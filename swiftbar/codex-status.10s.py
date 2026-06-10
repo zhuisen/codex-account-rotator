@@ -21,7 +21,7 @@ AMBER = "#e0a020"
 RED = "#e0533a"
 MONO = "font=Menlo size=12"
 EIGHTHS = "▏▎▍▌▋▊▉"  # 1/8 .. 7/8
-VERSION = "v0.7.4"  # bumped on every plugin change — shown in the menu so you can tell it reloaded
+VERSION = "v0.7.5"  # bumped on every change — shown in the menu so you can tell it reloaded
 
 
 def mask(aid):

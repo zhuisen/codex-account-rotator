@@ -36,6 +36,7 @@ OAUTH_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 
 _affinity = {}            # previous_response_id → account_id
 _lock = threading.Lock()
+_refresh_lock = threading.Lock()   # serialize refreshes — concurrent refresh of ONE account kills its single-use refresh_token
 _RESP_ID = re.compile(rb'"id"\s*:\s*"(resp_[A-Za-z0-9_-]+)"')
 
 
@@ -65,38 +66,44 @@ def _slot_token(aid, slot):
     use_live = (aid == _load(STATE).get("active") and LIVE.exists()
                 and (_load(LIVE).get("tokens") or {}).get("account_id") == aid)
     sf = LIVE if use_live else (AUTH_DIR / slot["file"])
-    auth = _load(sf)
-    tok = auth.get("tokens") or {}
-    at = tok.get("access_token", "")
-    if _exp(at) - time.time() > 60:
+    tok = (_load(sf).get("tokens") or {})
+    if _exp(tok.get("access_token", "")) - time.time() > 60:
+        return tok.get("access_token", ""), tok.get("account_id")
+    # token expired → refresh under a lock + re-check, so two concurrent requests don't both
+    # refresh the SAME account (refresh_token is single-use → a race invalidates it = dead account).
+    with _refresh_lock:
+        auth = _load(sf)
+        tok = auth.get("tokens") or {}
+        at = tok.get("access_token", "")
+        if _exp(at) - time.time() > 60:
+            return at, tok.get("account_id")            # another thread already refreshed it
+        rt = tok.get("refresh_token")
+        if not rt:
+            return at, tok.get("account_id")
+        body = json.dumps({"grant_type": "refresh_token", "client_id": OAUTH_CLIENT_ID,
+                           "refresh_token": rt}).encode()
+        try:
+            req = urllib.request.Request(OAUTH_TOKEN_URL, data=body,
+                                         headers={"Content-Type": "application/json"}, method="POST")
+            with urllib.request.urlopen(req, timeout=30) as r:
+                d = json.loads(r.read())
+        except Exception as e:
+            sys.stderr.write(f"[proxy] refresh {slot.get('label')} FAILED: {e}\n")
+            return at, tok.get("account_id")
+        if d.get("access_token"):
+            tok["access_token"] = d["access_token"]
+            if d.get("id_token"):
+                tok["id_token"] = d["id_token"]
+            if d.get("refresh_token"):
+                tok["refresh_token"] = d["refresh_token"]
+            auth["last_refresh"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+            tmp = sf.with_suffix(".tmp")
+            tmp.write_text(json.dumps(auth))
+            os.chmod(tmp, 0o600)
+            os.replace(tmp, sf)
+            sys.stderr.write(f"[proxy] refreshed {slot.get('label')} via {'live' if use_live else 'slot'}\n")
+            return d["access_token"], tok.get("account_id")
         return at, tok.get("account_id")
-    rt = tok.get("refresh_token")
-    if not rt:
-        return at, tok.get("account_id")
-    body = json.dumps({"grant_type": "refresh_token", "client_id": OAUTH_CLIENT_ID,
-                       "refresh_token": rt}).encode()
-    try:
-        req = urllib.request.Request(OAUTH_TOKEN_URL, data=body,
-                                     headers={"Content-Type": "application/json"}, method="POST")
-        with urllib.request.urlopen(req, timeout=30) as r:
-            d = json.loads(r.read())
-    except Exception as e:
-        sys.stderr.write(f"[proxy] refresh {slot.get('label')} FAILED: {e}\n")
-        return at, tok.get("account_id")
-    if d.get("access_token"):
-        tok["access_token"] = d["access_token"]
-        if d.get("id_token"):
-            tok["id_token"] = d["id_token"]
-        if d.get("refresh_token"):
-            tok["refresh_token"] = d["refresh_token"]
-        auth["last_refresh"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
-        tmp = sf.with_suffix(".tmp")
-        tmp.write_text(json.dumps(auth))
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, sf)
-        sys.stderr.write(f"[proxy] refreshed {slot.get('label')} via {'live' if use_live else 'slot'}\n")
-        return d["access_token"], tok.get("account_id")
-    return at, tok.get("account_id")
 
 
 def _used(slot):
