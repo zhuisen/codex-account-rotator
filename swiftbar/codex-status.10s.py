@@ -21,7 +21,7 @@ AMBER = "#e0a020"
 RED = "#e0533a"
 MONO = "font=Menlo size=12"
 EIGHTHS = "▏▎▍▌▋▊▉"  # 1/8 .. 7/8
-VERSION = "v0.7.9"  # bumped on every change — shown in the menu so you can tell it reloaded
+VERSION = "v0.7.10"  # bumped on every change — shown in the menu so you can tell it reloaded
 
 
 def mask(aid):
@@ -136,25 +136,6 @@ def effectively_cooling(slot):
     return not (ra and ra <= NOW)
 
 
-def pool_title(slots):
-    """Title = the live account with the most 5h (primary) headroom — the one the next cxp request will
-    pick (the proxy ranks by 5h used_percent). Stable: no last_aid/active 90s flip, and a reset window
-    counts as full. Skips dead + (effectively) cooling accounts. The weekly window lives in the dropdown
-    gauges. Returns (5h-remaining%, 5h reset ts) or None."""
-    best = None  # (sort_key, rem, eta); sort_key=(is_cooling, -rem) → non-cooling & highest 5h-rem wins
-    for aid, sl in slots.items():
-        if sl.get("auth_dead"):
-            continue
-        pr = (sl.get("quota") or {}).get("primary") or {}
-        rem = win_remaining(pr)
-        if rem is None:
-            rem = 100.0  # never run this account → assume full headroom
-        key = (effectively_cooling(sl), -rem)
-        if best is None or key < best[0]:
-            best = (key, rem, pr.get("resets_at"))
-    return (best[1], best[2]) if best else None
-
-
 def account_block(aid, slot, active):
     """Yield SwiftBar lines for one account."""
     label = slot.get("label", "?")
@@ -214,11 +195,15 @@ def main():
     slots = st.get("slots", {})
     active = st.get("active")
 
-    # ---- menu bar title: the pool's best-headroom live account (= next cxp pick). Stable, no flap. ----
-    best = pool_title(slots) if slots else None
-    if best:
-        rem, eta = best
-        title = f"{title_icon(rem)} {rem:.0f}% · {fmt_eta(eta)}"
+    # ---- menu bar title: 额度 of the account CURRENTLY IN USE (the proxy-served last_aid), no label. ----
+    # No 90s timer (that flip was the old jitter); since proxy is KeepAlive-up, this just tracks whichever
+    # account is serving now. The picker sticks to the least-used account, so it's piecewise-stable, only
+    # moving when rotation actually moves to another account. Falls back to active (plain codex) / pool.
+    shown = st.get("last_aid") if (up and st.get("last_aid") in slots) else active
+    pr = (slots.get(shown, {}).get("quota") or {}).get("primary") if shown in slots else None
+    rem = win_remaining(pr) if pr else None
+    if rem is not None:
+        title = f"{title_icon(rem)} {rem:.0f}% · {fmt_eta(pr.get('resets_at'))}"
         if rem <= 10:
             title += f" | color={RED}"
         elif rem <= 30:
