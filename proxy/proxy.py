@@ -132,9 +132,12 @@ def _slot_token(aid, slot, force=False):
 
 
 def _used(slot):
-    q = slot.get("quota") or {}
-    p = (q.get("primary") or {}).get("used_percent")
-    return p if p is not None else 0
+    p = (slot.get("quota") or {}).get("primary") or {}
+    ra = p.get("resets_at")
+    if ra and ra <= time.time():
+        return 0  # 5h window already reset → full headroom; prefer this account in _pick
+    u = p.get("used_percent")
+    return u if u is not None else 0
 
 
 def _pick(prev_id, exclude=None):
@@ -147,9 +150,15 @@ def _pick(prev_id, exclude=None):
     if not slots:
         return None, None, "empty"
 
+    def cooling(sl):
+        cu = sl.get("cooling_until", 0)
+        if cu <= now:
+            return False
+        ra = ((sl.get("quota") or {}).get("primary") or {}).get("resets_at")
+        return not (ra and ra <= now)  # window already reset → stale cooldown, treat as free
+
     def ok(aid, sl):
-        return (aid not in exclude and not sl.get("auth_dead")
-                and sl.get("cooling_until", 0) <= now)
+        return aid not in exclude and not sl.get("auth_dead") and not cooling(sl)
 
     with _lock:
         if prev_id and prev_id in _affinity:
@@ -168,8 +177,13 @@ def _pick(prev_id, exclude=None):
 
 def _cool(aid, minutes=300):
     def f(s):
-        if aid in s.get("slots", {}):
-            s["slots"][aid]["cooling_until"] = time.time() + minutes * 60
+        sl = s.get("slots", {}).get(aid)
+        if sl:
+            until = time.time() + minutes * 60
+            ra = ((sl.get("quota") or {}).get("primary") or {}).get("resets_at")
+            if ra:
+                until = min(until, ra + 60)  # never cool past the real 5h-window reset (was: fixed 300m)
+            sl["cooling_until"] = until
     _mutate_state(f)
 
 

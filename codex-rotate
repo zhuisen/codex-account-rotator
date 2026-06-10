@@ -244,10 +244,22 @@ def _newest_rollout():
     return max(cand, key=lambda p: p.stat().st_mtime)
 
 
+def _rollout_is_proxy(p):
+    """A rollout produced via cxp (session_meta.payload.model_provider == 'rotateproxy') records the
+    PROXY-served account's telemetry, NOT the live/active account's — so it must never be attributed to
+    `active` (that was the plus3≡plus5 cross-account leak). The proxy already accounts per-request."""
+    try:
+        with open(p) as fh:
+            meta = json.loads(fh.readline())
+        return ((meta.get("payload") or {}).get("model_provider")) == "rotateproxy"
+    except Exception:
+        return True  # can't tell → refuse attribution (fail-safe; never leak)
+
+
 def _live_quota():
     """Read the newest rollout's last rate-limit event (bounded tail read)."""
     p = _newest_rollout()
-    if not p:
+    if not p or _rollout_is_proxy(p):
         return None
     try:
         sz = os.path.getsize(p)
@@ -366,7 +378,8 @@ def _syncback(s):
     q = _attributable_quota(s)
     if q:
         slot["quota"] = q
-    s["active"] = aid
+    if s.get("active") != aid:
+        _activate(s, aid)  # keep active_since in lockstep with active (attribution window correctness)
 
 
 def _pick_next(s):
@@ -570,6 +583,8 @@ def cmd_quota(args):
             if q:
                 slot["quota"] = q          # fresh reading attributable to this account (plain codex)
                 slot["quota_status"] = "ok"
+            elif (slot.get("quota") or {}).get("source") == "proxy":
+                pass  # the proxy already recorded this account's real per-request quota — authoritative
             else:
                 since = s.get("active_since", 0)
                 if p and since and p.stat().st_mtime >= since:
