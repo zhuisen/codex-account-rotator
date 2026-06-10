@@ -30,6 +30,7 @@ UPSTREAM_BASE = "/backend-api/codex"
 STORE = Path(__file__).resolve().parent.parent          # codex-account-rotator/
 AUTH_DIR = STORE / "auth"
 STATE = STORE / "state.json"
+LIVE = Path(os.environ.get("CODEX_LIVE_AUTH", str(Path.home() / ".codex" / "auth.json")))
 OAUTH_TOKEN_URL = "https://auth.openai.com/oauth/token"
 OAUTH_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 
@@ -58,8 +59,12 @@ def _exp(jwt):
 
 
 def _slot_token(aid, slot):
-    """Return a FRESH access_token (+account_id) for the account, OAuth-refreshing if expired."""
-    sf = AUTH_DIR / slot["file"]
+    """Return a FRESH access_token (+account_id), OAuth-refreshing if expired. The ACTIVE account is
+    read/written via the live ~/.codex/auth.json (shared with plain codex) so a refresh here never
+    leaves codex's live copy stale (avoids 'session ended' divergence). Inactive → slot file."""
+    use_live = (aid == _load(STATE).get("active") and LIVE.exists()
+                and (_load(LIVE).get("tokens") or {}).get("account_id") == aid)
+    sf = LIVE if use_live else (AUTH_DIR / slot["file"])
     auth = _load(sf)
     tok = auth.get("tokens") or {}
     at = tok.get("access_token", "")
@@ -89,7 +94,7 @@ def _slot_token(aid, slot):
         tmp.write_text(json.dumps(auth))
         os.chmod(tmp, 0o600)
         os.replace(tmp, sf)
-        sys.stderr.write(f"[proxy] refreshed {slot.get('label')} (token was expired)\n")
+        sys.stderr.write(f"[proxy] refreshed {slot.get('label')} via {'live' if use_live else 'slot'}\n")
         return d["access_token"], tok.get("account_id")
     return at, tok.get("account_id")
 

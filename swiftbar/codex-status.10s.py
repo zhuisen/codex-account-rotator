@@ -21,7 +21,7 @@ AMBER = "#e0a020"
 RED = "#e0533a"
 MONO = "font=Menlo size=12"
 EIGHTHS = "▏▎▍▌▋▊▉"  # 1/8 .. 7/8
-VERSION = "v0.7.3"  # bumped on every plugin change — shown in the menu so you can tell it reloaded
+VERSION = "v0.7.4"  # bumped on every plugin change — shown in the menu so you can tell it reloaded
 
 
 def mask(aid):
@@ -152,8 +152,8 @@ def account_block(aid, slot, active):
                 continue
             lines.append(f"   {name} {smooth_bar(rem)} {rem:>3.0f}%  ↻{fmt_eta(w.get('resets_at'))} "
                          f"| color={rem_color(rem)} {MONO}")
-    elif slot.get("quota_status") == "empty":
-        lines.append(f"   ⚠️ 用量遥测为空(rate_limits=null,疑似模型版本) | color={AMBER} size=11")
+    elif slot.get("quota_status") == "empty" and aid == active:
+        lines.append(f"   ⚠️ 本次会话没拿到额度数据(再跑一次即可) | color={AMBER} size=11")
     else:
         hint = "跑一次 codex 刷新" if aid == active else "切到此并跑一次"
         lines.append(f"   用量未知 · {hint} | color={GRAY} size=11")

@@ -44,6 +44,9 @@
 ### B6 · test-home 被 codex 灌污染 ✅清
 代理隔离测试用的 `proxy/test-home/` 被 codex bootstrap 灌了 skills/sessions/sqlite。**修**:`.gitignore` 排除 `proxy/test-home/*`(留 config.toml)+ 物理清掉。
 
+### B7 · 切换号偶发 "Failed to refresh token: session has ended" ✅修
+**根因**:`plain codex`(管 live `~/.codex/auth.json`)与代理/keepalive(管 slot)**同时刷同一号的 token** → refresh_token 一次性轮换 → 两边副本互相作废 → "session ended"。**修**:代理对**当前 active 号**直接读写 live auth.json(与 plain codex 共用一份,refresh 不再让 live 陈旧);inactive 号才走 slot。**建议**:统一走 `cxp`(代理是唯一 token 管理者最安全);加号才 `\codex login`;万一真撞到某号死,`\codex login` 重登那**一个**号即可(autosync 自动入池)。
+
 ---
 
 ## 已知待办 / cleanup
@@ -56,3 +59,5 @@
 - `v0.7.0` 版本号右对齐(padding,已废弃)
 - `v0.7.1` 版本号并进 CODEX 头部行
 - `v0.7.2` 修"代理服务在跑 ≠ 在用代理"(plain codex 号不刷新额度)
+- `v0.7.3` 窗口过重置时间 → 显示 100% 余量
+- `v0.7.4` 软化"遥测为空"警告(仅活跃号);配合 B7 代理 live-token 同步修
