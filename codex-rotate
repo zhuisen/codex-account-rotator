@@ -650,13 +650,30 @@ CMDS = {"add": cmd_add, "list": cmd_list, "switch": cmd_switch, "cool": cmd_cool
         "health": cmd_health}
 
 
+# Commands that change what the menu bar shows → nudge SwiftBar to re-render immediately (so terminal
+# commands update the menu instantly, not on its 10s tick). Excludes quota/sync/keepalive: the plugin
+# runs `quota --save` every 10s, so refreshing there would loop; sync fires from the auth.json watcher.
+REFRESH_AFTER = {"add", "switch", "cool", "uncool", "rename", "refresh"}
+
+
+def _refresh_menu():
+    """Best-effort, silent: ask the SwiftBar plugin to re-render now."""
+    try:
+        subprocess.run(["open", "-g", "swiftbar://refreshallplugins"], capture_output=True, timeout=3)
+    except Exception:
+        pass
+
+
 def main():
     if len(sys.argv) < 2 or sys.argv[1] not in CMDS:
         print("usage: codex-rotate {add <label>|list|switch [label]|cool [min]|uncool [label]|"
               "quota [--save]|sync|rename <old> <new>|refresh [label|all]|"
               "keepalive [days] [--dry-run]|health|ensure|current}")
         sys.exit(1)
-    CMDS[sys.argv[1]](sys.argv[2:])
+    cmd = sys.argv[1]
+    CMDS[cmd](sys.argv[2:])
+    if cmd in REFRESH_AFTER:
+        _refresh_menu()
 
 
 if __name__ == "__main__":
