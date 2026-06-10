@@ -1,0 +1,588 @@
+#!/usr/bin/env python3
+"""codex-account-rotator — swap ~/.codex/auth.json across multiple ChatGPT
+subscription logins (one person, own accounts).
+
+Slots are keyed by OAuth account_id. Every switch first syncs the live
+auth.json back into its own slot (preserving any rotated refresh_token),
+then loads the target slot. config.toml is shared and never touched.
+Switch takes effect on the NEXT `codex` invocation, not mid-run.
+
+Identity: the id_token (JWT) carries email / account_id / plan / subscription
+expiry — decoded for human-friendly display.
+
+Quota: Codex writes rate-limit telemetry (primary=5h, secondary=weekly) into
+session rollouts. We read the newest rollout to show the ACTIVE account's live
+usage, and snapshot it per-account on switch. Attribution guard: a rollout is
+trusted for the active account only if produced after that account became
+active (active_since), so one account's usage is never shown as another's.
+"""
+import base64
+import datetime
+import json
+import os
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+CODEX_HOME = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
+LIVE = CODEX_HOME / "auth.json"
+SESSIONS = CODEX_HOME / "sessions"
+STORE = Path(__file__).resolve().parent
+AUTH_DIR = STORE / "auth"
+STATE = STORE / "state.json"
+LOCK = STORE / ".keepalive.lock"
+CODEX_BIN = "/Users/you/.local/bin/codex"
+OAUTH_TOKEN_URL = "https://auth.openai.com/oauth/token"
+OAUTH_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
+IDENT_FIELDS = ("email", "name", "plan", "sub_until")
+
+
+def _load_json(p):
+    with open(p) as f:
+        return json.load(f)
+
+
+def _account_id(auth):
+    return (auth.get("tokens") or {}).get("account_id") or None
+
+
+def _mask(aid):
+    if not aid:
+        return "?"
+    return aid[:6] + "…" + aid[-4:] if len(aid) > 12 else aid
+
+
+def _state():
+    if STATE.exists():
+        return _load_json(STATE)
+    return {"slots": {}, "active": None, "active_since": 0}
+
+
+def _save_state(s):
+    tmp = STATE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(s, indent=2))
+    os.replace(tmp, STATE)
+
+
+def _atomic_write(path, data, mode=0o600):
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data))
+    os.chmod(tmp, mode)
+    os.replace(tmp, path)
+
+
+def _write_slot(aid, auth):
+    AUTH_DIR.mkdir(parents=True, exist_ok=True)
+    os.chmod(AUTH_DIR, 0o700)
+    f = AUTH_DIR / f"{aid}.json"
+    _atomic_write(f, auth)
+    return f
+
+
+def _read_live():
+    if not LIVE.exists():
+        sys.exit(f"no live auth at {LIVE}")
+    return _load_json(LIVE)
+
+
+def _activate(s, aid, since=None):
+    s["active"] = aid
+    s["active_since"] = time.time() if since is None else since
+
+
+def _age_days(iso):
+    if not iso:
+        return None
+    try:
+        base = str(iso).replace("Z", "").split(".")[0]
+        dt = datetime.datetime.strptime(base, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=datetime.timezone.utc)
+        return (datetime.datetime.now(datetime.timezone.utc) - dt).total_seconds() / 86400
+    except Exception:
+        return None
+
+
+def _codex_running():
+    try:
+        return subprocess.run(["pgrep", "-x", "codex"], capture_output=True).returncode == 0
+    except Exception:
+        return False
+
+
+def _run_codex_ping():
+    codex = CODEX_BIN if os.path.exists(CODEX_BIN) else "codex"
+    try:
+        subprocess.run([codex, "exec", "reply with exactly: ok"], capture_output=True, timeout=120)
+    except Exception:
+        pass
+
+
+# ---------- identity (from id_token JWT) ----------
+
+def _decode_identity(auth):
+    tok = (auth.get("tokens") or {}).get("id_token")
+    if not tok:
+        return None
+    try:
+        seg = tok.split(".")[1]
+        seg += "=" * (-len(seg) % 4)
+        c = json.loads(base64.urlsafe_b64decode(seg))
+    except Exception:
+        return None
+    oa = c.get("https://api.openai.com/auth") or {}
+    return {
+        "account_id": oa.get("chatgpt_account_id"),
+        "email": c.get("email"),
+        "name": c.get("name"),
+        "plan": oa.get("chatgpt_plan_type"),
+        "sub_until": oa.get("chatgpt_subscription_active_until"),
+    }
+
+
+def _stamp_identity(slot, auth, expect_aid=None):
+    ident = _decode_identity(auth)
+    if not ident or (expect_aid and ident.get("account_id") != expect_aid):
+        return
+    for k in IDENT_FIELDS:
+        if ident.get(k):
+            slot[k] = ident[k]
+
+
+def _autosync_live(s):
+    """Auto-capture / keep-fresh the currently-live account — no manual `add` needed.
+    A freshly `codex login`-ed account gets a slot automatically (labelled main / plusN),
+    its stored credentials are kept in sync (refresh_token rotation safety), and it is
+    marked active. Idempotent: a no-op when the live account is already the active slot."""
+    if LOCK.exists() or not LIVE.exists():
+        return  # keepalive in progress (auth.json is being swapped) — don't fight it
+    try:
+        live = _load_json(LIVE)
+    except (OSError, ValueError):
+        return
+    aid = _account_id(live)
+    if not aid:
+        return
+    new = aid not in s["slots"]
+    if new:
+        existing = {sl.get("label") for sl in s["slots"].values()}
+        n = len(s["slots"])
+        label = "main" if n == 0 else f"plus{n + 1}"
+        while label in existing:
+            n += 1
+            label = f"plus{n + 1}"
+    slot = s["slots"].setdefault(aid, {})
+    slot["file"] = f"{aid}.json"
+    if new:
+        slot["label"] = label
+    _write_slot(aid, live)  # keep stored creds current (so switch-back has a valid refresh_token)
+    _stamp_identity(slot, live, expect_aid=aid)
+    if live.get("last_refresh"):
+        slot["last_refresh"] = live["last_refresh"]
+    changed = new
+    if s.get("active") != aid:
+        _activate(s, aid)
+        changed = True
+    if changed:
+        _save_state(s)
+
+
+# ---------- quota (rate-limit telemetry from session rollouts) ----------
+
+def _find_rl(o):
+    """Locate the rate-limit object: a dict whose 'primary' is a dict with used_percent."""
+    if isinstance(o, dict):
+        p = o.get("primary")
+        if isinstance(p, dict) and "used_percent" in p:
+            return o
+        for v in o.values():
+            r = _find_rl(v)
+            if r:
+                return r
+    elif isinstance(o, list):
+        for v in o:
+            r = _find_rl(v)
+            if r:
+                return r
+    return None
+
+
+def _newest_rollout():
+    if not SESSIONS.is_dir():
+        return None
+
+    def newest_dir(d):
+        subs = [c for c in d.iterdir() if c.is_dir()]
+        return max(subs, key=lambda c: c.name) if subs else None
+
+    y = newest_dir(SESSIONS)
+    mo = newest_dir(y) if y else None
+    if not mo:
+        return None
+    days = sorted((c for c in mo.iterdir() if c.is_dir()), key=lambda c: c.name, reverse=True)[:3]
+    cand = []
+    for dd in days:
+        cand += list(dd.glob("rollout-*.jsonl"))
+    if not cand:
+        return None
+    return max(cand, key=lambda p: p.stat().st_mtime)
+
+
+def _live_quota():
+    """Read the newest rollout's last rate-limit event (bounded tail read)."""
+    p = _newest_rollout()
+    if not p:
+        return None
+    try:
+        sz = os.path.getsize(p)
+        with open(p, "rb") as fh:
+            if sz > 262144:
+                fh.seek(sz - 262144)
+            data = fh.read().decode("utf-8", "ignore")
+    except OSError:
+        return None
+    rl = None
+    for ln in data.splitlines():
+        if '"used_percent"' not in ln:
+            continue
+        try:
+            d = json.loads(ln)
+        except ValueError:
+            continue
+        f = _find_rl(d)
+        if f:
+            rl = f
+    if not rl:
+        return None
+    return {
+        "primary": rl.get("primary"),
+        "secondary": rl.get("secondary"),
+        "plan_type": rl.get("plan_type"),
+        "captured_at": time.time(),
+        "source_mtime": os.path.getmtime(p),
+    }
+
+
+def _attributable_quota(s):
+    """Live quota only if a rollout was produced AFTER this account became active.
+    Rollouts carry no account_id, so this time-window check is the only safe attribution —
+    it prevents one account's usage from being shown as another's."""
+    since = s.get("active_since", 0)
+    if not since:
+        return None  # unknown activation time → cannot safely attribute
+    q = _live_quota()
+    if q and q.get("source_mtime", 0) >= since:
+        return q
+    return None
+
+
+def _refresh_slot(aid, slot):
+    """Refresh one account's OAuth tokens via the token endpoint; persist the rotated bundle to
+    its slot. Returns (ok: bool, msg). Do NOT call on the ACTIVE account — codex owns its live
+    token, and refreshing here would rotate the refresh_token out from under it."""
+    sf = AUTH_DIR / slot["file"]
+    try:
+        auth = _load_json(sf)
+    except (OSError, ValueError) as e:
+        return False, f"read err: {e}"
+    rt = (auth.get("tokens") or {}).get("refresh_token")
+    if not rt:
+        return False, "no refresh_token"
+    body = json.dumps({"grant_type": "refresh_token", "client_id": OAUTH_CLIENT_ID,
+                       "refresh_token": rt}).encode()
+    req = urllib.request.Request(OAUTH_TOKEN_URL, data=body,
+                                 headers={"Content-Type": "application/json"}, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            data = json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        return False, f"http {e.code}"
+    except Exception as e:
+        return False, f"err: {e}"
+    if not data.get("access_token"):
+        return False, "no access_token in response"
+    tok = auth.setdefault("tokens", {})
+    tok["access_token"] = data["access_token"]
+    if data.get("id_token"):
+        tok["id_token"] = data["id_token"]
+    if data.get("refresh_token"):
+        tok["refresh_token"] = data["refresh_token"]  # rotation — persist the new one
+    auth["last_refresh"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    _atomic_write(sf, auth)
+    slot["last_refresh"] = auth["last_refresh"]
+    return True, "ok"
+
+
+# ---------- slot mechanics ----------
+
+def _syncback(s):
+    """Persist current live auth into its own (account_id-keyed) slot."""
+    if not LIVE.exists():
+        return
+    live = _load_json(LIVE)
+    aid = _account_id(live)
+    if not aid:
+        return
+    _write_slot(aid, live)
+    slot = s["slots"].setdefault(aid, {})
+    slot["file"] = f"{aid}.json"
+    slot.setdefault("label", f"acct{len(s['slots'])}")
+    _stamp_identity(slot, live, expect_aid=aid)
+    q = _attributable_quota(s)
+    if q:
+        slot["quota"] = q
+    s["active"] = aid
+
+
+def _pick_next(s):
+    now = time.time()
+    aids = list(s["slots"].keys())
+    active = s.get("active")
+    order = aids
+    if active in aids:
+        i = aids.index(active)
+        order = aids[i + 1:] + aids[:i + 1]
+    for aid in order:
+        if aid == active:
+            continue
+        if s["slots"][aid].get("cooling_until", 0) > now:
+            continue
+        return aid
+    return None
+
+
+# ---------- commands ----------
+
+def cmd_add(args):
+    label = args[0] if args else None
+    s = _state()
+    live = _read_live()
+    aid = _account_id(live)
+    if not aid:
+        sys.exit("live auth.json has no OAuth account_id (API-key login? run `codex login` first)")
+    _write_slot(aid, live)
+    slot = s["slots"].setdefault(aid, {})
+    slot["file"] = f"{aid}.json"
+    slot["label"] = label or slot.get("label") or f"acct{len(s['slots'])}"
+    _stamp_identity(slot, live, expect_aid=aid)
+    _activate(s, aid)  # since=now; quota fills in only once THIS account runs codex (no cross-account leak)
+    _save_state(s)
+    who = slot.get("email") or _mask(aid)
+    print(f"added/updated [{slot['label']}] {who} (now active)")
+
+
+def _qfmt(q):
+    if not q:
+        return ""
+    p = (q.get("primary") or {}).get("used_percent")
+    w = (q.get("secondary") or {}).get("used_percent")
+    bits = []
+    if p is not None:
+        bits.append(f"5h:{p:.0f}%")
+    if w is not None:
+        bits.append(f"wk:{w:.0f}%")
+    return "  " + " ".join(bits) if bits else ""
+
+
+def cmd_list(args):
+    s = _state()
+    _autosync_live(s)
+    now = time.time()
+    active = s.get("active")
+    if not s["slots"]:
+        print("no slots yet — run: codex-rotate add <label>")
+        return
+    for aid, slot in s["slots"].items():
+        flags = []
+        if aid == active:
+            flags.append("ACTIVE")
+        cool = slot.get("cooling_until", 0)
+        if cool > now:
+            flags.append(f"cooling {int((cool - now) / 60)}m")
+        who = slot.get("email") or _mask(aid)
+        print(f"  [{slot.get('label', '?'):<8}] {who:<26} {' '.join(flags)}{_qfmt(slot.get('quota'))}")
+
+
+def cmd_switch(args):
+    s = _state()
+    _syncback(s)
+    if args:
+        key = args[0]
+        target = next((aid for aid, sl in s["slots"].items()
+                       if aid == key or sl.get("label") == key), None)
+        if not target:
+            sys.exit(f"no slot matching '{key}'")
+    else:
+        target = _pick_next(s)
+        if not target:
+            sys.exit("no other available account (all cooling or only one slot)")
+    auth = _load_json(AUTH_DIR / s["slots"][target]["file"])
+    _atomic_write(LIVE, auth)
+    _activate(s, target)
+    _save_state(s)
+    who = s["slots"][target].get("email") or _mask(target)
+    print(f"switched → [{s['slots'][target].get('label', '?')}] {who}  (effective on next `codex` run)")
+
+
+def cmd_cool(args):
+    mins = int(args[0]) if args else 300
+    s = _state()
+    aid = s.get("active")
+    if not aid:
+        sys.exit("no active slot")
+    s["slots"].setdefault(aid, {})["cooling_until"] = time.time() + mins * 60
+    _save_state(s)
+    print(f"marked [{s['slots'][aid].get('label', '?')}] cooling {mins}m")
+
+
+def cmd_uncool(args):
+    """Clear cooldown on a slot (label/account_id) or 'all' (default)."""
+    target = args[0] if args else "all"
+    s = _state()
+    n = 0
+    for aid, slot in s["slots"].items():
+        if target in ("all", aid, slot.get("label")) and slot.pop("cooling_until", None) is not None:
+            n += 1
+    _save_state(s)
+    print(f"cleared cooldown on {n} slot(s)")
+
+
+def cmd_sync(args):
+    """Auto-capture the currently-live account into the pool (silent; used by the launchd watcher)."""
+    _autosync_live(_state())
+
+
+def cmd_rename(args):
+    if len(args) < 2:
+        sys.exit("usage: codex-rotate rename <old-label-or-id> <new-label>")
+    old, new = args[0], args[1]
+    s = _state()
+    target = next((aid for aid, sl in s["slots"].items()
+                   if aid == old or sl.get("label") == old), None)
+    if not target:
+        sys.exit(f"no slot matching '{old}'")
+    s["slots"][target]["label"] = new
+    _save_state(s)
+    print(f"renamed → {new}")
+
+
+def cmd_refresh(args):
+    """Refresh one account (label/id) or 'all' via OAuth. Skips the ACTIVE account
+    (codex owns its live token; refreshing it would rotate the token out from under codex)."""
+    target = args[0] if args else "all"
+    s = _state()
+    active = s.get("active")
+    out = []
+    for aid, slot in s["slots"].items():
+        if target not in ("all", aid, slot.get("label")):
+            continue
+        if aid == active:
+            out.append(f"{slot.get('label')}:skip-active")
+            continue
+        ok, msg = _refresh_slot(aid, slot)
+        out.append(f"{slot.get('label')}:{'ok' if ok else msg}")
+    _save_state(s)
+    print("refresh " + (" ".join(out) if out else "(no matching slot)"))
+
+
+def cmd_keepalive(args):
+    """Keep idle accounts' tokens alive via OAuth refresh — cheap, no quota, no auth.json swap.
+    Refreshes NON-active accounts whose last_refresh is older than N days (default 4); the active
+    account is skipped (codex keeps it fresh while in use). `--dry-run` lists targets only."""
+    dry = "--dry-run" in args
+    pos = [a for a in args if not a.startswith("--")]
+    idle_after = float(pos[0]) if pos else 4.0
+    s = _state()
+    active = s.get("active")
+    refreshed, skipped = [], []
+    for aid, slot in s["slots"].items():
+        label = slot.get("label", _mask(aid))
+        if aid == active:
+            skipped.append(f"{label}:active")
+            continue
+        age = _age_days(slot.get("last_refresh"))
+        if age is not None and age < idle_after:
+            skipped.append(f"{label}:{round(age, 1)}d")
+            continue
+        if dry:
+            refreshed.append(f"{label}:age={'?' if age is None else round(age, 1)}d")
+            continue
+        ok, msg = _refresh_slot(aid, slot)
+        refreshed.append(f"{label}:{'ok' if ok else msg}")
+    if not dry:
+        _save_state(s)
+    print(f"keepalive refreshed=[{', '.join(refreshed) or 'none'}] skipped=[{', '.join(skipped)}]")
+
+
+def cmd_quota(args):
+    """Print live quota of the active account; --save stamps quota + identity into the active slot."""
+    s = _state()
+    _autosync_live(s)
+    p = _newest_rollout()
+    # If the rotating proxy recently produced the newest rollout, it already accounted per-request;
+    # attributing that rollout to the codex-rotate "active" account would mis-attribute. Skip then.
+    proxy_owns = (p is not None and s.get("last_proxy_ts", 0) > 0
+                  and p.stat().st_mtime <= s["last_proxy_ts"] + 12)
+    q = None if proxy_owns else _attributable_quota(s)
+    if "--save" in args and not proxy_owns:
+        aid = s.get("active")
+        if aid:
+            slot = s["slots"].setdefault(aid, {})
+            if q:
+                slot["quota"] = q          # fresh reading attributable to this account (plain codex)
+                slot["quota_status"] = "ok"
+            else:
+                since = s.get("active_since", 0)
+                if p and since and p.stat().st_mtime >= since:
+                    slot["quota_status"] = "empty"    # ran this stint but rollout had no rate_limit telemetry
+                else:
+                    slot.pop("quota", None)
+                    slot["quota_status"] = "pending"  # hasn't run codex since becoming active
+            if LIVE.exists():
+                _stamp_identity(slot, _load_json(LIVE), expect_aid=aid)
+            _save_state(s)
+    print(json.dumps(q, ensure_ascii=False) if q else "null")
+
+
+def cmd_current(args):
+    s = _state()
+    print(_mask(s.get("active")))
+
+
+def cmd_ensure(args):
+    """Preflight: auto-capture the live account; if it's cooling, switch to a fresh one."""
+    s = _state()
+    _autosync_live(s)
+    aid = s.get("active")
+    if not aid or s["slots"].get(aid, {}).get("cooling_until", 0) <= time.time():
+        return  # active is fine — silent no-op
+    _syncback(s)
+    target = _pick_next(s)
+    if not target:
+        _save_state(s)
+        print("all accounts cooling — staying put")
+        return
+    auth = _load_json(AUTH_DIR / s["slots"][target]["file"])
+    _atomic_write(LIVE, auth)
+    _activate(s, target)
+    _save_state(s)
+    print(f"auto-switched (prev cooling) → [{s['slots'][target].get('label', '?')}]")
+
+
+CMDS = {"add": cmd_add, "list": cmd_list, "switch": cmd_switch, "cool": cmd_cool,
+        "uncool": cmd_uncool, "quota": cmd_quota, "current": cmd_current, "ensure": cmd_ensure,
+        "sync": cmd_sync, "rename": cmd_rename, "keepalive": cmd_keepalive, "refresh": cmd_refresh}
+
+
+def main():
+    if len(sys.argv) < 2 or sys.argv[1] not in CMDS:
+        print("usage: codex-rotate {add <label>|list|switch [label]|cool [min]|uncool [label]|"
+              "quota [--save]|sync|rename <old> <new>|refresh [label|all]|"
+              "keepalive [days] [--dry-run]|ensure|current}")
+        sys.exit(1)
+    CMDS[sys.argv[1]](sys.argv[2:])
+
+
+if __name__ == "__main__":
+    main()

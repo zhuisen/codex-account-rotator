@@ -1,0 +1,10 @@
+#!/usr/bin/env python3
+# Codex auth.command helper: prints the ACTIVE account's OAuth access_token to stdout.
+# (Phase 0: reads live ~/.codex/auth.json. The proxy re-injects it anyway, but Codex needs a bearer.)
+import json
+import os
+from pathlib import Path
+
+live = Path(os.environ.get("CODEX_LIVE_AUTH", str(Path.home() / ".codex" / "auth.json")))
+tok = (json.loads(live.read_text()).get("tokens") or {}).get("access_token", "")
+print(tok)

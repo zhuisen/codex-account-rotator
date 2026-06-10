@@ -1,0 +1,18 @@
+# Isolated CODEX_HOME for the Phase-0 proxy feasibility test.
+# Routes Codex through the local proxy via a custom model_provider + auth.command.
+model = "gpt-5.5"
+model_provider = "rotateproxy"
+model_reasoning_effort = "low"
+approval_policy = "never"
+sandbox_mode = "danger-full-access"
+
+[model_providers.rotateproxy]
+name = "codex-rotate local proxy"
+base_url = "http://127.0.0.1:8011"
+wire_api = "responses"
+
+[model_providers.rotateproxy.auth]
+command = "/Users/you/Projects/tools/codex-account-rotator/proxy/auth-token"
+
+[projects."/Users/you/Projects/tools/codex-account-rotator/proxy"]
+trust_level = "trusted"

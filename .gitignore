@@ -1,0 +1,11 @@
+# credentials & runtime state — NEVER commit (these hold OAuth tokens / account ids)
+auth/
+state.json
+*.tmp
+*.log
+.keepalive.lock
+__pycache__/
+
+# isolated test CODEX_HOME — keep only the config, drop codex runtime
+proxy/test-home/*
+!proxy/test-home/config.toml

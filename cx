@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# cx — codex launcher with quota-aware account rotation (interactive-first).
+#   cx [codex args...]   launch codex; auto-avoid accounts marked cooling
+#   cx exec ...          non-interactive: auto rotate+retry across accounts on limit
+#   cx next              current account burned → cool it, switch, relaunch interactive
+#   cx ls                show the account pool
+set -uo pipefail
+
+DIR="$(cd "$(dirname "$0")" && pwd)"
+ROT="$DIR/codex-rotate"; [ -x "$ROT" ] || ROT="codex-rotate"
+COOL_MIN="${CX_COOL_MIN:-300}"   # 5h default; pass a longer value for the weekly cap
+# Limit signature — REFINE after the first real 429 (capture `codex exec` stderr).
+LIMIT_RE="${CX_LIMIT_RE:-usage limit|rate.?limit|429|too many requests|quota|reset[s]? (at|in)|try again later}"
+
+# --- meta-commands handled before any codex launch ---
+case "${1:-}" in
+  next|-n)
+    shift
+    "$ROT" cool "$COOL_MIN" >/dev/null
+    if ! "$ROT" switch; then
+      echo "cx: no fresh account (all cooling). see: $ROT list" >&2
+      exit 1
+    fi
+    exec codex "$@"
+    ;;
+  ls)
+    exec "$ROT" list
+    ;;
+esac
+
+# preflight: hop off a cooling account before launching
+"$ROT" ensure
+
+case "${1:-}" in
+  exec|e|review)
+    n="$("$ROT" list | grep -c .)"; [ "$n" -ge 1 ] || n=1
+    attempt=0
+    while :; do
+      attempt=$((attempt + 1))
+      tmp="$(mktemp "${TMPDIR:-/tmp}/cx.XXXXXX")"
+      codex "$@" 2>&1 | tee "$tmp"; rc=${PIPESTATUS[0]}
+      if [ "$rc" -eq 0 ] && ! grep -qiE "$LIMIT_RE" "$tmp"; then rm -f "$tmp"; exit 0; fi
+      if grep -qiE "$LIMIT_RE" "$tmp"; then
+        rm -f "$tmp"
+        echo "cx: limit hit → cooling & switching (try $attempt/$n)" >&2
+        "$ROT" cool "$COOL_MIN" >/dev/null
+        if [ "$attempt" -ge "$n" ] || ! "$ROT" switch; then
+          echo "cx: all accounts exhausted." >&2
+          exit 1
+        fi
+        continue
+      fi
+      rm -f "$tmp"
+      exit "$rc"   # genuine non-limit error → surface it
+    done
+    ;;
+  *)
+    codex "$@"; rc=$?
+    open -g "swiftbar://refreshallplugins" >/dev/null 2>&1 || true   # refresh menu bar after the session
+    exit $rc
+    ;;
+esac
