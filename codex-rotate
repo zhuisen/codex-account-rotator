@@ -193,7 +193,9 @@ def _autosync_live(s):
     _stamp_identity(slot, live, expect_aid=aid)
     if live.get("last_refresh"):
         slot["last_refresh"] = live["last_refresh"]
-    changed = new
+    revived = slot.pop("auth_dead", None) is not None  # fresh live token (re-login) revives a dead slot
+    slot.pop("auth_dead_at", None)
+    changed = new or revived
     if s.get("active") != aid:
         _activate(s, aid)
         changed = True
