@@ -21,7 +21,7 @@ AMBER = "#e0a020"
 RED = "#e0533a"
 MONO = "font=Menlo size=12"
 EIGHTHS = "▏▎▍▌▋▊▉"  # 1/8 .. 7/8
-VERSION = "v0.7.5"  # bumped on every change — shown in the menu so you can tell it reloaded
+VERSION = "v0.7.7"  # bumped on every change — shown in the menu so you can tell it reloaded
 
 
 def mask(aid):
@@ -130,10 +130,13 @@ def account_block(aid, slot, active):
     label = slot.get("label", "?")
     who = slot.get("email") or mask(aid)
     q = slot.get("quota")
+    dead = slot.get("auth_dead")
     cooling = slot.get("cooling_until", 0) > NOW
     sym_color = rem_color(tightest_remaining(q)) if q else GRAY
     lines = []
-    if aid == active:
+    if dead:
+        lines.append(f"{label} · 失效 | sfimage=exclamationmark.triangle.fill color={RED} size=13")
+    elif aid == active:
         lines.append(f"{label} | sfimage=circle.fill color={q and sym_color or GREEN} size=13")
     elif cooling:
         lines.append(f"{label} · 冷却 {fmt_eta(slot.get('cooling_until'))} | sfimage=clock color={GRAY} size=13")
@@ -144,6 +147,9 @@ def account_block(aid, slot, active):
     sub = slot.get("sub_until")
     sub_txt = f"  ·  订阅至 {str(sub)[:10]}" if sub else ""
     lines.append(f"   {who}{sub_txt} | color={GRAY} size=12")
+    if dead:
+        lines.append(f"   ⚠️ token 失效 · 终端跑 \\codex login 登此号即可自动复活 | color={RED} size=11")
+        return lines
     if q:
         for key, name in (("primary", "5h"), ("secondary", "周")):
             w = q.get(key) or {}

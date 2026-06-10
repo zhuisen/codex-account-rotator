@@ -4,6 +4,8 @@ state.json
 *.tmp
 *.log
 .keepalive.lock
+.refresh.lock
+state.json.corrupt-*
 __pycache__/
 
 # isolated test CODEX_HOME — keep only the config, drop codex runtime

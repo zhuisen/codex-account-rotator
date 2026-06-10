@@ -19,6 +19,7 @@
 - **Phase 1b(轮换代理)**:`proxy.py` 升级——读池选**用量最少**号 + 跳冷却 + 过期自动刷新 + 429 冷却 + `previous_response_id` 会话亲和(dormant)。★codex 每请求发完整上下文 → 跨号轮换天生安全,**痛点 2 解决(无感、不重启)**。
 - **Phase 1c(日常落地)**:`cxp` = `codex --profile rotateproxy`;代理跑 launchd 常驻;SwiftBar 加代理状态指示。
 - **Phase 2(逐请求精确记账)**:代理读 `x-codex-*` 响应头 → 写所服务号的 quota(`source=proxy`)+ `last_aid`/`last_proxy_ts`。
+- **Phase 3(健壮性闭环 — 2026-06-10)**:① 401 失效转移——代理对 401 先强制刷一次(可救活陈旧 token),仍失败则标 `auth_dead` + **同请求内换下一个号**,死号永不堵死 cxp;`_pick` 跳过 `auth_dead`/已试号。② 死号 UI——菜单栏红色三角 + “\codex login 复活”提示,`\codex login` 重登经 autosync `_syncback` 自动清 `auth_dead`。③ 只读 `health` 命令——查 access token 寿命 + 死号,**不轮换 token**(取代破坏性的 `refresh` 验证)。④ 并发写安全——state.json 改唯一 mkstemp tmp + 进程内 `_state_lock` 的 read-modify-write,根治多线程/多进程同写损坏。
 
 ---
 
@@ -50,11 +51,21 @@
 ### B8 · 重度 cxp 使用下偶发某号 token 死亡(需重登)✅修
 **症状**:并发 cxp 请求(代理是 ThreadingHTTPServer 多线程)**同时刷同一个号**的过期 token → refresh_token 一次性轮换 → 互相作废 → 该号死。**根因**:代理 `_slot_token` 刷新无并发保护。**修**:加 `_refresh_lock` + 双重检查锁(进锁后重读,若别的线程已刷过就直接用),保证一个号同一刻只刷一次。**残留**:跨进程(proxy vs keepalive vs 手动 `codex-rotate refresh`)仍无锁但低频——别在 cxp 重度使用时手动跑 `refresh all`。
 
+### B9 · `refresh` 验证有破坏性 + 跨进程刷新竞争 ✅修
+**症状**:让用户跑 `codex-rotate refresh <号>` 去“验证 token 是否健康”——但 refresh **会轮换** refresh_token(一次性),验证本身就把好号推向 reuse 竞争;且 proxy(04:30 keepalive / 手动 refresh)无跨进程锁,可同刷一号致死。**修**:① 新增只读 `health` 命令(看 access token 寿命 + 死号,不刷新);② `_refresh_slot` skip-if-valid(access token 剩 >1h 不刷)+ `fcntl.flock(.refresh.lock)` 跨进程串行 + 锁内重读重判;③ proxy `_slot_token` 刷新同样套 `.refresh.lock`。**规矩**:验证用 `health`,**别再用 `refresh`**。
+
+### B10 · 一个死号堵死整个 cxp(无 401 失效转移)✅修
+**症状**:proxy 选“用量最少”号,若它 token 死(401),每个 cxp 请求都打它 → 全 401,死号把整条管线堵死(违背“失效自动换号”)。旧代理只处理 429,不处理 401。**根因**:`_proxy` 单次 pick + 无失效转移。**修**:`_proxy` 改 failover 循环——401 先 `_slot_token(force=True)` 强刷重试同号(救陈旧 token),仍 401 → `_mark_dead` + `continue` 换下一个号;429 → `_cool` + 换号;`_pick(exclude=tried)` 跳过死号/已试号。**自愈**:即便 `auth_dead` 标记被跨进程竞争清掉,下次命中该死号会 401 → 重新标死 + 转移,系统自纠。**实测**:storm 中 plus3 429→main→plus2 全自动级联;单请求 200(ROTATE_OK)。
+
+### B11 · state.json 并发写损坏(末尾 stray `}`)✅修 ★根因级
+**症状**:state.json 解析报 `Extra data: line N`(合法 JSON 后多一个 `}`)→ active 乱飘、行为漂移、cxp 偶发崩。**根因**:proxy 是 **ThreadingHTTPServer 多线程**,`_save_state` 用**固定** `state.tmp` 且无锁;多线程(及 codex-rotate autosync/手动 CLI 同名 tmp 跨进程)同写同一 tmp → 字节交错/残留 → `os.replace` 落地即损坏。**修**:① 两边 `_atomic_write`/`_save_state` 改 `tempfile.mkstemp` **唯一 tmp 名**(永不共享路径,最坏 last-write-wins 仍是完整文档);② proxy 新增 `_state_lock` + `_mutate_state(fn)` 把 load→改→原子写整段锁住(防线程间丢更新),`_cool`/`_mark_dead`/`_record_quota` 全改走它。**回归**:15 进程并发写 + 30 并发读 → 0 损坏。
+
 ---
 
 ## 已知待办 / cleanup
 - `codex-rotate` 里 `_run_codex_ping`/`_codex_running`/`CODEX_BIN`/`LOCK`(autosync 内)是 keepalive 重写后的 **dead code**,可删。
-- 代理刷新槽位 token 与 keepalive(04:30)理论可能并发刷同一号(实际重叠概率极低)。
+- ~~代理刷新与 keepalive 并发刷同一号~~ → B9 已加 `.refresh.lock` 跨进程串行解决。
+- `auth_dead` 标记的跨进程写仍可能被 autosync 竞争清掉(low-freq);靠 B10 failover 自愈(下次命中重新标死),非阻塞。
 - SwiftBar 额度归因:plain 模式靠 rollout 时间窗、代理模式靠 `x-codex-*` 头——两套已对齐,但跨模式快速切换的边界(±10s)可能短暂不准。
 
 ## 插件版本史
@@ -64,3 +75,6 @@
 - `v0.7.2` 修"代理服务在跑 ≠ 在用代理"(plain codex 号不刷新额度)
 - `v0.7.3` 窗口过重置时间 → 显示 100% 余量
 - `v0.7.4` 软化"遥测为空"警告(仅活跃号);配合 B7 代理 live-token 同步修
+- `v0.7.5` 配合 B9——新增只读 `health` 命令(取代破坏性 `refresh` 验证)
+- `v0.7.6` 配合 B9——proxy `_slot_token` 跨进程 `.refresh.lock`
+- `v0.7.7` 配合 B10——死号红色三角 + "\codex login 复活"提示(`auth_dead`)

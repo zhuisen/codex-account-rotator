@@ -18,10 +18,12 @@ active (active_since), so one account's usage is never shown as another's.
 """
 import base64
 import datetime
+import fcntl
 import json
 import os
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -37,6 +39,7 @@ LOCK = STORE / ".keepalive.lock"
 CODEX_BIN = "/Users/you/.local/bin/codex"
 OAUTH_TOKEN_URL = "https://auth.openai.com/oauth/token"
 OAUTH_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
+REFRESH_LOCK = STORE / ".refresh.lock"   # cross-process lock so proxy/keepalive/manual never race a single-use refresh_token
 IDENT_FIELDS = ("email", "name", "plan", "sub_until")
 
 
@@ -62,16 +65,26 @@ def _state():
 
 
 def _save_state(s):
-    tmp = STATE.with_suffix(".tmp")
-    tmp.write_text(json.dumps(s, indent=2))
-    os.replace(tmp, STATE)
+    _atomic_write(STATE, s, mode=0o600)
 
 
 def _atomic_write(path, data, mode=0o600):
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data))
-    os.chmod(tmp, mode)
-    os.replace(tmp, path)
+    # UNIQUE temp name (mkstemp) — a fixed `*.tmp` is shared by the proxy + autosync + manual CLI, and
+    # concurrent writers to the same temp path interleave bytes → corrupt JSON. Atomic os.replace then
+    # gives, at worst, last-writer-wins (always a whole valid document, never garbage).
+    d = path.parent
+    fd, tmp = tempfile.mkstemp(dir=str(d), prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f, indent=2)
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def _write_slot(aid, auth):
@@ -277,41 +290,58 @@ def _attributable_quota(s):
     return None
 
 
-def _refresh_slot(aid, slot):
-    """Refresh one account's OAuth tokens via the token endpoint; persist the rotated bundle to
-    its slot. Returns (ok: bool, msg). Do NOT call on the ACTIVE account — codex owns its live
-    token, and refreshing here would rotate the refresh_token out from under it."""
+def _access_exp(tok):
+    try:
+        seg = (tok.get("access_token") or "").split(".")[1]
+        seg += "=" * (-len(seg) % 4)
+        return json.loads(base64.urlsafe_b64decode(seg)).get("exp", 0)
+    except Exception:
+        return 0
+
+
+def _refresh_slot(aid, slot, force=False):
+    """Refresh one account's OAuth tokens, persisting the rotated bundle. SKIPS if the access token
+    is still valid for >1h (needless rotation is the #1 cause of accidental token death). Serializes
+    via a cross-process file lock + re-check so proxy/keepalive/manual never race the single-use
+    refresh_token. Returns (ok, msg). Do NOT call on the ACTIVE account (codex owns its live token)."""
     sf = AUTH_DIR / slot["file"]
     try:
         auth = _load_json(sf)
     except (OSError, ValueError) as e:
         return False, f"read err: {e}"
-    rt = (auth.get("tokens") or {}).get("refresh_token")
-    if not rt:
-        return False, "no refresh_token"
-    body = json.dumps({"grant_type": "refresh_token", "client_id": OAUTH_CLIENT_ID,
-                       "refresh_token": rt}).encode()
-    req = urllib.request.Request(OAUTH_TOKEN_URL, data=body,
-                                 headers={"Content-Type": "application/json"}, method="POST")
-    try:
-        with urllib.request.urlopen(req, timeout=30) as r:
-            data = json.loads(r.read())
-    except urllib.error.HTTPError as e:
-        return False, f"http {e.code}"
-    except Exception as e:
-        return False, f"err: {e}"
-    if not data.get("access_token"):
-        return False, "no access_token in response"
-    tok = auth.setdefault("tokens", {})
-    tok["access_token"] = data["access_token"]
-    if data.get("id_token"):
-        tok["id_token"] = data["id_token"]
-    if data.get("refresh_token"):
-        tok["refresh_token"] = data["refresh_token"]  # rotation — persist the new one
-    auth["last_refresh"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
-    _atomic_write(sf, auth)
-    slot["last_refresh"] = auth["last_refresh"]
-    return True, "ok"
+    if not force and _access_exp(auth.get("tokens") or {}) - time.time() > 3600:
+        return True, "still valid"
+    with open(REFRESH_LOCK, "w") as lf:
+        fcntl.flock(lf, fcntl.LOCK_EX)
+        auth = _load_json(sf)  # re-read under lock — another process may have just refreshed
+        if not force and _access_exp(auth.get("tokens") or {}) - time.time() > 3600:
+            return True, "still valid"
+        rt = (auth.get("tokens") or {}).get("refresh_token")
+        if not rt:
+            return False, "no refresh_token"
+        body = json.dumps({"grant_type": "refresh_token", "client_id": OAUTH_CLIENT_ID,
+                           "refresh_token": rt}).encode()
+        req = urllib.request.Request(OAUTH_TOKEN_URL, data=body,
+                                     headers={"Content-Type": "application/json"}, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=30) as r:
+                data = json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            return False, f"http {e.code}"
+        except Exception as e:
+            return False, f"err: {e}"
+        if not data.get("access_token"):
+            return False, "no access_token in response"
+        tok = auth.setdefault("tokens", {})
+        tok["access_token"] = data["access_token"]
+        if data.get("id_token"):
+            tok["id_token"] = data["id_token"]
+        if data.get("refresh_token"):
+            tok["refresh_token"] = data["refresh_token"]  # rotation — persist the new one
+        auth["last_refresh"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+        _atomic_write(sf, auth)
+        slot["last_refresh"] = auth["last_refresh"]
+        return True, "ok"
 
 
 # ---------- slot mechanics ----------
@@ -329,6 +359,8 @@ def _syncback(s):
     slot["file"] = f"{aid}.json"
     slot.setdefault("label", f"acct{len(s['slots'])}")
     _stamp_identity(slot, live, expect_aid=aid)
+    slot.pop("auth_dead", None)      # a fresh live token (re-login / good refresh) revives a dead account
+    slot.pop("auth_dead_at", None)
     q = _attributable_quota(s)
     if q:
         slot["quota"] = q
@@ -437,15 +469,19 @@ def cmd_cool(args):
 
 
 def cmd_uncool(args):
-    """Clear cooldown on a slot (label/account_id) or 'all' (default)."""
+    """Clear cooldown (and the auth-dead flag) on a slot (label/account_id) or 'all' (default)."""
     target = args[0] if args else "all"
     s = _state()
     n = 0
     for aid, slot in s["slots"].items():
-        if target in ("all", aid, slot.get("label")) and slot.pop("cooling_until", None) is not None:
-            n += 1
+        if target in ("all", aid, slot.get("label")):
+            cleared = slot.pop("cooling_until", None) is not None
+            cleared |= slot.pop("auth_dead", None) is not None
+            slot.pop("auth_dead_at", None)
+            if cleared:
+                n += 1
     _save_state(s)
-    print(f"cleared cooldown on {n} slot(s)")
+    print(f"cleared cooldown/dead on {n} slot(s)")
 
 
 def cmd_sync(args):
@@ -550,6 +586,27 @@ def cmd_current(args):
     print(_mask(s.get("active")))
 
 
+def cmd_health(args):
+    """Read-only token health (no rotation): each account's access-token expiry + last_refresh."""
+    s = _state()
+    if not s["slots"]:
+        print("no accounts")
+        return
+    now = time.time()
+    for aid, slot in s["slots"].items():
+        try:
+            auth = _load_json(AUTH_DIR / slot["file"])
+        except Exception:
+            print(f"  [{slot.get('label', '?'):<8}] (no creds)")
+            continue
+        left = _access_exp(auth.get("tokens") or {}) - now
+        st = f"access {left / 3600:.0f}h" if left > 0 else "access 已过期"
+        who = slot.get("email") or _mask(aid)
+        dead = "  ⚠️ DEAD 需 \\codex login 重登" if slot.get("auth_dead") else ""
+        print(f"  [{slot.get('label', '?'):<8}] {who:<26} {st:<13} "
+              f"last_refresh:{(auth.get('last_refresh') or '?')[:19]}{dead}")
+
+
 def cmd_ensure(args):
     """Preflight: auto-capture the live account; if it's cooling, switch to a fresh one."""
     s = _state()
@@ -572,14 +629,15 @@ def cmd_ensure(args):
 
 CMDS = {"add": cmd_add, "list": cmd_list, "switch": cmd_switch, "cool": cmd_cool,
         "uncool": cmd_uncool, "quota": cmd_quota, "current": cmd_current, "ensure": cmd_ensure,
-        "sync": cmd_sync, "rename": cmd_rename, "keepalive": cmd_keepalive, "refresh": cmd_refresh}
+        "sync": cmd_sync, "rename": cmd_rename, "keepalive": cmd_keepalive, "refresh": cmd_refresh,
+        "health": cmd_health}
 
 
 def main():
     if len(sys.argv) < 2 or sys.argv[1] not in CMDS:
         print("usage: codex-rotate {add <label>|list|switch [label]|cool [min]|uncool [label]|"
               "quota [--save]|sync|rename <old> <new>|refresh [label|all]|"
-              "keepalive [days] [--dry-run]|ensure|current}")
+              "keepalive [days] [--dry-run]|health|ensure|current}")
         sys.exit(1)
     CMDS[sys.argv[1]](sys.argv[2:])
 
