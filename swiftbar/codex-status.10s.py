@@ -21,7 +21,7 @@ AMBER = "#e0a020"
 RED = "#e0533a"
 MONO = "font=Menlo size=12"
 EIGHTHS = "▏▎▍▌▋▊▉"  # 1/8 .. 7/8
-VERSION = "v0.7.2"  # bumped on every plugin change — shown in the menu so you can tell it reloaded
+VERSION = "v0.7.3"  # bumped on every plugin change — shown in the menu so you can tell it reloaded
 
 
 def mask(aid):
@@ -109,10 +109,20 @@ def proxy_up(port=8011):
         return False
 
 
+def win_remaining(w):
+    """Remaining % for one window; a window whose reset time has passed reads as fully reset (100%)."""
+    used = (w or {}).get("used_percent")
+    if used is None:
+        return None
+    ra = (w or {}).get("resets_at")
+    if ra and ra <= NOW:
+        return 100.0
+    return 100 - used
+
+
 def tightest_remaining(q):
-    used = [(w or {}).get("used_percent") for w in (q.get("primary"), q.get("secondary"))]
-    used = [u for u in used if u is not None] or [0]
-    return 100 - max(used)
+    rems = [r for r in (win_remaining(q.get("primary")), win_remaining(q.get("secondary"))) if r is not None]
+    return min(rems) if rems else 100
 
 
 def account_block(aid, slot, active):
@@ -137,10 +147,9 @@ def account_block(aid, slot, active):
     if q:
         for key, name in (("primary", "5h"), ("secondary", "周")):
             w = q.get(key) or {}
-            used = w.get("used_percent")
-            if used is None:
+            rem = win_remaining(w)
+            if rem is None:
                 continue
-            rem = 100 - used
             lines.append(f"   {name} {smooth_bar(rem)} {rem:>3.0f}%  ↻{fmt_eta(w.get('resets_at'))} "
                          f"| color={rem_color(rem)} {MONO}")
     elif slot.get("quota_status") == "empty":
@@ -173,8 +182,8 @@ def main():
     proxy_recent = up and (NOW - st.get("last_proxy_ts", 0)) < 90
     shown = st.get("last_aid") if proxy_recent and st.get("last_aid") in slots else active
     pr = (slots.get(shown, {}).get("quota") or {}).get("primary") if shown else None
-    if pr and pr.get("used_percent") is not None:
-        rem = 100 - pr["used_percent"]
+    rem = win_remaining(pr) if pr else None
+    if rem is not None:
         title = f"{title_icon(rem)} {rem:.0f}% · {fmt_eta(pr.get('resets_at'))}"
         if rem <= 10:
             title += f" | color={RED}"
