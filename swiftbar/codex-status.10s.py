@@ -21,7 +21,7 @@ AMBER = "#e0a020"
 RED = "#e0533a"
 MONO = "font=Menlo size=12"
 EIGHTHS = "▏▎▍▌▋▊▉"  # 1/8 .. 7/8
-VERSION = "v0.7.8"  # bumped on every change — shown in the menu so you can tell it reloaded
+VERSION = "v0.7.9"  # bumped on every change — shown in the menu so you can tell it reloaded
 
 
 def mask(aid):
@@ -125,6 +125,17 @@ def tightest_remaining(q):
     return min(rems) if rems else 100
 
 
+def effectively_cooling(slot):
+    """Single source of truth for 'is this account cooling', matching the proxy's _pick: a cooldown
+    that hasn't elapsed BUT whose 5h window already reset is stale → NOT cooling (that was the
+    '冷却 1h25m' + '5h 100% 已重置' contradiction: a pre-fix fixed-300m cooldown outliving its window)."""
+    cu = slot.get("cooling_until", 0)
+    if cu <= NOW:
+        return False
+    ra = ((slot.get("quota") or {}).get("primary") or {}).get("resets_at")
+    return not (ra and ra <= NOW)
+
+
 def pool_title(slots):
     """Title = the live account with the most 5h (primary) headroom — the one the next cxp request will
     pick (the proxy ranks by 5h used_percent). Stable: no last_aid/active 90s flip, and a reset window
@@ -138,11 +149,9 @@ def pool_title(slots):
         rem = win_remaining(pr)
         if rem is None:
             rem = 100.0  # never run this account → assume full headroom
-        ra = pr.get("resets_at")
-        is_cooling = sl.get("cooling_until", 0) > NOW and not (ra and ra <= NOW)
-        key = (is_cooling, -rem)
+        key = (effectively_cooling(sl), -rem)
         if best is None or key < best[0]:
-            best = (key, rem, ra)
+            best = (key, rem, pr.get("resets_at"))
     return (best[1], best[2]) if best else None
 
 
@@ -152,7 +161,7 @@ def account_block(aid, slot, active):
     who = slot.get("email") or mask(aid)
     q = slot.get("quota")
     dead = slot.get("auth_dead")
-    cooling = slot.get("cooling_until", 0) > NOW
+    cooling = effectively_cooling(slot)
     sym_color = rem_color(tightest_remaining(q)) if q else GRAY
     lines = []
     if dead:
