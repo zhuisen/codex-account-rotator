@@ -21,7 +21,7 @@ AMBER = "#e0a020"
 RED = "#e0533a"
 MONO = "font=Menlo size=12"
 EIGHTHS = "▏▎▍▌▋▊▉"  # 1/8 .. 7/8
-VERSION = "v0.7.10"  # bumped on every change — shown in the menu so you can tell it reloaded
+VERSION = "v0.7.11"  # bumped on every change — shown in the menu so you can tell it reloaded
 
 
 def mask(aid):
@@ -195,11 +195,13 @@ def main():
     slots = st.get("slots", {})
     active = st.get("active")
 
-    # ---- menu bar title: 额度 of the account CURRENTLY IN USE (the proxy-served last_aid), no label. ----
-    # No 90s timer (that flip was the old jitter); since proxy is KeepAlive-up, this just tracks whichever
-    # account is serving now. The picker sticks to the least-used account, so it's piecewise-stable, only
-    # moving when rotation actually moves to another account. Falls back to active (plain codex) / pool.
-    shown = st.get("last_aid") if (up and st.get("last_aid") in slots) else active
+    # ---- menu bar title: 额度 of the account currently in use, no label. Track whichever account-
+    # selection is MORE RECENT — a manual switch (active_since) or a cxp request (last_proxy_ts) — so the
+    # title updates immediately when you switch, and follows the proxy-served account while running cxp.
+    # (No 90s timer; that earlier flip was the jitter.) The picker sticks to the least-used account, so
+    # under cxp it's piecewise-stable, moving only when rotation actually moves.
+    cxp_recent = up and st.get("last_proxy_ts", 0) >= st.get("active_since", 0)
+    shown = st.get("last_aid") if (cxp_recent and st.get("last_aid") in slots) else active
     pr = (slots.get(shown, {}).get("quota") or {}).get("primary") if shown in slots else None
     rem = win_remaining(pr) if pr else None
     if rem is not None:
