@@ -3,4 +3,4 @@
 # Selects the `rotateproxy` profile (~/.codex/rotateproxy.config.toml), which overlays your real
 # ~/.codex config (MCP / hooks / model settings inherited) and swaps the model provider to the
 # local proxy on 127.0.0.1:8011. Plain `codex` is unaffected. Proxy = launchd service.
-exec codex --profile rotateproxy "$@"
+exec command codex --profile rotateproxy "$@"   # `command` bypasses any `codex` alias/function (no recursion if aliased to cxp)
