@@ -583,15 +583,15 @@ def cmd_quota(args):
             if q:
                 slot["quota"] = q          # fresh reading attributable to this account (plain codex)
                 slot["quota_status"] = "ok"
-            elif (slot.get("quota") or {}).get("source") == "proxy":
-                pass  # the proxy already recorded this account's real per-request quota — authoritative
+            elif slot.get("quota"):
+                pass  # keep the last snapshot (proxy OR a prior plain-codex reading) — a stale snapshot
+                      # beats '用量未知' when you switch back to an account; the leak is gated by Fix A
             else:
                 since = s.get("active_since", 0)
                 if p and since and p.stat().st_mtime >= since:
                     slot["quota_status"] = "empty"    # ran this stint but rollout had no rate_limit telemetry
                 else:
-                    slot.pop("quota", None)
-                    slot["quota_status"] = "pending"  # hasn't run codex since becoming active
+                    slot["quota_status"] = "pending"  # never ran this account — no snapshot to show
             if LIVE.exists():
                 _stamp_identity(slot, _load_json(LIVE), expect_aid=aid)
             _save_state(s)
