@@ -35,7 +35,8 @@ STATE = STORE / "state.json"
 LIVE = Path(os.environ.get("CODEX_LIVE_AUTH", str(Path.home() / ".codex" / "auth.json")))
 OAUTH_TOKEN_URL = "https://auth.openai.com/oauth/token"
 OAUTH_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
-REFRESH_LOCK = STORE / ".refresh.lock"   # cross-process: shared with codex-rotate keepalive/manual refresh
+REFRESH_LOCK = STORE / ".refresh.lock"   # cross-process: shared with codex-rotate (refresh + cred copies)
+STATE_LOCK = STORE / ".state.lock"       # cross-process state.json RMW mutex (codex-rotate takes the same)
 
 _affinity = {}            # previous_response_id → account_id
 _lock = threading.Lock()
@@ -52,8 +53,11 @@ def _mutate_state(fn):
     """Serialized read-modify-write of state.json. ThreadingHTTPServer runs many request threads; a
     fixed `state.tmp` + unsynchronized writes interleave bytes → corrupt JSON (observed: stray '}').
     Holding _state_lock for the whole load→modify→atomic-write makes the proxy a single writer and
-    prevents lost updates; the UNIQUE mkstemp temp keeps even cross-process writes from sharing a path."""
-    with _state_lock:
+    prevents lost updates; the UNIQUE mkstemp temp keeps even cross-process writes from sharing a path.
+    The STATE_LOCK flock extends the same guarantee across processes (codex-rotate holds it for its own
+    load→mutate→save), so CLI and proxy can no longer silently revert each other's fields."""
+    with _state_lock, open(STATE_LOCK, "w") as lf:
+        fcntl.flock(lf, fcntl.LOCK_EX)
         try:
             s = _load(STATE)
         except (OSError, ValueError):
@@ -82,21 +86,32 @@ def _exp(jwt):
 
 
 def _slot_token(aid, slot, force=False):
-    """Return a FRESH access_token (+account_id), OAuth-refreshing if expired (or force=True, used on a
-    401 to retry with a brand-new token). The ACTIVE account is read/written via the live
-    ~/.codex/auth.json (shared with plain codex) so a refresh here never leaves codex's live copy stale
-    (avoids 'session ended' divergence). Inactive → slot file."""
+    """Return (access_token, account_id), or (None, None) when this account is unusable RIGHT NOW.
+    LIVE (active) account: READ-ONLY. Its refresh_token is owned by codex's native refresher, which
+    does not take our flock — refreshing here can consume the same single-use token concurrently
+    (= dead account, the last open death path of the B9 class). A valid live access token is used
+    as-is (re-read every call, so codex's own rotation is picked up); expired/rejected → (None, None)
+    and the caller fails over to another account instead of refreshing.
+    Inactive slot: refresh on expiry (or force=True after a 401) under in-process + cross-process locks."""
     use_live = (aid == _load(STATE).get("active") and LIVE.exists()
                 and (_load(LIVE).get("tokens") or {}).get("account_id") == aid)
-    sf = LIVE if use_live else (AUTH_DIR / slot["file"])
+    if use_live:
+        tok = (_load(LIVE).get("tokens") or {})
+        at = tok.get("access_token", "")
+        if _exp(at) - time.time() > 60:
+            return at, tok.get("account_id")
+        return None, None
+    sf = AUTH_DIR / slot["file"]
     tok = (_load(sf).get("tokens") or {})
     if not force and _exp(tok.get("access_token", "")) - time.time() > 60:
         return tok.get("access_token", ""), tok.get("account_id")
     # token expired → refresh under BOTH an in-process lock (proxy threads) and a cross-process file
-    # lock (codex-rotate keepalive/manual refresh), each with a re-check: the refresh_token is
+    # lock (codex-rotate keepalive/manual refresh/switch), each with a re-check: the refresh_token is
     # single-use, so any two refreshers racing the SAME account invalidate it = dead account.
     with _refresh_lock, open(REFRESH_LOCK, "w") as lf:
         fcntl.flock(lf, fcntl.LOCK_EX)
+        if _load(STATE).get("active") == aid:
+            return None, None  # a switch raced us: account just became live → codex owns it, never refresh
         auth = _load(sf)
         tok = auth.get("tokens") or {}
         at = tok.get("access_token", "")
@@ -122,22 +137,30 @@ def _slot_token(aid, slot, force=False):
             if d.get("refresh_token"):
                 tok["refresh_token"] = d["refresh_token"]
             auth["last_refresh"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
-            tmp = sf.with_suffix(".tmp")
-            tmp.write_text(json.dumps(auth))
+            fd, tmp = tempfile.mkstemp(dir=str(sf.parent), prefix=f".{sf.name}.", suffix=".tmp")
+            with os.fdopen(fd, "w") as f:
+                f.write(json.dumps(auth))
             os.chmod(tmp, 0o600)
             os.replace(tmp, sf)
-            sys.stderr.write(f"[proxy] refreshed {slot.get('label')} via {'live' if use_live else 'slot'}\n")
+            sys.stderr.write(f"[proxy] refreshed {slot.get('label')} (slot)\n")
             return d["access_token"], tok.get("account_id")
         return at, tok.get("account_id")
 
 
-def _used(slot):
-    p = (slot.get("quota") or {}).get("primary") or {}
-    ra = p.get("resets_at")
+def _win_used(slot, key):
+    w = (slot.get("quota") or {}).get(key) or {}
+    ra = w.get("resets_at")
     if ra and ra <= time.time():
-        return 0  # 5h window already reset → full headroom; prefer this account in _pick
-    u = p.get("used_percent")
+        return 0  # window already reset → full headroom
+    u = w.get("used_percent")
     return u if u is not None else 0
+
+
+def _used(slot):
+    """Sort key for _pick: primary (5h) first, weekly as tie-break. Without the weekly component, five
+    accounts whose 5h windows all reset sort in dict-insertion order and every request lands on the
+    first one — even if its weekly quota is nearly exhausted (observed: main at 9% weekly picked first)."""
+    return (_win_used(slot, "primary"), _win_used(slot, "secondary"))
 
 
 def _pick(prev_id, exclude=None):
@@ -179,22 +202,32 @@ def _cool(aid, minutes=300):
     def f(s):
         sl = s.get("slots", {}).get(aid)
         if sl:
-            until = time.time() + minutes * 60
+            now = time.time()
+            until = now + minutes * 60
             ra = ((sl.get("quota") or {}).get("primary") or {}).get("resets_at")
-            if ra:
-                until = min(until, ra + 60)  # never cool past the real 5h-window reset (was: fixed 300m)
+            if ra and ra > now:
+                until = min(until, ra + 60)  # never cool past the real 5h-window reset
+            elif ra:
+                # snapshot is STALE (its reset already passed — e.g. a 429 that carried no x-codex
+                # headers): capping with it would set cooling_until in the PAST = no cooldown at all,
+                # and the next request re-picks this account in a 429 loop. Short fallback instead.
+                until = now + 600
             sl["cooling_until"] = until
     _mutate_state(f)
 
 
-def _mark_dead(aid):
+def _mark_dead(aid, token_fp=None):
     """Flag an account whose token the server rejected even after a forced refresh (token invalidated /
-    session terminated) so the picker skips it until the user re-logs in (\\codex login → autosync
-    writes a fresh token and clears the flag)."""
+    session terminated) so the picker skips it. token_fp = tail of the REJECTED access token: autosync
+    only clears the flag when it sees a DIFFERENT token (re-login / codex-native refresh), so the 10s
+    quota--save tick can no longer false-revive a dead account with the very token that was rejected."""
     def f(s):
         if aid in s.get("slots", {}):
-            s["slots"][aid]["auth_dead"] = True
-            s["slots"][aid]["auth_dead_at"] = time.time()
+            sl = s["slots"][aid]
+            sl["auth_dead"] = True
+            sl["auth_dead_at"] = time.time()
+            if token_fp:
+                sl["auth_dead_fp"] = token_fp
     _mutate_state(f)
 
 
@@ -284,6 +317,8 @@ class Handler(BaseHTTPRequestHandler):
                     rid = m.group(1).decode()
                     with _lock:
                         _affinity[rid] = aid
+                        while len(_affinity) > 256:  # FIFO cap — codex never sends previous_response_id
+                            _affinity.pop(next(iter(_affinity)))  # today, so entries only accumulate
                     got = True
                     sys.stderr.write(f"[proxy] affinity {rid[:18]} → [{label}]\n")
                 elif len(scanbuf) > 65536:
@@ -299,51 +334,68 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 pass
         # failover loop: pick least-used → on 401 (dead token) mark dead + try next; on 429 cool + try
-        # next; first usable account wins. One dead/exhausted account never blocks the whole request.
+        # next; on a network error before any bytes reach codex, try next. First usable account wins.
+        # One dead/exhausted/unreachable attempt never blocks the whole request.
         tried = set()
         pool_n = len(_load(STATE).get("slots", {}))
         for _ in range(max(1, pool_n)):
             aid, slot, reason = _pick(prev_id, exclude=tried)
             if not aid:
-                self.send_error(503, "no usable accounts in pool (all dead or excluded)")
-                return
+                break
             tried.add(aid)
             label = slot.get("label", aid[:6])
             token, account_id = _slot_token(aid, slot)
+            if not token:
+                sys.stderr.write(f"[proxy] skip [{label}]: live token expired (codex owns its refresh)\n")
+                continue
             conn = None
+            streamed = False
             try:
-                conn, resp = self._open(body, token, account_id, label, reason, prev_id)
+                try:
+                    conn, resp = self._open(body, token, account_id, label, reason, prev_id)
+                except Exception as e:  # connect/TLS/send error — nothing reached codex yet, fail over
+                    sys.stderr.write(f"[proxy] upstream err [{label}]: {e} — failing over\n")
+                    continue
                 if resp.status == 401:
                     conn.close()  # stored token rejected → one forced refresh, retry SAME account once
                     conn = None
                     token2, account_id2 = _slot_token(aid, slot, force=True)
                     if token2 and token2 != token:
-                        conn, resp = self._open(body, token2, account_id2, label, "retry-refresh", prev_id)
+                        try:
+                            conn, resp = self._open(body, token2, account_id2, label, "retry-refresh", prev_id)
+                        except Exception as e:
+                            sys.stderr.write(f"[proxy] upstream err [{label}]: {e} — failing over\n")
+                            continue
                         if resp.status != 401:
+                            streamed = True
                             self._finish(conn, resp, aid, label)
                             return
-                    _mark_dead(aid)
+                    _mark_dead(aid, (token2 or token)[-16:])
                     sys.stderr.write(f"[proxy] 401 invalidated → marked dead [{label}], failing over\n")
                     continue
                 if resp.status == 429:
                     _record_quota(aid, resp.getheaders())
                     _cool(aid)
-                    sys.stderr.write(f"[proxy] 429 → cooled [{label}] 300m, failing over\n")
+                    sys.stderr.write(f"[proxy] 429 → cooled [{label}], failing over\n")
                     continue
+                streamed = True
                 self._finish(conn, resp, aid, label)
                 return
             except Exception as e:
-                sys.stderr.write(f"[proxy] upstream err [{label}]: {e}\n")
-                try:
-                    self.send_error(502, str(e))
-                except Exception:
-                    pass
+                # response already partially relayed (or client hung up) — a retry on another account
+                # would double-send; abort. send_error only if no headers went out yet.
+                sys.stderr.write(f"[proxy] stream err [{label}]: {e}\n")
+                if not streamed:
+                    try:
+                        self.send_error(502, str(e))
+                    except Exception:
+                        pass
                 return
             finally:
                 if conn is not None:
                     conn.close()
         try:
-            self.send_error(503, "all accounts rate-limited or dead — re-login a dead one: \\codex login")
+            self.send_error(503, "no usable account (dead / rate-limited / live-expired) — \\codex login or wait")
         except Exception:
             pass
 

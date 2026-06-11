@@ -17,6 +17,7 @@ trusted for the active account only if produced after that account became
 active (active_since), so one account's usage is never shown as another's.
 """
 import base64
+import contextlib
 import datetime
 import fcntl
 import json
@@ -35,11 +36,10 @@ SESSIONS = CODEX_HOME / "sessions"
 STORE = Path(__file__).resolve().parent
 AUTH_DIR = STORE / "auth"
 STATE = STORE / "state.json"
-LOCK = STORE / ".keepalive.lock"
-CODEX_BIN = "/Users/you/.local/bin/codex"
 OAUTH_TOKEN_URL = "https://auth.openai.com/oauth/token"
 OAUTH_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
-REFRESH_LOCK = STORE / ".refresh.lock"   # cross-process lock so proxy/keepalive/manual never race a single-use refresh_token
+REFRESH_LOCK = STORE / ".refresh.lock"   # cross-process: ALL credential movement (refresh + slot↔live copies)
+STATE_LOCK = STORE / ".state.lock"       # cross-process state.json RMW mutex (shared with the proxy)
 IDENT_FIELDS = ("email", "name", "plan", "sub_until")
 
 
@@ -66,6 +66,35 @@ def _state():
 
 def _save_state(s):
     _atomic_write(STATE, s, mode=0o600)
+
+
+@contextlib.contextmanager
+def _state_mutex():
+    """Cross-process state.json mutex (the proxy's _mutate_state takes the same flock): held across a
+    whole load→mutate→save so one writer can never clobber another's fields (cooling_until, auth_dead,
+    quota, last_*). Commands that do network work must NOT hold this — use _mutate_state instead."""
+    with open(STATE_LOCK, "w") as lf:
+        fcntl.flock(lf, fcntl.LOCK_EX)
+        yield
+
+
+def _mutate_state(fn):
+    """flock'd read-modify-write for updates made AFTER slow work (an OAuth refresh): re-reads fresh
+    state under the lock and applies a targeted mutation, instead of saving a stale in-memory copy."""
+    with _state_mutex():
+        s = _state()
+        fn(s)
+        _save_state(s)
+
+
+@contextlib.contextmanager
+def _cred_lock(nonblock=False):
+    """Serializes ALL credential movement (OAuth refresh, slot↔live copies) across processes. A copy
+    racing a refresh can write a consumed single-use refresh_token back over the fresh one = dead
+    account. nonblock=True raises BlockingIOError instead of waiting (autosync: skip, retry next tick)."""
+    with open(REFRESH_LOCK, "w") as lf:
+        fcntl.flock(lf, fcntl.LOCK_EX | (fcntl.LOCK_NB if nonblock else 0))
+        yield
 
 
 def _atomic_write(path, data, mode=0o600):
@@ -117,19 +146,11 @@ def _age_days(iso):
         return None
 
 
-def _codex_running():
-    try:
-        return subprocess.run(["pgrep", "-x", "codex"], capture_output=True).returncode == 0
-    except Exception:
-        return False
-
-
-def _run_codex_ping():
-    codex = CODEX_BIN if os.path.exists(CODEX_BIN) else "codex"
-    try:
-        subprocess.run([codex, "exec", "reply with exactly: ok"], capture_output=True, timeout=120)
-    except Exception:
-        pass
+def _token_fp(auth):
+    """Last 16 chars of the access token — enough to tell 'the very token the server rejected' from a
+    genuinely new one (re-login / codex-native refresh). Used to gate auth_dead revival."""
+    at = ((auth.get("tokens") or {}).get("access_token") or "")
+    return at[-16:] or None
 
 
 # ---------- identity (from id_token JWT) ----------
@@ -168,14 +189,18 @@ def _autosync_live(s):
     A freshly `codex login`-ed account gets a slot automatically (labelled main / plusN),
     its stored credentials are kept in sync (refresh_token rotation safety), and it is
     marked active. Idempotent: a no-op when the live account is already the active slot."""
-    if LOCK.exists() or not LIVE.exists():
-        return  # keepalive in progress (auth.json is being swapped) — don't fight it
-    try:
-        live = _load_json(LIVE)
-    except (OSError, ValueError):
+    if not LIVE.exists():
         return
-    aid = _account_id(live)
-    if not aid:
+    try:
+        # the copy LIVE→slot must be atomic wrt any in-flight refresh of the same slot file — a stale
+        # LIVE write-back would resurrect a consumed refresh_token. Non-blocking: busy → next tick.
+        with _cred_lock(nonblock=True):
+            live = _load_json(LIVE)
+            aid = _account_id(live)
+            if not aid:
+                return
+            _write_slot(aid, live)  # keep stored creds current (so switch-back has a valid refresh_token)
+    except (BlockingIOError, OSError, ValueError):
         return
     new = aid not in s["slots"]
     if new:
@@ -189,12 +214,16 @@ def _autosync_live(s):
     slot["file"] = f"{aid}.json"
     if new:
         slot["label"] = label
-    _write_slot(aid, live)  # keep stored creds current (so switch-back has a valid refresh_token)
     _stamp_identity(slot, live, expect_aid=aid)
     if live.get("last_refresh"):
         slot["last_refresh"] = live["last_refresh"]
-    revived = slot.pop("auth_dead", None) is not None  # fresh live token (re-login) revives a dead slot
-    slot.pop("auth_dead_at", None)
+    revived = False
+    if slot.get("auth_dead") and _token_fp(live) != slot.get("auth_dead_fp"):
+        # only a genuinely NEW token revives; re-seeing the very token the server rejected must NOT
+        # clear the flag (otherwise the 10s quota--save tick puts a dead account straight back in pool)
+        for k in ("auth_dead", "auth_dead_at", "auth_dead_fp"):
+            slot.pop(k, None)
+        revived = True
     changed = new or revived
     if s.get("active") != aid:
         _activate(s, aid)
@@ -325,8 +354,9 @@ def _refresh_slot(aid, slot, force=False):
         return False, f"read err: {e}"
     if not force and _access_exp(auth.get("tokens") or {}) - time.time() > 3600:
         return True, "still valid"
-    with open(REFRESH_LOCK, "w") as lf:
-        fcntl.flock(lf, fcntl.LOCK_EX)
+    with _cred_lock():
+        if _state().get("active") == aid:
+            return True, "skip-active"  # switch raced us: now live → codex owns its token, never refresh
         auth = _load_json(sf)  # re-read under lock — another process may have just refreshed
         if not force and _access_exp(auth.get("tokens") or {}) - time.time() > 3600:
             return True, "still valid"
@@ -364,17 +394,19 @@ def _syncback(s):
     """Persist current live auth into its own (account_id-keyed) slot."""
     if not LIVE.exists():
         return
-    live = _load_json(LIVE)
-    aid = _account_id(live)
-    if not aid:
-        return
-    _write_slot(aid, live)
+    with _cred_lock():
+        live = _load_json(LIVE)
+        aid = _account_id(live)
+        if not aid:
+            return
+        _write_slot(aid, live)
     slot = s["slots"].setdefault(aid, {})
     slot["file"] = f"{aid}.json"
     slot.setdefault("label", f"acct{len(s['slots'])}")
     _stamp_identity(slot, live, expect_aid=aid)
-    slot.pop("auth_dead", None)      # a fresh live token (re-login / good refresh) revives a dead account
-    slot.pop("auth_dead_at", None)
+    if slot.get("auth_dead") and _token_fp(live) != slot.get("auth_dead_fp"):
+        for k in ("auth_dead", "auth_dead_at", "auth_dead_fp"):  # new token only — see _autosync_live
+            slot.pop(k, None)
     q = _attributable_quota(s)
     if q:
         slot["quota"] = q
@@ -395,6 +427,8 @@ def _pick_next(s):
             continue
         if s["slots"][aid].get("cooling_until", 0) > now:
             continue
+        if s["slots"][aid].get("auth_dead"):
+            continue  # never hand the live auth to an account the server already rejected
         return aid
     return None
 
@@ -404,11 +438,12 @@ def _pick_next(s):
 def cmd_add(args):
     label = args[0] if args else None
     s = _state()
-    live = _read_live()
-    aid = _account_id(live)
-    if not aid:
-        sys.exit("live auth.json has no OAuth account_id (API-key login? run `codex login` first)")
-    _write_slot(aid, live)
+    with _cred_lock():
+        live = _read_live()
+        aid = _account_id(live)
+        if not aid:
+            sys.exit("live auth.json has no OAuth account_id (API-key login? run `codex login` first)")
+        _write_slot(aid, live)
     slot = s["slots"].setdefault(aid, {})
     slot["file"] = f"{aid}.json"
     slot["label"] = label or slot.get("label") or f"acct{len(s['slots'])}"
@@ -464,10 +499,13 @@ def cmd_switch(args):
         target = _pick_next(s)
         if not target:
             sys.exit("no other available account (all cooling or only one slot)")
-    auth = _load_json(AUTH_DIR / s["slots"][target]["file"])
-    _atomic_write(LIVE, auth)
-    _activate(s, target)
-    _save_state(s)
+    with _cred_lock():
+        # slot-read → LIVE-write → state-save as ONE credential move: the proxy's refresh path re-checks
+        # `active` under this same flock, so it can never rotate a slot that just became live
+        auth = _load_json(AUTH_DIR / s["slots"][target]["file"])
+        _atomic_write(LIVE, auth)
+        _activate(s, target)
+        _save_state(s)
     who = s["slots"][target].get("email") or _mask(target)
     print(f"switched → [{s['slots'][target].get('label', '?')}] {who}  (effective on next `codex` run)")
 
@@ -493,6 +531,7 @@ def cmd_uncool(args):
             cleared = slot.pop("cooling_until", None) is not None
             cleared |= slot.pop("auth_dead", None) is not None
             slot.pop("auth_dead_at", None)
+            slot.pop("auth_dead_fp", None)
             if cleared:
                 n += 1
     _save_state(s)
@@ -532,8 +571,10 @@ def cmd_refresh(args):
             out.append(f"{slot.get('label')}:skip-active")
             continue
         ok, msg = _refresh_slot(aid, slot)
+        if msg == "ok":  # persist last_refresh via a fresh RMW — a bulk save here would clobber
+            _mutate_state(lambda st, a=aid, v=slot["last_refresh"]:  # concurrent proxy/plugin writes
+                          st["slots"].setdefault(a, {}).update({"last_refresh": v}))
         out.append(f"{slot.get('label')}:{'ok' if ok else msg}")
-    _save_state(s)
     print("refresh " + (" ".join(out) if out else "(no matching slot)"))
 
 
@@ -560,9 +601,10 @@ def cmd_keepalive(args):
             refreshed.append(f"{label}:age={'?' if age is None else round(age, 1)}d")
             continue
         ok, msg = _refresh_slot(aid, slot)
+        if msg == "ok":  # targeted RMW, same reason as cmd_refresh
+            _mutate_state(lambda st, a=aid, v=slot["last_refresh"]:
+                          st["slots"].setdefault(a, {}).update({"last_refresh": v}))
         refreshed.append(f"{label}:{'ok' if ok else msg}")
-    if not dry:
-        _save_state(s)
     print(f"keepalive refreshed=[{', '.join(refreshed) or 'none'}] skipped=[{', '.join(skipped)}]")
 
 
@@ -594,7 +636,9 @@ def cmd_quota(args):
                     slot["quota_status"] = "pending"  # never ran this account — no snapshot to show
             if LIVE.exists():
                 _stamp_identity(slot, _load_json(LIVE), expect_aid=aid)
-            _save_state(s)
+            if p and not _rollout_is_proxy(p):
+                s["last_plain_ts"] = p.stat().st_mtime  # newest plain-codex activity — the title's
+            _save_state(s)                              # cxp-vs-plain arbitration signal
     print(json.dumps(q, ensure_ascii=False) if q else "null")
 
 
@@ -637,10 +681,11 @@ def cmd_ensure(args):
         _save_state(s)
         print("all accounts cooling — staying put")
         return
-    auth = _load_json(AUTH_DIR / s["slots"][target]["file"])
-    _atomic_write(LIVE, auth)
-    _activate(s, target)
-    _save_state(s)
+    with _cred_lock():
+        auth = _load_json(AUTH_DIR / s["slots"][target]["file"])
+        _atomic_write(LIVE, auth)
+        _activate(s, target)
+        _save_state(s)
     print(f"auto-switched (prev cooling) → [{s['slots'][target].get('label', '?')}]")
 
 
@@ -654,6 +699,11 @@ CMDS = {"add": cmd_add, "list": cmd_list, "switch": cmd_switch, "cool": cmd_cool
 # commands update the menu instantly, not on its 10s tick). Excludes quota/sync/keepalive: the plugin
 # runs `quota --save` every 10s, so refreshing there would loop; sync fires from the auth.json watcher.
 REFRESH_AFTER = {"add", "switch", "cool", "uncool", "rename", "refresh"}
+
+# Disk-only commands run their whole load→mutate→save under the cross-process state mutex (lost-update
+# guard). refresh/keepalive do network and write back via _mutate_state instead; health/current are
+# read-only. Lock order is always state → cred, never the reverse (no deadlock).
+STATE_LOCKED = {"add", "list", "switch", "cool", "uncool", "quota", "sync", "rename", "ensure"}
 
 
 def _refresh_menu():
@@ -671,7 +721,11 @@ def main():
               "keepalive [days] [--dry-run]|health|ensure|current}")
         sys.exit(1)
     cmd = sys.argv[1]
-    CMDS[cmd](sys.argv[2:])
+    if cmd in STATE_LOCKED:
+        with _state_mutex():
+            CMDS[cmd](sys.argv[2:])
+    else:
+        CMDS[cmd](sys.argv[2:])
     if cmd in REFRESH_AFTER:
         _refresh_menu()
 
