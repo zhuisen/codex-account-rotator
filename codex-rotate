@@ -20,8 +20,10 @@ import base64
 import contextlib
 import datetime
 import fcntl
+import http.client
 import json
 import os
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -642,6 +644,83 @@ def cmd_quota(args):
     print(json.dumps(q, ensure_ascii=False) if q else "null")
 
 
+PROBE_BODY = {
+    "model": "gpt-5.5",
+    "instructions": "Reply with exactly: ok",
+    "input": [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "ok"}]}],
+    "stream": True, "store": False,
+}
+
+
+def _probe_quota(aid, slot, is_active):
+    """Send a minimal request from THIS account's own token and read the live x-codex-* quota headers.
+    Read-only on the token (never OAuth-refreshes — the active account's live token stays codex-owned);
+    active reads live auth.json, inactive reads its slot file. Returns (quota_dict|None, msg)."""
+    authpath = LIVE if is_active else (AUTH_DIR / slot["file"])
+    try:
+        tok = (_load_json(authpath).get("tokens") or {})
+    except (OSError, ValueError) as e:
+        return None, f"read err: {e}"
+    if _access_exp(tok) - time.time() < 60:
+        return None, "token expired (\\codex login / wait keepalive)"
+    body = json.dumps(PROBE_BODY).encode()
+    conn = http.client.HTTPSConnection("chatgpt.com", 443, context=ssl.create_default_context(), timeout=60)
+    try:
+        conn.request("POST", "/backend-api/codex/responses", body=body, headers={
+            "Authorization": f"Bearer {tok.get('access_token', '')}",
+            "chatgpt-account-id": tok.get("account_id"),
+            "Content-Type": "application/json", "originator": "codex_cli_rs",
+            "Accept": "text/event-stream", "Content-Length": str(len(body))})
+        r = conn.getresponse()
+        h = {k.lower(): v for k, v in r.getheaders()}  # headers carry quota; SSE body not drained
+        status = r.status
+    except Exception as e:
+        return None, f"req err: {e}"
+    finally:
+        conn.close()
+
+    def num(key):
+        try:
+            return float(h[key])
+        except (KeyError, ValueError, TypeError):
+            return None
+
+    pu, su = num("x-codex-primary-used-percent"), num("x-codex-secondary-used-percent")
+    if pu is None and su is None:
+        return None, f"HTTP {status} (no quota headers)"
+    q = {
+        "primary": {"used_percent": pu, "window_minutes": num("x-codex-primary-window-minutes"),
+                    "resets_at": num("x-codex-primary-reset-at")},
+        "secondary": {"used_percent": su, "window_minutes": num("x-codex-secondary-window-minutes"),
+                      "resets_at": num("x-codex-secondary-reset-at")},
+        "plan_type": h.get("x-codex-plan-type"), "captured_at": time.time(), "source": "probe",
+    }
+    return q, f"HTTP {status}"
+
+
+def cmd_refresh_all(args):
+    """Refresh EVERY account's quota snapshot to now — one minimal request per account from its own
+    token (read-only: never refreshes a refresh_token, never switches the live account). Fixes the
+    stale-snapshot problem: SwiftBar otherwise shows a non-active account's quota as of its last switch."""
+    s = _state()
+    active = s.get("active")
+    out = []
+    for aid, slot in s["slots"].items():
+        label = slot.get("label", _mask(aid))
+        q, msg = _probe_quota(aid, slot, aid == active)
+        if q:
+            _mutate_state(lambda st, a=aid, qq=q: st["slots"].setdefault(a, {}).update(
+                {"quota": qq, "quota_status": "ok"}))
+            pr = 100 - (q["primary"]["used_percent"] or 0)
+            wk = 100 - (q["secondary"]["used_percent"] or 0)
+            out.append(f"{label}:5h{pr:.0f}%/wk{wk:.0f}%")
+        else:
+            out.append(f"{label}:{msg}")
+        time.sleep(0.4)  # gentle pacing
+    _refresh_menu()
+    print("refresh-all " + " ".join(out))
+
+
 def cmd_current(args):
     s = _state()
     print(_mask(s.get("active")))
@@ -692,7 +771,7 @@ def cmd_ensure(args):
 CMDS = {"add": cmd_add, "list": cmd_list, "switch": cmd_switch, "cool": cmd_cool,
         "uncool": cmd_uncool, "quota": cmd_quota, "current": cmd_current, "ensure": cmd_ensure,
         "sync": cmd_sync, "rename": cmd_rename, "keepalive": cmd_keepalive, "refresh": cmd_refresh,
-        "health": cmd_health}
+        "refresh-all": cmd_refresh_all, "health": cmd_health}
 
 
 # Commands that change what the menu bar shows → nudge SwiftBar to re-render immediately (so terminal
@@ -717,7 +796,7 @@ def _refresh_menu():
 def main():
     if len(sys.argv) < 2 or sys.argv[1] not in CMDS:
         print("usage: codex-rotate {add <label>|list|switch [label]|cool [min]|uncool [label]|"
-              "quota [--save]|sync|rename <old> <new>|refresh [label|all]|"
+              "quota [--save]|sync|rename <old> <new>|refresh [label|all]|refresh-all|"
               "keepalive [days] [--dry-run]|health|ensure|current}")
         sys.exit(1)
     cmd = sys.argv[1]
