@@ -3,4 +3,16 @@
 # Selects the `rotateproxy` profile (~/.codex/rotateproxy.config.toml), which overlays your real
 # ~/.codex config (MCP / hooks / model settings inherited) and swaps the model provider to the
 # local proxy on 127.0.0.1:8011. Plain `codex` is unaffected. Proxy = launchd service.
-exec command codex --profile rotateproxy "$@"   # `command` bypasses any `codex` alias/function (no recursion if aliased to cxp)
+#
+# EXCEPTION — `resume` / `fork` run WITHOUT the proxy profile. Codex stamps every session with the
+# model_provider it ran under, and the resume/fork PICKER only lists sessions matching the current
+# provider. Under the proxy profile (provider=rotateproxy) the picker hides your plain-codex history
+# (provider=openai) — the "会话都不见了" symptom. Plain codex here lists & continues that full history,
+# identical to typing `\codex resume`. Trade-off: a resumed session runs on the single live account,
+# not the rotating pool — same as the `\codex resume` you're already using by hand.
+case "$1" in
+    resume|fork)
+        exec command codex "$@" ;;
+    *)
+        exec command codex --profile rotateproxy "$@" ;;
+esac

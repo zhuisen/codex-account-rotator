@@ -88,6 +88,12 @@
 **代价**:每号每次 +1% 的 5h 窗,**周额度增量 0%**。
 **定时**:launchd `com.doushutangmu.codex-rotate.refreshquota`,每天 **07:00(SGT)** 跑一次——早上打开 mac 即见全池近实时额度。非 KeepAlive,睡眠错过会在唤醒后补跑一次。
 
+### `codex resume` 看不到历史会话修复(2026-06-13)
+**症状**:`codex resume`(日常 alias=cxp)的 picker 里历史会话全空,要手敲 `\codex resume`(plain)才看得到。
+**根因**:`codex` alias→`cxp`=`codex --profile rotateproxy`。Codex 给每个 session 记录运行时的 `model_provider`,而 **resume/fork 的 picker 只列出与当前 provider 匹配的 session**。实测:90 个交互 session 里 89 个 `openai`(plain 跑的)、仅 1 个 `rotateproxy`——cxp(provider=rotateproxy)的 picker 只匹配 1 个="会话都不见了";plain(openai)匹配 89 个=历史全在。(诊断绕路:codex TUI 在 pty/script 下一律秒退,无法非交互捕获 picker;靠 session_meta 的 source=cli + model_provider + cwd 统计定位,help 只文档化 cwd 过滤、未提 provider 过滤。)
+**修**:`cxp` wrapper 对 `resume`/`fork` 子命令绕过 `--profile rotateproxy`、走 plain codex(= `\codex resume` 的自动化,省手敲 `\`)。全新会话 / `exec` 仍走代理轮换。**权衡**:resume 出来的会话跑在单个 live 号、**不轮换**——但这与用户原本手敲 `\codex resume` 的行为完全一致,非新增损失。
+**未做(可选)**:若想让某个 resumed 会话也走代理轮换,可 `cxp resume <session-id>`(显式 id 跳过 picker 过滤、在 rotateproxy 下恢复)——但 picker 浏览态无法同时"既列全 openai 历史又路由代理"(codex 不暴露"选完返回 id")。
+
 ---
 
 ## 已知待办 / cleanup
