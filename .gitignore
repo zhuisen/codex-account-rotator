@@ -14,3 +14,4 @@ scratch/
 # isolated test CODEX_HOME — keep only the config, drop codex runtime
 proxy/test-home/*
 !proxy/test-home/config.toml
+.DS_Store
