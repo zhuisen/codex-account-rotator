@@ -94,6 +94,11 @@
 **修**:`cxp` wrapper 对 `resume`/`fork` 子命令绕过 `--profile rotateproxy`、走 plain codex(= `\codex resume` 的自动化,省手敲 `\`)。全新会话 / `exec` 仍走代理轮换。**权衡**:resume 出来的会话跑在单个 live 号、**不轮换**——但这与用户原本手敲 `\codex resume` 的行为完全一致,非新增损失。
 **未做(可选)**:若想让某个 resumed 会话也走代理轮换,可 `cxp resume <session-id>`(显式 id 跳过 picker 过滤、在 rotateproxy 下恢复)——但 picker 浏览态无法同时"既列全 openai 历史又路由代理"(codex 不暴露"选完返回 id")。
 
+### 菜单栏一直显示 100% · 已重置 修复(v0.8.1,2026-06-17)
+**症状**:菜单栏标题卡在 `⚡ 100% · 已重置`,看着像不更新。
+**根因(三层)**:① 最近没跑 cxp(`last_proxy_ts` 55h 前)→ proxy 停止逐请求实时记账,标题退回显示 active 号每天 07:00 探测的快照;② **标题只取 5h(primary)窗**;③ 5h 窗每 5h 重置,`resets_at` 一过,`win_remaining` 就把"过了重置时间"读成"已重置满额 = 100%",于是真正吃紧的**周额度**(plus3 42%)被藏掉 → 标题卡 100%。**数据本身更新正常**(07:00 refreshquota 全池 + 用账号时 proxy/quota--save 实时);不用账号时额度不变是**正确的**(无消耗)。
+**修**:标题改显示**两窗里最吃紧的那个**(`min(5h剩, 周剩)`)+ 对应窗的重置时间。5h 紧时显 5h、周紧时显周、两窗都真空闲才显 100。纯显示层,**不耗额度**。实测:plus3 标题 `100% · 已重置` → `42% · 1h18m`(周窗);边界:重度 cxp(5h 紧)→显 5h 20%、全空闲→诚实 100、无 quota→`codex`。
+
 ---
 
 ## 已知待办 / cleanup
@@ -117,3 +122,4 @@
 - `v0.7.10` 标题改回**当前正在用的号(last_aid)的额度**(用户:"在用什么号就显示对应号额度");仍无 90s 定时器(消抖保留),proxy KeepAlive-up 下直接跟随服务号,选号器粘最少用号→分段稳定
 - `v0.7.11` 修"手动切号后标题不更新"——根因:`shown=last_aid` 只跟 cxp 服务号,手动切号改的是 `active` 不是 `last_aid`(实测 last_proxy_ts 2h 前=plus2,active 刚切 plus4,标题错显 plus2)。改:标题跟**最近一次选号事件**——`last_proxy_ts`(cxp)vs `active_since`(手动切号)谁更近显示谁。切号即时反映,跑 cxp 时跟服务号
 - `v0.8.0` 配合 B20——标题仲裁加第三信号 `last_plain_ts`(plain rollout mtime,quota --save 落):cxp 用过之后回去跑 plain codex(不切号)标题也能跟回 active 号;无固定 TTL,无抖动回归
+- `v0.8.1` 标题改显示**最吃紧窗**(`min(5h剩,周剩)`)而非只看 5h——修"5h 窗过 resets_at 被读成 100% 把周额度藏掉"导致的"卡 100%·已重置"
