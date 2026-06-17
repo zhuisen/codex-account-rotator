@@ -92,9 +92,12 @@ final class Controller: NSObject, NSMenuDelegate {
         menu.delegate = self        // build the dropdown only when it's about to open
         item.menu = menu
         tick()                      // initial title
-        // 30s timer does only the cheap work — title + auto-switch check. The dropdown is rebuilt
-        // lazily in menuNeedsUpdate (when you actually open it), not every tick.
-        timer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in self?.tick() }
+        // 60s timer does only the cheap work — title (minute-precision ETA) + auto-switch check. The
+        // dropdown is built lazily on open. tolerance lets macOS COALESCE this wakeup with other system
+        // timers (Apple's Energy guide), so it doesn't fire a dedicated CPU wake. (Pure FSEvents was
+        // rejected: the title's ETA countdown changes on its own, so it still needs a periodic tick.)
+        timer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in self?.tick() }
+        timer?.tolerance = 15
     }
 
     func loadState() -> [String: Any] {
@@ -139,7 +142,7 @@ final class Controller: NSObject, NSMenuDelegate {
                 title = "⚡ \(Int(rem))% · \(fmtEta((q["primary"] as? [String: Any])?["resets_at"]))"
             }
         }
-        item.button?.title = title
+        if item.button?.title != title { item.button?.title = title }  // diff: skip redundant redraw
         maybeAutoSwitch(slots, active, st["last_proxy_ts"] as? Double ?? 0)
     }
 
