@@ -61,9 +61,30 @@ func colorFor(_ rem: Double) -> NSColor {
     rem <= 10 ? .systemRed : (rem <= 30 ? .systemOrange : .systemGreen)
 }
 
+// the binding constraint for an account = min(5h remaining, weekly remaining), captured_at-aware.
+func tightestRem(_ q: [String: Any]?) -> Double? {
+    guard let q = q else { return nil }
+    let cap = q["captured_at"] as? Double ?? 0
+    let rs = [winRemaining(q["primary"] as? [String: Any], cap),
+              winRemaining(q["secondary"] as? [String: Any], cap)].compactMap { $0 }
+    return rs.min()
+}
+
 final class Controller: NSObject {
     let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     var timer: Timer?
+    var lastAutoSwitch = 0.0
+    // auto-switch off a low account (plain-codex fallback). Default ON. cxp's per-request rotation is
+    // separate + stronger — we stand down whenever cxp ran recently (last_proxy_ts) so we never fight it.
+    let SW_THRESHOLD = 15.0   // active's tightest remaining below this → consider switching
+    let SW_MIN_TARGET = 30.0  // only switch to an account with at least this much headroom
+    let SW_MARGIN = 15.0      // target must beat active by at least this (avoid low↔low flapping)
+    let SW_DEBOUNCE = 300.0   // ≥5 min between auto-switches
+    let SW_PROXY_GRACE = 120.0 // if cxp ran within this, the proxy is rotating → don't touch
+    var autoSwitch: Bool {
+        get { UserDefaults.standard.object(forKey: "autoSwitch") as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: "autoSwitch") }
+    }
 
     override init() {
         super.init()
@@ -167,9 +188,33 @@ final class Controller: NSObject {
         addAction(menu, "🔄 立即刷新全池额度（各号 +1% 5h）", #selector(refreshAll))
         addAction(menu, "❄️ 把当前号冷却 5h", #selector(coolCurrent))
         addAction(menu, "♻️ 清除所有冷却", #selector(uncoolAll))
+        let auto = NSMenuItem(title: "🔁 额度低自动切号（plain 兜底）", action: #selector(toggleAuto), keyEquivalent: "")
+        auto.target = self; auto.state = autoSwitch ? .on : .off
+        menu.addItem(auto)
         addAction(menu, "重新读取", #selector(reload), "r")
         addAction(menu, "退出 CodexBar", #selector(quitApp), "q")
         item.menu = menu
+
+        maybeAutoSwitch(slots, active, st["last_proxy_ts"] as? Double ?? 0)
+    }
+
+    // plain-codex fallback: if the active account is low AND a clearly-better healthy account exists AND
+    // cxp isn't currently rotating, switch (takes effect on next codex run, doesn't interrupt anything).
+    func maybeAutoSwitch(_ slots: [String: [String: Any]], _ active: String?, _ lastProxyTs: Double) {
+        guard autoSwitch, let active = active, let aslot = slots[active] else { return }
+        if nowTS() - lastProxyTs < SW_PROXY_GRACE { return }   // cxp is rotating per-request — stand down
+        if nowTS() - lastAutoSwitch < SW_DEBOUNCE { return }
+        guard let aRem = tightestRem(aslot["quota"] as? [String: Any]), aRem < SW_THRESHOLD else { return }
+        var best: (label: String, rem: Double)? = nil
+        for (aid, slot) in slots where aid != active {
+            if (slot["auth_dead"] as? Bool) ?? false { continue }
+            if (slot["cooling_until"] as? Double ?? 0) > nowTS() { continue }
+            guard let r = tightestRem(slot["quota"] as? [String: Any]) else { continue }
+            if best == nil || r > best!.rem { best = (slot["label"] as? String ?? "?", r) }
+        }
+        guard let b = best, b.rem >= SW_MIN_TARGET, b.rem > aRem + SW_MARGIN else { return }
+        lastAutoSwitch = nowTS()
+        runRot(["switch", b.label], notify: "当前号额度低（\(Int(aRem))%），自动切到 \(b.label)（剩 \(Int(b.rem))%）")
     }
 
     func addAction(_ menu: NSMenu, _ title: String, _ sel: Selector, _ key: String = "") {
@@ -190,6 +235,7 @@ final class Controller: NSObject {
         p.arguments = ["python3", ROT, "refresh-all", "--notify"]
         try? p.run()  // async (~2s); the 10s timer picks up fresh state, refresh-all itself notifies
     }
+    @objc func toggleAuto() { autoSwitch.toggle(); notifyMac(autoSwitch ? "自动切号：开" : "自动切号：关"); rebuild() }
     @objc func reload() { rebuild() }
     @objc func quitApp() { NSApp.terminate(nil) }
 }
