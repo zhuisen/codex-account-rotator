@@ -43,6 +43,14 @@ func fmtAge(_ ts: Any?) -> String {
     return h > 0 ? "\(h)h前" : "\(d / 60)m前"
 }
 
+// days until the Plus subscription lapses (chatgpt_subscription_active_until, stored as sub_until).
+func subDaysLeft(_ sub: String?) -> Int? {
+    guard let s = sub, s.count >= 10 else { return nil }
+    let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd"; f.timeZone = TimeZone(identifier: "UTC")
+    guard let d = f.date(from: String(s.prefix(10))) else { return nil }
+    return Int((d.timeIntervalSince1970 - nowTS()) / 86400)
+}
+
 func bar(_ rem: Double, _ width: Int = 10) -> String {
     let r = max(0, min(100, rem))
     let full = Int((r / 100.0) * Double(width) + 0.0001)
@@ -129,9 +137,16 @@ final class Controller: NSObject {
                 head.action = #selector(switchAccount(_:)); head.target = self; head.representedObject = label
             }
             menu.addItem(head)
-            let subTxt = "   " + email + (dead ? "  · 失效,终端 \\codex login 复活" : "")
+            let subUntil = slot["sub_until"] as? String
+            let subShow = subUntil != nil ? "  · 订阅至 \(String(subUntil!.prefix(10)))" : ""
+            let subTxt = "   " + email + subShow + (dead ? "  · 失效,终端 \\codex login 复活" : "")
             let sub = NSMenuItem(); sub.attributedTitle = mono(subTxt, dead ? .systemRed : .secondaryLabelColor, 11)
             menu.addItem(sub)
+            if let dl = subDaysLeft(subUntil), dl <= 7 {   // subscription about to lapse → warn
+                let txt = dl <= 0 ? "   ⚠️ 订阅已到期 · 续费否则无 codex 额度" : "   ⚠️ 订阅 \(dl) 天后到期 · 记得续费"
+                let w = NSMenuItem(); w.attributedTitle = mono(txt, dl <= 3 ? .systemRed : .systemOrange, 11)
+                menu.addItem(w)
+            }
             if let q = q {
                 let cap = q["captured_at"] as? Double ?? 0
                 for (key, name) in [("primary", "5h"), ("secondary", "周")] {
