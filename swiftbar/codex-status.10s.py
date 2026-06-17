@@ -3,6 +3,7 @@
 # SF-symbol status dot (filled=active / hollow=switchable / clock=cooling, colored by remaining)
 # + smooth remaining-quota gauges + email subtitle. UUID/plan/expiry/actions live in a submenu.
 # Menu-bar title stays system-colored unless quota is low (amber/red). Display reads state.json.
+import base64
 import datetime
 import json
 import os
@@ -14,6 +15,7 @@ import time
 STORE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ROT = os.path.join(STORE, "codex-rotate")
 STATE = os.path.join(STORE, "state.json")
+AUTH = os.path.join(STORE, "auth")
 NOW = time.time()
 GRAY = "#8a8a8a"
 GREEN = "#3aa856"
@@ -21,7 +23,7 @@ AMBER = "#e0a020"
 RED = "#e0533a"
 MONO = "font=Menlo size=12"
 EIGHTHS = "▏▎▍▌▋▊▉"  # 1/8 .. 7/8
-VERSION = "v0.8.2"  # bumped on every change — shown in the menu so you can tell it reloaded
+VERSION = "v0.8.3"  # bumped on every change — shown in the menu so you can tell it reloaded
 
 
 def mask(aid):
@@ -86,14 +88,21 @@ def fmt_age(ts):
     return f"{h}h前" if h else f"{d // 60}m前"
 
 
-def stale_days(slot):
-    lr = slot.get("last_refresh")
-    if not lr:
+def access_left_h(slot):
+    """Hours until this account's access token expires, decoded from its auth-file JWT. None if unknown.
+    This is the real token-health signal — NOT last_refresh age: keepalive's skip-if-valid leaves
+    last_refresh stale for days while the token is perfectly fine (tokens last ~10 days), so an age-based
+    warning fires falsely. The access token's own `exp` is the truth."""
+    f = slot.get("file")
+    if not f:
         return None
     try:
-        base = str(lr).replace("Z", "").split(".")[0]
-        dt = datetime.datetime.strptime(base, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=datetime.timezone.utc)
-        return (datetime.datetime.now(datetime.timezone.utc) - dt).total_seconds() / 86400
+        with open(os.path.join(AUTH, f)) as fh:
+            at = ((json.load(fh).get("tokens") or {}).get("access_token") or "")
+        seg = at.split(".")[1]
+        seg += "=" * (-len(seg) % 4)
+        exp = json.loads(base64.urlsafe_b64decode(seg)).get("exp", 0)
+        return (exp - NOW) / 3600 if exp else None
     except Exception:
         return None
 
@@ -174,9 +183,12 @@ def account_block(aid, slot, active):
     else:
         hint = "跑一次 codex 刷新" if aid == active else "切到此并跑一次"
         lines.append(f"   用量未知 · {hint} | color={GRAY} size=11")
-    sd = stale_days(slot)
-    if sd is not None and sd > 7:
-        lines.append(f"   ⚠️ {int(sd)} 天未刷新 · 可能需重新登录 | color={AMBER} size=11")
+    # Token-health hint based on the ACCESS TOKEN's real expiry, not last_refresh age. The genuine
+    # "re-login" signal is auth_dead (handled in the dead branch above). A merely-expired access token
+    # is self-healing — the next codex/cxp run refreshes it — so it's an FYI, not a "re-login" alarm.
+    left = access_left_h(slot)
+    if left is not None and left <= 0:
+        lines.append(f"   ⚠️ access token 已过期 · 跑一次 codex/cxp 自动刷新 | color={AMBER} size=11")
     return lines
 
 

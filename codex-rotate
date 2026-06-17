@@ -137,17 +137,6 @@ def _activate(s, aid, since=None):
     s["active_since"] = time.time() if since is None else since
 
 
-def _age_days(iso):
-    if not iso:
-        return None
-    try:
-        base = str(iso).replace("Z", "").split(".")[0]
-        dt = datetime.datetime.strptime(base, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=datetime.timezone.utc)
-        return (datetime.datetime.now(datetime.timezone.utc) - dt).total_seconds() / 86400
-    except Exception:
-        return None
-
-
 def _token_fp(auth):
     """Last 16 chars of the access token — enough to tell 'the very token the server rejected' from a
     genuinely new one (re-login / codex-native refresh). Used to gate auth_dead revival."""
@@ -217,8 +206,10 @@ def _autosync_live(s):
     if new:
         slot["label"] = label
     _stamp_identity(slot, live, expect_aid=aid)
-    if live.get("last_refresh"):
-        slot["last_refresh"] = live["last_refresh"]
+    lr_changed = False
+    if live.get("last_refresh") and live["last_refresh"] != slot.get("last_refresh"):
+        slot["last_refresh"] = live["last_refresh"]  # codex/native refresh of the active token bumped
+        lr_changed = True                            # this — persist it so the menu's health stays fresh
     revived = False
     if slot.get("auth_dead") and _token_fp(live) != slot.get("auth_dead_fp"):
         # only a genuinely NEW token revives; re-seeing the very token the server rejected must NOT
@@ -226,7 +217,7 @@ def _autosync_live(s):
         for k in ("auth_dead", "auth_dead_at", "auth_dead_fp"):
             slot.pop(k, None)
         revived = True
-    changed = new or revived
+    changed = new or revived or lr_changed
     if s.get("active") != aid:
         _activate(s, aid)
         changed = True
@@ -344,23 +335,26 @@ def _access_exp(tok):
         return 0
 
 
-def _refresh_slot(aid, slot, force=False):
-    """Refresh one account's OAuth tokens, persisting the rotated bundle. SKIPS if the access token
-    is still valid for >1h (needless rotation is the #1 cause of accidental token death). Serializes
-    via a cross-process file lock + re-check so proxy/keepalive/manual never race the single-use
-    refresh_token. Returns (ok, msg). Do NOT call on the ACTIVE account (codex owns its live token)."""
+def _refresh_slot(aid, slot, force=False, min_valid_seconds=3600):
+    """Refresh one account's OAuth tokens, persisting the rotated bundle. SKIPS if the access token is
+    still valid for more than `min_valid_seconds` (needless rotation is the #1 cause of accidental token
+    death). Manual `refresh` keeps the conservative 1h; keepalive passes ~48h so a token expiring before
+    the NEXT daily run is refreshed today (closes the idle-token coverage gap AND keeps last_refresh
+    current so the menu's health signal stays honest). Serializes via a cross-process file lock +
+    re-check so proxy/keepalive/manual never race the single-use refresh_token. Returns (ok, msg).
+    Do NOT call on the ACTIVE account (codex owns its live token)."""
     sf = AUTH_DIR / slot["file"]
     try:
         auth = _load_json(sf)
     except (OSError, ValueError) as e:
         return False, f"read err: {e}"
-    if not force and _access_exp(auth.get("tokens") or {}) - time.time() > 3600:
+    if not force and _access_exp(auth.get("tokens") or {}) - time.time() > min_valid_seconds:
         return True, "still valid"
     with _cred_lock():
         if _state().get("active") == aid:
             return True, "skip-active"  # switch raced us: now live → codex owns its token, never refresh
         auth = _load_json(sf)  # re-read under lock — another process may have just refreshed
-        if not force and _access_exp(auth.get("tokens") or {}) - time.time() > 3600:
+        if not force and _access_exp(auth.get("tokens") or {}) - time.time() > min_valid_seconds:
             return True, "still valid"
         rt = (auth.get("tokens") or {}).get("refresh_token")
         if not rt:
@@ -580,13 +574,25 @@ def cmd_refresh(args):
     print("refresh " + (" ".join(out) if out else "(no matching slot)"))
 
 
+def _slot_access_left_h(slot):
+    """Hours until this slot's stored access token expires (None if unreadable)."""
+    try:
+        tok = (_load_json(AUTH_DIR / slot["file"]).get("tokens") or {})
+    except (OSError, ValueError):
+        return None
+    return (_access_exp(tok) - time.time()) / 3600
+
+
 def cmd_keepalive(args):
     """Keep idle accounts' tokens alive via OAuth refresh — cheap, no quota, no auth.json swap.
-    Refreshes NON-active accounts whose last_refresh is older than N days (default 4); the active
-    account is skipped (codex keeps it fresh while in use). `--dry-run` lists targets only."""
+    Refreshes NON-active accounts whose access token expires within N hours (default 48 — wider than
+    the 24h daily cadence, so a token is renewed the run BEFORE it would expire; this both closes the
+    idle-token gap and keeps last_refresh current). The active account is skipped (codex owns its live
+    token). `--dry-run` lists targets only. Was: last_refresh>4d — but B9 skip-if-valid froze
+    last_refresh while tokens stayed healthy, so that gate never fired."""
     dry = "--dry-run" in args
     pos = [a for a in args if not a.startswith("--")]
-    idle_after = float(pos[0]) if pos else 4.0
+    thresh_h = float(pos[0]) if pos else 48.0
     s = _state()
     active = s.get("active")
     refreshed, skipped = [], []
@@ -595,18 +601,18 @@ def cmd_keepalive(args):
         if aid == active:
             skipped.append(f"{label}:active")
             continue
-        age = _age_days(slot.get("last_refresh"))
-        if age is not None and age < idle_after:
-            skipped.append(f"{label}:{round(age, 1)}d")
-            continue
+        left = _slot_access_left_h(slot)
         if dry:
-            refreshed.append(f"{label}:age={'?' if age is None else round(age, 1)}d")
+            tgt = left is not None and left <= thresh_h
+            (refreshed if tgt else skipped).append(f"{label}:{'?' if left is None else round(left)}h-left")
             continue
-        ok, msg = _refresh_slot(aid, slot)
-        if msg == "ok":  # targeted RMW, same reason as cmd_refresh
+        ok, msg = _refresh_slot(aid, slot, min_valid_seconds=thresh_h * 3600)
+        if msg == "ok":  # real refresh → persist last_refresh via targeted RMW (bulk save would clobber)
             _mutate_state(lambda st, a=aid, v=slot["last_refresh"]:
                           st["slots"].setdefault(a, {}).update({"last_refresh": v}))
-        refreshed.append(f"{label}:{'ok' if ok else msg}")
+            refreshed.append(f"{label}:ok")
+        else:
+            skipped.append(f"{label}:{msg}")  # 'still valid' / 'skip-active' are NO-OPS — not refreshes
     print(f"keepalive refreshed=[{', '.join(refreshed) or 'none'}] skipped=[{', '.join(skipped)}]")
 
 

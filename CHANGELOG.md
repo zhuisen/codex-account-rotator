@@ -105,6 +105,16 @@
 **实测真相**:后端 4 个 launchd 服务(proxy/autosync/keepalive/refreshquota)**全部重启自启成功**(proxy 有 `RunAtLoad`+`KeepAlive`,登录时由 `~/Library/LaunchAgents` 自动加载;实测重启后 proxy 在听 8011)。**只有 SwiftBar 菜单栏没起**——它是 GUI App、macOS 登录项里没注册,后端服务起来也带不出菜单栏,用户遂以为"整个项目没自启"。
 **修**:新增第 5 个 launchd `com.doushutangmu.codex-rotate.swiftbar`(`RunAtLoad` → `open -g -a SwiftBar`),把 SwiftBar 自启纳入项目 launchd 体系(与"一切走 launchd"一致,SETUP 可复现)。`open` 秒退,故只 `RunAtLoad` 不 `KeepAlive`(否则空转重启)。**实测**:杀掉 SwiftBar → bootstrap 该 plist → RunAtLoad 自动拉起 SwiftBar,重启自启验证通过。文档:SETUP §6 + RUNBOOK §1/§3 同步。
 
+### 三方评审:全员"7天未刷新·可能需重新登录"误报 + keepalive 保鲜失效(B22~B25,2026-06-17,v0.8.3)
+**症状**:菜单栏 5 个号全部 `⚠️ 7 天未刷新 · 可能需要重新登录`。
+**三方评审**(omc ask codex gpt-5.5 + gemini + 我,brief/synthesis 在 `scratch/review-*-20260617`):**根因一致**——`last_refresh` 被插件当成"凭证健康"信号,但 B9 的 skip-if-valid(access 剩 >1h 不刷)让 `_refresh_slot` 在 token 健康时跳过,`last_refresh` 不再等价于 token 新鲜度。**JWT `iat` 铁证**:token 06-10 签发、06-20 过期(**有效期 10 天**),`auth.last_refresh==state.last_refresh==06-10` 一致无 divergence,token 实际**还有 70h**——警告**纯误报**。
+- **B22 [P1] 误报警告**:插件警告改基于 **access token 实际 `exp`**(解 `auth/<id>.json` 的 JWT,`access_left_h()`),不再用 `last_refresh` 年龄。`auth_dead` 仍是唯一"需重登"信号;access 过期只提示"跑一次 codex/cxp 自动刷新"(自愈,非告警)。顺带:插件改读 auth 文件后,**proxy 刷新不回写 state.json 的问题被绕过**(插件不再看 state.last_refresh)。
+- **B23 [P1] keepalive 保鲜失效 + idle coverage gap**:`cmd_keepalive` 原用 `last_refresh>4d` 判定(被 skip-if-valid 架空,从不触发)。改为按 **access token 剩余时间**:`_refresh_slot` 加 `min_valid_seconds` 参数,keepalive 用 **48h**(> 24h daily cadence)→ token 在过期前一天的 04:30 被刷,**关闭"idle token 14:00 过期→次日 04:30 才刷"的 ~23h 缺口** + 让 `last_refresh` 保持新鲜。手动 `refresh` 仍保守 1h、proxy on-expiry 仍 60s(分层有意)。
+- **B24 [P1] active 号 last_refresh 不落 state**:`_autosync_live` 的 `changed` 原不含 `last_refresh` 变化 → codex 刷新 active token 后 state.json 不更新。修:`lr_changed` 纳入 `changed`。
+- **B25 [P2] log 把 no-op 写成刷成功**:`_refresh_slot` 返回 "still valid" 时原进 `refreshed=[...]`,现进 `skipped=[...]`(log 不再假装刷新)。顺带删死代码 `_age_days`。
+**不改(设计权衡,三方认同)**:active 号不由 keepalive 刷(codex 拥有 live token,强刷抢一次性 RT = B14 红线);三处刷新阈值分层(proxy 60s / 手动 1h / keepalive 48h)是有意的。
+**验证**:误报警告 0 条;`access_left_h` 实测每号 ~70h;`keepalive --dry-run` → `70h-left > 48h → 不刷`(明天 <48h 才刷);AST + 渲染通过。
+
 ---
 
 ## 已知待办 / cleanup
