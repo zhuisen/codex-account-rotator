@@ -140,3 +140,5 @@
 - `v0.8.0` 配合 B20——标题仲裁加第三信号 `last_plain_ts`(plain rollout mtime,quota --save 落):cxp 用过之后回去跑 plain codex(不切号)标题也能跟回 active 号;无固定 TTL,无抖动回归
 - `v0.8.1` 标题改显示**最吃紧窗**(`min(5h剩,周剩)`)而非只看 5h——修"5h 窗过 resets_at 被读成 100% 把周额度藏掉"导致的"卡 100%·已重置"
 - `v0.8.2` 标题改回**只看 5h(primary)**——用户优先顶部与下拉 5h 行一致(v0.8.1 最吃紧窗虽有信息量但和下拉 5h 视觉对不上,顶部显周 42%/下拉看 5h 99% 让人以为不同步);周额度仍在下拉 周 行
+- `v0.8.3` 配合 B22——下拉的 token 健康警告改看 access token 真实 `exp`(`access_left_h` 解 auth JWT),不再用 `last_refresh` 年龄;删死代码
+- `v0.8.4` 下拉顶部加 **🔄 立即刷新全池额度** 一键按钮(跑 `codex-rotate refresh-all` 逐号探测,各号 +1% 5h;refresh-all 完成后自动回刷菜单)

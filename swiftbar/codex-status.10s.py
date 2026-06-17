@@ -23,7 +23,7 @@ AMBER = "#e0a020"
 RED = "#e0533a"
 MONO = "font=Menlo size=12"
 EIGHTHS = "▏▎▍▌▋▊▉"  # 1/8 .. 7/8
-VERSION = "v0.8.3"  # bumped on every change — shown in the menu so you can tell it reloaded
+VERSION = "v0.8.4"  # bumped on every change — shown in the menu so you can tell it reloaded
 
 
 def mask(aid):
@@ -235,6 +235,10 @@ def main():
     print("---")
     print(f"CODEX · 剩余额度 · {VERSION} | color={GRAY} size=11")
     print(f"{'🔀 代理轮换 开 (cxp)' if up else '⏸ 代理关 · plain codex'} | color={GRAY} size=11")
+    # one-tap: probe every account for live quota now (codex-rotate refresh-all). ~2s; each account
+    # spends ~1% of its 5h window. refresh-all calls back into SwiftBar when done, so the menu updates
+    # itself once fresh — refresh=true just acknowledges the tap immediately.
+    print(f"🔄 立即刷新全池额度 · 各号 +1% 5h | shell={ROT} param1=refresh-all terminal=false refresh=true")
     print("---")
     if not slots:
         print(f"还没有账号 — 终端跑: codex-rotate add <label> | color={GRAY}")
