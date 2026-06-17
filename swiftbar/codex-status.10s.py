@@ -21,7 +21,7 @@ AMBER = "#e0a020"
 RED = "#e0533a"
 MONO = "font=Menlo size=12"
 EIGHTHS = "▏▎▍▌▋▊▉"  # 1/8 .. 7/8
-VERSION = "v0.8.1"  # bumped on every change — shown in the menu so you can tell it reloaded
+VERSION = "v0.8.2"  # bumped on every change — shown in the menu so you can tell it reloaded
 
 
 def mask(aid):
@@ -203,19 +203,14 @@ def main():
     cxp_recent = up and st.get("last_proxy_ts", 0) >= max(st.get("active_since", 0),
                                                           st.get("last_plain_ts", 0))
     shown = st.get("last_aid") if (cxp_recent and st.get("last_aid") in slots) else active
-    # Show the TIGHTEST of the two windows (5h vs weekly), not just 5h. The 5h window resets every 5h,
-    # so a few hours after a snapshot its reset time passes and win_remaining reads it as a full 100%
-    # — which hid the real binding constraint (e.g. weekly at 42%) and left the title stuck at "100% ·
-    # 已重置" whenever the account wasn't being actively driven (no live cxp/codex to refresh the 5h).
-    q = (slots.get(shown, {}).get("quota") or {}) if shown in slots else {}
-    wins = []
-    for w in (q.get("primary"), q.get("secondary")):
-        r = win_remaining(w)
-        if r is not None:
-            wins.append((r, w))
-    if wins:
-        rem, w = min(wins, key=lambda kv: kv[0])  # the binding constraint = least remaining
-        title = f"{title_icon(rem)} {rem:.0f}% · {fmt_eta(w.get('resets_at'))}"
+    # Title = the shown account's 5h (primary) window, matching that account's 5h row in the dropdown
+    # (user's choice 2026-06-17: keep the top number and the dropdown consistent, over surfacing the
+    # tighter weekly figure). A 5h window past its reset reads 100% — that's truthful (it genuinely
+    # reset to full); the weekly figure lives in the dropdown's 周 row.
+    pr = (slots.get(shown, {}).get("quota") or {}).get("primary") if shown in slots else None
+    rem = win_remaining(pr) if pr else None
+    if rem is not None:
+        title = f"{title_icon(rem)} {rem:.0f}% · {fmt_eta(pr.get('resets_at'))}"
         if rem <= 10:
             title += f" | color={RED}"
         elif rem <= 30:
