@@ -19,3 +19,4 @@ proxy/test-home/*
 # native app build artifacts
 app/**/*.app
 app/**/.build
+app/**/.build_number

@@ -11,7 +11,11 @@ import Foundation
 let STORE = "/Users/you/Projects/tools/codex-account-rotator"
 let STATE = STORE + "/state.json"
 let ROT = STORE + "/codex-rotate"
-let VERSION = "0.2.0"
+// Version per CLAUDE.md: X.Y.Z+B. CFBundleShortVersionString = release baseline (X.Y.Z, bumped only on
+// a real release), CFBundleVersion = build number (B, +1 per local build). Single source = Info.plist.
+let _info = Bundle.main.infoDictionary
+let VERSION = ((_info?["CFBundleShortVersionString"] as? String) ?? "0.1.0")
+            + "+" + ((_info?["CFBundleVersion"] as? String) ?? "?")
 
 func nowTS() -> Double { Date().timeIntervalSince1970 }
 
