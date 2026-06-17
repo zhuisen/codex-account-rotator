@@ -70,8 +70,9 @@ func tightestRem(_ q: [String: Any]?) -> Double? {
     return rs.min()
 }
 
-final class Controller: NSObject {
+final class Controller: NSObject, NSMenuDelegate {
     let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+    let menu = NSMenu()
     var timer: Timer?
     var lastAutoSwitch = 0.0
     // auto-switch off a low account (plain-codex fallback). Default ON. cxp's per-request rotation is
@@ -88,8 +89,12 @@ final class Controller: NSObject {
 
     override init() {
         super.init()
-        rebuild()
-        timer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in self?.rebuild() }
+        menu.delegate = self        // build the dropdown only when it's about to open
+        item.menu = menu
+        tick()                      // initial title
+        // 30s timer does only the cheap work — title + auto-switch check. The dropdown is rebuilt
+        // lazily in menuNeedsUpdate (when you actually open it), not every tick.
+        timer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in self?.tick() }
     }
 
     func loadState() -> [String: Any] {
@@ -112,7 +117,7 @@ final class Controller: NSObject {
         try? p.run()
         p.waitUntilExit()
         if let n = notify { notifyMac(n) }
-        rebuild()
+        tick()  // refresh the title now; the dropdown rebuilds itself on next open
     }
 
     func notifyMac(_ msg: String) {
@@ -122,24 +127,28 @@ final class Controller: NSObject {
         try? p.run()
     }
 
-    func rebuild() {
+    // timer path (every 30s) — cheap: update the menu-bar title + run the auto-switch check. NOT the dropdown.
+    func tick() {
         let st = loadState()
         let slots = st["slots"] as? [String: [String: Any]] ?? [:]
         let active = st["active"] as? String
-
-        // ---- menu-bar title: active account's 5h remaining ----
         var title = "⚡ codex"
         if let active = active, let slot = slots[active], let q = slot["quota"] as? [String: Any] {
             let cap = q["captured_at"] as? Double ?? 0
             if let rem = winRemaining(q["primary"] as? [String: Any], cap) {
-                let pr = q["primary"] as? [String: Any]
-                title = "⚡ \(Int(rem))% · \(fmtEta(pr?["resets_at"]))"
+                title = "⚡ \(Int(rem))% · \(fmtEta((q["primary"] as? [String: Any])?["resets_at"]))"
             }
         }
         item.button?.title = title
+        maybeAutoSwitch(slots, active, st["last_proxy_ts"] as? Double ?? 0)
+    }
 
-        // ---- dropdown ----
-        let menu = NSMenu()
+    // NSMenuDelegate — build the dropdown ONLY when it's about to open (not every tick).
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        menu.removeAllItems()
+        let st = loadState()
+        let slots = st["slots"] as? [String: [String: Any]] ?? [:]
+        let active = st["active"] as? String
         let header = NSMenuItem(); header.attributedTitle = mono("CODEX · 剩余额度 · CodexBar \(VERSION)", .secondaryLabelColor, 11)
         menu.addItem(header)
         menu.addItem(.separator())
@@ -193,9 +202,6 @@ final class Controller: NSObject {
         menu.addItem(auto)
         addAction(menu, "重新读取", #selector(reload), "r")
         addAction(menu, "退出 CodexBar", #selector(quitApp), "q")
-        item.menu = menu
-
-        maybeAutoSwitch(slots, active, st["last_proxy_ts"] as? Double ?? 0)
     }
 
     // plain-codex fallback: if the active account is low AND a clearly-better healthy account exists AND
@@ -235,8 +241,8 @@ final class Controller: NSObject {
         p.arguments = ["python3", ROT, "refresh-all", "--notify"]
         try? p.run()  // async (~2s); the 10s timer picks up fresh state, refresh-all itself notifies
     }
-    @objc func toggleAuto() { autoSwitch.toggle(); notifyMac(autoSwitch ? "自动切号：开" : "自动切号：关"); rebuild() }
-    @objc func reload() { rebuild() }
+    @objc func toggleAuto() { autoSwitch.toggle(); notifyMac(autoSwitch ? "自动切号：开" : "自动切号：关"); tick() }
+    @objc func reload() { tick() }  // dropdown rebuilds itself on next open (menuNeedsUpdate)
     @objc func quitApp() { NSApp.terminate(nil) }
 }
 
