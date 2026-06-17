@@ -710,7 +710,7 @@ def cmd_refresh_all(args):
     stale-snapshot problem: SwiftBar otherwise shows a non-active account's quota as of its last switch."""
     s = _state()
     active = s.get("active")
-    out = []
+    out, notif, ok_n = [], [], 0
     for aid, slot in s["slots"].items():
         label = slot.get("label", _mask(aid))
         q, msg = _probe_quota(aid, slot, aid == active)
@@ -720,10 +720,21 @@ def cmd_refresh_all(args):
             pr = 100 - (q["primary"]["used_percent"] or 0)
             wk = 100 - (q["secondary"]["used_percent"] or 0)
             out.append(f"{label}:5h{pr:.0f}%/wk{wk:.0f}%")
+            notif.append(f"{label} 周{wk:.0f}%")
+            ok_n += 1
         else:
             out.append(f"{label}:{msg}")
         time.sleep(0.4)  # gentle pacing
     _refresh_menu()
+    if "--notify" in args:  # SwiftBar closes the dropdown on tap → a notification is the visible ACK
+        total = len(s["slots"])
+        body = "  ".join(notif) or "无可刷新账号"
+        try:
+            subprocess.run(["osascript", "-e",
+                            f'display notification "{body}" with title "✅ 额度已刷新 {ok_n}/{total}"'],
+                           capture_output=True, timeout=5)
+        except Exception:
+            pass
     print("refresh-all " + " ".join(out))
 
 
