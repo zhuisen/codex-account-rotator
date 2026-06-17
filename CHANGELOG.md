@@ -100,6 +100,11 @@
 **修(v0.8.1)**:标题改显示**两窗里最吃紧的那个**(`min(5h剩, 周剩)`)+ 对应窗的重置时间。实测:plus3 标题 `100% · 已重置` → `42% · 1h18m`(周窗)。
 **追加(v0.8.2,用户定)**:最吃紧窗(周 42%)和下拉里各号的 **5h 行**(99%)视觉上"对不上"——用户扫下拉先看到 5h,顶部 42% 反而困惑。用户在三方案(5h+周并列 / 只看 5h / 池子下个号)中选**只看 5h**:**优先顶部与下拉一致**,接受 5h 重置后显 100%(那是真实的——5h 窗确实满额重置了)。标题改回 `win_remaining(primary)`,周额度看下拉 `周` 行。教训:菜单栏单数字宁可"和明细一致、可被验证",也别为了"更有信息量"而和用户的主参照系(5h 行)错位。
 
+### 重启后菜单栏不自启 修复(第 5 个 launchd,2026-06-17)
+**症状**:断电重启后"项目没自启动"。
+**实测真相**:后端 4 个 launchd 服务(proxy/autosync/keepalive/refreshquota)**全部重启自启成功**(proxy 有 `RunAtLoad`+`KeepAlive`,登录时由 `~/Library/LaunchAgents` 自动加载;实测重启后 proxy 在听 8011)。**只有 SwiftBar 菜单栏没起**——它是 GUI App、macOS 登录项里没注册,后端服务起来也带不出菜单栏,用户遂以为"整个项目没自启"。
+**修**:新增第 5 个 launchd `com.doushutangmu.codex-rotate.swiftbar`(`RunAtLoad` → `open -g -a SwiftBar`),把 SwiftBar 自启纳入项目 launchd 体系(与"一切走 launchd"一致,SETUP 可复现)。`open` 秒退,故只 `RunAtLoad` 不 `KeepAlive`(否则空转重启)。**实测**:杀掉 SwiftBar → bootstrap 该 plist → RunAtLoad 自动拉起 SwiftBar,重启自启验证通过。文档:SETUP §6 + RUNBOOK §1/§3 同步。
+
 ---
 
 ## 已知待办 / cleanup
