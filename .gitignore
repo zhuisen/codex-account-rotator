@@ -15,3 +15,7 @@ scratch/
 proxy/test-home/*
 !proxy/test-home/config.toml
 .DS_Store
+
+# native app build artifacts
+app/**/*.app
+app/**/.build
