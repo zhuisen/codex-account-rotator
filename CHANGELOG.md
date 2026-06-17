@@ -143,3 +143,4 @@
 - `v0.8.3` 配合 B22——下拉的 token 健康警告改看 access token 真实 `exp`(`access_left_h` 解 auth JWT),不再用 `last_refresh` 年龄;删死代码
 - `v0.8.4` 下拉顶部加 **🔄 立即刷新全池额度** 一键按钮(跑 `codex-rotate refresh-all` 逐号探测,各号 +1% 5h;refresh-all 完成后自动回刷菜单)
 - `v0.8.5` 给刷新按钮加**可见反馈**——`refresh-all --notify` 弹 macOS 通知「✅ 额度已刷新 N/5 + 各号周额度」。根因:按钮 v0.8.4 其实在工作(实测 captured_at 即时更新),但 SwiftBar 点击即关下拉、标题(5h~99%)又不变→看着"没作用"。通知是点击的可见 ACK;cron(refreshquota)不带 --notify 保持静默
+- `v0.8.6` **修额度虚高**(用户报"账户没那么高了")——`win_remaining` 原对 `resets_at<=now` 的窗口无脑返 100%,**丢弃了真实 `used_percent`**:实测 plus3 used=39%(剩61%)但 resets 名义过期→显 100%(虚高 39 点)。ChatGPT API 常返回「新鲜 used + 过期 resets」(窗口边界延迟),"过了重置时间"≠"已重置满额"。改 **captured_at 感知**:快照晚于 resets→用 `100-used`(真实);仅快照早于 resets(重置后无数据)才乐观 100%。单元测试 4 例全过(含 plus3 场景 →61%)。⚠️ 这只治"显示逻辑";数据本身仍靠探测,**不走 cxp 时仍会陈旧**——根治见三方评审的「统一计量」方向

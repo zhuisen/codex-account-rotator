@@ -23,7 +23,7 @@ AMBER = "#e0a020"
 RED = "#e0533a"
 MONO = "font=Menlo size=12"
 EIGHTHS = "▏▎▍▌▋▊▉"  # 1/8 .. 7/8
-VERSION = "v0.8.5"  # bumped on every change — shown in the menu so you can tell it reloaded
+VERSION = "v0.8.6"  # bumped on every change — shown in the menu so you can tell it reloaded
 
 
 def mask(aid):
@@ -118,19 +118,25 @@ def proxy_up(port=8011):
         return False
 
 
-def win_remaining(w):
-    """Remaining % for one window; a window whose reset time has passed reads as fully reset (100%)."""
+def win_remaining(w, captured_at=0):
+    """Remaining % for one window. `used_percent` is the API's REAL usage at snapshot time, so use it
+    directly (100 − used). A passed `resets_at` reads as a full 100% ONLY when our snapshot predates
+    that reset (window reset since → no post-reset data, optimistic guess). When the snapshot is NEWER
+    than resets_at the used_percent already reflects the new window — returning 100% there was the
+    inflation bug (showed 100% while the account had really used 39%)."""
     used = (w or {}).get("used_percent")
     if used is None:
         return None
     ra = (w or {}).get("resets_at")
-    if ra and ra <= NOW:
+    if ra and ra <= NOW and captured_at and captured_at < ra:
         return 100.0
     return 100 - used
 
 
 def tightest_remaining(q):
-    rems = [r for r in (win_remaining(q.get("primary")), win_remaining(q.get("secondary"))) if r is not None]
+    cap = (q or {}).get("captured_at", 0)
+    rems = [r for r in (win_remaining(q.get("primary"), cap), win_remaining(q.get("secondary"), cap))
+            if r is not None]
     return min(rems) if rems else 100
 
 
@@ -173,7 +179,7 @@ def account_block(aid, slot, active):
     if q:
         for key, name in (("primary", "5h"), ("secondary", "周")):
             w = q.get(key) or {}
-            rem = win_remaining(w)
+            rem = win_remaining(w, q.get("captured_at", 0))
             if rem is None:
                 continue
             lines.append(f"   {name} {smooth_bar(rem)} {rem:>3.0f}%  ↻{fmt_eta(w.get('resets_at'))} "
@@ -219,8 +225,9 @@ def main():
     # (user's choice 2026-06-17: keep the top number and the dropdown consistent, over surfacing the
     # tighter weekly figure). A 5h window past its reset reads 100% — that's truthful (it genuinely
     # reset to full); the weekly figure lives in the dropdown's 周 row.
-    pr = (slots.get(shown, {}).get("quota") or {}).get("primary") if shown in slots else None
-    rem = win_remaining(pr) if pr else None
+    sq = (slots.get(shown, {}).get("quota") or {}) if shown in slots else {}
+    pr = sq.get("primary")
+    rem = win_remaining(pr, sq.get("captured_at", 0)) if pr else None
     if rem is not None:
         title = f"{title_icon(rem)} {rem:.0f}% · {fmt_eta(pr.get('resets_at'))}"
         if rem <= 10:
