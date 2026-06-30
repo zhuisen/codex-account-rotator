@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useRef } from "react";
+import { useEffect, useState, useCallback, useRef, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -15,7 +15,6 @@ import "./App.css";
 type Page = "overview" | "logs" | "settings";
 
 // ---- SVG icons (inline, matching design handoff) ----
-const IconBolt = () => <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M13 2 4 14h6l-1 8 9-12h-6z"/></svg>;
 const IconChart = () => <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><rect x="3" y="12" width="4" height="9" rx="1"/><rect x="10" y="7" width="4" height="14" rx="1"/><rect x="17" y="3" width="4" height="18" rx="1"/></svg>;
 const IconClip = () => <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7"><rect x="5" y="4" width="14" height="17" rx="2"/><path d="M9 3.5h6v3H9z" fill="currentColor" stroke="none"/></svg>;
 const IconGear = () => <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7"><circle cx="12" cy="12" r="3.2"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9 17 7M7 17l-2.1 2.1"/></svg>;
@@ -118,6 +117,8 @@ export default function App() {
   useEffect(() => { const u = listen("state-changed", () => refresh()); return () => { u.then(f => f()); }; }, [refresh]);
 
   const notifiedRef = useRef<Set<string>>(new Set());
+  const accountsRef = useRef<Account[]>([]);
+  const tokensRef = useRef<Record<string, TokenInfo>>({});
 
   // cooldown countdown (1s)
   useEffect(() => {
@@ -156,13 +157,15 @@ export default function App() {
     });
 
   const currentNode = state.active;
+  accountsRef.current = accounts;
+  tokensRef.current = tokens;
 
-  // expiry warnings (check every 60s)
+  // expiry warnings (check every 60s, refs to avoid interval rebuild on every render)
   useEffect(() => {
     const check = () => {
       const settings = getSettings();
       const n = Date.now() / 1000;
-      for (const a of accounts) {
+      for (const a of accountsRef.current) {
         const key = `${a.aid}-${a.exp}`;
         if (notifiedRef.current.has(key)) continue;
         if (a.exp && a.exp !== "—") {
@@ -177,8 +180,8 @@ export default function App() {
           }
         }
         const tokKey = `tok-${a.aid}`;
-        if (!notifiedRef.current.has(tokKey) && tokens[a.aid]?.exp) {
-          const tokH = (tokens[a.aid].exp! - n) / 3600;
+        if (!notifiedRef.current.has(tokKey) && tokensRef.current[a.aid]?.exp) {
+          const tokH = (tokensRef.current[a.aid].exp! - n) / 3600;
           if (tokH <= settings.tokenExpiryWarnHours && tokH > 0) {
             notify("Token 即将过期", `${a.node} access token 还剩 ${Math.round(tokH)}h`);
             notifiedRef.current.add(tokKey);
@@ -189,7 +192,7 @@ export default function App() {
     check();
     const id = setInterval(check, 60_000);
     return () => clearInterval(id);
-  }, [accounts, tokens]);
+  }, []); // refs avoid stale closures; interval stays stable
   const hero = recommended(accounts);
   const counts = { total: accounts.length, live: accounts.filter(a => a.status === "live" || a.status === "low").length, cool: accounts.filter(a => a.status === "cool").length, dead: accounts.filter(a => a.status === "dead").length };
   const summary = `${counts.total} nodes · ${counts.live} 活 · ${counts.cool} 冷 · ${counts.dead} 死`;
@@ -197,13 +200,12 @@ export default function App() {
   const refreshAll = async () => { setSpinning(true); await run(["refresh-all", "--notify"], `已刷新全池 · ${counts.total} 个号`); setTimeout(() => setSpinning(false), 750); };
 
   const sidebarItems: { id: Page; Icon: React.FC; tip: string }[] = [
-    { id: "overview" as Page, Icon: IconBolt, tip: "快捷" },
     { id: "overview" as Page, Icon: IconChart, tip: "总览" },
     { id: "logs" as Page, Icon: IconClip, tip: "日志" },
     { id: "settings" as Page, Icon: IconGear, tip: "设置" },
   ];
 
-  const win = getCurrentWindow();
+  const win = useMemo(() => getCurrentWindow(), []);
 
   // macOS keyboard shortcuts (lost when decorations:false)
   useEffect(() => {
@@ -246,8 +248,8 @@ export default function App() {
       <div style={{ flex: 1, display: "flex", minHeight: 0 }}>
         {/* ---- Sidebar (52px) ---- */}
         <div style={{ width: 52, flexShrink: 0, borderRight: `1px solid ${t.railBorder}`, background: t.railBg, display: "flex", flexDirection: "column", alignItems: "center", padding: "14px 0", gap: 4, transition: "background-color .35s ease" }}>
-          {sidebarItems.map((it, i) => (
-            <div key={i} onClick={() => setPage(it.id)} style={{ width: 34, height: 34, borderRadius: 9, display: "grid", placeItems: "center", cursor: "pointer", color: (i === 1 && page === "overview") || (it.id === page && i > 1) ? t.accentText : t.muted, background: (i === 1 && page === "overview") || (it.id === page && i > 1) ? t.accent : "transparent", transition: "background .2s, color .2s" }} title={it.tip}><it.Icon /></div>
+          {sidebarItems.map((it) => (
+            <div key={it.id} onClick={() => setPage(it.id)} style={{ width: 34, height: 34, borderRadius: 9, display: "grid", placeItems: "center", cursor: "pointer", color: page === it.id ? t.accentText : t.muted, background: page === it.id ? t.accent : "transparent", transition: "background .2s, color .2s" }} title={it.tip}><it.Icon /></div>
           ))}
           <span style={{ marginTop: "auto", fontSize: 9, color: t.faint, fontFamily: "'JetBrains Mono'" }}>0.1</span>
         </div>

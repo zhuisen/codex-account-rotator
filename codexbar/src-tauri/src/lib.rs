@@ -9,20 +9,31 @@ use tauri::{
     AppHandle, Emitter, Manager, PhysicalPosition, WebviewUrl,
 };
 
-const STORE: &str = "/Users/you/Projects/tools/codex-account-rotator";
+fn store_dir() -> String {
+    std::env::var("CODEXBAR_STORE").unwrap_or_else(|_| {
+        let home = std::env::var("HOME").unwrap_or_default();
+        format!("{}/Projects/tools/codex-account-rotator", home)
+    })
+}
+
+const ALLOWED_CMDS: &[&str] = &["switch", "cool", "uncool", "refresh-all", "health", "list", "quota", "refresh-all"];
 
 // ---- IPC commands ----
 
 #[tauri::command]
 fn read_state() -> Result<Value, String> {
-    let path = format!("{}/state.json", STORE);
+    let path = format!("{}/state.json", store_dir());
     let data = fs::read_to_string(&path).map_err(|e| format!("read state: {}", e))?;
     serde_json::from_str(&data).map_err(|e| format!("parse state: {}", e))
 }
 
 #[tauri::command]
 async fn run_rotate(app: AppHandle, args: Vec<String>) -> Result<String, String> {
-    let rot = format!("{}/codex-rotate", STORE);
+    let store = store_dir();
+    if args.first().map_or(true, |c| !ALLOWED_CMDS.contains(&c.as_str())) {
+        return Err(format!("disallowed command: {:?}", args.first()));
+    }
+    let rot = format!("{}/codex-rotate", store);
     let out = tauri::async_runtime::spawn_blocking(move || {
         Command::new("python3").arg(&rot).args(&args).output()
     })
@@ -46,7 +57,7 @@ fn read_auth_tokens() -> Result<Value, String> {
     let mut result = serde_json::Map::new();
     for (aid, slot) in slots {
         let file = slot["file"].as_str().unwrap_or("");
-        let path = format!("{}/auth/{}", STORE, file);
+        let path = format!("{}/auth/{}", store_dir(), file);
         if let Ok(data) = fs::read_to_string(&path) {
             if let Ok(auth) = serde_json::from_str::<Value>(&data) {
                 if let Some(tokens) = auth.get("tokens") {
@@ -110,7 +121,7 @@ fn b64_decode(input: &str) -> Result<Vec<u8>, String> {
 fn read_logs() -> Result<String, String> {
     let mut lines = Vec::new();
     for name in ["keepalive.log", "refreshquota.log", "proxy/proxy.log", "quotad.log"] {
-        let path = format!("{}/{}", STORE, name);
+        let path = format!("{}/{}", store_dir(), name);
         if let Ok(data) = fs::read_to_string(&path) {
             for line in data.lines().rev().take(100) {
                 if !line.trim().is_empty() {
@@ -126,7 +137,7 @@ fn read_logs() -> Result<String, String> {
 // ---- tray title from state.json ----
 
 fn format_tray_title() -> String {
-    let path = format!("{}/state.json", STORE);
+    let path = format!("{}/state.json", store_dir());
     let Ok(data) = fs::read_to_string(&path) else {
         return "codex".into();
     };
@@ -238,7 +249,7 @@ pub fn run() {
                             let _ = w.center();
                         }
                     }
-                    "quit" => std::process::exit(0),
+                    "quit" => { app.exit(0); }
                     _ => {}
                 })
                 .on_tray_icon_event(|tray, event| {
