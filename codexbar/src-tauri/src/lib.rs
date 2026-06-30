@@ -104,6 +104,25 @@ fn b64_decode(input: &str) -> Result<Vec<u8>, String> {
     Ok(buf)
 }
 
+// ---- read logs for the UI ----
+
+#[tauri::command]
+fn read_logs() -> Result<String, String> {
+    let mut lines = Vec::new();
+    for name in ["keepalive.log", "refreshquota.log", "proxy/proxy.log", "quotad.log"] {
+        let path = format!("{}/{}", STORE, name);
+        if let Ok(data) = fs::read_to_string(&path) {
+            for line in data.lines().rev().take(100) {
+                if !line.trim().is_empty() {
+                    lines.push(line.to_string());
+                }
+            }
+        }
+    }
+    lines.truncate(300);
+    Ok(lines.join("\n"))
+}
+
 // ---- tray title from state.json ----
 
 fn format_tray_title() -> String {
@@ -166,6 +185,7 @@ fn toggle_menubar(app: &AppHandle, tray_rect: Option<tauri::Rect>) {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             let handle = app.handle();
 
@@ -264,7 +284,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             read_state,
             run_rotate,
-            read_auth_tokens
+            read_auth_tokens,
+            read_logs
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

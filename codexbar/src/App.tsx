@@ -7,6 +7,9 @@ import { type AppState, type TokenInfo, type Account, slotToAccount, recommended
 import Ring from "./components/Ring";
 import Toast from "./components/Toast";
 import GhostButton from "./components/GhostButton";
+import LogsPage from "./pages/LogsPage";
+import SettingsPage, { getSettings } from "./pages/SettingsPage";
+import { notify } from "./hooks/useNotify";
 import "./App.css";
 
 type Page = "overview" | "logs" | "settings";
@@ -113,6 +116,43 @@ export default function App() {
 
   useEffect(() => { refresh(); const id = setInterval(refresh, 10_000); return () => clearInterval(id); }, [refresh]);
   useEffect(() => { const u = listen("state-changed", () => refresh()); return () => { u.then(f => f()); }; }, [refresh]);
+
+  // expiry warnings (check every 60s)
+  const notifiedRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    const check = () => {
+      const settings = getSettings();
+      const now = Date.now() / 1000;
+      for (const a of accounts) {
+        const key = `${a.aid}-${a.exp}`;
+        if (notifiedRef.current.has(key)) continue;
+        // subscription expiry
+        if (a.exp && a.exp !== "—") {
+          const subTs = new Date(a.exp).getTime() / 1000;
+          const daysLeft = (subTs - now) / 86400;
+          if (daysLeft <= settings.subExpiryWarnDays && daysLeft > 0) {
+            notify("订阅即将到期", `${a.node} 订阅还剩 ${Math.ceil(daysLeft)} 天 (${a.exp})`);
+            notifiedRef.current.add(key);
+          } else if (daysLeft <= 0) {
+            notify("订阅已到期", `${a.node} 订阅已到期 — 续费否则无 codex 额度`);
+            notifiedRef.current.add(key);
+          }
+        }
+        // token expiry
+        const tokKey = `tok-${a.aid}`;
+        if (!notifiedRef.current.has(tokKey) && tokens[a.aid]?.exp) {
+          const tokH = (tokens[a.aid].exp! - now) / 3600;
+          if (tokH <= settings.tokenExpiryWarnHours && tokH > 0) {
+            notify("Token 即将过期", `${a.node} access token 还剩 ${Math.round(tokH)}h`);
+            notifiedRef.current.add(tokKey);
+          }
+        }
+      }
+    };
+    check();
+    const id = setInterval(check, 60_000);
+    return () => clearInterval(id);
+  }, [accounts, tokens]);
 
   // cooldown countdown (1s)
   useEffect(() => {
@@ -275,25 +315,8 @@ export default function App() {
             </>
           )}
 
-          {page === "logs" && (
-            <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", color: t.muted }}>
-              <div style={{ textAlign: "center" }}>
-                <div style={{ fontSize: 28, marginBottom: 8 }}>📋</div>
-                <div style={{ fontSize: 15, fontWeight: 600 }}>日志</div>
-                <div style={{ fontSize: 11, marginTop: 4, color: t.faint }}>proxy 请求日志 / 切号历史 / keepalive 记录 · 下个版本</div>
-              </div>
-            </div>
-          )}
-
-          {page === "settings" && (
-            <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", color: t.muted }}>
-              <div style={{ textAlign: "center" }}>
-                <div style={{ fontSize: 28, marginBottom: 8 }}>⚙️</div>
-                <div style={{ fontSize: 15, fontWeight: 600 }}>设置</div>
-                <div style={{ fontSize: 11, marginTop: 4, color: t.faint }}>自动切号阈值 / 探测频率 / 开机启动 · 下个版本</div>
-              </div>
-            </div>
-          )}
+          {page === "logs" && <LogsPage t={t} />}
+          {page === "settings" && <SettingsPage t={t} />}
         </div>
       </div>
 
