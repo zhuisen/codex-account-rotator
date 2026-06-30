@@ -35,6 +35,7 @@ function AccountCard({ a, isCurrent, isBest, t, onSelect }: {
     <div onClick={onSelect} onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}
       style={{ background: isCurrent ? t.curCardBg : t.cardBg, border: `1px solid ${isCurrent ? t.accent : t.cardBorder}`,
         borderRadius: 12, padding: 12, display: "flex", gap: 11, alignItems: "center",
+        minHeight: 100, overflow: "hidden",
         cursor: "pointer", userSelect: "none",
         transform: hover ? "translateY(-2px)" : undefined,
         boxShadow: hover ? t.cardHoverShadow : undefined,
