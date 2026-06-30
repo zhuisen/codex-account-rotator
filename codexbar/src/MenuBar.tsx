@@ -39,7 +39,7 @@ function AccountRow({ a, isCurrent, isBest, t, onSelect }: {
             </div>
             <span style={{ fontSize: 9, color: t.text2, fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>{a.wk}%</span>
             <span style={{ fontSize: 8.5, color: t.muted, fontFamily: "'JetBrains Mono'" }}>
-              {isCool ? `❄${fmtCd(a.cooldownSec)}` : `↻${a.h5reset}`}
+              {isCool ? `❄${fmtCd(a.cooldownSec)}` : `↻${a.h5reset}${a.h5resetAt && a.h5resetAt !== "已重置" ? ` (${a.h5resetAt})` : ""}`}
             </span>
           </div>
         )}

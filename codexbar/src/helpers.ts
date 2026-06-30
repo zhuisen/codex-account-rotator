@@ -18,7 +18,9 @@ export interface Account {
   status: "live" | "low" | "cool" | "dead";
   h5: number;
   h5reset: string;
+  h5resetAt: string;  // absolute time "HH:MM" or "已重置"
   wk: number;
+  wkReset: string;
   exp: string;
   cooldownSec: number;
   tok: string;
@@ -46,6 +48,14 @@ export function fmtCd(sec: number): string {
   return `${m}:${String(s).padStart(2, "0")}`;
 }
 
+export function fmtResetTime(ts?: number): string {
+  if (!ts) return "";
+  const n = now();
+  if (ts <= n) return "已重置";
+  const d = new Date(ts * 1000);
+  return `${String(d.getHours()).padStart(2,"0")}:${String(d.getMinutes()).padStart(2,"0")}`;
+}
+
 export function ringDash(pct: number, r: number): string {
   const C = 2 * Math.PI * r;
   return `${(clamp(pct) / 100 * C).toFixed(1)} ${C.toFixed(1)}`;
@@ -70,6 +80,8 @@ export function slotToAccount(aid: string, slot: Slot, tokens: Record<string, To
     aid, node: slot.label ?? "?", email: slot.email ?? "",
     status, h5: clamp(h5), wk: clamp(wk),
     h5reset: fmtEta(q?.primary?.resets_at),
+    h5resetAt: fmtResetTime(q?.primary?.resets_at),
+    wkReset: fmtEta(q?.secondary?.resets_at),
     exp: slot.sub_until?.slice(0, 10) ?? "—",
     cooldownSec: Math.round(coolSec),
     tok: tokH != null ? `${tokH}h` : "—",

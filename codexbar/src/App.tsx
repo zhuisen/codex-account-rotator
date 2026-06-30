@@ -64,7 +64,7 @@ function AccountCard({ a, isCurrent, isBest, t, onSelect }: {
               <span style={{ fontSize: 10, color: t.text2, fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>{a.wk}%</span>
             </div>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 9.5, color: t.muted, fontFamily: "'JetBrains Mono'" }}>
-              {isCool ? <span style={{ color: "#2BA0C0", fontWeight: 600 }}>❄ 冷却 {fmtCd(a.cooldownSec)}</span> : <span>↻ {a.h5reset}</span>}
+              {isCool ? <span style={{ color: "#2BA0C0", fontWeight: 600 }}>❄ 冷却 {fmtCd(a.cooldownSec)}</span> : <span>↻ {a.h5reset}{a.h5resetAt && a.h5resetAt !== "已重置" ? ` (${a.h5resetAt})` : ""}</span>}
               <span>到期 {a.exp}</span>
             </div>
           </>
@@ -291,7 +291,7 @@ export default function App() {
                       <span style={{ color: t.faint }}>·</span>
                       <span>周 <b style={{ color: t.accent }}>{hero.wk}%</b></span>
                       <span style={{ color: t.faint }}>·</span>
-                      <span>↻ {hero.h5reset}</span>
+                      <span>↻ {hero.h5reset}{hero.h5resetAt && hero.h5resetAt !== "已重置" ? ` (${hero.h5resetAt})` : ""}</span>
                       <span style={{ color: t.faint }}>·</span>
                       <span>订阅至 {hero.exp}</span>
                     </div>
