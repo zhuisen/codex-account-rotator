@@ -64,7 +64,7 @@ export default function MenuBar() {
   const [toast, setToast] = useState<string | null>(null);
   const [cooldowns, setCooldowns] = useState<Record<string, number>>({});
   const [spinning, setSpinning] = useState(false);
-  const toastRef = useRef<ReturnType<typeof setTimeout>>();
+  const toastRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const t = THEMES[theme];
 
   const showToast = useCallback((msg: string) => {

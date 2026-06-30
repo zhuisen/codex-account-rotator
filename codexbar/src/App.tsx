@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { THEMES, STATUS_COLORS, STATUS_TEXT, type Theme } from "./theme";
-import { type AppState, type TokenInfo, type Account, slotToAccount, recommended, clamp, fmtEta, fmtCd } from "./helpers";
+import { type AppState, type TokenInfo, type Account, slotToAccount, recommended, clamp, fmtCd } from "./helpers";
 import Ring from "./components/Ring";
 import Toast from "./components/Toast";
 import GhostButton from "./components/GhostButton";
@@ -90,7 +90,7 @@ export default function App() {
   const [spinning, setSpinning] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const [cooldowns, setCooldowns] = useState<Record<string, number>>({});
-  const toastRef = useRef<ReturnType<typeof setTimeout>>();
+  const toastRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const t = THEMES[theme];
 
@@ -117,42 +117,7 @@ export default function App() {
   useEffect(() => { refresh(); const id = setInterval(refresh, 10_000); return () => clearInterval(id); }, [refresh]);
   useEffect(() => { const u = listen("state-changed", () => refresh()); return () => { u.then(f => f()); }; }, [refresh]);
 
-  // expiry warnings (check every 60s)
   const notifiedRef = useRef<Set<string>>(new Set());
-  useEffect(() => {
-    const check = () => {
-      const settings = getSettings();
-      const now = Date.now() / 1000;
-      for (const a of accounts) {
-        const key = `${a.aid}-${a.exp}`;
-        if (notifiedRef.current.has(key)) continue;
-        // subscription expiry
-        if (a.exp && a.exp !== "—") {
-          const subTs = new Date(a.exp).getTime() / 1000;
-          const daysLeft = (subTs - now) / 86400;
-          if (daysLeft <= settings.subExpiryWarnDays && daysLeft > 0) {
-            notify("订阅即将到期", `${a.node} 订阅还剩 ${Math.ceil(daysLeft)} 天 (${a.exp})`);
-            notifiedRef.current.add(key);
-          } else if (daysLeft <= 0) {
-            notify("订阅已到期", `${a.node} 订阅已到期 — 续费否则无 codex 额度`);
-            notifiedRef.current.add(key);
-          }
-        }
-        // token expiry
-        const tokKey = `tok-${a.aid}`;
-        if (!notifiedRef.current.has(tokKey) && tokens[a.aid]?.exp) {
-          const tokH = (tokens[a.aid].exp! - now) / 3600;
-          if (tokH <= settings.tokenExpiryWarnHours && tokH > 0) {
-            notify("Token 即将过期", `${a.node} access token 还剩 ${Math.round(tokH)}h`);
-            notifiedRef.current.add(tokKey);
-          }
-        }
-      }
-    };
-    check();
-    const id = setInterval(check, 60_000);
-    return () => clearInterval(id);
-  }, [accounts, tokens]);
 
   // cooldown countdown (1s)
   useEffect(() => {
@@ -191,6 +156,40 @@ export default function App() {
     });
 
   const currentNode = state.active;
+
+  // expiry warnings (check every 60s)
+  useEffect(() => {
+    const check = () => {
+      const settings = getSettings();
+      const n = Date.now() / 1000;
+      for (const a of accounts) {
+        const key = `${a.aid}-${a.exp}`;
+        if (notifiedRef.current.has(key)) continue;
+        if (a.exp && a.exp !== "—") {
+          const subTs = new Date(a.exp).getTime() / 1000;
+          const daysLeft = (subTs - n) / 86400;
+          if (daysLeft <= settings.subExpiryWarnDays && daysLeft > 0) {
+            notify("订阅即将到期", `${a.node} 订阅还剩 ${Math.ceil(daysLeft)} 天 (${a.exp})`);
+            notifiedRef.current.add(key);
+          } else if (daysLeft <= 0) {
+            notify("订阅已到期", `${a.node} 订阅已到期 — 续费否则无 codex 额度`);
+            notifiedRef.current.add(key);
+          }
+        }
+        const tokKey = `tok-${a.aid}`;
+        if (!notifiedRef.current.has(tokKey) && tokens[a.aid]?.exp) {
+          const tokH = (tokens[a.aid].exp! - n) / 3600;
+          if (tokH <= settings.tokenExpiryWarnHours && tokH > 0) {
+            notify("Token 即将过期", `${a.node} access token 还剩 ${Math.round(tokH)}h`);
+            notifiedRef.current.add(tokKey);
+          }
+        }
+      }
+    };
+    check();
+    const id = setInterval(check, 60_000);
+    return () => clearInterval(id);
+  }, [accounts, tokens]);
   const hero = recommended(accounts);
   const counts = { total: accounts.length, live: accounts.filter(a => a.status === "live" || a.status === "low").length, cool: accounts.filter(a => a.status === "cool").length, dead: accounts.filter(a => a.status === "dead").length };
   const summary = `${counts.total} nodes · ${counts.live} 活 · ${counts.cool} 冷 · ${counts.dead} 死`;
@@ -223,7 +222,7 @@ export default function App() {
   }, [win, refresh]);
 
   const std_process_exit = async () => {
-    try { const { exit } = await import("@tauri-apps/plugin-process"); await exit(0); } catch { win.close(); }
+    try { win.close(); } catch { /* fallback */ }
   };
 
   return (

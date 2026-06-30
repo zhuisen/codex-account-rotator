@@ -33,7 +33,7 @@ export const THEMES = {
     toastBg:"rgba(255,255,255,.97)", toastText:"#161b22", toastBorder:"rgba(14,159,142,.35)",
     sunBg:"#0e9f8e", sunColor:"#ffffff", moonBg:"transparent", moonColor:"#8a93a0",
   },
-} as const;
+};
 
 export type Theme = typeof THEMES.dark;
 
