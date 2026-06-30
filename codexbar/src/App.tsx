@@ -44,14 +44,14 @@ function AccountCard({ a, isCurrent, isBest, t, onSelect }: {
         <span style={{ fontSize: 13, fontWeight: 700, color: t.text, fontVariantNumeric: "tabular-nums", lineHeight: 1 }}>{isDead ? "—" : a.h5}</span>
       </Ring>
 
-      <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 4 }}>
+      <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 4, overflow: "hidden" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
           <span style={{ fontSize: 13, fontWeight: 700, color: t.text }}>{a.node}</span>
           <span style={{ fontSize: 9.5, fontWeight: 600, color: sc }}>{STATUS_TEXT[a.status]}</span>
-          {isBest && <span style={{ fontSize: 8, fontWeight: 700, color: t.accentText, background: t.accent, padding: "1px 5px", borderRadius: 4 }}>USE</span>}
-          {isCurrent && <span style={{ marginLeft: "auto", fontSize: 8.5, fontWeight: 700, color: t.accent, border: `1px solid ${t.accentBorder}`, padding: "1px 6px", borderRadius: 999 }}>当前</span>}
+          {isBest && <span style={{ fontSize: 8, fontWeight: 700, color: t.accentText, background: t.accent, padding: "1px 5px", borderRadius: 4, flexShrink: 0 }}>USE</span>}
+          {isCurrent && <span style={{ marginLeft: "auto", fontSize: 8.5, fontWeight: 700, color: t.accent, border: `1px solid ${t.accentBorder}`, padding: "1px 6px", borderRadius: 999, flexShrink: 0 }}>当前</span>}
         </div>
-        <div style={{ fontSize: 10.5, color: t.email, fontFamily: "'JetBrains Mono'", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{a.email}</div>
+        <div style={{ fontSize: 10.5, color: t.email, fontFamily: "'JetBrains Mono'", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: "100%" }}>{a.email}</div>
 
         {!isDead && (
           <>
