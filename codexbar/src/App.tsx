@@ -88,7 +88,6 @@ export default function App() {
   const [page, setPage] = useState<Page>("overview");
   const [loadingAction, setLoadingAction] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
-  const [justRefreshed, setJustRefreshed] = useState(false);
   const [cooldowns, setCooldowns] = useState<Record<string, number>>({});
   const toastRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -141,8 +140,6 @@ export default function App() {
     setLoadingAction(actionId);
     try { await invoke("run_rotate", { args }); } catch (e) { console.error(e); }
     await refresh();
-    setJustRefreshed(true);
-    setTimeout(() => setJustRefreshed(false), 800);
     setLoadingAction(null);
     showToast(msg);
   };
@@ -202,7 +199,7 @@ export default function App() {
   const counts = { total: accounts.length, live: accounts.filter(a => a.status === "live" || a.status === "low").length, cool: accounts.filter(a => a.status === "cool").length, dead: accounts.filter(a => a.status === "dead").length };
   const summary = `${counts.total} nodes · ${counts.live} 活 · ${counts.cool} 冷 · ${counts.dead} 死`;
 
-  const refreshAll = async () => { setSpinning(true); await run(["refresh-all", "--notify"], `已刷新全池 · ${counts.total} 个号`); setTimeout(() => setSpinning(false), 750); };
+  const refreshAll = () => run("refresh-all", ["refresh-all", "--notify"], `已刷新全池 · ${counts.total} 个号`);
 
   const sidebarItems: { id: Page; Icon: React.FC; tip: string }[] = [
     { id: "overview" as Page, Icon: IconChart, tip: "总览" },
@@ -270,13 +267,13 @@ export default function App() {
                   <span style={{ fontSize: 11.5, color: t.muted, fontFamily: "'JetBrains Mono'" }}>{summary}</span>
                 </div>
                 <div style={{ display: "flex", gap: 7, alignItems: "center" }}>
-                  <GhostButton t={t} onClick={refreshAll}><IconRefresh spin={spinning} />刷新全池</GhostButton>
-                  <GhostButton t={t} onClick={() => run(["refresh-all", "--notify"], "各号 5h 额度 +1%")} accent>
-                    <IconRefresh />刷新各号<span style={{ fontSize: 9.5, fontWeight: 700, color: t.accentText, background: t.accent, padding: "1px 5px", borderRadius: 4, letterSpacing: ".02em" }}>+1%</span>
+                  <GhostButton t={t} onClick={refreshAll} loading={loadingAction === "refresh-all"} loadingText="刷新中…"><IconRefresh spin={loadingAction === "refresh-all"} />刷新全池</GhostButton>
+                  <GhostButton t={t} onClick={() => run("refresh-each", ["refresh-all", "--notify"], "各号 5h 额度 +1%")} accent loading={loadingAction === "refresh-each"} loadingText="探测中…">
+                    <IconRefresh spin={loadingAction === "refresh-each"} />刷新各号<span style={{ fontSize: 9.5, fontWeight: 700, color: t.accentText, background: t.accent, padding: "1px 5px", borderRadius: 4, letterSpacing: ".02em" }}>+1%</span>
                   </GhostButton>
                   <span style={{ width: 1, height: 18, background: t.divider, margin: "0 1px" }} />
-                  <GhostButton t={t} onClick={() => run(["cool", "300"], `已冷却 ${slots[currentNode ?? ""]?.label ?? "当前号"}`)}>冷却当前号</GhostButton>
-                  <GhostButton t={t} onClick={() => run(["uncool", "all"], "已清除所有冷却")}>清除冷却</GhostButton>
+                  <GhostButton t={t} onClick={() => run("cool", ["cool", "300"], `已冷却 ${slots[currentNode ?? ""]?.label ?? "当前号"}`)} loading={loadingAction === "cool"} loadingText="冷却中…">冷却当前号</GhostButton>
+                  <GhostButton t={t} onClick={() => run("uncool", ["uncool", "all"], "已清除所有冷却")} loading={loadingAction === "uncool"} loadingText="解冻中…">清除冷却</GhostButton>
                 </div>
               </div>
 
@@ -306,7 +303,9 @@ export default function App() {
                   {hero.aid === currentNode ? (
                     <span style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "10px 16px", borderRadius: 9, fontSize: 12.5, fontWeight: 700, color: t.accent, border: `1px solid ${t.accentBorder}`, background: t.accentSoft, flexShrink: 0 }}>✓ 当前使用中</span>
                   ) : (
-                    <span onClick={() => run(["switch", hero.node], `当前号 → ${hero.node}`)} style={{ display: "inline-flex", alignItems: "center", gap: 7, padding: "10px 16px", borderRadius: 9, fontSize: 12.5, fontWeight: 700, color: t.accentText, background: t.accent, flexShrink: 0, cursor: "pointer", userSelect: "none" }}>设为当前号 →</span>
+                    <span onClick={() => run("switch-hero", ["switch", hero.node], `当前号 → ${hero.node}`)} style={{ display: "inline-flex", alignItems: "center", gap: 7, padding: "10px 16px", borderRadius: 9, fontSize: 12.5, fontWeight: 700, color: t.accentText, background: t.accent, flexShrink: 0, cursor: "pointer", userSelect: "none", opacity: loadingAction?.startsWith("switch") ? 0.6 : 1 }}>
+                      {loadingAction?.startsWith("switch") ? "切换中…" : "设为当前号 →"}
+                    </span>
                   )}
                 </div>
               )}
@@ -315,7 +314,7 @@ export default function App() {
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 11, flex: 1, overflow: "auto", alignContent: "start" }}>
                 {accounts.map(a => (
                   <AccountCard key={a.aid} a={a} isCurrent={a.aid === currentNode} isBest={hero?.aid === a.aid} t={t}
-                    onSelect={() => { if (!a.status.startsWith("dead")) run(["switch", a.node], `当前号 → ${a.node}`); }} />
+                    onSelect={() => { if (!a.status.startsWith("dead")) run(`switch-${a.aid}`, ["switch", a.node], `当前号 → ${a.node}`); }} />
                 ))}
               </div>
             </>

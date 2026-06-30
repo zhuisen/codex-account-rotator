@@ -156,7 +156,14 @@ fn format_tray_title() -> String {
             if let Some(q) = slot.get("quota") {
                 let used = q["primary"]["used_percent"].as_f64().unwrap_or(0.0);
                 let rem = (100.0 - used).max(0.0) as u32;
-                return format!("{} {}%", label, rem);
+                let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs_f64();
+                let ra = q["primary"]["resets_at"].as_f64().unwrap_or(0.0);
+                let eta = if ra > now {
+                    let d = (ra - now) as u64;
+                    let h = d / 3600; let m = (d % 3600) / 60;
+                    if h > 0 { format!(" ↻{}h{:02}m", h, m) } else { format!(" ↻{}m", m) }
+                } else { String::new() };
+                return format!("{} {}%{}", label, rem, eta);
             }
             return format!("{}", label);
         }

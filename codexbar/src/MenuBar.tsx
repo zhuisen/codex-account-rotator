@@ -63,7 +63,7 @@ export default function MenuBar() {
   const [theme, setTheme] = useState<"dark" | "light">("dark");
   const [toast, setToast] = useState<string | null>(null);
   const [cooldowns, setCooldowns] = useState<Record<string, number>>({});
-  const [spinning, setSpinning] = useState(false);
+  const [loadingAction, setLoadingAction] = useState<string | null>(null);
   const toastRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const t = THEMES[theme];
 
@@ -100,9 +100,10 @@ export default function MenuBar() {
     return () => clearInterval(id);
   }, []);
 
-  const run = async (args: string[], msg: string) => {
+  const run = async (actionId: string, args: string[], msg: string) => {
+    setLoadingAction(actionId);
     try { await invoke("run_rotate", { args }); } catch (e) { console.error(e); }
-    await refresh(); showToast(msg);
+    await refresh(); setLoadingAction(null); showToast(msg);
   };
 
   // macOS keyboard shortcuts
@@ -165,7 +166,7 @@ export default function MenuBar() {
           {hero.aid === currentNode ? (
             <span style={{ fontSize: 10.5, fontWeight: 700, color: t.accent, border: `1px solid ${t.accentBorder}`, background: t.accentSoft, padding: "7px 12px", borderRadius: 8, flexShrink: 0 }}>✓ 使用中</span>
           ) : (
-            <span onClick={() => run(["switch", hero.node], `当前号 → ${hero.node}`)} style={{ fontSize: 10.5, fontWeight: 700, color: t.accentText, background: t.accent, padding: "7px 12px", borderRadius: 8, flexShrink: 0, cursor: "pointer" }}>设为当前</span>
+            <span onClick={() => run("switch-hero", ["switch", hero.node], `当前号 → ${hero.node}`)} style={{ fontSize: 10.5, fontWeight: 700, color: t.accentText, background: t.accent, padding: "7px 12px", borderRadius: 8, flexShrink: 0, cursor: "pointer", opacity: loadingAction?.startsWith("switch") ? 0.6 : 1 }}>{loadingAction?.startsWith("switch") ? "切换中…" : "设为当前"}</span>
           )}
         </div>
       )}
@@ -177,29 +178,35 @@ export default function MenuBar() {
       <div style={{ flex: 1, overflowY: "auto", padding: "0 2px", maxHeight: 286 }}>
         {accounts.map(a => (
           <AccountRow key={a.aid} a={a} isCurrent={a.aid === currentNode} isBest={hero?.aid === a.aid} t={t}
-            onSelect={() => { if (a.status !== "dead") run(["switch", a.node], `当前号 → ${a.node}`); }} />
+            onSelect={() => { if (a.status !== "dead") run(`switch-${a.aid}`, ["switch", a.node], `当前号 → ${a.node}`); }} />
         ))}
       </div>
 
       {/* Bottom 2x2 */}
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 7, padding: "10px 14px 14px", borderTop: `1px solid ${t.chromeBorder}` }}>
         {[
-          { label: "刷新全池", icon: true, accent: false, action: () => { setSpinning(true); run(["refresh-all", "--notify"], "已刷新全池").then(() => setTimeout(() => setSpinning(false), 750)); } },
-          { label: "刷新各号", icon: true, accent: true, badge: "+1%", action: () => run(["refresh-all", "--notify"], "各号 5h +1%") },
-          { label: "冷却当前号", icon: false, accent: false, action: () => run(["cool", "300"], "已冷却当前号") },
-          { label: "清除冷却", icon: false, accent: false, action: () => run(["uncool", "all"], "已清除冷却") },
-        ].map((btn, i) => (
-          <span key={i} onClick={btn.action} style={{
+          { id: "refresh-all", label: "刷新全池", loadingLabel: "刷新中…", icon: true, accent: false, action: () => run("refresh-all", ["refresh-all", "--notify"], "已刷新全池") },
+          { id: "refresh-each", label: "刷新各号", loadingLabel: "探测中…", icon: true, accent: true, badge: "+1%", action: () => run("refresh-each", ["refresh-all", "--notify"], "各号 5h +1%") },
+          { id: "cool", label: "冷却当前号", loadingLabel: "冷却中…", icon: false, accent: false, action: () => run("cool", ["cool", "300"], "已冷却当前号") },
+          { id: "uncool", label: "清除冷却", loadingLabel: "解冻中…", icon: false, accent: false, action: () => run("uncool", ["uncool", "all"], "已清除冷却") },
+        ].map((btn) => {
+          const isLoading = loadingAction === btn.id;
+          return (
+          <span key={btn.id} onClick={isLoading ? undefined : btn.action} style={{
             display: "flex", alignItems: "center", justifyContent: "center", gap: 5, padding: "8px 0",
             border: `1px solid ${btn.accent ? t.accentBorder : t.ghostBorder}`, borderRadius: 8,
             fontSize: 11, color: btn.accent ? t.accentTextSoft : t.ghostText,
-            background: btn.accent ? t.accentSoft : t.ghostBg, cursor: "pointer", userSelect: "none",
+            background: btn.accent ? t.accentSoft : t.ghostBg,
+            cursor: isLoading ? "default" : "pointer", userSelect: "none",
+            opacity: isLoading ? 0.6 : 1, transition: "opacity .2s",
           }}>
-            {btn.icon && <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ animation: spinning && i === 0 ? "cbSpin .7s linear" : "none", transformOrigin: "center" }}><path d="M21 12a9 9 0 1 1-3-6.7M21 4v4h-4"/></svg>}
-            {btn.label}
-            {btn.badge && <span style={{ fontSize: 8.5, fontWeight: 700, color: t.accentText, background: t.accent, padding: "1px 4px", borderRadius: 3 }}>{btn.badge}</span>}
+            {isLoading ? <><span style={{ width: 12, height: 12, border: "2px solid currentColor", borderTopColor: "transparent", borderRadius: "50%", animation: "cbSpin .65s linear infinite", display: "inline-block" }} />{btn.loadingLabel}</> : <>
+              {btn.icon && <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 12a9 9 0 1 1-3-6.7M21 4v4h-4"/></svg>}
+              {btn.label}
+              {btn.badge && <span style={{ fontSize: 8.5, fontWeight: 700, color: t.accentText, background: t.accent, padding: "1px 4px", borderRadius: 3 }}>{btn.badge}</span>}
+            </>}
           </span>
-        ))}
+        );})}
       </div>
 
       {toast && <Toast msg={toast} t={t} />}
