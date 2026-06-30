@@ -245,7 +245,6 @@ pub fn run() {
                 .icon(tray_icon)
                 .icon_as_template(true)
                 .title(format_tray_title())
-                .tooltip("CodexBar")
                 .menu(&menu)
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| match event.id().as_ref() {

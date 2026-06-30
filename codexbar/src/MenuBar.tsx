@@ -16,42 +16,39 @@ function AccountRow({ a, isCurrent, isBest, t, onSelect }: {
 
   return (
     <div onClick={onSelect} style={{
-      display: "flex", gap: 10, alignItems: "center", padding: "9px 14px",
-      background: isCurrent ? t.curCardBg : "transparent", borderRadius: 10,
+      display: "flex", gap: 8, alignItems: "center", padding: "7px 12px",
+      background: isCurrent ? t.curCardBg : "transparent", borderRadius: 8,
       cursor: "pointer", userSelect: "none", transition: "background .2s ease",
     }}>
-      <Ring pct={isDead ? 0 : a.h5} r={17} sw={4} color={sc} track={t.ringTrack} size={42}>
-        <span style={{ fontSize: 11, fontWeight: 700, color: t.text, fontVariantNumeric: "tabular-nums", lineHeight: 1 }}>{isDead ? "—" : a.h5}</span>
+      <Ring pct={isDead ? 0 : a.h5} r={15} sw={3.5} color={sc} track={t.ringTrack} size={36}>
+        <span style={{ fontSize: 10, fontWeight: 700, color: t.text, fontVariantNumeric: "tabular-nums", lineHeight: 1 }}>{isDead ? "—" : a.h5}</span>
       </Ring>
-      <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 2 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
-          <span style={{ fontSize: 12.5, fontWeight: 700, color: t.text }}>{a.node}</span>
-          <span style={{ fontSize: 9, fontWeight: 600, color: sc }}>{STATUS_TEXT[a.status]}</span>
-          {isBest && <span style={{ fontSize: 7.5, fontWeight: 700, color: t.accentText, background: t.accent, padding: "1px 4px", borderRadius: 3 }}>USE</span>}
-          {isCurrent && <span style={{ fontSize: 7.5, fontWeight: 700, color: t.accent, border: `1px solid ${t.accentBorder}`, padding: "0px 5px", borderRadius: 999 }}>当前</span>}
+      <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 1 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+          <span style={{ fontSize: 12, fontWeight: 700, color: t.text }}>{a.node}</span>
+          <span style={{ fontSize: 8.5, fontWeight: 600, color: sc }}>{STATUS_TEXT[a.status]}</span>
+          {isBest && <span style={{ fontSize: 7, fontWeight: 700, color: t.accentText, background: t.accent, padding: "1px 4px", borderRadius: 3 }}>USE</span>}
+          {isCurrent && <span style={{ fontSize: 7, fontWeight: 700, color: t.accent, border: `1px solid ${t.accentBorder}`, padding: "0px 4px", borderRadius: 999 }}>当前</span>}
+          <span style={{ marginLeft: "auto", fontSize: 8, color: t.faint, fontFamily: "'JetBrains Mono'" }}>{a.exp}</span>
         </div>
-        <div style={{ fontSize: 9.5, color: t.email, fontFamily: "'JetBrains Mono'", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{a.email}</div>
         {!isDead && (
-          <div style={{ display: "flex", alignItems: "center", gap: 5, marginTop: 1 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
             <span style={{ fontSize: 8, color: t.muted, fontFamily: "'JetBrains Mono'" }}>周</span>
             <div style={{ flex: 1, height: 3, borderRadius: 1.5, background: t.barTrack, overflow: "hidden" }}>
               <div style={{ height: "100%", width: `${clamp(a.wk)}%`, background: sc, borderRadius: 1.5, transition: "width .55s cubic-bezier(.4,0,.2,1)" }} />
             </div>
-            <span style={{ fontSize: 9, color: t.text2, fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>{a.wk}%</span>
-            <span style={{ fontSize: 8.5, color: t.muted, fontFamily: "'JetBrains Mono'" }}>
-              {isCool ? `❄${fmtCd(a.cooldownSec)}` : `↻${a.h5reset}${a.h5resetAt && a.h5resetAt !== "已重置" ? ` (${a.h5resetAt})` : ""}`}
+            <span style={{ fontSize: 8.5, color: t.text2, fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>{a.wk}%</span>
+            <span style={{ fontSize: 8, color: t.muted, fontFamily: "'JetBrains Mono'" }}>
+              {isCool ? `❄${fmtCd(a.cooldownSec)}` : `↻${a.h5reset}`}
             </span>
           </div>
         )}
         {isDead && (
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 1 }}>
-            <span style={{ fontSize: 8.5, color: "#E0524D", fontWeight: 600 }}>token 失效</span>
-            <span style={{ fontSize: 9, fontWeight: 700, color: t.accentText, background: t.accent, padding: "2px 8px", borderRadius: 5, cursor: "pointer" }}>复活</span>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+            <span style={{ fontSize: 8, color: "#E0524D", fontWeight: 600 }}>token 失效</span>
+            <span style={{ fontSize: 8.5, fontWeight: 700, color: t.accentText, background: t.accent, padding: "1px 7px", borderRadius: 4, cursor: "pointer" }}>复活</span>
           </div>
         )}
-      </div>
-      <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 2, flexShrink: 0 }}>
-        <span style={{ fontSize: 8.5, color: t.muted, fontFamily: "'JetBrains Mono'" }}>到期 {a.exp}</span>
       </div>
     </div>
   );
@@ -128,40 +125,46 @@ export default function MenuBar() {
 
   return (
     <div style={{ width: "100%", height: "100vh", display: "flex", flexDirection: "column", background: t.appBg, color: t.text, fontFamily: "'Space Grotesk'", borderRadius: 16, overflow: "hidden", position: "relative", transition: "background-color .35s ease, color .35s ease" }}>
-      {/* Header */}
-      <div style={{ display: "flex", alignItems: "center", padding: "12px 16px 10px", gap: 8, borderBottom: `1px solid ${t.chromeBorder}` }}>
-        <svg width="14" height="14" viewBox="0 0 24 24" fill={t.accent}><path d="M13 2 4 14h6l-1 8 9-12h-6z"/></svg>
-        <span style={{ fontSize: 13, fontWeight: 700 }}>CodexBar</span>
-        <div style={{ display: "flex", alignItems: "center", gap: 5, marginLeft: 6 }}>
-          <span style={{ width: 6, height: 6, borderRadius: "50%", background: STATUS_COLORS.live }} /><span style={{ fontSize: 10, color: t.muted }}>{counts.live}</span>
-          <span style={{ width: 6, height: 6, borderRadius: "50%", background: STATUS_COLORS.cool }} /><span style={{ fontSize: 10, color: t.muted }}>{counts.cool}</span>
-          <span style={{ width: 6, height: 6, borderRadius: "50%", background: STATUS_COLORS.dead }} /><span style={{ fontSize: 10, color: t.muted }}>{counts.dead}</span>
+      {/* Header — clean: logo + name + status dots + theme toggle (one gear only) */}
+      <div style={{ display: "flex", alignItems: "center", padding: "10px 14px 8px", gap: 7, borderBottom: `1px solid ${t.chromeBorder}` }}>
+        <svg width="13" height="13" viewBox="0 0 24 24" fill={t.accent}><path d="M13 2 4 14h6l-1 8 9-12h-6z"/></svg>
+        <span style={{ fontSize: 12.5, fontWeight: 700 }}>CodexBar</span>
+        <div style={{ display: "flex", alignItems: "center", gap: 4, marginLeft: 4 }}>
+          <span style={{ width: 5, height: 5, borderRadius: "50%", background: STATUS_COLORS.live }} /><span style={{ fontSize: 9.5, color: t.muted }}>{counts.live}</span>
+          {counts.cool > 0 && <><span style={{ width: 5, height: 5, borderRadius: "50%", background: STATUS_COLORS.cool }} /><span style={{ fontSize: 9.5, color: t.muted }}>{counts.cool}</span></>}
+          {counts.dead > 0 && <><span style={{ width: 5, height: 5, borderRadius: "50%", background: STATUS_COLORS.dead }} /><span style={{ fontSize: 9.5, color: t.muted }}>{counts.dead}</span></>}
         </div>
-        <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 8 }}>
+        <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 6 }}>
           <div style={{ display: "flex", gap: 1, padding: 1, border: `1px solid ${t.ghostBorder}`, borderRadius: 6 }}>
-            <span onClick={() => setTheme("light")} style={{ display: "grid", placeItems: "center", width: 20, height: 18, borderRadius: 4, cursor: "pointer", color: t.sunColor, background: t.sunBg }}>
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9"><circle cx="12" cy="12" r="4.2"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M19.1 4.9 17.7 6.3M6.3 17.7 4.9 19.1"/></svg>
+            <span onClick={() => setTheme("light")} style={{ display: "grid", placeItems: "center", width: 18, height: 16, borderRadius: 4, cursor: "pointer", color: t.sunColor, background: t.sunBg }}>
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9"><circle cx="12" cy="12" r="4.2"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M19.1 4.9 17.7 6.3M6.3 17.7 4.9 19.1"/></svg>
             </span>
-            <span onClick={() => setTheme("dark")} style={{ display: "grid", placeItems: "center", width: 20, height: 18, borderRadius: 4, cursor: "pointer", color: t.moonColor, background: t.moonBg }}>
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
+            <span onClick={() => setTheme("dark")} style={{ display: "grid", placeItems: "center", width: 18, height: 16, borderRadius: 4, cursor: "pointer", color: t.moonColor, background: t.moonBg }}>
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
             </span>
           </div>
-          <span style={{ color: t.muted, cursor: "pointer" }}>
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7"><circle cx="12" cy="12" r="3.2"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9 17 7M7 17l-2.1 2.1"/></svg>
-          </span>
         </div>
       </div>
 
-      {/* Hero */}
+      {/* Hero — with metric line like the main window */}
       {hero && (
-        <div style={{ display: "flex", alignItems: "center", gap: 12, margin: "12px 14px 0", padding: "12px 14px", background: t.heroBg, border: `1px solid ${t.heroBorder}`, borderRadius: 12, transition: "background-color .35s ease" }}>
-          <Ring pct={hero.h5} r={24} sw={5} color={t.accent} track={t.ringTrack} size={58}>
-            <span style={{ fontSize: 15, fontWeight: 700, color: t.text, fontVariantNumeric: "tabular-nums", lineHeight: 1, marginTop: -1 }}>{hero.h5}</span>
+        <div style={{ display: "flex", alignItems: "center", gap: 11, margin: "10px 14px 0", padding: "10px 12px", background: t.heroBg, border: `1px solid ${t.heroBorder}`, borderRadius: 12, transition: "background-color .35s ease" }}>
+          <Ring pct={hero.h5} r={22} sw={4.5} color={t.accent} track={t.ringTrack} size={52}>
+            <span style={{ fontSize: 14, fontWeight: 700, color: t.text, fontVariantNumeric: "tabular-nums", lineHeight: 1 }}>{hero.h5}</span>
           </Ring>
           <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ fontSize: 9, fontWeight: 700, letterSpacing: ".12em", color: t.accent, fontFamily: "'JetBrains Mono'" }}>现在该用</div>
-            <div style={{ fontSize: 18, fontWeight: 700, marginTop: 1 }}>{hero.node}</div>
-            <div style={{ fontSize: 9.5, color: t.email, fontFamily: "'JetBrains Mono'", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{hero.email}</div>
+            <div style={{ fontSize: 8.5, fontWeight: 700, letterSpacing: ".12em", color: t.accent, fontFamily: "'JetBrains Mono'" }}>现在该用</div>
+            <div style={{ display: "flex", alignItems: "baseline", gap: 6, marginTop: 1 }}>
+              <span style={{ fontSize: 16, fontWeight: 700 }}>{hero.node}</span>
+              <span style={{ fontSize: 9, color: t.email, fontFamily: "'JetBrains Mono'" }}>{hero.email}</span>
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 4, fontSize: 10, color: t.text2, fontFamily: "'JetBrains Mono'" }}>
+              <span>5h <b style={{ color: t.accent }}>{hero.h5}%</b></span>
+              <span style={{ color: t.faint }}>·</span>
+              <span>周 <b style={{ color: t.accent }}>{hero.wk}%</b></span>
+              <span style={{ color: t.faint }}>·</span>
+              <span>↻{hero.h5reset}</span>
+            </div>
           </div>
           {hero.aid === currentNode ? (
             <span style={{ fontSize: 10.5, fontWeight: 700, color: t.accent, border: `1px solid ${t.accentBorder}`, background: t.accentSoft, padding: "7px 12px", borderRadius: 8, flexShrink: 0 }}>✓ 使用中</span>
