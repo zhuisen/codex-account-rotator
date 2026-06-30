@@ -1,0 +1,197 @@
+import { useEffect, useState, useCallback, useRef } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import { THEMES, STATUS_COLORS, STATUS_TEXT, type Theme } from "./theme";
+import { type AppState, type TokenInfo, type Account, slotToAccount, recommended, clamp, fmtCd } from "./helpers";
+import Ring from "./components/Ring";
+import Toast from "./components/Toast";
+import "./App.css";
+
+function AccountRow({ a, isCurrent, isBest, t, onSelect }: {
+  a: Account; isCurrent: boolean; isBest: boolean; t: Theme; onSelect: () => void;
+}) {
+  const sc = STATUS_COLORS[a.status] ?? STATUS_COLORS.live;
+  const isDead = a.status === "dead";
+  const isCool = a.status === "cool";
+
+  return (
+    <div onClick={onSelect} style={{
+      display: "flex", gap: 10, alignItems: "center", padding: "9px 14px",
+      background: isCurrent ? t.curCardBg : "transparent", borderRadius: 10,
+      cursor: "pointer", userSelect: "none", transition: "background .2s ease",
+    }}>
+      <Ring pct={isDead ? 0 : a.h5} r={17} sw={4} color={sc} track={t.ringTrack} size={42}>
+        <span style={{ fontSize: 11, fontWeight: 700, color: t.text, fontVariantNumeric: "tabular-nums" }}>{isDead ? "—" : a.h5}</span>
+      </Ring>
+      <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 2 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+          <span style={{ fontSize: 12.5, fontWeight: 700, color: t.text }}>{a.node}</span>
+          <span style={{ fontSize: 9, fontWeight: 600, color: sc }}>{STATUS_TEXT[a.status]}</span>
+          {isBest && <span style={{ fontSize: 7.5, fontWeight: 700, color: t.accentText, background: t.accent, padding: "1px 4px", borderRadius: 3 }}>USE</span>}
+          {isCurrent && <span style={{ fontSize: 7.5, fontWeight: 700, color: t.accent, border: `1px solid ${t.accentBorder}`, padding: "0px 5px", borderRadius: 999 }}>当前</span>}
+        </div>
+        <div style={{ fontSize: 9.5, color: t.email, fontFamily: "'JetBrains Mono'", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{a.email}</div>
+        {!isDead && (
+          <div style={{ display: "flex", alignItems: "center", gap: 5, marginTop: 1 }}>
+            <span style={{ fontSize: 8, color: t.muted, fontFamily: "'JetBrains Mono'" }}>周</span>
+            <div style={{ flex: 1, height: 3, borderRadius: 1.5, background: t.barTrack, overflow: "hidden" }}>
+              <div style={{ height: "100%", width: `${clamp(a.wk)}%`, background: sc, borderRadius: 1.5, transition: "width .55s cubic-bezier(.4,0,.2,1)" }} />
+            </div>
+            <span style={{ fontSize: 9, color: t.text2, fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>{a.wk}%</span>
+            <span style={{ fontSize: 8.5, color: t.muted, fontFamily: "'JetBrains Mono'" }}>
+              {isCool ? `❄${fmtCd(a.cooldownSec)}` : `↻${a.h5reset}`}
+            </span>
+          </div>
+        )}
+        {isDead && (
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 1 }}>
+            <span style={{ fontSize: 8.5, color: "#E0524D", fontWeight: 600 }}>token 失效</span>
+            <span style={{ fontSize: 9, fontWeight: 700, color: t.accentText, background: t.accent, padding: "2px 8px", borderRadius: 5, cursor: "pointer" }}>复活</span>
+          </div>
+        )}
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 2, flexShrink: 0 }}>
+        <span style={{ fontSize: 8.5, color: t.muted, fontFamily: "'JetBrains Mono'" }}>到期 {a.exp}</span>
+      </div>
+    </div>
+  );
+}
+
+export default function MenuBar() {
+  const [state, setState] = useState<AppState>({});
+  const [tokens, setTokens] = useState<Record<string, TokenInfo>>({});
+  const [theme, setTheme] = useState<"dark" | "light">("dark");
+  const [toast, setToast] = useState<string | null>(null);
+  const [cooldowns, setCooldowns] = useState<Record<string, number>>({});
+  const [spinning, setSpinning] = useState(false);
+  const toastRef = useRef<ReturnType<typeof setTimeout>>();
+  const t = THEMES[theme];
+
+  const showToast = useCallback((msg: string) => {
+    if (toastRef.current) clearTimeout(toastRef.current);
+    setToast(msg);
+    toastRef.current = setTimeout(() => setToast(null), 2100);
+  }, []);
+
+  const refresh = useCallback(async () => {
+    try {
+      const [s, tk] = await Promise.all([invoke<AppState>("read_state"), invoke<Record<string, TokenInfo>>("read_auth_tokens")]);
+      setState(s); setTokens(tk);
+      const now = Date.now() / 1000;
+      const cds: Record<string, number> = {};
+      for (const [aid, sl] of Object.entries(s.slots ?? {})) {
+        const cd = (sl.cooling_until ?? 0) - now;
+        if (cd > 0) cds[aid] = Math.round(cd);
+      }
+      setCooldowns(cds);
+    } catch (e) { console.error(e); }
+  }, []);
+
+  useEffect(() => { refresh(); const id = setInterval(refresh, 10_000); return () => clearInterval(id); }, [refresh]);
+  useEffect(() => { const u = listen("state-changed", () => refresh()); return () => { u.then(f => f()); }; }, [refresh]);
+  useEffect(() => {
+    const id = setInterval(() => {
+      setCooldowns(prev => {
+        const next = { ...prev }; let changed = false;
+        for (const aid of Object.keys(next)) { if (next[aid] > 0) { next[aid]--; changed = true; } if (next[aid] <= 0) delete next[aid]; }
+        return changed ? next : prev;
+      });
+    }, 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  const run = async (args: string[], msg: string) => {
+    try { await invoke("run_rotate", { args }); } catch (e) { console.error(e); }
+    await refresh(); showToast(msg);
+  };
+
+  const slots = state.slots ?? {};
+  const accounts: Account[] = Object.entries(slots)
+    .map(([aid, sl]) => { const a = slotToAccount(aid, sl, tokens); if (cooldowns[aid] != null) a.cooldownSec = cooldowns[aid]; if (a.cooldownSec > 0 && a.status !== "dead") a.status = "cool"; return a; })
+    .sort((a, b) => { if (a.status === "dead" && b.status !== "dead") return 1; if (b.status === "dead" && a.status !== "dead") return -1; return b.h5 - a.h5; });
+
+  const currentNode = state.active;
+  const hero = recommended(accounts);
+  const counts = { live: accounts.filter(a => a.status === "live" || a.status === "low").length, cool: accounts.filter(a => a.status === "cool").length, dead: accounts.filter(a => a.status === "dead").length };
+
+  return (
+    <div style={{ width: "100%", height: "100vh", display: "flex", flexDirection: "column", background: t.appBg, color: t.text, fontFamily: "'Space Grotesk'", borderRadius: 16, overflow: "hidden", position: "relative", transition: "background-color .35s ease, color .35s ease" }}>
+      {/* Header */}
+      <div style={{ display: "flex", alignItems: "center", padding: "12px 16px 10px", gap: 8, borderBottom: `1px solid ${t.chromeBorder}` }}>
+        <svg width="14" height="14" viewBox="0 0 24 24" fill={t.accent}><path d="M13 2 4 14h6l-1 8 9-12h-6z"/></svg>
+        <span style={{ fontSize: 13, fontWeight: 700 }}>CodexBar</span>
+        <div style={{ display: "flex", alignItems: "center", gap: 5, marginLeft: 6 }}>
+          <span style={{ width: 6, height: 6, borderRadius: "50%", background: STATUS_COLORS.live }} /><span style={{ fontSize: 10, color: t.muted }}>{counts.live}</span>
+          <span style={{ width: 6, height: 6, borderRadius: "50%", background: STATUS_COLORS.cool }} /><span style={{ fontSize: 10, color: t.muted }}>{counts.cool}</span>
+          <span style={{ width: 6, height: 6, borderRadius: "50%", background: STATUS_COLORS.dead }} /><span style={{ fontSize: 10, color: t.muted }}>{counts.dead}</span>
+        </div>
+        <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 8 }}>
+          <div style={{ display: "flex", gap: 1, padding: 1, border: `1px solid ${t.ghostBorder}`, borderRadius: 6 }}>
+            <span onClick={() => setTheme("light")} style={{ display: "grid", placeItems: "center", width: 20, height: 18, borderRadius: 4, cursor: "pointer", color: t.sunColor, background: t.sunBg }}>
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9"><circle cx="12" cy="12" r="4.2"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M19.1 4.9 17.7 6.3M6.3 17.7 4.9 19.1"/></svg>
+            </span>
+            <span onClick={() => setTheme("dark")} style={{ display: "grid", placeItems: "center", width: 20, height: 18, borderRadius: 4, cursor: "pointer", color: t.moonColor, background: t.moonBg }}>
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
+            </span>
+          </div>
+          <span style={{ color: t.muted, cursor: "pointer" }}>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7"><circle cx="12" cy="12" r="3.2"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9 17 7M7 17l-2.1 2.1"/></svg>
+          </span>
+        </div>
+      </div>
+
+      {/* Hero */}
+      {hero && (
+        <div style={{ display: "flex", alignItems: "center", gap: 12, margin: "12px 14px 0", padding: "12px 14px", background: t.heroBg, border: `1px solid ${t.heroBorder}`, borderRadius: 12, transition: "background-color .35s ease" }}>
+          <Ring pct={hero.h5} r={24} sw={5} color={t.accent} track={t.ringTrack} size={58}>
+            <span style={{ fontSize: 15, fontWeight: 700, color: t.text, fontVariantNumeric: "tabular-nums", lineHeight: 1 }}>{hero.h5}</span>
+          </Ring>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 9, fontWeight: 700, letterSpacing: ".12em", color: t.accent, fontFamily: "'JetBrains Mono'" }}>现在该用</div>
+            <div style={{ fontSize: 18, fontWeight: 700, marginTop: 1 }}>{hero.node}</div>
+            <div style={{ fontSize: 9.5, color: t.email, fontFamily: "'JetBrains Mono'", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{hero.email}</div>
+          </div>
+          {hero.aid === currentNode ? (
+            <span style={{ fontSize: 10.5, fontWeight: 700, color: t.accent, border: `1px solid ${t.accentBorder}`, background: t.accentSoft, padding: "7px 12px", borderRadius: 8, flexShrink: 0 }}>✓ 使用中</span>
+          ) : (
+            <span onClick={() => run(["switch", hero.node], `当前号 → ${hero.node}`)} style={{ fontSize: 10.5, fontWeight: 700, color: t.accentText, background: t.accent, padding: "7px 12px", borderRadius: 8, flexShrink: 0, cursor: "pointer" }}>设为当前</span>
+          )}
+        </div>
+      )}
+
+      {/* List */}
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 16px 4px", fontSize: 10.5, color: t.muted }}>
+        <span>全部账号</span><span>{accounts.length} 个</span>
+      </div>
+      <div style={{ flex: 1, overflowY: "auto", padding: "0 2px", maxHeight: 286 }}>
+        {accounts.map(a => (
+          <AccountRow key={a.aid} a={a} isCurrent={a.aid === currentNode} isBest={hero?.aid === a.aid} t={t}
+            onSelect={() => { if (a.status !== "dead") run(["switch", a.node], `当前号 → ${a.node}`); }} />
+        ))}
+      </div>
+
+      {/* Bottom 2x2 */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 7, padding: "10px 14px 14px", borderTop: `1px solid ${t.chromeBorder}` }}>
+        {[
+          { label: "刷新全池", icon: true, accent: false, action: () => { setSpinning(true); run(["refresh-all", "--notify"], "已刷新全池").then(() => setTimeout(() => setSpinning(false), 750)); } },
+          { label: "刷新各号", icon: true, accent: true, badge: "+1%", action: () => run(["refresh-all", "--notify"], "各号 5h +1%") },
+          { label: "冷却当前号", icon: false, accent: false, action: () => run(["cool", "300"], "已冷却当前号") },
+          { label: "清除冷却", icon: false, accent: false, action: () => run(["uncool", "all"], "已清除冷却") },
+        ].map((btn, i) => (
+          <span key={i} onClick={btn.action} style={{
+            display: "flex", alignItems: "center", justifyContent: "center", gap: 5, padding: "8px 0",
+            border: `1px solid ${btn.accent ? t.accentBorder : t.ghostBorder}`, borderRadius: 8,
+            fontSize: 11, color: btn.accent ? t.accentTextSoft : t.ghostText,
+            background: btn.accent ? t.accentSoft : t.ghostBg, cursor: "pointer", userSelect: "none",
+          }}>
+            {btn.icon && <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ animation: spinning && i === 0 ? "cbSpin .7s linear" : "none", transformOrigin: "center" }}><path d="M21 12a9 9 0 1 1-3-6.7M21 4v4h-4"/></svg>}
+            {btn.label}
+            {btn.badge && <span style={{ fontSize: 8.5, fontWeight: 700, color: t.accentText, background: t.accent, padding: "1px 4px", borderRadius: 3 }}>{btn.badge}</span>}
+          </span>
+        ))}
+      </div>
+
+      {toast && <Toast msg={toast} t={t} />}
+    </div>
+  );
+}
