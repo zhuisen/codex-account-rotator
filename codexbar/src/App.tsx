@@ -86,8 +86,9 @@ export default function App() {
   const [tokens, setTokens] = useState<Record<string, TokenInfo>>({});
   const [theme, setTheme] = useState<"dark" | "light">("dark");
   const [page, setPage] = useState<Page>("overview");
-  const [spinning, setSpinning] = useState(false);
+  const [loadingAction, setLoadingAction] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
+  const [justRefreshed, setJustRefreshed] = useState(false);
   const [cooldowns, setCooldowns] = useState<Record<string, number>>({});
   const toastRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -136,9 +137,13 @@ export default function App() {
     return () => clearInterval(id);
   }, []);
 
-  const run = async (args: string[], msg: string) => {
+  const run = async (actionId: string, args: string[], msg: string) => {
+    setLoadingAction(actionId);
     try { await invoke("run_rotate", { args }); } catch (e) { console.error(e); }
     await refresh();
+    setJustRefreshed(true);
+    setTimeout(() => setJustRefreshed(false), 800);
+    setLoadingAction(null);
     showToast(msg);
   };
 
