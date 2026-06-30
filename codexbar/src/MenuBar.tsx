@@ -21,7 +21,7 @@ function AccountRow({ a, isCurrent, isBest, t, onSelect }: {
       cursor: "pointer", userSelect: "none", transition: "background .2s ease",
     }}>
       <Ring pct={isDead ? 0 : a.h5} r={17} sw={4} color={sc} track={t.ringTrack} size={42}>
-        <span style={{ fontSize: 11, fontWeight: 700, color: t.text, fontVariantNumeric: "tabular-nums" }}>{isDead ? "—" : a.h5}</span>
+        <span style={{ fontSize: 11, fontWeight: 700, color: t.text, fontVariantNumeric: "tabular-nums", lineHeight: 1 }}>{isDead ? "—" : a.h5}</span>
       </Ring>
       <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 2 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
@@ -105,6 +105,17 @@ export default function MenuBar() {
     await refresh(); showToast(msg);
   };
 
+  // macOS keyboard shortcuts
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (!e.metaKey) return;
+      if (e.key === "w") { e.preventDefault(); import("@tauri-apps/api/window").then(m => m.getCurrentWindow().hide()); }
+      if (e.key === "r" && !e.shiftKey) { e.preventDefault(); refresh(); }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [refresh]);
+
   const slots = state.slots ?? {};
   const accounts: Account[] = Object.entries(slots)
     .map(([aid, sl]) => { const a = slotToAccount(aid, sl, tokens); if (cooldowns[aid] != null) a.cooldownSec = cooldowns[aid]; if (a.cooldownSec > 0 && a.status !== "dead") a.status = "cool"; return a; })
@@ -144,7 +155,7 @@ export default function MenuBar() {
       {hero && (
         <div style={{ display: "flex", alignItems: "center", gap: 12, margin: "12px 14px 0", padding: "12px 14px", background: t.heroBg, border: `1px solid ${t.heroBorder}`, borderRadius: 12, transition: "background-color .35s ease" }}>
           <Ring pct={hero.h5} r={24} sw={5} color={t.accent} track={t.ringTrack} size={58}>
-            <span style={{ fontSize: 15, fontWeight: 700, color: t.text, fontVariantNumeric: "tabular-nums", lineHeight: 1 }}>{hero.h5}</span>
+            <span style={{ fontSize: 15, fontWeight: 700, color: t.text, fontVariantNumeric: "tabular-nums", lineHeight: 1, marginTop: -1 }}>{hero.h5}</span>
           </Ring>
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ fontSize: 9, fontWeight: 700, letterSpacing: ".12em", color: t.accent, fontFamily: "'JetBrains Mono'" }}>现在该用</div>

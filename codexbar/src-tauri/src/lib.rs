@@ -109,10 +109,10 @@ fn b64_decode(input: &str) -> Result<Vec<u8>, String> {
 fn format_tray_title() -> String {
     let path = format!("{}/state.json", STORE);
     let Ok(data) = fs::read_to_string(&path) else {
-        return "⚡ codex".into();
+        return "codex".into();
     };
     let Ok(state) = serde_json::from_str::<Value>(&data) else {
-        return "⚡ codex".into();
+        return "codex".into();
     };
     let active = state["active"].as_str().unwrap_or("");
     let slots = state["slots"].as_object();
@@ -121,17 +121,17 @@ fn format_tray_title() -> String {
             let label = slot["label"].as_str().unwrap_or("?");
             let dead = slot["auth_dead"].as_bool().unwrap_or(false);
             if dead {
-                return format!("⚡ {} 失效", label);
+                return format!("{} 失效", label);
             }
             if let Some(q) = slot.get("quota") {
                 let used = q["primary"]["used_percent"].as_f64().unwrap_or(0.0);
                 let rem = (100.0 - used).max(0.0) as u32;
-                return format!("⚡ {} {}%", label, rem);
+                return format!("{} {}%", label, rem);
             }
-            return format!("⚡ {}", label);
+            return format!("{}", label);
         }
     }
-    "⚡ codex".into()
+    "codex".into()
 }
 
 // ---- toggle menubar popover ----
@@ -195,7 +195,8 @@ pub fn run() {
             });
 
             // ---- tray icon ----
-            let tray_icon = app.default_window_icon().unwrap().clone();
+            let tray_bytes = include_bytes!("../icons/tray.png");
+            let tray_icon = tauri::image::Image::from_bytes(tray_bytes)?;
 
             let quit = MenuItem::with_id(app, "quit", "退出 CodexBar", true, None::<&str>)?;
             let show =

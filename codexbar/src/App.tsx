@@ -39,7 +39,7 @@ function AccountCard({ a, isCurrent, isBest, t, onSelect }: {
         transition: "background .3s ease, border-color .3s ease, transform .15s ease, box-shadow .15s ease" }}>
 
       <Ring pct={isDead ? 0 : a.h5} r={21} sw={5} color={sc} track={t.ringTrack} size={52}>
-        <span style={{ fontSize: 13, fontWeight: 700, color: t.text, fontVariantNumeric: "tabular-nums" }}>{isDead ? "—" : a.h5}</span>
+        <span style={{ fontSize: 13, fontWeight: 700, color: t.text, fontVariantNumeric: "tabular-nums", lineHeight: 1 }}>{isDead ? "—" : a.h5}</span>
       </Ring>
 
       <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 4 }}>
@@ -166,6 +166,26 @@ export default function App() {
 
   const win = getCurrentWindow();
 
+  // macOS keyboard shortcuts (lost when decorations:false)
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (!e.metaKey) return;
+      switch (e.key) {
+        case "w": e.preventDefault(); win.hide(); break;
+        case "q": e.preventDefault(); std_process_exit(); break;
+        case "m": e.preventDefault(); win.minimize(); break;
+        case ",": e.preventDefault(); setPage("settings"); break;
+        case "r": if (!e.shiftKey) { e.preventDefault(); refresh(); } break;
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [win, refresh]);
+
+  const std_process_exit = async () => {
+    try { const { exit } = await import("@tauri-apps/plugin-process"); await exit(0); } catch { win.close(); }
+  };
+
   return (
     <div style={{ width: "100vw", height: "100vh", display: "flex", flexDirection: "column", background: t.appBg, color: t.text, fontFamily: "'Space Grotesk'", borderRadius: 12, overflow: "hidden", boxShadow: t.shadow, transition: "background-color .35s ease, color .35s ease" }}>
 
@@ -218,8 +238,8 @@ export default function App() {
               {hero && (
                 <div style={{ display: "flex", alignItems: "center", gap: 18, background: t.heroBg, border: `1px solid ${t.heroBorder}`, borderRadius: 14, padding: "15px 18px", marginBottom: 13, boxShadow: t.heroShadow, transition: "background-color .35s ease, border-color .35s ease" }}>
                   <Ring pct={hero.h5} r={33} sw={6} color={t.accent} track={t.ringTrack} size={80}>
-                    <span style={{ fontSize: 19, fontWeight: 700, color: t.text, fontVariantNumeric: "tabular-nums", lineHeight: 1 }}>{hero.h5}<span style={{ fontSize: 10, color: t.muted }}>%</span></span>
-                    <span style={{ fontSize: 8.5, color: t.muted, fontFamily: "'JetBrains Mono'" }}>5h</span>
+                    <span style={{ fontSize: 19, fontWeight: 700, color: t.text, fontVariantNumeric: "tabular-nums", lineHeight: 1, marginTop: -1 }}>{hero.h5}<span style={{ fontSize: 10, color: t.muted }}>%</span></span>
+                    <span style={{ fontSize: 8.5, color: t.muted, fontFamily: "'JetBrains Mono'", lineHeight: 1, marginTop: 2 }}>5h</span>
                   </Ring>
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: ".14em", color: t.accent, fontFamily: "'JetBrains Mono'" }}>现在该用 · USE NOW</div>

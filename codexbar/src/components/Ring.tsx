@@ -23,7 +23,7 @@ export default function Ring({ pct, r, sw, color, track, size, children }: RingP
           style={{ transition: "stroke-dasharray .6s cubic-bezier(.4,0,.2,1), stroke .35s ease" }}
         />
       </svg>
-      <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center" }}>
+      <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", lineHeight: 1, gap: 1 }}>
         {children}
       </div>
     </div>
