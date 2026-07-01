@@ -29,9 +29,9 @@ export interface Account {
 export const now = () => Date.now() / 1000;
 export const clamp = (n: number) => Math.max(0, Math.min(100, Math.round(n)));
 
-export function winRem(w?: Win, cap = 0): number | null {
+export function winRem(w?: Win, _cap = 0): number | null {
   if (!w || w.used_percent == null) return null;
-  if (w.resets_at && w.resets_at <= now() && cap > 0 && cap < w.resets_at) return 100;
+  if (w.resets_at && w.resets_at <= now()) return 100;
   return 100 - w.used_percent;
 }
 

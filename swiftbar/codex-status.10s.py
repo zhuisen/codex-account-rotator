@@ -119,16 +119,16 @@ def proxy_up(port=8011):
 
 
 def win_remaining(w, captured_at=0):
-    """Remaining % for one window. `used_percent` is the API's REAL usage at snapshot time, so use it
-    directly (100 − used). A passed `resets_at` reads as a full 100% ONLY when our snapshot predates
-    that reset (window reset since → no post-reset data, optimistic guess). When the snapshot is NEWER
-    than resets_at the used_percent already reflects the new window — returning 100% there was the
-    inflation bug (showed 100% while the account had really used 39%)."""
+    """Remaining % for one window. resets_at passed = window reset = 100%, unconditionally.
+    The v0.8.6 captured_at guard was too conservative: it prevented showing 100% when the snapshot
+    was newer than resets_at, but that also broke dead/stale accounts whose snapshot predates the
+    reset AND whose used_percent reflects the OLD window (e.g. plus4 used=22 but window reset hours
+    ago → should be 100%, was showing 78%)."""
     used = (w or {}).get("used_percent")
     if used is None:
         return None
     ra = (w or {}).get("resets_at")
-    if ra and ra <= NOW and captured_at and captured_at < ra:
+    if ra and ra <= NOW:
         return 100.0
     return 100 - used
 
