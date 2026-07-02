@@ -120,6 +120,12 @@ export default function App() {
   const notifiedRef = useRef<Set<string>>(new Set());
   const accountsRef = useRef<Account[]>([]);
   const tokensRef = useRef<Record<string, TokenInfo>>({});
+  const lastAutoSwitchRef = useRef(0);
+
+  const SW_MIN_TARGET = 30;
+  const SW_MARGIN = 15;
+  const SW_DEBOUNCE = 300;
+  const SW_PROXY_GRACE = 120;
 
   // cooldown countdown (1s)
   useEffect(() => {
@@ -162,6 +168,39 @@ export default function App() {
   const currentNode = state.active;
   accountsRef.current = accounts;
   tokensRef.current = tokens;
+
+  // auto-switch: if active account's tightest remaining < threshold AND a clearly better account
+  // exists AND cxp isn't currently rotating, switch to the fullest account (takes effect next codex run)
+  useEffect(() => {
+    const check = () => {
+      const accts = accountsRef.current;
+      const now = Date.now() / 1000;
+      if (!currentNode || now - lastAutoSwitchRef.current < SW_DEBOUNCE) return;
+      if ((state.last_proxy_ts ?? 0) > now - SW_PROXY_GRACE) return; // cxp is rotating — stand down
+      const active = accts.find(a => a.aid === currentNode);
+      if (!active) return;
+      const settings = getSettings();
+      if (!settings.autoSwitchEnabled) return;
+      const activeRem = Math.min(active.h5, active.wk);
+      if (activeRem >= settings.autoSwitchThreshold) return;
+      let best: Account | null = null;
+      for (const a of accts) {
+        if (a.aid === currentNode || a.status === "dead" || a.status === "cool") continue;
+        const rem = Math.min(a.h5, a.wk);
+        if (rem >= SW_MIN_TARGET && rem > activeRem + SW_MARGIN) {
+          if (!best || rem > Math.min(best.h5, best.wk)) best = a;
+        }
+      }
+      if (best) {
+        lastAutoSwitchRef.current = now;
+        run("auto-switch", ["switch", best.node], `额度低(${activeRem}%)，自动切到 ${best.node}(${Math.min(best.h5, best.wk)}%)`);
+        notify("自动切号", `${active.node} 额度低(${activeRem}%)，已切到 ${best.node}`);
+      }
+    };
+    check();
+    const id = setInterval(check, 30_000); // check every 30s
+    return () => clearInterval(id);
+  }, [currentNode, state.last_proxy_ts]); // re-setup when active changes or proxy activity changes
 
   // expiry warnings (check every 60s, refs to avoid interval rebuild on every render)
   useEffect(() => {
