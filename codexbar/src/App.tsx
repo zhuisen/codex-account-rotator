@@ -31,23 +31,60 @@ interface AccountDetail {
   quota_source?: string; quota_captured_at?: number;
 }
 
-function AccountCard({ a, isCurrent, isBest, t, onSelect }: {
-  a: Account; isCurrent: boolean; isBest: boolean; t: Theme; onSelect: () => void;
+function DetailModal({ detail, t, onClose }: { detail: AccountDetail; t: Theme; onClose: () => void }) {
+  const fmtTs = (ts?: number) => ts ? new Date(ts * 1000).toLocaleString("zh-CN", { timeZone: "Asia/Singapore" }) : "—";
+  const rows: [string, string, string?][] = [
+    ["account_id", detail.account_id ?? "—"],
+    ["email", detail.email ?? "—"],
+    ["文件", `auth/${detail.file}`],
+    ["access_token", `…${detail.access_token_tail}  (${detail.access_token_len} chars)`],
+    ["access 签发", fmtTs(detail.access_iat)],
+    ["access 过期", fmtTs(detail.access_exp), detail.access_exp && detail.access_exp < Date.now()/1000 ? "#E0524D" : t.accent],
+    ["refresh_token", `…${detail.refresh_token_tail}  (${detail.refresh_token_len} chars)`],
+    ["last_refresh", detail.last_refresh?.slice(0, 19) ?? "—"],
+    ["plan", detail.plan || "—"],
+    ["订阅至", detail.sub_until?.slice(0, 10) ?? "—"],
+    ["quota 来源", String(detail.quota_source ?? "—")],
+    ["快照时间", fmtTs(detail.quota_captured_at)],
+  ];
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100, backdropFilter: "blur(4px)" }}>
+      <div onClick={e => e.stopPropagation()} style={{ background: t.cardBg, border: `1px solid ${t.accent}`, borderRadius: 14, padding: "20px 24px", width: 460, maxHeight: "80vh", overflow: "auto", boxShadow: "0 20px 60px rgba(0,0,0,.5)", userSelect: "text" }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14 }}>
+          <span style={{ fontSize: 16, fontWeight: 700 }}>{detail.label} · 账号详情</span>
+          <span onClick={onClose} style={{ fontSize: 18, color: t.muted, cursor: "pointer", padding: "0 4px" }}>✕</span>
+        </div>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11, fontFamily: "'JetBrains Mono'" }}>
+          <tbody>
+            {rows.map(([key, val, color]) => (
+              <tr key={key} style={{ borderBottom: `1px solid ${t.divider}` }}>
+                <td style={{ padding: "6px 8px 6px 0", color: t.muted, whiteSpace: "nowrap", verticalAlign: "top", width: 100 }}>{key}</td>
+                <td style={{ padding: "6px 0", color: color ?? t.text, wordBreak: "break-all", cursor: "text" }}>{val}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        <div style={{ marginTop: 12, fontSize: 9.5, color: t.faint, textAlign: "center" }}>点击文字可选中复制 · 完整 token 不显示(仅指纹)</div>
+      </div>
+    </div>
+  );
+}
+
+function AccountCard({ a, isCurrent, isBest, t, onSelect, onShowDetail }: {
+  a: Account; isCurrent: boolean; isBest: boolean; t: Theme; onSelect: () => void; onShowDetail: (aid: string) => void;
 }) {
   const [hover, setHover] = useState(false);
-  const [expanded, setExpanded] = useState(false);
-  const [detail, setDetail] = useState<AccountDetail | null>(null);
   const sc = STATUS_COLORS[a.status] ?? STATUS_COLORS.live;
   const isDead = a.status === "dead";
   const isCool = a.status === "cool";
 
   return (
     <div
-      onClick={(e) => { e.stopPropagation(); setExpanded(!expanded); if (!expanded) invoke<AccountDetail>("read_account_detail", { aid: a.aid }).then(setDetail).catch(() => {}); }}
+      onClick={() => onShowDetail(a.aid)}
       onDoubleClick={(e) => { e.stopPropagation(); onSelect(); }}
       onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}
       style={{ background: isCurrent ? t.curCardBg : t.cardBg, border: `1px solid ${isCurrent ? t.accent : t.cardBorder}`,
-        borderRadius: 12, padding: 12, display: "flex", gap: 11, alignItems: "center", flexWrap: "wrap",
+        borderRadius: 12, padding: 12, display: "flex", gap: 11, alignItems: "center",
         minHeight: 100, overflow: "hidden",
         cursor: "pointer", userSelect: "none",
         transform: hover ? "translateY(-2px)" : undefined,
@@ -91,24 +128,6 @@ function AccountCard({ a, isCurrent, isBest, t, onSelect }: {
         )}
       </div>
 
-      {/* expanded auth detail panel */}
-      {expanded && detail && (
-        <div style={{ width: "100%", marginTop: 8, padding: "8px 10px", background: "rgba(0,0,0,.2)", borderRadius: 8, fontSize: 9.5, fontFamily: "'JetBrains Mono'", color: t.text2, display: "grid", gridTemplateColumns: "1fr 1fr", gap: "4px 12px", lineHeight: 1.6 }}
-          onClick={(e) => e.stopPropagation()}>
-          <span style={{ color: t.muted }}>account_id</span><span style={{ color: t.text, wordBreak: "break-all" }}>{detail.account_id ?? "—"}</span>
-          <span style={{ color: t.muted }}>file</span><span>auth/{detail.file}</span>
-          <span style={{ color: t.muted }}>access_token</span><span>…{detail.access_token_tail} <span style={{ color: t.faint }}>({detail.access_token_len} chars)</span></span>
-          <span style={{ color: t.muted }}>access 签发</span><span>{detail.access_iat ? new Date(detail.access_iat * 1000).toLocaleString("zh-CN", { timeZone: "Asia/Singapore" }) : "—"}</span>
-          <span style={{ color: t.muted }}>access 过期</span><span style={{ color: detail.access_exp && detail.access_exp < Date.now()/1000 ? "#E0524D" : t.accent }}>{detail.access_exp ? new Date(detail.access_exp * 1000).toLocaleString("zh-CN", { timeZone: "Asia/Singapore" }) : "—"}</span>
-          <span style={{ color: t.muted }}>refresh_token</span><span>…{detail.refresh_token_tail} <span style={{ color: t.faint }}>({detail.refresh_token_len} chars)</span></span>
-          <span style={{ color: t.muted }}>last_refresh</span><span>{detail.last_refresh?.slice(0, 19) ?? "—"}</span>
-          <span style={{ color: t.muted }}>plan</span><span>{detail.plan || "—"}</span>
-          <span style={{ color: t.muted }}>订阅至</span><span>{detail.sub_until?.slice(0, 10) ?? "—"}</span>
-          <span style={{ color: t.muted }}>quota 来源</span><span>{String(detail.quota_source ?? "—")}</span>
-          <span style={{ color: t.muted }}>快照时间</span><span>{detail.quota_captured_at ? new Date(detail.quota_captured_at * 1000).toLocaleString("zh-CN", { timeZone: "Asia/Singapore" }) : "—"}</span>
-        </div>
-      )}
-      {expanded && !detail && <div style={{ width: "100%", marginTop: 8, fontSize: 10, color: t.muted, textAlign: "center" }}>加载中…</div>}
     </div>
   );
 }
@@ -122,6 +141,7 @@ export default function App() {
   const [loadingAction, setLoadingAction] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [cooldowns, setCooldowns] = useState<Record<string, number>>({});
+  const [detailModal, setDetailModal] = useState<AccountDetail | null>(null);
   const toastRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const t = THEMES[theme];
@@ -386,7 +406,8 @@ export default function App() {
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 11, flex: 1, overflow: "auto", alignContent: "start" }}>
                 {accounts.map(a => (
                   <AccountCard key={a.aid} a={a} isCurrent={a.aid === currentNode} isBest={hero?.aid === a.aid} t={t}
-                    onSelect={() => { if (!a.status.startsWith("dead")) run(`switch-${a.aid}`, ["switch", a.node], `当前号 → ${a.node}`); }} />
+                    onSelect={() => { if (!a.status.startsWith("dead")) run(`switch-${a.aid}`, ["switch", a.node], `当前号 → ${a.node}`); }}
+                    onShowDetail={(aid) => { invoke<AccountDetail>("read_account_detail", { aid }).then(d => setDetailModal(d)).catch(() => {}); }} />
                 ))}
               </div>
             </>
@@ -396,6 +417,9 @@ export default function App() {
           {page === "settings" && <SettingsPage t={t} />}
         </div>
       </div>
+
+      {/* Detail modal */}
+      {detailModal && <DetailModal detail={detailModal} t={t} onClose={() => setDetailModal(null)} />}
 
       {/* Toast */}
       {toast && <Toast msg={toast} t={t} />}
