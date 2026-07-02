@@ -23,18 +23,31 @@ const IconSun = () => <svg width="13" height="13" viewBox="0 0 24 24" fill="none
 const IconMoon = () => <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>;
 
 // ---- Account card (3x2 grid) ----
+interface AccountDetail {
+  account_id?: string; email?: string; label?: string; plan?: string; sub_until?: string;
+  last_refresh?: string; auth_dead?: boolean; file?: string;
+  access_token_tail?: string; access_token_len?: number; access_exp?: number; access_iat?: number;
+  refresh_token_tail?: string; refresh_token_len?: number; id_token_len?: number;
+  quota_source?: string; quota_captured_at?: number;
+}
+
 function AccountCard({ a, isCurrent, isBest, t, onSelect }: {
   a: Account; isCurrent: boolean; isBest: boolean; t: Theme; onSelect: () => void;
 }) {
   const [hover, setHover] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+  const [detail, setDetail] = useState<AccountDetail | null>(null);
   const sc = STATUS_COLORS[a.status] ?? STATUS_COLORS.live;
   const isDead = a.status === "dead";
   const isCool = a.status === "cool";
 
   return (
-    <div onClick={onSelect} onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}
+    <div
+      onClick={(e) => { e.stopPropagation(); setExpanded(!expanded); if (!expanded) invoke<AccountDetail>("read_account_detail", { aid: a.aid }).then(setDetail).catch(() => {}); }}
+      onDoubleClick={(e) => { e.stopPropagation(); onSelect(); }}
+      onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}
       style={{ background: isCurrent ? t.curCardBg : t.cardBg, border: `1px solid ${isCurrent ? t.accent : t.cardBorder}`,
-        borderRadius: 12, padding: 12, display: "flex", gap: 11, alignItems: "center",
+        borderRadius: 12, padding: 12, display: "flex", gap: 11, alignItems: "center", flexWrap: "wrap",
         minHeight: 100, overflow: "hidden",
         cursor: "pointer", userSelect: "none",
         transform: hover ? "translateY(-2px)" : undefined,
@@ -77,6 +90,25 @@ function AccountCard({ a, isCurrent, isBest, t, onSelect }: {
           </div>
         )}
       </div>
+
+      {/* expanded auth detail panel */}
+      {expanded && detail && (
+        <div style={{ width: "100%", marginTop: 8, padding: "8px 10px", background: "rgba(0,0,0,.2)", borderRadius: 8, fontSize: 9.5, fontFamily: "'JetBrains Mono'", color: t.text2, display: "grid", gridTemplateColumns: "1fr 1fr", gap: "4px 12px", lineHeight: 1.6 }}
+          onClick={(e) => e.stopPropagation()}>
+          <span style={{ color: t.muted }}>account_id</span><span style={{ color: t.text, wordBreak: "break-all" }}>{detail.account_id ?? "—"}</span>
+          <span style={{ color: t.muted }}>file</span><span>auth/{detail.file}</span>
+          <span style={{ color: t.muted }}>access_token</span><span>…{detail.access_token_tail} <span style={{ color: t.faint }}>({detail.access_token_len} chars)</span></span>
+          <span style={{ color: t.muted }}>access 签发</span><span>{detail.access_iat ? new Date(detail.access_iat * 1000).toLocaleString("zh-CN", { timeZone: "Asia/Singapore" }) : "—"}</span>
+          <span style={{ color: t.muted }}>access 过期</span><span style={{ color: detail.access_exp && detail.access_exp < Date.now()/1000 ? "#E0524D" : t.accent }}>{detail.access_exp ? new Date(detail.access_exp * 1000).toLocaleString("zh-CN", { timeZone: "Asia/Singapore" }) : "—"}</span>
+          <span style={{ color: t.muted }}>refresh_token</span><span>…{detail.refresh_token_tail} <span style={{ color: t.faint }}>({detail.refresh_token_len} chars)</span></span>
+          <span style={{ color: t.muted }}>last_refresh</span><span>{detail.last_refresh?.slice(0, 19) ?? "—"}</span>
+          <span style={{ color: t.muted }}>plan</span><span>{detail.plan || "—"}</span>
+          <span style={{ color: t.muted }}>订阅至</span><span>{detail.sub_until?.slice(0, 10) ?? "—"}</span>
+          <span style={{ color: t.muted }}>quota 来源</span><span>{String(detail.quota_source ?? "—")}</span>
+          <span style={{ color: t.muted }}>快照时间</span><span>{detail.quota_captured_at ? new Date(detail.quota_captured_at * 1000).toLocaleString("zh-CN", { timeZone: "Asia/Singapore" }) : "—"}</span>
+        </div>
+      )}
+      {expanded && !detail && <div style={{ width: "100%", marginTop: 8, fontSize: 10, color: t.muted, textAlign: "center" }}>加载中…</div>}
     </div>
   );
 }

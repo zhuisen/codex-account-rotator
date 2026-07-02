@@ -134,6 +134,62 @@ fn read_logs() -> Result<String, String> {
     Ok(lines.join("\n"))
 }
 
+// ---- read single account auth detail ----
+
+#[tauri::command]
+fn read_account_detail(aid: String) -> Result<Value, String> {
+    let state: Value = read_state()?;
+    let slot = state["slots"].get(&aid).ok_or("account not found")?;
+    let file = slot["file"].as_str().unwrap_or("");
+    let path = format!("{}/auth/{}", store_dir(), file);
+    let data = fs::read_to_string(&path).map_err(|e| format!("read: {}", e))?;
+    let auth: Value = serde_json::from_str(&data).map_err(|e| format!("parse: {}", e))?;
+    let tokens = auth.get("tokens").cloned().unwrap_or(Value::Null);
+
+    let mut detail = serde_json::Map::new();
+    detail.insert("account_id".into(), tokens["account_id"].clone());
+    detail.insert("email".into(), Value::from(slot["email"].as_str().unwrap_or("")));
+    detail.insert("label".into(), Value::from(slot["label"].as_str().unwrap_or("")));
+    detail.insert("plan".into(), Value::from(slot["plan"].as_str().unwrap_or("")));
+    detail.insert("sub_until".into(), Value::from(slot["sub_until"].as_str().unwrap_or("")));
+    detail.insert("last_refresh".into(), Value::from(auth["last_refresh"].as_str().unwrap_or("")));
+    detail.insert("auth_dead".into(), Value::from(slot["auth_dead"].as_bool().unwrap_or(false)));
+    detail.insert("file".into(), Value::from(file));
+
+    // token fingerprints (last 8 chars) — never expose full tokens
+    if let Some(at) = tokens["access_token"].as_str() {
+        let len = at.len();
+        detail.insert("access_token_tail".into(), Value::from(if len > 8 { &at[len-8..] } else { at }));
+        detail.insert("access_token_len".into(), Value::from(len));
+        // decode exp
+        if let Some(payload) = at.split('.').nth(1) {
+            let padded = format!("{}{}", payload, "=".repeat((4 - payload.len() % 4) % 4));
+            if let Ok(decoded) = b64_decode(&padded) {
+                if let Ok(claims) = serde_json::from_slice::<Value>(&decoded) {
+                    if let Some(exp) = claims["exp"].as_f64() { detail.insert("access_exp".into(), Value::from(exp)); }
+                    if let Some(iat) = claims["iat"].as_f64() { detail.insert("access_iat".into(), Value::from(iat)); }
+                }
+            }
+        }
+    }
+    if let Some(rt) = tokens["refresh_token"].as_str() {
+        let len = rt.len();
+        detail.insert("refresh_token_tail".into(), Value::from(if len > 8 { &rt[len-8..] } else { rt }));
+        detail.insert("refresh_token_len".into(), Value::from(len));
+    }
+    if let Some(id) = tokens["id_token"].as_str() {
+        detail.insert("id_token_len".into(), Value::from(id.len()));
+    }
+
+    // quota snapshot
+    if let Some(q) = slot.get("quota") {
+        detail.insert("quota_source".into(), q["source"].clone());
+        detail.insert("quota_captured_at".into(), q["captured_at"].clone());
+    }
+
+    Ok(Value::Object(detail))
+}
+
 // ---- tray title from state.json ----
 
 fn format_tray_title() -> String {
@@ -307,7 +363,8 @@ pub fn run() {
             read_state,
             run_rotate,
             read_auth_tokens,
-            read_logs
+            read_logs,
+            read_account_detail
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
