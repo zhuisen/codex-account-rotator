@@ -266,6 +266,16 @@ pub fn run() {
                 })
                 .build(app)?;
 
+            // ---- startup: auto refresh-all to get fresh quota ----
+            let store_startup = store_dir();
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(Duration::from_secs(3)).await; // wait for app to settle
+                let rot = format!("{}/codex-rotate", store_startup);
+                let _ = tokio::task::spawn_blocking(move || {
+                    std::process::Command::new("python3").arg(&rot).args(["refresh-all"]).output()
+                }).await;
+            });
+
             // ---- periodic tray title refresh (every 30s) ----
             let handle_timer = handle.clone();
             tauri::async_runtime::spawn(async move {
