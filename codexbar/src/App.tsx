@@ -197,10 +197,11 @@ export default function App() {
 
   const run = async (actionId: string, args: string[], msg: string) => {
     setLoadingAction(actionId);
+    showToast(`${msg}…`);
     try { await invoke("run_rotate", { args }); } catch (e) { console.error(e); }
     await refresh();
     setLoadingAction(null);
-    showToast(msg);
+    showToast(`✓ ${msg}`);
   };
 
   const slots = state.slots ?? {};
