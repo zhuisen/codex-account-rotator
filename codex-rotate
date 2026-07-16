@@ -450,17 +450,44 @@ def cmd_add(args):
     print(f"added/updated [{slot['label']}] {who} (now active)")
 
 
+def _win_tag(w):
+    wm = (w or {}).get("window_minutes", 300)
+    if wm >= 40000: return "月"
+    if wm >= 5000: return "周"
+    return f"{round(wm/60)}h"
+
 def _qfmt(q):
     if not q:
         return ""
-    p = (q.get("primary") or {}).get("used_percent")
-    w = (q.get("secondary") or {}).get("used_percent")
     bits = []
-    if p is not None:
-        bits.append(f"5h:{p:.0f}%")
-    if w is not None:
-        bits.append(f"wk:{w:.0f}%")
+    for key in ("primary", "secondary"):
+        w = q.get(key) or {}
+        used = w.get("used_percent")
+        if used is not None:
+            bits.append(f"{_win_tag(w)}:{used:.0f}%")
     return "  " + " ".join(bits) if bits else ""
+
+
+def cmd_remove(args):
+    if not args:
+        sys.exit("usage: codex-rotate remove <label>")
+    key = args[0]
+    s = _state()
+    target = next((aid for aid, sl in s["slots"].items()
+                   if aid == key or sl.get("label") == key), None)
+    if not target:
+        sys.exit(f"no slot matching '{key}'")
+    slot = s["slots"].pop(target)
+    if s.get("active") == target:
+        remaining = list(s["slots"].keys())
+        s["active"] = remaining[0] if remaining else None
+        s["active_since"] = time.time() if remaining else 0
+    _save_state(s)
+    auth_file = AUTH_DIR / slot.get("file", "")
+    if auth_file.exists():
+        auth_file.unlink()
+    who = slot.get("email") or slot.get("label") or _mask(target)
+    print(f"removed [{slot.get('label', '?')}] {who}")
 
 
 def cmd_list(args):
@@ -583,6 +610,92 @@ def _slot_access_left_h(slot):
     return (_access_exp(tok) - time.time()) / 3600
 
 
+def _codex_running():
+    """True if a real `codex` CLI process is running — skip auth.json rotation then (codex owns its live
+    token and may be mid-refresh). Conservative: also true during a cxp session (the proxy-routed codex
+    binary), which is fine — rotation just waits for the next keepalive run. Ignores our own tooling."""
+    try:
+        out = subprocess.run(["pgrep", "-fl", "codex"], capture_output=True, text=True, timeout=5).stdout
+    except Exception:
+        return False
+    for line in out.splitlines():
+        low = line.lower()
+        if ("codex-rotate" in low or "codex-account-rotator" in low
+                or "codexbar" in low or "quota_daemon" in low):
+            continue  # our own tooling, not a codex session
+        # 只有**裸 codex** 会读/刷 ~/.codex/auth.json;cxp/代理会话(--profile rotateproxy)的 token 由代理
+        # 的 auth-token 命令注入、不碰 auth.json → 放行(否则 graph-label 等 cxp 定时任务会一直阻塞轮换)。
+        is_codex_bin = ("npm-global/bin/codex" in line or "codex-cli" in low
+                        or "/.local/bin/codex" in line)
+        if is_codex_bin and "rotateproxy" not in low:
+            return True
+    return False
+
+
+def _ensure_live_healthy(s, *, force=False, quiet=False):
+    """Keep ~/.codex/auth.json (the account plain `codex` + `omc ask codex` use) SERVER-ALIVE by rotating
+    a fresh, server-healthy slot INTO it when the current live account is dead/near-expiry. 用户定稿
+    2026-07-16(选项②).
+
+    ★不变量:active 账号**永不被 rotator 原地 OAuth 刷新**(那会和 codex 原生刷新器抢一次性 refresh_token
+    → B7/B8/B14 号死)。这里只做「换一个 keepalive 已保鲜的健康号进来」= 与 cmd_switch 同一套凭证移动。
+    ★判死活直测 upstream(_probe_quota:200=活/401=服务端已 revoke),不能只看 JWT exp(B21:JWT 没过期
+    但服务端已作废)。★codex 在跑时跳过(_codex_running),不覆盖活会话的 auth.json。返回状态串。"""
+    if _codex_running():
+        return "skip: codex running"
+    active = s.get("active")
+    active_slot = s["slots"].get(active) if active else None
+    # 1) live 账号还服务端活 + JWT 不临近过期? >6h JWT 才值得探(<6h keepalive 该轮换了)。
+    if active_slot and LIVE.exists() and not force:
+        try:
+            left = _access_exp((_load_json(LIVE).get("tokens") or {})) - time.time()
+        except (OSError, ValueError):
+            left = -1
+        if left > 6 * 3600:
+            q, _ = _probe_quota(active, active_slot, is_active=True)
+            if q is not None:  # 200 + quota headers = 服务端活
+                return "live healthy (no rotation)"
+    # 2) live 死/临近过期 → 找最新鲜的**服务端健康**非活跃 slot,switch 进来。
+    candidates = []
+    for aid, slot in s["slots"].items():
+        if aid == active or (slot.get("cooling_until") or 0) > time.time():
+            continue
+        try:
+            tok = (_load_json(AUTH_DIR / slot["file"]).get("tokens") or {})
+        except (OSError, ValueError, KeyError):
+            continue
+        jwt_left = _access_exp(tok) - time.time()
+        if jwt_left < 6 * 3600:  # JWT 太近过期(keepalive 本该刷过)→ 跳,别换个也快死的进来
+            continue
+        q, _ = _probe_quota(aid, slot, is_active=False)  # 只读探,不刷新
+        if q is None:  # 401/无 quota 头 = 服务端死
+            continue
+        candidates.append((jwt_left, aid, slot))
+    if not candidates:
+        return "no server-healthy slot to rotate in (\\codex login 补活号 / 等 keepalive 刷)"
+    candidates.sort(key=lambda c: c[0], reverse=True)  # JWT 最新鲜优先
+    _, target, tslot = candidates[0]
+    # 3) 凭证移动 = cmd_switch 同款:syncback 现 live→其槽,再锁内 slot→LIVE→activate→save。
+    _syncback(s)
+    with _cred_lock():
+        auth = _load_json(AUTH_DIR / s["slots"][target]["file"])
+        _atomic_write(LIVE, auth)
+        _activate(s, target)
+        _save_state(s)
+    who = tslot.get("label", _mask(target))
+    if not quiet:
+        print(f"[ensure-live] rotated auth.json → [{who}] (server-healthy; plain codex/omc 现在有活号)")
+    return f"rotated → [{who}]"
+
+
+def cmd_ensure_live(args):
+    """选项②手动入口:检测 ~/.codex/auth.json 死/临近过期 → 轮换一个服务端健康号进来。`--force` 强制轮换。"""
+    s = _state()
+    _autosync_live(s)
+    msg = _ensure_live_healthy(s, force="--force" in args)
+    print(f"ensure-live: {msg}")
+
+
 def cmd_keepalive(args):
     """Keep idle accounts' tokens alive via OAuth refresh — cheap, no quota, no auth.json swap.
     Refreshes NON-active accounts whose access token expires within N hours (default 48 — wider than
@@ -614,6 +727,11 @@ def cmd_keepalive(args):
         else:
             skipped.append(f"{label}:{msg}")  # 'still valid' / 'skip-active' are NO-OPS — not refreshes
     print(f"keepalive refreshed=[{', '.join(refreshed) or 'none'}] skipped=[{', '.join(skipped)}]")
+    # 选项②(2026-07-16):keepalive 尾部保活 ~/.codex/auth.json——非活跃号已刷新鲜,这里把最新鲜的
+    # 服务端健康号轮进 auth.json,让裸 codex / omc ask codex 也一直有活号。重读 state 拿 _mutate_state
+    # 刚落盘的 last_refresh,避免 _ensure_live_healthy 的 _save_state 回滚 keepalive 的更新。
+    if not dry:
+        print(f"ensure-live: {_ensure_live_healthy(_state())}")
 
 
 def cmd_quota(args):
@@ -717,10 +835,14 @@ def cmd_refresh_all(args):
         if q:
             _mutate_state(lambda st, a=aid, qq=q: st["slots"].setdefault(a, {}).update(
                 {"quota": qq, "quota_status": "ok"}))
-            pr = 100 - (q["primary"]["used_percent"] or 0)
-            wk = 100 - (q["secondary"]["used_percent"] or 0)
-            out.append(f"{label}:5h{pr:.0f}%/wk{wk:.0f}%")
-            notif.append(f"{label} 周{wk:.0f}%")
+            parts = []
+            for wkey in ("primary", "secondary"):
+                w = q.get(wkey)
+                if w and w.get("used_percent") is not None:
+                    rem = 100 - (w["used_percent"] or 0)
+                    parts.append(f"{_win_tag(w)}{rem:.0f}%")
+            out.append(f"{label}:{'/'.join(parts) if parts else '?'}")
+            notif.append(f"{label} {parts[0] if parts else '?'}")
             ok_n += 1
         else:
             out.append(f"{label}:{msg}")
@@ -788,18 +910,19 @@ def cmd_ensure(args):
 CMDS = {"add": cmd_add, "list": cmd_list, "switch": cmd_switch, "cool": cmd_cool,
         "uncool": cmd_uncool, "quota": cmd_quota, "current": cmd_current, "ensure": cmd_ensure,
         "sync": cmd_sync, "rename": cmd_rename, "keepalive": cmd_keepalive, "refresh": cmd_refresh,
-        "refresh-all": cmd_refresh_all, "health": cmd_health}
+        "refresh-all": cmd_refresh_all, "health": cmd_health, "remove": cmd_remove,
+        "ensure-live": cmd_ensure_live}
 
 
 # Commands that change what the menu bar shows → nudge SwiftBar to re-render immediately (so terminal
 # commands update the menu instantly, not on its 10s tick). Excludes quota/sync/keepalive: the plugin
 # runs `quota --save` every 10s, so refreshing there would loop; sync fires from the auth.json watcher.
-REFRESH_AFTER = {"add", "switch", "cool", "uncool", "rename", "refresh"}
+REFRESH_AFTER = {"add", "switch", "cool", "uncool", "rename", "refresh", "remove"}
 
 # Disk-only commands run their whole load→mutate→save under the cross-process state mutex (lost-update
 # guard). refresh/keepalive do network and write back via _mutate_state instead; health/current are
 # read-only. Lock order is always state → cred, never the reverse (no deadlock).
-STATE_LOCKED = {"add", "list", "switch", "cool", "uncool", "quota", "sync", "rename", "ensure"}
+STATE_LOCKED = {"add", "list", "switch", "cool", "uncool", "quota", "sync", "rename", "ensure", "remove"}
 
 
 def _refresh_menu():
@@ -812,7 +935,7 @@ def _refresh_menu():
 
 def main():
     if len(sys.argv) < 2 or sys.argv[1] not in CMDS:
-        print("usage: codex-rotate {add <label>|list|switch [label]|cool [min]|uncool [label]|"
+        print("usage: codex-rotate {add <label>|remove <label>|list|switch [label]|cool [min]|uncool [label]|"
               "quota [--save]|sync|rename <old> <new>|refresh [label|all]|refresh-all|"
               "keepalive [days] [--dry-run]|health|ensure|current}")
         sys.exit(1)
