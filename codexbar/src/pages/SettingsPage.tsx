@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
+import { enable as enableAutostart, disable as disableAutostart, isEnabled as isAutostartEnabled } from "@tauri-apps/plugin-autostart";
 import type { Theme } from "../theme";
 
 interface Settings {
@@ -9,7 +10,7 @@ interface Settings {
 }
 
 const DEFAULTS: Settings = {
-  autoSwitchEnabled: true,
+  autoSwitchEnabled: false,
   autoSwitchThreshold: 15,
   subExpiryWarnDays: 7,
   tokenExpiryWarnHours: 48,
@@ -30,19 +31,23 @@ export default function SettingsPage({ t }: { t: Theme }) {
     const next = { ...s, ...patch }; setS(next); save(next);
   };
 
+  const [autostart, setAutostart] = useState(false);
+  const [autostartBusy, setAutostartBusy] = useState(false);
+  useEffect(() => { isAutostartEnabled().then(setAutostart).catch(() => {}); }, []);
+  const toggleAutostart = async () => {
+    if (autostartBusy) return;
+    setAutostartBusy(true);
+    try {
+      if (autostart) { await disableAutostart(); setAutostart(false); }
+      else { await enableAutostart(); setAutostart(true); }
+    } catch (e) { console.error(e); }
+    setAutostartBusy(false);
+  };
+
   const Row = ({ label, desc, children }: { label: string; desc: string; children: React.ReactNode }) => (
     <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "12px 0", borderBottom: `1px solid ${t.divider}` }}>
       <div><div style={{ fontSize: 13, fontWeight: 600, color: t.text }}>{label}</div><div style={{ fontSize: 10.5, color: t.muted, marginTop: 2 }}>{desc}</div></div>
       {children}
-    </div>
-  );
-
-  const Toggle = ({ on, onChange }: { on: boolean; onChange: (v: boolean) => void }) => (
-    <div onClick={() => onChange(!on)} style={{
-      width: 38, height: 22, borderRadius: 11, padding: 2, cursor: "pointer",
-      background: on ? t.accent : t.barTrack, transition: "background .2s",
-    }}>
-      <div style={{ width: 18, height: 18, borderRadius: 9, background: "#fff", transform: on ? "translateX(16px)" : "translateX(0)", transition: "transform .2s" }} />
     </div>
   );
 
@@ -58,11 +63,25 @@ export default function SettingsPage({ t }: { t: Theme }) {
     <div style={{ display: "flex", flexDirection: "column", gap: 0 }}>
       <span style={{ fontSize: 20, fontWeight: 700, marginBottom: 12 }}>设置</span>
 
-      <Row label="额度低自动切号" desc="当前号额度低于阈值时,自动切到更满的号">
-        <Toggle on={s.autoSwitchEnabled} onChange={v => update({ autoSwitchEnabled: v })} />
+      <Row label="开机自启" desc="登录 macOS 时自动启动 CodexBar(后台常驻菜单栏)">
+        <div onClick={toggleAutostart} style={{
+          width: 38, height: 22, borderRadius: 11, padding: 2, cursor: autostartBusy ? "default" : "pointer",
+          background: autostart ? t.accent : t.barTrack, transition: "background .2s", opacity: autostartBusy ? 0.6 : 1,
+        }}>
+          <div style={{ width: 18, height: 18, borderRadius: 9, background: "#fff", transform: autostart ? "translateX(16px)" : "translateX(0)", transition: "transform .2s" }} />
+        </div>
+      </Row>
+
+      <Row label="额度低自动切号" desc="当前号额度低于阈值时自动切到最佳号(默认关)">
+        <div onClick={() => update({ autoSwitchEnabled: !s.autoSwitchEnabled })} style={{
+          width: 38, height: 22, borderRadius: 11, padding: 2, cursor: "pointer",
+          background: s.autoSwitchEnabled ? t.accent : t.barTrack, transition: "background .2s",
+        }}>
+          <div style={{ width: 18, height: 18, borderRadius: 9, background: "#fff", transform: s.autoSwitchEnabled ? "translateX(16px)" : "translateX(0)", transition: "transform .2s" }} />
+        </div>
       </Row>
       {s.autoSwitchEnabled && (
-        <Row label="自动切号阈值" desc="当前号最吃紧额度低于此值(%)时触发">
+        <Row label="自动切号阈值" desc="当前号剩余额度低于此值(%)时触发">
           <NumInput value={s.autoSwitchThreshold} onChange={v => update({ autoSwitchThreshold: v })} min={5} max={50} suffix="%" />
         </Row>
       )}
@@ -76,7 +95,7 @@ export default function SettingsPage({ t }: { t: Theme }) {
       <div style={{ marginTop: 20, padding: "12px 0", borderTop: `1px solid ${t.divider}` }}>
         <div style={{ fontSize: 12, fontWeight: 600, color: t.muted, marginBottom: 6 }}>关于</div>
         <div style={{ fontSize: 11, color: t.faint, fontFamily: "'JetBrains Mono'", lineHeight: 1.8 }}>
-          CodexBar v0.1.0<br />
+          CodexBar v0.3.0<br />
           Tauri 2 + React · macOS<br />
           github.com/zhuisen/codex-account-rotator
         </div>

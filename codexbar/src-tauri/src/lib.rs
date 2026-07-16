@@ -3,7 +3,7 @@ use std::fs;
 use std::process::Command;
 use std::time::Duration;
 use tauri::{
-    menu::{Menu, MenuItem},
+    menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     webview::WebviewWindowBuilder,
     AppHandle, Emitter, Manager, PhysicalPosition, WebviewUrl,
@@ -16,7 +16,7 @@ fn store_dir() -> String {
     })
 }
 
-const ALLOWED_CMDS: &[&str] = &["switch", "cool", "uncool", "refresh-all", "health", "list", "quota", "refresh-all"];
+const ALLOWED_CMDS: &[&str] = &["switch", "cool", "uncool", "refresh-all", "health", "list", "quota", "remove"];
 
 // ---- IPC commands ----
 
@@ -43,6 +43,9 @@ async fn run_rotate(app: AppHandle, args: Vec<String>) -> Result<String, String>
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
     let stderr = String::from_utf8_lossy(&out.stderr).to_string();
     let _ = app.emit("state-changed", ());
+    if let Some(tray) = app.tray_by_id("main") {
+        let _ = tray.set_title(Some(&format_tray_title()));
+    }
     if out.status.success() {
         Ok(stdout)
     } else {
@@ -210,11 +213,27 @@ fn format_tray_title() -> String {
                 return format!("✗ {}", label);
             }
             if let Some(q) = slot.get("quota") {
-                let used = q["primary"]["used_percent"].as_f64().unwrap_or(0.0);
+                // Codex retired 5h; only weekly(10080)/monthly(43200) are real. Pick the first
+                // real window (primary then secondary); phantom slots (wm<5000) are ignored.
+                let win = ["primary", "secondary"].iter().find_map(|k| {
+                    let w = &q[*k];
+                    let wm = w["window_minutes"].as_f64().unwrap_or(0.0);
+                    if wm >= 5000.0 && w["used_percent"].is_number() { Some(w) } else { None }
+                });
+                let Some(w) = win else { return label.to_string(); };
+                let used = w["used_percent"].as_f64().unwrap_or(0.0);
+                let wm = w["window_minutes"].as_f64().unwrap_or(0.0);
+                let win_tag = if wm >= 40000.0 { "月" } else { "周" };
                 let now_ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs_f64();
-                let ra = q["primary"]["resets_at"].as_f64().unwrap_or(0.0);
+                let ra = w["resets_at"].as_f64().unwrap_or(0.0);
                 let rem = if ra > 0.0 && ra <= now_ts { 100 } else { (100.0 - used).max(0.0) as u32 };
-                return format!("{} {}%", label, rem);
+                let eta = if ra > 0.0 && ra > now_ts {
+                    let secs = (ra - now_ts) as u64;
+                    let h = secs / 3600;
+                    let m = (secs % 3600) / 60;
+                    if h >= 24 { format!(" ↻{}d{}h", h / 24, h % 24) } else if h > 0 { format!(" ↻{}h{:02}m", h, m) } else { format!(" ↻{}m", m) }
+                } else { String::new() };
+                return format!("{} {} {}%{}", label, win_tag, rem, eta);
             }
             return label.to_string();
         }
@@ -238,7 +257,8 @@ fn toggle_menubar(app: &AppHandle, tray_rect: Option<tauri::Rect>) {
                     tauri::Size::Physical(s) => (s.width as f64, s.height as f64),
                     tauri::Size::Logical(s) => (s.width, s.height),
                 };
-                let x = px + sw / 2.0 - 206.0;
+                let panel_w = 412.0; // must match inner_size width
+                let x = px + sw / 2.0 - panel_w / 2.0;
                 let y = py + sh + 4.0;
                 let _ = win.set_position(PhysicalPosition::new(x as i32, y as i32));
             }
@@ -255,7 +275,14 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
         .setup(|app| {
+            // Hide from Dock — LSUIElement alone isn't reliable with Tauri
+            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+
             let handle = app.handle();
 
             // ---- create menubar popover window (hidden by default) ----
@@ -287,10 +314,14 @@ pub fn run() {
             let tray_bytes = include_bytes!("../icons/tray.png");
             let tray_icon = tauri::image::Image::from_bytes(tray_bytes)?;
 
-            let quit = MenuItem::with_id(app, "quit", "退出 CodexBar", true, None::<&str>)?;
-            let show =
-                MenuItem::with_id(app, "show", "打开主窗口", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show, &quit])?;
+            let show = MenuItem::with_id(app, "show", "打开主窗口", true, None::<&str>)?;
+            let refresh = MenuItem::with_id(app, "refresh", "刷新全池额度", true, None::<&str>)?;
+            let switch_best = MenuItem::with_id(app, "switch_best", "切到最佳号", true, None::<&str>)?;
+            let sep1 = PredefinedMenuItem::separator(app)?;
+            let sep2 = PredefinedMenuItem::separator(app)?;
+            let version = MenuItem::with_id(app, "version", "CodexBar v0.3.0", false, None::<&str>)?;
+            let quit = MenuItem::with_id(app, "quit", "⏻ 退出 CodexBar", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&show, &refresh, &switch_best, &sep1, &version, &sep2, &quit])?;
 
             let _tray = TrayIconBuilder::with_id("main")
                 .icon(tray_icon)
@@ -305,6 +336,34 @@ pub fn run() {
                             let _ = w.set_focus();
                             let _ = w.center();
                         }
+                    }
+                    "refresh" => {
+                        let store = store_dir();
+                        let app_h = app.clone();
+                        tauri::async_runtime::spawn(async move {
+                            let rot = format!("{}/codex-rotate", store);
+                            let _ = tokio::task::spawn_blocking(move || {
+                                std::process::Command::new("python3").arg(&rot).args(["refresh-all", "--notify"]).output()
+                            }).await;
+                            let _ = app_h.emit("state-changed", ());
+                            if let Some(tray) = app_h.tray_by_id("main") {
+                                let _ = tray.set_title(Some(&format_tray_title()));
+                            }
+                        });
+                    }
+                    "switch_best" => {
+                        let store = store_dir();
+                        let app_h = app.clone();
+                        tauri::async_runtime::spawn(async move {
+                            let rot = format!("{}/codex-rotate", store);
+                            let _ = tokio::task::spawn_blocking(move || {
+                                std::process::Command::new("python3").arg(&rot).args(["switch"]).output()
+                            }).await;
+                            let _ = app_h.emit("state-changed", ());
+                            if let Some(tray) = app_h.tray_by_id("main") {
+                                let _ = tray.set_title(Some(&format_tray_title()));
+                            }
+                        });
                     }
                     "quit" => { app.exit(0); }
                     _ => {}
@@ -324,12 +383,17 @@ pub fn run() {
 
             // ---- startup: auto refresh-all to get fresh quota ----
             let store_startup = store_dir();
+            let handle_startup = handle.clone();
             tauri::async_runtime::spawn(async move {
-                tokio::time::sleep(Duration::from_secs(3)).await; // wait for app to settle
+                tokio::time::sleep(Duration::from_secs(3)).await;
                 let rot = format!("{}/codex-rotate", store_startup);
                 let _ = tokio::task::spawn_blocking(move || {
                     std::process::Command::new("python3").arg(&rot).args(["refresh-all"]).output()
                 }).await;
+                let _ = handle_startup.emit("state-changed", ());
+                if let Some(tray) = handle_startup.tray_by_id("main") {
+                    let _ = tray.set_title(Some(&format_tray_title()));
+                }
             });
 
             // ---- periodic tray title refresh (every 30s) ----
@@ -344,10 +408,19 @@ pub fn run() {
                 }
             });
 
-            // ---- show main window (hidden by default in config, show on first launch) ----
+            // ---- main window: show on launch, intercept close → hide ----
             if let Some(w) = handle.get_webview_window("main") {
                 let _ = w.show();
                 let _ = w.center();
+                let handle_close = handle.clone();
+                w.on_window_event(move |event| {
+                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                        api.prevent_close();
+                        if let Some(win) = handle_close.get_webview_window("main") {
+                            let _ = win.hide();
+                        }
+                    }
+                });
             }
 
             if cfg!(debug_assertions) {
@@ -366,6 +439,16 @@ pub fn run() {
             read_logs,
             read_account_detail
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            if let tauri::RunEvent::ExitRequested { code, api, .. } = event {
+                if code.is_none() {
+                    api.prevent_exit();
+                    if let Some(w) = app.get_webview_window("main") {
+                        let _ = w.hide();
+                    }
+                }
+            }
+        });
 }

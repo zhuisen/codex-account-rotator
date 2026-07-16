@@ -1,20 +1,23 @@
-import { useEffect, useState, useCallback, useRef, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { THEMES, STATUS_COLORS, STATUS_TEXT, type Theme } from "./theme";
-import { type AppState, type TokenInfo, type Account, slotToAccount, recommended, clamp, fmtCd } from "./helpers";
+import { THEMES } from "./theme";
 import Ring from "./components/Ring";
 import Toast from "./components/Toast";
 import GhostButton from "./components/GhostButton";
+import AccountCard from "./components/AccountCard";
+import DetailModal, { type AccountDetail } from "./components/DetailModal";
 import LogsPage from "./pages/LogsPage";
 import SettingsPage, { getSettings } from "./pages/SettingsPage";
-import { notify } from "./hooks/useNotify";
+import { useStore } from "./hooks/useStore";
+import { useExpiryWatch } from "./hooks/useExpiryWatch";
+import { useAutoSwitch } from "./hooks/useAutoSwitch";
+import { useKeyboard } from "./hooks/useKeyboard";
 import "./App.css";
 
 type Page = "overview" | "logs" | "settings";
 
-// ---- SVG icons (inline, matching design handoff) ----
 const IconChart = () => <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><rect x="3" y="12" width="4" height="9" rx="1"/><rect x="10" y="7" width="4" height="14" rx="1"/><rect x="17" y="3" width="4" height="18" rx="1"/></svg>;
 const IconClip = () => <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7"><rect x="5" y="4" width="14" height="17" rx="2"/><path d="M9 3.5h6v3H9z" fill="currentColor" stroke="none"/></svg>;
 const IconGear = () => <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7"><circle cx="12" cy="12" r="3.2"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9 17 7M7 17l-2.1 2.1"/></svg>;
@@ -22,310 +25,45 @@ const IconRefresh = ({ spin }: { spin?: boolean }) => <svg width="13" height="13
 const IconSun = () => <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9"><circle cx="12" cy="12" r="4.2"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M19.1 4.9 17.7 6.3M6.3 17.7 4.9 19.1"/></svg>;
 const IconMoon = () => <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>;
 
-// ---- Account card (3x2 grid) ----
-interface AccountDetail {
-  account_id?: string; email?: string; label?: string; plan?: string; sub_until?: string;
-  last_refresh?: string; auth_dead?: boolean; file?: string;
-  access_token_tail?: string; access_token_len?: number; access_exp?: number; access_iat?: number;
-  refresh_token_tail?: string; refresh_token_len?: number; id_token_len?: number;
-  quota_source?: string; quota_captured_at?: number;
-}
-
-function DetailModal({ detail, t, onClose }: { detail: AccountDetail; t: Theme; onClose: () => void }) {
-  const fmtTs = (ts?: number) => ts ? new Date(ts * 1000).toLocaleString("zh-CN", { timeZone: "Asia/Singapore" }) : "—";
-  const rows: [string, string, string?][] = [
-    ["account_id", detail.account_id ?? "—"],
-    ["email", detail.email ?? "—"],
-    ["文件", `auth/${detail.file}`],
-    ["access_token", `…${detail.access_token_tail}  (${detail.access_token_len} chars)`],
-    ["access 签发", fmtTs(detail.access_iat)],
-    ["access 过期", fmtTs(detail.access_exp), detail.access_exp && detail.access_exp < Date.now()/1000 ? "#E0524D" : t.accent],
-    ["refresh_token", `…${detail.refresh_token_tail}  (${detail.refresh_token_len} chars)`],
-    ["last_refresh", detail.last_refresh?.slice(0, 19) ?? "—"],
-    ["plan", detail.plan || "—"],
-    ["订阅至", detail.sub_until?.slice(0, 10) ?? "—"],
-    ["quota 来源", String(detail.quota_source ?? "—")],
-    ["快照时间", fmtTs(detail.quota_captured_at)],
-  ];
-  return (
-    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100, backdropFilter: "blur(4px)" }}>
-      <div onClick={e => e.stopPropagation()} style={{ background: t.cardBg, border: `1px solid ${t.accent}`, borderRadius: 14, padding: "20px 24px", width: 460, maxHeight: "80vh", overflow: "auto", boxShadow: "0 20px 60px rgba(0,0,0,.5)", userSelect: "text" }}>
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14 }}>
-          <span style={{ fontSize: 16, fontWeight: 700 }}>{detail.label} · 账号详情</span>
-          <span onClick={onClose} style={{ fontSize: 18, color: t.muted, cursor: "pointer", padding: "0 4px" }}>✕</span>
-        </div>
-        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11, fontFamily: "'JetBrains Mono'" }}>
-          <tbody>
-            {rows.map(([key, val, color]) => (
-              <tr key={key} style={{ borderBottom: `1px solid ${t.divider}` }}>
-                <td style={{ padding: "6px 8px 6px 0", color: t.muted, whiteSpace: "nowrap", verticalAlign: "top", width: 100 }}>{key}</td>
-                <td style={{ padding: "6px 0", color: color ?? t.text, wordBreak: "break-all", cursor: "text" }}>{val}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-        <div style={{ marginTop: 12, fontSize: 9.5, color: t.faint, textAlign: "center" }}>点击文字可选中复制 · 完整 token 不显示(仅指纹)</div>
-      </div>
-    </div>
-  );
-}
-
-function AccountCard({ a, isCurrent, isBest, t, onSelect, onShowDetail }: {
-  a: Account; isCurrent: boolean; isBest: boolean; t: Theme; onSelect: () => void; onShowDetail: (aid: string) => void;
-}) {
-  const [hover, setHover] = useState(false);
-  const sc = STATUS_COLORS[a.status] ?? STATUS_COLORS.live;
-  const isDead = a.status === "dead";
-  const isCool = a.status === "cool";
-
-  return (
-    <div
-      onClick={() => onShowDetail(a.aid)}
-      onDoubleClick={(e) => { e.stopPropagation(); onSelect(); }}
-      onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}
-      style={{ background: isCurrent ? t.curCardBg : t.cardBg, border: `1px solid ${isCurrent ? t.accent : t.cardBorder}`,
-        borderRadius: 12, padding: 12, display: "flex", gap: 11, alignItems: "center",
-        minHeight: 100, overflow: "hidden",
-        cursor: "pointer", userSelect: "none",
-        transform: hover ? "translateY(-2px)" : undefined,
-        boxShadow: hover ? t.cardHoverShadow : undefined,
-        transition: "background .3s ease, border-color .3s ease, transform .15s ease, box-shadow .15s ease" }}>
-
-      <Ring pct={isDead ? 0 : a.h5} r={21} sw={5} color={sc} track={t.ringTrack} size={52}>
-        <span style={{ fontSize: 13, fontWeight: 700, color: t.text, fontVariantNumeric: "tabular-nums", lineHeight: 1 }}>{isDead ? "—" : a.h5}</span>
-      </Ring>
-
-      <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 4, overflow: "hidden" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-          <span style={{ fontSize: 13, fontWeight: 700, color: t.text }}>{a.node}</span>
-          <span style={{ fontSize: 9.5, fontWeight: 600, color: sc }}>{STATUS_TEXT[a.status]}</span>
-          {isBest && <span style={{ fontSize: 8, fontWeight: 700, color: t.accentText, background: t.accent, padding: "1px 5px", borderRadius: 4, flexShrink: 0 }}>USE</span>}
-          {isCurrent && <span style={{ marginLeft: "auto", fontSize: 8.5, fontWeight: 700, color: t.accent, border: `1px solid ${t.accentBorder}`, padding: "1px 6px", borderRadius: 999, flexShrink: 0 }}>当前</span>}
-        </div>
-        <div style={{ fontSize: 10.5, color: t.email, fontFamily: "'JetBrains Mono'", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: "100%" }}>{a.email}</div>
-
-        {!isDead && (
-          <>
-            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-              <span style={{ fontSize: 9, color: t.muted, fontFamily: "'JetBrains Mono'" }}>周</span>
-              <div style={{ flex: 1, height: 4, borderRadius: 2, background: t.barTrack, overflow: "hidden" }}>
-                <div style={{ height: "100%", width: `${clamp(a.wk)}%`, background: sc, borderRadius: 2, transition: "width .55s cubic-bezier(.4,0,.2,1), background-color .35s ease" }} />
-              </div>
-              <span style={{ fontSize: 10, color: t.text2, fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>{a.wk}%</span>
-            </div>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 9.5, color: t.muted, fontFamily: "'JetBrains Mono'" }}>
-              {isCool ? <span style={{ color: "#2BA0C0", fontWeight: 600 }}>❄ 冷却 {fmtCd(a.cooldownSec)}</span> : <span>↻ {a.h5reset}{a.h5resetAt && a.h5resetAt !== "已重置" ? ` (${a.h5resetAt})` : ""}</span>}
-              <span>到期 {a.exp}</span>
-            </div>
-          </>
-        )}
-
-        {isDead && (
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginTop: 1 }}>
-            <span style={{ fontSize: 9.5, color: "#E0524D", fontWeight: 600 }}>token 失效 · 已到期</span>
-            <span style={{ fontSize: 10, fontWeight: 700, color: t.accentText, background: t.accent, padding: "3px 10px", borderRadius: 6, cursor: "pointer", flexShrink: 0 }}>复活</span>
-          </div>
-        )}
-      </div>
-
-    </div>
-  );
-}
-
-// ---- Main App ----
 export default function App() {
-  const [state, setState] = useState<AppState>({});
-  const [tokens, setTokens] = useState<Record<string, TokenInfo>>({});
+  const { accounts, hero, currentNode, slots, counts, tokens, loadingAction, toast, refresh, run, showToast } = useStore();
   const [theme, setTheme] = useState<"dark" | "light">("dark");
   const [page, setPage] = useState<Page>("overview");
-  const [loadingAction, setLoadingAction] = useState<string | null>(null);
-  const [toast, setToast] = useState<string | null>(null);
-  const [cooldowns, setCooldowns] = useState<Record<string, number>>({});
   const [detailModal, setDetailModal] = useState<AccountDetail | null>(null);
-  const toastRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [selectedCard, setSelectedCard] = useState<string | null>(null);
+  const [autoSwitch, setAutoSwitch] = useState(() => getSettings().autoSwitchEnabled);
 
   const t = THEMES[theme];
-
-  const showToast = useCallback((msg: string) => {
-    if (toastRef.current) clearTimeout(toastRef.current);
-    setToast(msg);
-    toastRef.current = setTimeout(() => setToast(null), 2100);
-  }, []);
-
-  const refresh = useCallback(async () => {
-    try {
-      const [s, tk] = await Promise.all([invoke<AppState>("read_state"), invoke<Record<string, TokenInfo>>("read_auth_tokens")]);
-      setState(s); setTokens(tk);
-      const now = Date.now() / 1000;
-      const cds: Record<string, number> = {};
-      for (const [aid, sl] of Object.entries(s.slots ?? {})) {
-        const cd = (sl.cooling_until ?? 0) - now;
-        if (cd > 0) cds[aid] = Math.round(cd);
-      }
-      setCooldowns(cds);
-    } catch (e) { console.error(e); }
-  }, []);
-
-  useEffect(() => { refresh(); const id = setInterval(refresh, 10_000); return () => clearInterval(id); }, [refresh]);
-  useEffect(() => { const u = listen("state-changed", () => refresh()); return () => { u.then(f => f()); }; }, [refresh]);
-
-  const notifiedRef = useRef<Set<string>>(new Set());
-  const accountsRef = useRef<Account[]>([]);
-  const tokensRef = useRef<Record<string, TokenInfo>>({});
-  const lastAutoSwitchRef = useRef(0);
-
-  const SW_MIN_TARGET = 30;
-  const SW_MARGIN = 15;
-  const SW_DEBOUNCE = 300;
-  const SW_PROXY_GRACE = 120;
-
-  // cooldown countdown (1s)
-  useEffect(() => {
-    const id = setInterval(() => {
-      setCooldowns(prev => {
-        const next = { ...prev };
-        let changed = false;
-        for (const aid of Object.keys(next)) {
-          if (next[aid] > 0) { next[aid]--; changed = true; }
-          if (next[aid] <= 0) delete next[aid];
-        }
-        return changed ? next : prev;
-      });
-    }, 1000);
-    return () => clearInterval(id);
-  }, []);
-
-  const run = async (actionId: string, args: string[], msg: string) => {
-    setLoadingAction(actionId);
-    showToast(`${msg}…`);
-    try { await invoke("run_rotate", { args }); } catch (e) { console.error(e); }
-    await refresh();
-    setLoadingAction(null);
-    showToast(`✓ ${msg}`);
-  };
-
-  const slots = state.slots ?? {};
-  const accounts: Account[] = Object.entries(slots)
-    .map(([aid, sl]) => {
-      const a = slotToAccount(aid, sl, tokens);
-      if (cooldowns[aid] != null) a.cooldownSec = cooldowns[aid];
-      if (a.cooldownSec > 0 && a.status !== "dead") a.status = "cool";
-      return a;
-    })
-    .sort((a, b) => {
-      if (a.status === "dead" && b.status !== "dead") return 1;
-      if (b.status === "dead" && a.status !== "dead") return -1;
-      return b.h5 - a.h5;
-    });
-
-  const currentNode = state.active;
-  accountsRef.current = accounts;
-  tokensRef.current = tokens;
-
-  // auto-switch: if active account's tightest remaining < threshold AND a clearly better account
-  // exists AND cxp isn't currently rotating, switch to the fullest account (takes effect next codex run)
-  useEffect(() => {
-    const check = () => {
-      const accts = accountsRef.current;
-      const now = Date.now() / 1000;
-      if (!currentNode || now - lastAutoSwitchRef.current < SW_DEBOUNCE) return;
-      if ((state.last_proxy_ts ?? 0) > now - SW_PROXY_GRACE) return; // cxp is rotating — stand down
-      const active = accts.find(a => a.aid === currentNode);
-      if (!active) return;
-      const settings = getSettings();
-      if (!settings.autoSwitchEnabled) return;
-      const activeRem = Math.min(active.h5, active.wk);
-      if (activeRem >= settings.autoSwitchThreshold) return;
-      let best: Account | null = null;
-      for (const a of accts) {
-        if (a.aid === currentNode || a.status === "dead" || a.status === "cool") continue;
-        const rem = Math.min(a.h5, a.wk);
-        if (rem >= SW_MIN_TARGET && rem > activeRem + SW_MARGIN) {
-          if (!best || rem > Math.min(best.h5, best.wk)) best = a;
-        }
-      }
-      if (best) {
-        lastAutoSwitchRef.current = now;
-        run("auto-switch", ["switch", best.node], `额度低(${activeRem}%)，自动切到 ${best.node}(${Math.min(best.h5, best.wk)}%)`);
-        notify("自动切号", `${active.node} 额度低(${activeRem}%)，已切到 ${best.node}`);
-      }
-    };
-    check();
-    const id = setInterval(check, 30_000); // check every 30s
-    return () => clearInterval(id);
-  }, [currentNode, state.last_proxy_ts]); // re-setup when active changes or proxy activity changes
-
-  // expiry warnings (check every 60s, refs to avoid interval rebuild on every render)
-  useEffect(() => {
-    const check = () => {
-      const settings = getSettings();
-      const n = Date.now() / 1000;
-      for (const a of accountsRef.current) {
-        const key = `${a.aid}-${a.exp}`;
-        if (notifiedRef.current.has(key)) continue;
-        if (a.exp && a.exp !== "—") {
-          const subTs = new Date(a.exp).getTime() / 1000;
-          const daysLeft = (subTs - n) / 86400;
-          if (daysLeft <= settings.subExpiryWarnDays && daysLeft > 0) {
-            notify("订阅即将到期", `${a.node} 订阅还剩 ${Math.ceil(daysLeft)} 天 (${a.exp})`);
-            notifiedRef.current.add(key);
-          } else if (daysLeft <= 0) {
-            notify("订阅已到期", `${a.node} 订阅已到期 — 续费否则无 codex 额度`);
-            notifiedRef.current.add(key);
-          }
-        }
-        const tokKey = `tok-${a.aid}`;
-        if (!notifiedRef.current.has(tokKey) && tokensRef.current[a.aid]?.exp) {
-          const tokH = (tokensRef.current[a.aid].exp! - n) / 3600;
-          if (tokH <= settings.tokenExpiryWarnHours && tokH > 0) {
-            notify("Token 即将过期", `${a.node} access token 还剩 ${Math.round(tokH)}h`);
-            notifiedRef.current.add(tokKey);
-          }
-        }
-      }
-    };
-    check();
-    const id = setInterval(check, 60_000);
-    return () => clearInterval(id);
-  }, []); // refs avoid stale closures; interval stays stable
-  const hero = recommended(accounts);
-  const counts = { total: accounts.length, live: accounts.filter(a => a.status === "live" || a.status === "low").length, cool: accounts.filter(a => a.status === "cool").length, dead: accounts.filter(a => a.status === "dead").length };
+  const win = useMemo(() => getCurrentWindow(), []);
   const summary = `${counts.total} nodes · ${counts.live} 活 · ${counts.cool} 冷 · ${counts.dead} 死`;
 
-  const refreshAll = () => run("refresh-all", ["refresh-all", "--notify"], `已刷新全池 · ${counts.total} 个号`);
+  // menubar gear button → jump to settings page + reveal window
+  useEffect(() => {
+    const un = listen("navigate-settings", () => {
+      setPage("settings");
+      win.show(); win.setFocus();
+    });
+    return () => { un.then(f => f()); };
+  }, [win]);
+
+  const aliveByLabel = accounts.filter(a => a.status !== "dead").sort((a, b) => a.node.localeCompare(b.node, undefined, { numeric: true }));
+  useExpiryWatch(accounts, tokens);
+  useAutoSwitch(accounts, currentNode, run);
+  useKeyboard(win, refresh, setPage as (p: string) => void, (idx) => {
+    const target = aliveByLabel[idx];
+    if (target && target.aid !== currentNode) run(`switch-${target.aid}`, ["switch", target.node], `⌘${idx + 1} → ${target.node}`);
+  });
 
   const sidebarItems: { id: Page; Icon: React.FC; tip: string }[] = [
-    { id: "overview" as Page, Icon: IconChart, tip: "总览" },
-    { id: "logs" as Page, Icon: IconClip, tip: "日志" },
-    { id: "settings" as Page, Icon: IconGear, tip: "设置" },
+    { id: "overview", Icon: IconChart, tip: "总览" },
+    { id: "logs", Icon: IconClip, tip: "日志" },
+    { id: "settings", Icon: IconGear, tip: "设置" },
   ];
-
-  const win = useMemo(() => getCurrentWindow(), []);
-
-  // macOS keyboard shortcuts (lost when decorations:false)
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      if (!e.metaKey) return;
-      switch (e.key) {
-        case "w": e.preventDefault(); win.hide(); break;
-        case "q": e.preventDefault(); std_process_exit(); break;
-        case "m": e.preventDefault(); win.minimize(); break;
-        case ",": e.preventDefault(); setPage("settings"); break;
-        case "r": if (!e.shiftKey) { e.preventDefault(); refresh(); } break;
-      }
-    };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
-  }, [win, refresh]);
-
-  const std_process_exit = async () => {
-    try { win.close(); } catch { /* fallback */ }
-  };
 
   return (
     <div style={{ width: "100vw", height: "100vh", display: "flex", flexDirection: "column", background: t.appBg, color: t.text, fontFamily: "'Space Grotesk'", borderRadius: 12, overflow: "hidden", boxShadow: t.shadow, transition: "background-color .35s ease, color .35s ease" }}>
 
-      {/* ---- Title bar (38px) ---- */}
+      {/* Title bar */}
       <div data-tauri-drag-region style={{ height: 38, flexShrink: 0, display: "flex", alignItems: "center", padding: "0 14px", gap: 8, borderBottom: `1px solid ${t.chromeBorder}`, background: t.chromeBg, position: "relative", transition: "background-color .35s ease" }}>
         <span onClick={() => win.hide()} style={{ width: 12, height: 12, borderRadius: "50%", background: "#ff5f57", cursor: "pointer" }} title="隐藏" />
         <span onClick={() => win.minimize()} style={{ width: 12, height: 12, borderRadius: "50%", background: "#febc2e", cursor: "pointer" }} title="最小化" />
@@ -336,81 +74,132 @@ export default function App() {
             <span onClick={() => setTheme("light")} style={{ display: "grid", placeItems: "center", width: 24, height: 20, borderRadius: 6, cursor: "pointer", color: t.sunColor, background: t.sunBg, transition: "background .25s, color .25s" }}><IconSun /></span>
             <span onClick={() => setTheme("dark")} style={{ display: "grid", placeItems: "center", width: 24, height: 20, borderRadius: 6, cursor: "pointer", color: t.moonColor, background: t.moonBg, transition: "background .25s, color .25s" }}><IconMoon /></span>
           </div>
-          <span style={{ fontSize: 11, color: t.muted, fontFamily: "'JetBrains Mono'" }}>v0.1.0</span>
+          <span style={{ fontSize: 11, color: t.muted, fontFamily: "'JetBrains Mono'" }}>v0.3.0</span>
         </div>
       </div>
 
       <div style={{ flex: 1, display: "flex", minHeight: 0 }}>
-        {/* ---- Sidebar (52px) ---- */}
+        {/* Sidebar */}
         <div style={{ width: 52, flexShrink: 0, borderRight: `1px solid ${t.railBorder}`, background: t.railBg, display: "flex", flexDirection: "column", alignItems: "center", padding: "14px 0", gap: 4, transition: "background-color .35s ease" }}>
           {sidebarItems.map((it) => (
             <div key={it.id} onClick={() => setPage(it.id)} style={{ width: 34, height: 34, borderRadius: 9, display: "grid", placeItems: "center", cursor: "pointer", color: page === it.id ? t.accentText : t.muted, background: page === it.id ? t.accent : "transparent", transition: "background .2s, color .2s" }} title={it.tip}><it.Icon /></div>
           ))}
-          <span style={{ marginTop: "auto", fontSize: 9, color: t.faint, fontFamily: "'JetBrains Mono'" }}>0.1</span>
+          <span style={{ marginTop: "auto", fontSize: 9, color: t.faint, fontFamily: "'JetBrains Mono'" }}>0.3</span>
         </div>
 
-        {/* ---- Content ---- */}
+        {/* Content */}
         <div style={{ flex: 1, minWidth: 0, padding: "16px 20px", display: "flex", flexDirection: "column", overflow: "hidden" }}>
           {page === "overview" && (
             <>
-              {/* header */}
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 13 }}>
                 <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
                   <span style={{ fontSize: 20, fontWeight: 700, letterSpacing: "-.01em" }}>总览</span>
                   <span style={{ fontSize: 11.5, color: t.muted, fontFamily: "'JetBrains Mono'" }}>{summary}</span>
                 </div>
                 <div style={{ display: "flex", gap: 7, alignItems: "center" }}>
-                  <GhostButton t={t} onClick={refreshAll} loading={loadingAction === "refresh-all"} loadingText="刷新中…"><IconRefresh spin={loadingAction === "refresh-all"} />刷新全池</GhostButton>
+                  <GhostButton t={t} onClick={() => run("refresh-all", ["refresh-all", "--notify"], `已刷新全池 · ${counts.total} 个号`)} loading={loadingAction === "refresh-all"} loadingText="刷新中…"><IconRefresh spin={loadingAction === "refresh-all"} />刷新全池</GhostButton>
                   <GhostButton t={t} onClick={() => run("refresh-each", ["refresh-all", "--notify"], "各号 5h 额度 +1%")} accent loading={loadingAction === "refresh-each"} loadingText="探测中…">
                     <IconRefresh spin={loadingAction === "refresh-each"} />刷新各号<span style={{ fontSize: 9.5, fontWeight: 700, color: t.accentText, background: t.accent, padding: "1px 5px", borderRadius: 4, letterSpacing: ".02em" }}>+1%</span>
                   </GhostButton>
+                  <span style={{ width: 1, height: 18, background: t.divider, margin: "0 1px" }} />
+                  <span onClick={() => {
+                    const next = !autoSwitch;
+                    setAutoSwitch(next);
+                    const s = getSettings(); s.autoSwitchEnabled = next;
+                    localStorage.setItem("codexbar_settings", JSON.stringify(s));
+                    showToast(next ? "✓ 自动切号 已开启" : "自动切号 已关闭");
+                  }} style={{
+                    display: "flex", alignItems: "center", gap: 6, padding: "5px 13px", borderRadius: 8, cursor: "pointer", userSelect: "none", fontSize: 11.5, fontWeight: 600, transition: "all .2s",
+                    border: `1px solid ${autoSwitch ? t.accentBorder : t.ghostBorder}`,
+                    color: autoSwitch ? t.accent : t.ghostText,
+                    background: autoSwitch ? t.accentSoft : "transparent",
+                  }}>
+                    <span style={{ width: 8, height: 8, borderRadius: "50%", background: autoSwitch ? t.accent : t.faint, animation: autoSwitch ? "cbDotPulse 2s ease-in-out infinite" : "none" }} />
+                    {autoSwitch ? "自动切号 开" : "自动切号"}
+                  </span>
                   <span style={{ width: 1, height: 18, background: t.divider, margin: "0 1px" }} />
                   <GhostButton t={t} onClick={() => run("cool", ["cool", "300"], `已冷却 ${slots[currentNode ?? ""]?.label ?? "当前号"}`)} loading={loadingAction === "cool"} loadingText="冷却中…">冷却当前号</GhostButton>
                   <GhostButton t={t} onClick={() => run("uncool", ["uncool", "all"], "已清除所有冷却")} loading={loadingAction === "uncool"} loadingText="解冻中…">清除冷却</GhostButton>
                 </div>
               </div>
 
-              {/* Hero */}
-              {hero && (
-                <div style={{ display: "flex", alignItems: "center", gap: 18, background: t.heroBg, border: `1px solid ${t.heroBorder}`, borderRadius: 14, padding: "15px 18px", marginBottom: 13, boxShadow: t.heroShadow, transition: "background-color .35s ease, border-color .35s ease" }}>
-                  <Ring pct={hero.h5} r={33} sw={6} color={t.accent} track={t.ringTrack} size={80}>
-                    <span style={{ fontSize: 19, fontWeight: 700, color: t.text, fontVariantNumeric: "tabular-nums", lineHeight: 1, marginTop: -1 }}>{hero.h5}<span style={{ fontSize: 10, color: t.muted }}>%</span></span>
-                    <span style={{ fontSize: 8.5, color: t.muted, fontFamily: "'JetBrains Mono'", lineHeight: 1, marginTop: 2 }}>5h</span>
-                  </Ring>
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: ".14em", color: t.accent, fontFamily: "'JetBrains Mono'" }}>现在该用 · USE NOW</div>
-                    <div style={{ display: "flex", alignItems: "baseline", gap: 9, marginTop: 3 }}>
-                      <span style={{ fontSize: 24, fontWeight: 700, letterSpacing: "-.01em" }}>{hero.node}</span>
-                      <span style={{ fontSize: 12, color: t.email, fontFamily: "'JetBrains Mono'" }}>{hero.email}</span>
+              {(() => {
+                const cur = accounts.find(a => a.aid === currentNode);
+                const betterExists = hero && hero.aid !== currentNode;
+                if (!cur) return null;
+                const sc = cur.status === "dead" ? "#E0524D" : t.accent;
+                return (
+                  <div style={{ display: "flex", alignItems: "center", gap: 18, background: t.heroBg, border: `1px solid ${t.heroBorder}`, borderRadius: 14, padding: "15px 18px", marginBottom: 13, boxShadow: t.heroShadow, transition: "background-color .35s ease, border-color .35s ease" }}>
+                    <Ring pct={cur.tightest < 0 ? 0 : cur.tightest} r={33} sw={6} color={sc} track={t.ringTrack} size={80}>
+                      <span style={{ fontSize: 19, fontWeight: 700, color: t.text, fontVariantNumeric: "tabular-nums", lineHeight: 1, marginTop: -1 }}>{cur.tightest < 0 ? "—" : cur.tightest}<span style={{ fontSize: 10, color: t.muted }}>%</span></span>
+                      <span style={{ fontSize: 8.5, color: t.muted, fontFamily: "'JetBrains Mono'", lineHeight: 1, marginTop: 2 }}>{cur.windows[0]?.label ?? ""}</span>
+                    </Ring>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: ".14em", color: t.accent, fontFamily: "'JetBrains Mono'" }}>当前使用中</div>
+                      <div style={{ display: "flex", alignItems: "baseline", gap: 9, marginTop: 3 }}>
+                        <span style={{ fontSize: 24, fontWeight: 700, letterSpacing: "-.01em" }}>{cur.node}</span>
+                        <span style={{ fontSize: 12, color: t.email, fontFamily: "'JetBrains Mono'" }}>{cur.email}</span>
+                      </div>
+                      <div style={{ display: "flex", alignItems: "center", gap: 13, marginTop: 8, fontSize: 12, color: t.text2, fontFamily: "'JetBrains Mono'" }}>
+                        {cur.windows.map((w, i) => (
+                          <span key={w.label}>{i > 0 && <span style={{ color: t.faint, marginRight: 13 }}>·</span>}{w.label} <b style={{ color: sc }}>{w.pct}%</b> <span style={{ color: t.muted }}>↻{w.reset}</span></span>
+                        ))}
+                        {cur.windows.length > 0 && <span style={{ color: t.faint }}>·</span>}
+                        <span>订阅至 {cur.exp}</span>
+                      </div>
                     </div>
-                    <div style={{ display: "flex", alignItems: "center", gap: 13, marginTop: 8, fontSize: 12, color: t.text2, fontFamily: "'JetBrains Mono'" }}>
-                      <span>5h <b style={{ color: t.accent }}>{hero.h5}%</b></span>
-                      <span style={{ color: t.faint }}>·</span>
-                      <span>周 <b style={{ color: t.accent }}>{hero.wk}%</b></span>
-                      <span style={{ color: t.faint }}>·</span>
-                      <span>↻ {hero.h5reset}{hero.h5resetAt && hero.h5resetAt !== "已重置" ? ` (${hero.h5resetAt})` : ""}</span>
-                      <span style={{ color: t.faint }}>·</span>
-                      <span>订阅至 {hero.exp}</span>
-                    </div>
+                    {betterExists && hero ? (
+                      <span onClick={() => run("switch-hero", ["switch", hero.node], `当前号 → ${hero.node}`)} style={{ display: "inline-flex", flexDirection: "column", alignItems: "center", gap: 4, padding: "8px 14px", borderRadius: 9, fontSize: 11, fontWeight: 700, color: t.accentText, background: t.accent, flexShrink: 0, cursor: "pointer", userSelect: "none", opacity: loadingAction?.startsWith("switch") ? 0.6 : 1 }}>
+                        <span style={{ fontSize: 10, opacity: 0.8 }}>建议切到 {hero.node}({hero.tightest}%)</span>
+                        <span>{loadingAction?.startsWith("switch") ? "切换中…" : "切换 →"}</span>
+                      </span>
+                    ) : (
+                      <span style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "10px 16px", borderRadius: 9, fontSize: 12.5, fontWeight: 700, color: t.accent, border: `1px solid ${t.accentBorder}`, background: t.accentSoft, flexShrink: 0 }}>✓ 额度最优</span>
+                    )}
                   </div>
-                  {hero.aid === currentNode ? (
-                    <span style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "10px 16px", borderRadius: 9, fontSize: 12.5, fontWeight: 700, color: t.accent, border: `1px solid ${t.accentBorder}`, background: t.accentSoft, flexShrink: 0 }}>✓ 当前使用中</span>
-                  ) : (
-                    <span onClick={() => run("switch-hero", ["switch", hero.node], `当前号 → ${hero.node}`)} style={{ display: "inline-flex", alignItems: "center", gap: 7, padding: "10px 16px", borderRadius: 9, fontSize: 12.5, fontWeight: 700, color: t.accentText, background: t.accent, flexShrink: 0, cursor: "pointer", userSelect: "none", opacity: loadingAction?.startsWith("switch") ? 0.6 : 1 }}>
-                      {loadingAction?.startsWith("switch") ? "切换中…" : "设为当前号 →"}
-                    </span>
-                  )}
-                </div>
-              )}
+                );
+              })()}
 
-              {/* Card grid */}
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 11, flex: 1, overflow: "auto", alignContent: "start" }}>
-                {accounts.map(a => (
-                  <AccountCard key={a.aid} a={a} isCurrent={a.aid === currentNode} isBest={hero?.aid === a.aid} t={t}
-                    onSelect={() => { if (!a.status.startsWith("dead")) run(`switch-${a.aid}`, ["switch", a.node], `当前号 → ${a.node}`); }}
-                    onShowDetail={(aid) => { invoke<AccountDetail>("read_account_detail", { aid }).then(d => setDetailModal(d)).catch(() => {}); }} />
-                ))}
-              </div>
+              {(() => {
+                const alive = accounts.filter(a => a.status !== "dead");
+                const dead = accounts.filter(a => a.status === "dead");
+                return (
+                  <div style={{ flex: 1, overflow: "auto" }}>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 11, alignContent: "start" }}>
+                      {alive.map((a) => {
+                        const shortcutIdx = aliveByLabel.findIndex(x => x.aid === a.aid);
+                        return (
+                        <AccountCard key={a.aid} a={a} isCurrent={a.aid === currentNode} isBest={hero?.aid === a.aid} isSelected={selectedCard === a.aid} shortcut={shortcutIdx >= 0 && shortcutIdx < 9 ? shortcutIdx + 1 : undefined} t={t}
+                          onSelect={() => setSelectedCard(selectedCard === a.aid ? null : a.aid)}
+                          onSwitch={() => run(`switch-${a.aid}`, ["switch", a.node], `当前号 → ${a.node}`)}
+                          onShowDetail={(aid) => { invoke<AccountDetail>("read_account_detail", { aid }).then(d => setDetailModal(d)).catch(() => {}); }}
+                          onRemove={(label) => run(`remove-${label}`, ["remove", label], `已删除 ${label}`)} />
+                      );})}
+                    </div>
+                    {dead.length > 0 && (
+                      <details style={{ marginTop: 12 }}>
+                        <summary style={{ fontSize: 12, color: t.muted, cursor: "pointer", padding: "8px 14px", background: t.cardBg, borderRadius: 10, border: `1px solid ${t.cardBorder}`, userSelect: "none", display: "flex", alignItems: "center", gap: 6 }}>
+                          <span style={{ width: 6, height: 6, borderRadius: "50%", background: "#E0524D" }} />
+                          {dead.length} 个失效账号
+                        </summary>
+                        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", padding: "8px 4px 0" }}>
+                          {dead.map(a => (
+                            <span key={a.aid} onClick={() => setSelectedCard(selectedCard === a.aid ? null : a.aid)}
+                              style={{ display: "flex", alignItems: "center", gap: 6, padding: "5px 12px", background: t.cardBg, borderRadius: 8, fontSize: 11, cursor: "pointer", border: selectedCard === a.aid ? `1px solid ${t.accent}` : `1px solid ${t.cardBorder}`, opacity: 0.65 }}>
+                              <span style={{ width: 6, height: 6, borderRadius: "50%", background: "#E0524D" }} />
+                              {a.node} · {a.email.split("@")[0]}
+                              {selectedCard === a.aid && (
+                                <span onClick={(e) => { e.stopPropagation(); run(`remove-${a.node}`, ["remove", a.node], `已删除 ${a.node}`); }}
+                                  style={{ fontSize: 10, color: "#E0524D", cursor: "pointer", marginLeft: 4 }}>删除</span>
+                              )}
+                            </span>
+                          ))}
+                        </div>
+                      </details>
+                    )}
+                  </div>
+                );
+              })()}
             </>
           )}
 
@@ -419,10 +208,7 @@ export default function App() {
         </div>
       </div>
 
-      {/* Detail modal */}
       {detailModal && <DetailModal detail={detailModal} t={t} onClose={() => setDetailModal(null)} />}
-
-      {/* Toast */}
       {toast && <Toast msg={toast} t={t} />}
     </div>
   );

@@ -7,13 +7,14 @@ interface RingProps {
   color: string;
   track: string;
   size: number;
+  glow?: string;
   children?: React.ReactNode;
 }
 
-export default function Ring({ pct, r, sw, color, track, size, children }: RingProps) {
+export default function Ring({ pct, r, sw, color, track, size, glow, children }: RingProps) {
   const cx = size / 2;
   return (
-    <div style={{ position: "relative", width: size, height: size, flexShrink: 0 }}>
+    <div className={glow ? "ring-glow" : undefined} style={{ position: "relative", width: size, height: size, flexShrink: 0, "--glow": glow } as React.CSSProperties}>
       <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
         <circle cx={cx} cy={cx} r={r} fill="none" stroke={track} strokeWidth={sw} />
         <circle cx={cx} cy={cx} r={r} fill="none"

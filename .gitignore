@@ -10,6 +10,12 @@ state.json.corrupt-*
 __pycache__/
 scratch/
 .omc/
+.omx/
+
+# Tauri / node build artifacts
+codexbar/node_modules/
+codexbar/dist/
+codexbar/src-tauri/target/
 
 # isolated test CODEX_HOME — keep only the config, drop codex runtime
 proxy/test-home/*

@@ -450,11 +450,16 @@ def cmd_add(args):
     print(f"added/updated [{slot['label']}] {who} (now active)")
 
 
+# Codex retired the 5h window (2026-07). Only weekly (10080) / monthly (43200) windows
+# are real now; anything shorter is a deprecated/phantom slot (old 5h=300, empty=0) and
+# must not be shown or counted.
+REAL_WINDOW_MIN = 5000
+
+def _win_real(w):
+    return bool(w) and (w.get("window_minutes") or 0) >= REAL_WINDOW_MIN
+
 def _win_tag(w):
-    wm = (w or {}).get("window_minutes", 300)
-    if wm >= 40000: return "月"
-    if wm >= 5000: return "周"
-    return f"{round(wm/60)}h"
+    return "月" if (w or {}).get("window_minutes", 0) >= 40000 else "周"
 
 def _qfmt(q):
     if not q:
@@ -463,7 +468,7 @@ def _qfmt(q):
     for key in ("primary", "secondary"):
         w = q.get(key) or {}
         used = w.get("used_percent")
-        if used is not None:
+        if used is not None and _win_real(w):
             bits.append(f"{_win_tag(w)}:{used:.0f}%")
     return "  " + " ".join(bits) if bits else ""
 
@@ -838,7 +843,7 @@ def cmd_refresh_all(args):
             parts = []
             for wkey in ("primary", "secondary"):
                 w = q.get(wkey)
-                if w and w.get("used_percent") is not None:
+                if w and w.get("used_percent") is not None and _win_real(w):
                     rem = 100 - (w["used_percent"] or 0)
                     parts.append(f"{_win_tag(w)}{rem:.0f}%")
             out.append(f"{label}:{'/'.join(parts) if parts else '?'}")

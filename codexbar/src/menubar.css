@@ -1,0 +1,222 @@
+/* MenuBar panel — dedicated styles for the tray popover window. */
+
+.mb-root {
+  width: 100%;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  border-radius: 32px 32px 16px 16px;
+  overflow: hidden;
+  position: relative;
+  font-family: 'Space Grotesk', system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+  transition: background-color .35s ease, color .35s ease;
+}
+
+/* Header */
+.mb-header {
+  display: flex;
+  align-items: center;
+  padding: 10px 14px 8px;
+  gap: 7px;
+  flex-shrink: 0;
+}
+.mb-header-logo { font-size: 12.5px; font-weight: 700; }
+.mb-status-dots { display: flex; align-items: center; gap: 4px; margin-left: 4px; }
+.mb-dot { width: 5px; height: 5px; border-radius: 50%; }
+.mb-dot-count { font-size: 9.5px; }
+.mb-theme-toggle {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.mb-theme-group {
+  display: flex;
+  gap: 1px;
+  padding: 1px;
+  border-radius: 6px;
+}
+.mb-theme-btn {
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 16px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background .25s, color .25s;
+}
+.mb-settings-btn {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: color .2s, background .2s;
+}
+.mb-settings-btn:hover { filter: brightness(1.4); }
+
+/* Hero card */
+.mb-hero {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 12px 14px 0;
+  padding: 12px 14px;
+  border-radius: 12px;
+  transition: background-color .35s ease;
+}
+.mb-hero-info { flex: 1; min-width: 0; }
+.mb-hero-label {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: .12em;
+  font-family: 'JetBrains Mono', monospace;
+}
+.mb-hero-name { font-size: 18px; font-weight: 700; margin-top: 1px; }
+.mb-hero-email {
+  font-size: 9.5px;
+  font-family: 'JetBrains Mono', monospace;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.mb-hero-windows {
+  display: flex;
+  gap: 10px;
+  margin-top: 4px;
+  font-size: 9px;
+  font-family: 'JetBrains Mono', monospace;
+}
+.mb-hero-action {
+  font-size: 10.5px;
+  font-weight: 700;
+  padding: 7px 12px;
+  border-radius: 8px;
+  flex-shrink: 0;
+  cursor: pointer;
+  transition: opacity .2s;
+}
+.mb-hero-action:hover { opacity: 0.85; }
+.mb-hero-badge {
+  font-size: 10.5px;
+  font-weight: 700;
+  padding: 7px 12px;
+  border-radius: 8px;
+  flex-shrink: 0;
+}
+
+/* Account list section */
+.mb-list-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 16px 8px;
+  font-size: 10.5px;
+  flex-shrink: 0;
+}
+.mb-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-height: 0;
+}
+.mb-list::-webkit-scrollbar { width: 5px; }
+.mb-list::-webkit-scrollbar-thumb { background: rgba(255,255,255,.12); border-radius: 5px; }
+.mb-list::-webkit-scrollbar-track { background: transparent; }
+.mb-list-spacer { height: 6px; flex-shrink: 0; }
+
+/* Dead accounts fold — collapsed by default */
+.mb-dead-fold { margin-top: 4px; }
+.mb-dead-summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px 6px;
+  font-size: 10.5px;
+  cursor: pointer;
+  list-style: none;
+  outline: none;
+}
+.mb-dead-summary::-webkit-details-marker { display: none; }
+.mb-dead-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
+.mb-dead-chevron { margin-left: auto; font-size: 9px; transition: transform .2s ease; }
+.mb-dead-fold[open] .mb-dead-chevron { transform: rotate(90deg); }
+.mb-dead-list { display: flex; flex-direction: column; gap: 6px; padding-top: 4px; }
+
+/* Account row */
+.mb-row {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  padding: 10px 12px;
+  border-radius: 12px;
+  cursor: pointer;
+  user-select: none;
+  transition: transform .15s ease, background .2s ease, box-shadow .2s ease;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+}
+.mb-row:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 6px 18px rgba(0,0,0,0.18);
+}
+.mb-row:active { transform: scale(0.985); }
+.mb-row-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; overflow: hidden; }
+.mb-row-name-line { display: flex; align-items: center; gap: 5px; }
+.mb-row-name { font-size: 12.5px; font-weight: 700; }
+.mb-row-status { font-size: 9px; font-weight: 600; }
+.mb-row-badge-use { font-size: 7.5px; font-weight: 700; padding: 1px 4px; border-radius: 3px; flex-shrink: 0; }
+.mb-row-badge-cur { font-size: 7.5px; font-weight: 700; padding: 0 5px; border-radius: 999px; flex-shrink: 0; }
+.mb-row-email {
+  font-size: 9.5px;
+  font-family: 'JetBrains Mono', monospace;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.mb-row-windows { display: flex; gap: 12px; margin-top: 2px; font-size: 8.5px; font-family: 'JetBrains Mono', monospace; }
+.mb-row-dead { font-size: 8.5px; color: #E0524D; font-weight: 600; margin-top: 1px; }
+.mb-row-exp { display: flex; flex-direction: column; align-items: flex-end; gap: 1px; flex-shrink: 0; }
+.mb-row-exp-text { font-size: 8.5px; font-family: 'JetBrains Mono', monospace; }
+
+/* Bottom actions */
+.mb-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1px;
+  padding: 0;
+  flex-shrink: 0;
+}
+.mb-action-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 12px 0;
+  font-size: 11px;
+  cursor: pointer;
+  user-select: none;
+  transition: background-color .2s, opacity .2s;
+}
+.mb-action-btn:hover { filter: brightness(1.15); }
+.mb-action-btn.loading { cursor: default; opacity: 0.7; }
+.mb-action-badge {
+  font-size: 8.5px;
+  font-weight: 700;
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+.mb-spinner {
+  width: 12px;
+  height: 12px;
+  border: 2px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: cbSpin .65s linear infinite;
+  display: inline-block;
+}

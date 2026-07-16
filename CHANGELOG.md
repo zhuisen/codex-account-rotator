@@ -1,6 +1,6 @@
 # codex-rotate · CHANGELOG & BUG LOG
 
-构建于 2026-06-09 ~ 06-10。插件版本号见 `swiftbar/codex-status.10s.py` 的 `VERSION`(改插件必 bump)。
+构建于 2026-06-09 ~ 06-10。展示层版本号见 `codexbar/src-tauri/tauri.conf.json` 的 `version`(SwiftBar 已退役)。
 
 ---
 
@@ -20,6 +20,17 @@
 - **Phase 1c(日常落地)**:`cxp` = `codex --profile rotateproxy`;代理跑 launchd 常驻;SwiftBar 加代理状态指示。
 - **Phase 2(逐请求精确记账)**:代理读 `x-codex-*` 响应头 → 写所服务号的 quota(`source=proxy`)+ `last_aid`/`last_proxy_ts`。
 - **Phase 3(健壮性闭环 — 2026-06-10)**:① 401 失效转移——代理对 401 先强制刷一次(可救活陈旧 token),仍失败则标 `auth_dead` + **同请求内换下一个号**,死号永不堵死 cxp;`_pick` 跳过 `auth_dead`/已试号。② 死号 UI——菜单栏红色三角 + “\codex login 复活”提示,`\codex login` 重登经 autosync `_syncback` 自动清 `auth_dead`。③ 只读 `health` 命令——查 access token 寿命 + 死号,**不轮换 token**(取代破坏性的 `refresh` 验证)。④ 并发写安全——state.json 改唯一 mkstemp tmp + 进程内 `_state_lock` 的 read-modify-write,根治多线程/多进程同写损坏。
+
+### CodexBar 桌面应用(取代 SwiftBar)— 2026-07
+
+**v0.1.0 → v0.3.0**。SwiftBar 插件退役,展示层重写为 **Tauri 2 + React** 原生 app(`codexbar/`):菜单栏弹窗 + 1000×660 主窗口仪表盘,Dock 隐藏(`ActivationPolicy::Accessory`),自签证书跨重建保 TCC 授权(`scripts/setup-signing.sh`),`scripts/deploy.sh` 一键构建部署。
+
+- **数据模型改造(Codex 取消 5h)**:2026-07 Codex 把 5h 窗口废弃、改周额度,还残留空槽位 `{window_minutes:0, resets_at:null}`。统一不变量:**只有 `window_minutes ≥ 5000`(周=10080/月=43200)才是真实窗口**,幽灵/遗留 5h 槽全部丢弃——前端 `helpers.ts`、CLI `_qfmt`/`refresh-all`、Rust 托盘标题、SwiftBar 四处同步。窗口标签由 `window_minutes` 动态判定(周/月)。
+- **菜单栏弹窗**:当前号 hero(有更优号才显示"建议切到")+ 可用账号列表(周额度油表 + 重置倒计时)+ **失效号默认折叠**(`<details>`)+ 底部刷新 + 齿轮直达设置页;托盘标题 `plusN 周 XX% ↻Nd Nh`(天/时换算)。
+- **主窗口**:3 列账号卡(渐变色温 + Ring 低额度脉冲 + 双窗口进度条)+ 死号折叠 + Hero 当前号 + ⌘1~⌘9 快捷键切号 + 日志/设置页。
+- **功能**:手动切号(点卡片/⌘N/右键菜单)、账号删除(`codex-rotate remove` + 应用内二次确认)、可选自动切号、订阅/token 到期通知、**开机自启**(`tauri-plugin-autostart` LaunchAgent)。
+- **右键托盘菜单**:打开主窗口 / 刷新全池 / 切到最佳号 /(分隔)版本 /(分隔)退出——退出与常用项隔开防误触。
+- 多轮 Fable/Codex 交叉评审修:失败静默(catch 显 `✗ 失败`)、⌘Q 销毁窗口(改 `ExitRequested` 拦截 hide)、WKWebView `confirm()` 失效(改内联确认)、冷却 `300:00` 时长格式、未探测号假 `0%`(哨兵 `-1` → `—`)、切号后托盘延迟刷新、字体被脚手架 `index.css` 覆盖。
 
 ---
 

@@ -177,11 +177,15 @@ def account_block(aid, slot, active):
         lines.append(f"   ⚠️ token 失效 · 终端跑 \\codex login 登此号即可自动复活 | color={RED} size=11")
         return lines
     if q:
-        for key, name in (("primary", "5h"), ("secondary", "周")):
+        for key in ("primary", "secondary"):
             w = q.get(key) or {}
+            wm = w.get("window_minutes", 0)
+            if wm < 5000:  # Codex retired 5h; skip deprecated/phantom slots
+                continue
             rem = win_remaining(w, q.get("captured_at", 0))
             if rem is None:
                 continue
+            name = "月" if wm >= 40000 else "周"
             lines.append(f"   {name} {smooth_bar(rem)} {rem:>3.0f}%  ↻{fmt_eta(w.get('resets_at'))} "
                          f"| color={rem_color(rem)} {MONO}")
     elif slot.get("quota_status") == "empty" and aid == active:
@@ -221,15 +225,15 @@ def main():
     cxp_recent = up and st.get("last_proxy_ts", 0) >= max(st.get("active_since", 0),
                                                           st.get("last_plain_ts", 0))
     shown = st.get("last_aid") if (cxp_recent and st.get("last_aid") in slots) else active
-    # Title = the shown account's 5h (primary) window, matching that account's 5h row in the dropdown
-    # (user's choice 2026-06-17: keep the top number and the dropdown consistent, over surfacing the
-    # tighter weekly figure). A 5h window past its reset reads 100% — that's truthful (it genuinely
-    # reset to full); the weekly figure lives in the dropdown's 周 row.
     sq = (slots.get(shown, {}).get("quota") or {}) if shown in slots else {}
-    pr = sq.get("primary")
+    # Codex retired 5h; pick the first real window (primary then secondary), skip phantom slots
+    pr = next((w for w in (sq.get("primary"), sq.get("secondary"))
+               if w and (w.get("window_minutes") or 0) >= 5000), None)
     rem = win_remaining(pr, sq.get("captured_at", 0)) if pr else None
     if rem is not None:
-        title = f"{title_icon(rem)} {rem:.0f}% · {fmt_eta(pr.get('resets_at'))}"
+        wm = (pr or {}).get("window_minutes", 0)
+        wtag = "月" if wm >= 40000 else "周"
+        title = f"{title_icon(rem)} {wtag} {rem:.0f}% · {fmt_eta(pr.get('resets_at'))}"
         if rem <= 10:
             title += f" | color={RED}"
         elif rem <= 30:

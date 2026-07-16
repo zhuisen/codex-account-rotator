@@ -1,6 +1,6 @@
 // shared helpers — data transforms & formatters
 
-export interface Win { used_percent?: number; resets_at?: number }
+export interface Win { used_percent?: number; resets_at?: number; window_minutes?: number }
 export interface Quota { primary?: Win; secondary?: Win; captured_at?: number; source?: string }
 export interface Slot {
   label?: string; email?: string; quota?: Quota; auth_dead?: boolean;
@@ -11,16 +11,20 @@ export interface AppState {
 }
 export interface TokenInfo { exp?: number }
 
+export interface QuotaWindow {
+  label: string;
+  pct: number;
+  reset: string;
+  resetAt: string;
+}
+
 export interface Account {
   aid: string;
   node: string;
   email: string;
   status: "live" | "low" | "cool" | "dead";
-  h5: number;
-  h5reset: string;
-  h5resetAt: string;  // absolute time "HH:MM" or "已重置"
-  wk: number;
-  wkReset: string;
+  windows: QuotaWindow[];
+  tightest: number;
   exp: string;
   cooldownSec: number;
   tok: string;
@@ -29,10 +33,21 @@ export interface Account {
 export const now = () => Date.now() / 1000;
 export const clamp = (n: number) => Math.max(0, Math.min(100, Math.round(n)));
 
-export function winRem(w?: Win, _cap = 0): number | null {
+export function winRem(w?: Win): number | null {
   if (!w || w.used_percent == null) return null;
   if (w.resets_at && w.resets_at <= now()) return 100;
   return 100 - w.used_percent;
+}
+
+// Codex retired the 5h window (2026-07). A real quota window is now weekly (10080)
+// or monthly (43200); anything shorter is a deprecated/phantom slot (e.g. the empty
+// {window_minutes: 0, resets_at: null} Codex still returns) and must not be shown.
+const REAL_WINDOW_MIN = 5000;
+
+function winLabel(w?: Win): string {
+  const mins = w?.window_minutes ?? 0;
+  if (mins >= 40000) return "月";
+  return "周";
 }
 
 export function fmtEta(ts?: number): string {
@@ -44,7 +59,10 @@ export function fmtEta(ts?: number): string {
 }
 
 export function fmtCd(sec: number): string {
-  const m = Math.floor(sec / 60), s = Math.round(sec % 60);
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = Math.round(sec % 60);
+  if (h > 0) return `${h}h${String(m).padStart(2, "0")}m`;
   return `${m}:${String(s).padStart(2, "0")}`;
 }
 
@@ -61,27 +79,43 @@ export function ringDash(pct: number, r: number): string {
   return `${(clamp(pct) / 100 * C).toFixed(1)} ${C.toFixed(1)}`;
 }
 
+function buildWindow(w: Win | undefined): QuotaWindow | null {
+  // Drop deprecated/phantom windows (old 5h = 300, empty slot = 0/undefined).
+  if (!w || (w.window_minutes ?? 0) < REAL_WINDOW_MIN) return null;
+  const pctRaw = winRem(w);
+  if (pctRaw == null) return null;
+  return {
+    label: winLabel(w),
+    pct: clamp(pctRaw),
+    reset: fmtEta(w.resets_at),
+    resetAt: fmtResetTime(w.resets_at),
+  };
+}
+
 export function slotToAccount(aid: string, slot: Slot, tokens: Record<string, TokenInfo>): Account {
-  const q = slot.quota; const cap = q?.captured_at ?? 0;
-  const h5 = winRem(q?.primary, cap) ?? 0;
-  const wk = winRem(q?.secondary, cap) ?? 0;
+  const q = slot.quota;
   const n = now();
   const coolSec = (slot.cooling_until ?? 0) > n ? Math.max(0, (slot.cooling_until ?? 0) - n) : 0;
+
+  const windows: QuotaWindow[] = [];
+  const w1 = buildWindow(q?.primary);
+  if (w1) windows.push(w1);
+  const w2 = buildWindow(q?.secondary);
+  if (w2) windows.push(w2);
+
+  const tightest = windows.length > 0 ? Math.min(...windows.map(w => w.pct)) : -1;
 
   let status: Account["status"] = "live";
   if (slot.auth_dead) status = "dead";
   else if (coolSec > 0) status = "cool";
-  else if (h5 <= 20) status = "low";
+  else if (tightest >= 0 && tightest <= 20) status = "low";
 
   const tokExp = tokens[aid]?.exp;
   const tokH = tokExp ? Math.floor((tokExp - n) / 3600) : null;
 
   return {
     aid, node: slot.label ?? "?", email: slot.email ?? "",
-    status, h5: clamp(h5), wk: clamp(wk),
-    h5reset: fmtEta(q?.primary?.resets_at),
-    h5resetAt: fmtResetTime(q?.primary?.resets_at),
-    wkReset: fmtEta(q?.secondary?.resets_at),
+    status, windows, tightest,
     exp: slot.sub_until?.slice(0, 10) ?? "—",
     cooldownSec: Math.round(coolSec),
     tok: tokH != null ? `${tokH}h` : "—",
@@ -90,5 +124,5 @@ export function slotToAccount(aid: string, slot: Slot, tokens: Record<string, To
 
 export function recommended(accounts: Account[]): Account | null {
   const avail = accounts.filter(a => a.status === "live" || a.status === "low");
-  return avail.sort((x, y) => y.h5 - x.h5)[0] ?? null;
+  return avail.sort((x, y) => y.tightest - x.tightest || x.node.localeCompare(y.node))[0] ?? null;
 }
