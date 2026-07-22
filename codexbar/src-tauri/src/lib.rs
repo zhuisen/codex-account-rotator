@@ -319,7 +319,7 @@ pub fn run() {
             let switch_best = MenuItem::with_id(app, "switch_best", "切到最佳号", true, None::<&str>)?;
             let sep1 = PredefinedMenuItem::separator(app)?;
             let sep2 = PredefinedMenuItem::separator(app)?;
-            let version = MenuItem::with_id(app, "version", "CodexBar v0.3.0", false, None::<&str>)?;
+            let version = MenuItem::with_id(app, "version", "CodexBar v0.3.1", false, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "⏻ 退出 CodexBar", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&show, &refresh, &switch_best, &sep1, &version, &sep2, &quit])?;
 
@@ -381,15 +381,13 @@ pub fn run() {
                 })
                 .build(app)?;
 
-            // ---- startup: auto refresh-all to get fresh quota ----
-            let store_startup = store_dir();
+            // ---- startup: refresh UI from EXISTING state.json — NO probe ----
+            // Codex retired the 5h window; probing (refresh-all) now spends real weekly quota on
+            // every launch (and with autostart, every login). quotad keeps the ACTIVE account fresh
+            // for free (tails rollouts); non-active accounts show last-known until manually refreshed.
             let handle_startup = handle.clone();
             tauri::async_runtime::spawn(async move {
                 tokio::time::sleep(Duration::from_secs(3)).await;
-                let rot = format!("{}/codex-rotate", store_startup);
-                let _ = tokio::task::spawn_blocking(move || {
-                    std::process::Command::new("python3").arg(&rot).args(["refresh-all"]).output()
-                }).await;
                 let _ = handle_startup.emit("state-changed", ());
                 if let Some(tray) = handle_startup.tray_by_id("main") {
                     let _ = tray.set_title(Some(&format_tray_title()));

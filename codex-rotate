@@ -248,19 +248,25 @@ def _find_rl(o):
 def _newest_rollout():
     if not SESSIONS.is_dir():
         return None
-
-    def newest_dir(d):
-        subs = [c for c in d.iterdir() if c.is_dir()]
-        return max(subs, key=lambda c: c.name) if subs else None
-
-    y = newest_dir(SESSIONS)
-    mo = newest_dir(y) if y else None
-    if not mo:
+    # Pick by MTIME (last append = freshest data), scanning the 2 newest MONTHS in full — NOT by the
+    # newest-NAMED day directories. A long-running session RESUMED today keeps its ORIGINAL creation-date
+    # filename + directory (e.g. sessions/2026/07/14/ appended at 07/22 09:38), so the old day-name window
+    # ([:3] newest-named days) skipped it and quotad read a newer-NAMED but STALER file → displayed quota
+    # lagged real usage (observed: live 50% vs stale rollout 20%). Attribution stays safe via source_mtime.
+    months = []
+    for y in SESSIONS.iterdir():
+        if y.is_dir():
+            for mo in y.iterdir():
+                if mo.is_dir():
+                    months.append((y.name, mo.name, mo))
+    if not months:
         return None
-    days = sorted((c for c in mo.iterdir() if c.is_dir()), key=lambda c: c.name, reverse=True)[:3]
+    months.sort(key=lambda t: (t[0], t[1]), reverse=True)
     cand = []
-    for dd in days:
-        cand += list(dd.glob("rollout-*.jsonl"))
+    for _, _, mo in months[:2]:
+        for dd in mo.iterdir():
+            if dd.is_dir():
+                cand += list(dd.glob("rollout-*.jsonl"))
     if not cand:
         return None
     return max(cand, key=lambda p: p.stat().st_mtime)
@@ -753,9 +759,18 @@ def cmd_quota(args):
         aid = s.get("active")
         if aid:
             slot = s["slots"].setdefault(aid, {})
-            if q:
+            existing = slot.get("quota") or {}
+            rollout_mtime = p.stat().st_mtime if p else 0
+            # Freshest-wins: never let an OLDER plain rollout revert a NEWER manual probe. Without this,
+            # quotad's 15s tick clobbers a just-made probe reading with the last codex session's stale
+            # value → the displayed % flickers back (observed: probe 58% → quotad reverts to 80%).
+            probe_is_fresher = (existing.get("source") == "probe"
+                                and existing.get("captured_at", 0) > rollout_mtime)
+            if q and not probe_is_fresher:
                 slot["quota"] = q          # fresh reading attributable to this account (plain codex)
                 slot["quota_status"] = "ok"
+            elif q and probe_is_fresher:
+                pass  # keep the newer manual probe; the older rollout is behind live
             elif slot.get("quota"):
                 pass  # keep the last snapshot (proxy OR a prior plain-codex reading) — a stale snapshot
                       # beats '用量未知' when you switch back to an account; the leak is gated by Fix A

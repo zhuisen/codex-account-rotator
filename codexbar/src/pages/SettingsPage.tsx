@@ -95,7 +95,7 @@ export default function SettingsPage({ t }: { t: Theme }) {
       <div style={{ marginTop: 20, padding: "12px 0", borderTop: `1px solid ${t.divider}` }}>
         <div style={{ fontSize: 12, fontWeight: 600, color: t.muted, marginBottom: 6 }}>关于</div>
         <div style={{ fontSize: 11, color: t.faint, fontFamily: "'JetBrains Mono'", lineHeight: 1.8 }}>
-          CodexBar v0.3.0<br />
+          CodexBar v0.3.1<br />
           Tauri 2 + React · macOS<br />
           github.com/zhuisen/codex-account-rotator
         </div>

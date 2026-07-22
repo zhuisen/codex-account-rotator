@@ -135,12 +135,12 @@ export default function MenuBar() {
       {/* Bottom actions — only refresh, no cool/uncool in menu bar */}
       <div className="mb-actions" style={{ background: t.chromeBorder, borderTop: `1px solid ${t.chromeBorder}` }}>
         {[
-          { id: "refresh-all", label: "刷新全池", loadingLabel: "刷新中…", accent: false, action: () => run("refresh-all", ["refresh-all", "--notify"], "已刷新全池") },
-          { id: "refresh-each", label: "刷新各号", loadingLabel: "探测中…", accent: true, badge: "+1%", action: () => run("refresh-each", ["refresh-all", "--notify"], "各号额度 +1%") },
+          { id: "refresh-all", label: "刷新全池", loadingLabel: "刷新中…", accent: false, badge: undefined as string | undefined, hint: "⚠️ 探测每个号,各扣一次周额度", action: () => run("refresh-all", ["refresh-all", "--notify"], "已刷新全池 · 各号各扣 1 次周额度") },
+          { id: "refresh-each", label: "刷新各号", loadingLabel: "探测中…", accent: true, badge: "耗额度", hint: "⚠️ 探测每个号,各扣一次周额度", action: () => run("refresh-each", ["refresh-all", "--notify"], "已探测各号 · 各扣 1 次周额度") },
         ].map((btn) => {
           const isLoading = loadingAction === btn.id;
           return (
-            <span key={btn.id}
+            <span key={btn.id} title={btn.hint}
               className={`mb-action-btn${isLoading ? " loading" : ""}`}
               onClick={isLoading ? undefined : btn.action}
               style={{ color: btn.accent ? t.accentTextSoft : t.ghostText, background: btn.accent ? t.accentSoft : t.appBg }}>
