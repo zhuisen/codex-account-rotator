@@ -521,32 +521,68 @@ def _qfmt(q):
 
 
 def cmd_login(args):
-    """SAFE way to add / re-login an account. Use this instead of `codex logout && codex login`.
+    """SAFE way to add / re-login an account:  codex-rotate login [label]
 
-    ★ Why this exists — `codex logout` REVOKES the tokens server-side (the codex binary literally logs
-    "failed to revoke auth tokens during logout"). The rotator's ACTIVE account keeps its freshest
-    tokens only in ~/.codex/auth.json (by design: codex-native owns them, see B14), so `codex logout`
-    permanently kills whichever account happens to be active — you gain the account you just logged in
-    and lose the one you had. Measured 2026-07-30: plus4 was healthy at 14:13, a logout+login for plus7
-    landed at 14:15, plus4 was 401 token_invalidated by 14:16. That zero-sum churn looked like "this
-    machine only allows 2 Codex logins"; it was self-inflicted.
+    ★ MEASURED MECHANISM (2026-07-30, two incidents, 4 accounts) — `codex login` REVOKES, server-side,
+    whichever account is sitting in ~/.codex/auth.json at the moment you run it. It performs an implicit
+    logout of the current session before authorising the new one (`codex logout` does the same thing
+    explicitly — the binary logs "failed to revoke auth tokens during logout").
 
-    This command instead: syncs the live account back into its own slot FIRST (so its freshest token is
-    preserved), then runs a plain `codex login` — never `logout` — and finally re-adopts whatever ended
-    up live. Nothing is revoked, so the previous account stays usable."""
-    # ★ Read state INSIDE the mutex. Reading it outside and then saving that copy under the lock is the
-    # B15 lost-update pattern: if acquiring the lock blocks (quotad ticks every 15s, the proxy mutates
-    # per request), we would wait for the other writer and then overwrite exactly what it just wrote —
-    # losing auth_dead / cooling_until / quota. Contention here means guaranteed loss, not a rare race.
+        15:56:24 login plus4   ->  (revoked whatever was live)
+        15:56:57 login plus3   ->  plus4 revoked      <- plus4 was live
+        15:58:09 login plus7   ->  plus3 revoked      <- plus3 was live
+        plus6 was never made live during the round -> survived
+
+    So each login costs you the account you were on: log in three, keep one. It looks exactly like
+    "this machine only allows 2 Codex logins" — it is not a limit, it is the login flow.
+
+    Saving the old token first does NOT help: the copy is revoked server-side too. The only way to add
+    an account without collateral damage is to make sure the token that gets revoked is one you were
+    going to lose anyway. So before launching the login this command parks a SACRIFICIAL account in
+    auth.json, preferring, in order:
+        1. `label`, when re-logging an existing account — its old token is being replaced regardless;
+        2. any already-dead account — its token is worthless already;
+        3. nothing safe available -> refuse, and say which live account would be destroyed."""
+    want = args[0] if args else None
     with _state_mutex():
         s = _state()
         prev = s.get("active")
         prev_label = (s["slots"].get(prev) or {}).get("label", "?") if prev else None
-        _syncback(s)          # preserve the live account's freshest token before codex overwrites it
-        _save_state(s)
-    if prev_label:
-        print(f"saved current account [{prev_label}] to its slot — it will NOT be revoked")
-    print("launching `codex login` (never `codex logout` — that would revoke the current account)…")
+
+        target = None   # slot whose token we are willing to see revoked
+        if want:
+            target = next((a for a, sl in s["slots"].items()
+                           if a == want or sl.get("label") == want), None)
+            if not target:
+                print(f"[{want}] 不在池中 —— 当作新号登录")
+        if target is None:
+            target = next((a for a, sl in s["slots"].items() if sl.get("auth_dead")), None)
+            if target:
+                print(f"用已失效的 [{s['slots'][target].get('label')}] 占位,登录时被作废的是它(本就无用)")
+
+        if target and target != prev:
+            # same credential move as cmd_switch: syncback the live account, then load the sacrifice
+            _syncback(s)
+            with _cred_lock():
+                _atomic_write(LIVE, _load_json(AUTH_DIR / s["slots"][target]["file"]))
+                _activate(s, target)
+            _save_state(s)
+        elif target is None:
+            _syncback(s)
+            _save_state(s)
+            live_label = prev_label or "当前号"
+            print(f"⚠️  池中没有可牺牲的号。现在登录会让 [{live_label}] 被服务端作废。")
+            print(f"    要重登 {live_label} 本身:  codex-rotate login {live_label}")
+            print( "    确实要牺牲它:            codex-rotate login --sacrifice-current")
+            if "--sacrifice-current" not in args:
+                sys.exit(1)
+        else:
+            _syncback(s)
+            _save_state(s)
+
+    parked = (s["slots"].get(s.get("active")) or {}).get("label", "?")
+    print(f"auth.json 现在是 [{parked}] —— 登录时被作废的将是它")
+    print("launching `codex login`…")
     rc = subprocess.call(["codex", "login"])
     if rc != 0:
         sys.exit(f"codex login exited {rc}")
@@ -569,8 +605,7 @@ def cmd_login(args):
               "(check: codex-rotate list)")
     else:
         print(f"now active: [{lab}] {who}")
-    if prev and prev != now_aid and prev_label:
-        print(f"previous account [{prev_label}] kept — verify with: codex-rotate refresh-all")
+    print("验证全池:  codex-rotate health")
 
 
 def cmd_remove(args):
@@ -885,6 +920,38 @@ def cmd_quota(args):
 
 
 USAGE_PATH = "/backend-api/codex/usage"
+# Liveness endpoint. /usage carries a Cloudflare bot challenge (403 for every client, healthy or not),
+# so it cannot answer "is this token revoked". /models is unchallenged, is a GET, costs no quota, and
+# still 401s on a revoked token — which makes it the reliable health signal.
+MODELS_PATH = "/backend-api/codex/models?client_version=0.146.0"
+
+
+def _api_get(tok, path, timeout=25):
+    """GET an authenticated Codex backend path with this account's token. -> (status, body|b'')."""
+    conn = http.client.HTTPSConnection("chatgpt.com", 443, context=ssl.create_default_context(), timeout=timeout)
+    try:
+        conn.request("GET", path, headers={
+            "Authorization": f"Bearer {tok.get('access_token', '')}",
+            "chatgpt-account-id": tok.get("account_id"),
+            "originator": "codex_cli_rs", "User-Agent": "codex_cli_rs/0.146.0",
+            "Accept": "application/json"})
+        r = conn.getresponse()
+        return r.status, r.read()
+    except Exception:
+        return None, b""
+    finally:
+        conn.close()
+
+
+def _token_alive(tok):
+    """True / False / None(unknown) — is this token still accepted by the server?
+    Uses /models because /usage is behind a bot challenge; 401 here is a genuine revocation."""
+    st, _ = _api_get(tok, MODELS_PATH)
+    if st == 200:
+        return True
+    if st == 401:
+        return False
+    return None
 
 
 def _win_from_usage(w):
@@ -932,37 +999,30 @@ def _probe_quota(aid, slot, is_active):
                       else "slot file/account mismatch — not attributing")
     if _access_exp(tok) - time.time() < 60:
         return None, "token expired (\\codex login / wait keepalive)"
-    # Cloudflare rate-limits this endpoint per client, and it answers 403/429 (never 401) when it does —
-    # observed all four accounts returning 403 in one burst, then 200 on an immediate retry. Those codes
-    # are transient and MUST NOT be mistaken for an account problem, so back off once and retry.
-    status, raw = None, b""
-    for attempt in range(2):
-        if attempt:
-            time.sleep(2.5)
-        conn = http.client.HTTPSConnection("chatgpt.com", 443, context=ssl.create_default_context(), timeout=30)
-        try:
-            conn.request("GET", USAGE_PATH, headers={
-                "Authorization": f"Bearer {tok.get('access_token', '')}",
-                "chatgpt-account-id": tok.get("account_id"),
-                "originator": "codex_cli_rs", "User-Agent": "codex_cli_rs/0.144.6",
-                "Accept": "application/json"})
-            r = conn.getresponse()
-            status = r.status
-            raw = r.read()
-        except Exception as e:
-            return None, f"req err: {e}"
-        finally:
-            conn.close()
-        if status not in (403, 429):
-            break
+    # ★ Cloudflare puts a BOT CHALLENGE on /usage (`cf-mitigated: challenge` -> 403 HTML), and it is
+    # sticky: every account 403s, including the healthy active one, and curl is challenged just like
+    # Python — so it is the ENDPOINT, not our client or the accounts. Meanwhile /models answers 200 for
+    # the very same token. A 403 therefore says NOTHING about the account, and treating it as a signal
+    # is what made a fully healthy pool look dead. Liveness now comes from /models (unchallenged, GET,
+    # no quota); /usage is only for the numbers, and its 403 degrades to "quota unknown".
+    status, raw = _api_get(tok, USAGE_PATH, timeout=30)
+    if status is None:
+        return None, "req err"
 
-    # ★ 401 here is the server saying the token is REVOKED — the local JWT exp was already checked above,
-    # so this is exactly the "valid-looking but server-side dead" case that `health` cannot detect (B21).
-    # Until now only proxy.py ever set auth_dead, so an account that died while IDLE (never routed through
-    # the proxy) kept showing its last stale snapshot — plus7 sat at a 26h-old "0% remaining", which reads
-    # as "quota exhausted" when it was really "token revoked". The usage endpoint gives this signal for
-    # FREE on every account, so wire it here. auth_dead_fp = tail of the REJECTED token, preserving B16's
-    # revival gate (autosync only clears the flag when a genuinely DIFFERENT token appears).
+    # A 403 on /usage is the bot challenge, never an account verdict — resolve liveness on /models and
+    # report quota as unknown. Only escalate to "revoked" when the UNCHALLENGED endpoint agrees.
+    if status in (403, 429):
+        alive = _token_alive(tok)
+        if alive is False:
+            status = 401                       # fall through to the dead-marking path below
+        else:
+            return None, "额度接口被 Cloudflare 质询(账号正常)" if alive else "额度接口被质询(死活未知)"
+
+    # ★ 401 = the server says this token is REVOKED — the local JWT exp was checked above, so this is the
+    # "valid-looking but server-side dead" case `health` cannot detect (B21). Until now only proxy.py set
+    # auth_dead, so an account dying while IDLE kept showing a stale snapshot: plus7 sat at a 26h-old
+    # "0% remaining" that reads as quota exhaustion when the token had been revoked. auth_dead_fp = tail
+    # of the REJECTED token, preserving B16's revival gate.
     if status == 401:
         fp = (tok.get("access_token") or "")[-16:] or None
         def _dead(st, a=aid, f=fp):
@@ -1059,11 +1119,17 @@ def cmd_current(args):
 
 
 def cmd_health(args):
-    """Read-only token health (no rotation): each account's access-token expiry + last_refresh."""
+    """Read-only token health (no rotation, no quota cost).
+
+    ★ By default this now ASKS THE SERVER (GET /models, unchallenged + free) instead of only reading the
+    local JWT `exp`. A revoked token keeps a perfectly valid-looking exp — plus7 had 201h left while the
+    server had already invalidated it — so an exp-only check reports a dead account as healthy (B21).
+    `--local` keeps the old offline behaviour."""
     s = _state()
     if not s["slots"]:
         print("no accounts")
         return
+    online = "--local" not in args
     now = time.time()
     for aid, slot in s["slots"].items():
         try:
@@ -1073,8 +1139,24 @@ def cmd_health(args):
             continue
         left = _access_exp(auth.get("tokens") or {}) - now
         st = f"access {left / 3600:.0f}h" if left > 0 else "access 已过期"
+        if online and left > 0:
+            alive = _token_alive(auth.get("tokens") or {})
+            st += "  服务端:" + {True: "✅活", False: "☠️已作废", None: "?"}[alive]
+            if alive is False and not slot.get("auth_dead"):
+                fp = ((auth.get("tokens") or {}).get("access_token") or "")[-16:] or None
+                def _d(stt, a=aid, f=fp):
+                    sl = stt.get("slots", {}).get(a)
+                    if sl is not None:
+                        sl["auth_dead"] = True
+                        sl.setdefault("auth_dead_at", time.time())
+                        sl["auth_dead_src"] = "probe"
+                        if f:
+                            sl["auth_dead_fp"] = f
+                _mutate_state(_d)
+                slot["auth_dead"] = True
+            time.sleep(1.2)   # pacing
         who = slot.get("email") or _mask(aid)
-        dead = "  ⚠️ DEAD 需 \\codex login 重登" if slot.get("auth_dead") else ""
+        dead = "  ⚠️ DEAD 需 codex-rotate login 重登" if slot.get("auth_dead") else ""
         print(f"  [{slot.get('label', '?'):<8}] {who:<26} {st:<13} "
               f"last_refresh:{(auth.get('last_refresh') or '?')[:19]}{dead}")
 

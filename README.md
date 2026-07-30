@@ -59,16 +59,26 @@
 
 外部依赖:`~/.codex/config.toml` 里有一个 dormant 的 `[model_providers.rotateproxy]` 块;`~/.codex/rotateproxy.config.toml` 是 cxp 的 profile overlay。详见 RUNBOOK。
 
-> ⛔ **千万别跑 `codex logout`**。它会把**当前活跃号**的 token 在**服务端 revoke**(codex 二进制内含 `failed to revoke auth tokens during logout`;实测 2026-07-30:plus4 在 14:13 还健康,14:15 一次 logout+login 后,14:16 就变成 401 `token_invalidated`)。于是"每加一个号就死一个号",看起来像"这台机器只能登 2 个 Codex",其实是自己打的。
+> ⛔ **加号/重登只用 `codex-rotate login`,别直接跑 `codex login` 或 `codex logout`。**
 >
-> 加号/重登一律用 **`codex-rotate login`**（`~/.local/bin/codex` 包装脚本已内置拦截：直接跑 `codex logout`（含 `\codex logout`，反斜杠只绕 alias 不绕 PATH）会被拒绝并提示，需 `--force` 才放行）:它**先把当前号 syncback 回槽位、再直接 `codex login`,全程不调 logout**。
-> ⚠️ 注意边界:syncback 保的是"槽位里留着的是最新、未被消耗的 refresh_token"(防 B7/B8 类重放致死),**它挡不住服务端 revoke**——本地存几份都一样。另外 **`codex login` 在已登录状态下会不会隐式 revoke 旧号,尚未实测确认**;验证方法:登入另一个号后,立刻与 ~30 分钟后各跑一次 `codex-rotate refresh-all`,原号两次都 200 才算确证(401=被 revoke,该检查零消耗)。
+> **实测机制(2026-07-30,两次事故 4 个号)**:`codex login` 会把**运行那一刻 `~/.codex/auth.json` 里的号**在服务端 revoke(它自带隐式 logout;`codex logout` 是显式做同一件事)。所以连登三个号只会剩最后一个:
+> ```
+> 15:56:24 登 plus4  →  (作废当时的活跃号)
+> 15:56:57 登 plus3  →  plus4 被作废   ← 登录前 auth.json 里是 plus4
+> 15:58:09 登 plus7  →  plus3 被作废   ← 登录前 auth.json 里是 plus3
+> plus6 全程没被设为活跃            → 幸存
+> ```
+> 看起来像「这台机器只能登 2 个 Codex」——**不是限制,是登录流程本身**。
+>
+> 先把 token 存起来**没用**:服务端那份也被作废了。唯一无损的办法是**让被作废的那个 token 本来就该作废**。`codex-rotate login` 就是这么做的——登录前先把「牺牲号」放进 auth.json:① 你指定要重登的号(`codex-rotate login plus3`,它的旧 token 反正要换);② 任意已失效的号(token 早就没用);③ 都没有就拒绝执行,并告诉你会毁掉哪个活号。
+>
+> `~/.local/bin/codex` 包装脚本另外拦截了 `codex logout`(含 `\codex logout`——反斜杠只绕 alias 不绕 PATH),需 `--force` 才放行。
 
 ## Quickstart
 
 ```bash
 # 1) 加号 / 重登死号:★必须用 codex-rotate login,不要自己跑 codex logout
-codex-rotate login                   # 先把当前号存回槽位,再走 codex login(浏览器,必要时无痕窗)
+codex-rotate login [label]           # 先放好牺牲号再登,零连坐;重登某号就带上它的 label
 
 # 2) 日常用 cxp(多号透明轮换)
 cxp                                  # 交互
