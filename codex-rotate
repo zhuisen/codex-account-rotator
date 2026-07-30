@@ -543,7 +543,9 @@ def cmd_login(args):
         1. `label`, when re-logging an existing account — its old token is being replaced regardless;
         2. any already-dead account — its token is worthless already;
         3. nothing safe available -> refuse, and say which live account would be destroyed."""
-    want = args[0] if args else None
+    # First NON-flag arg is the label. Without this filter, `login --sacrifice-current` treats the flag
+    # itself as a label and reports "[--sacrifice-current] 不在池中" before falling through.
+    want = next((a for a in args if not a.startswith("-")), None)
     with _state_mutex():
         s = _state()
         prev = s.get("active")
@@ -561,12 +563,19 @@ def cmd_login(args):
                 print(f"用已失效的 [{s['slots'][target].get('label')}] 占位,登录时被作废的是它(本就无用)")
 
         if target and target != prev:
-            # same credential move as cmd_switch: syncback the live account, then load the sacrifice
+            # same credential move as cmd_switch: syncback the live account, then load the sacrifice.
+            # ★ slot-read → LIVE-write → state-save must all happen INSIDE the cred lock, exactly as
+            # cmd_switch does it. proxy.py re-reads `active` under this same flock before refreshing a
+            # slot (the B14 guard: never rotate the live account's codex-owned token). Saving the state
+            # outside the lock leaves a window where LIVE already holds the sacrifice account while
+            # state.json still names the old one — the proxy would then treat the now-live account as
+            # inactive and refresh it, racing codex's native refresher for a single-use refresh_token.
+            # That is precisely the B7/B8 death mode.
             _syncback(s)
             with _cred_lock():
                 _atomic_write(LIVE, _load_json(AUTH_DIR / s["slots"][target]["file"]))
                 _activate(s, target)
-            _save_state(s)
+                _save_state(s)
         elif target is None:
             _syncback(s)
             _save_state(s)
@@ -1119,7 +1128,7 @@ def cmd_current(args):
 
 
 def cmd_health(args):
-    """Read-only token health (no rotation, no quota cost).
+    """Token health: never rotates a token and costs no quota, but DOES record newly-found deaths.
 
     ★ By default this now ASKS THE SERVER (GET /models, unchallenged + free) instead of only reading the
     local JWT `exp`. A revoked token keeps a perfectly valid-looking exp — plus7 had 201h left while the
