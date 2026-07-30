@@ -215,7 +215,8 @@ fn format_tray_title() -> String {
             let label = slot["label"].as_str().unwrap_or("?");
             let dead = slot["auth_dead"].as_bool().unwrap_or(false);
             if dead {
-                return format!("✗ {} 失效", label);
+                // dead_n includes the active account here, so it is the true total (≥1).
+                return format!("✗ {} 失效{}", label, if dead_n > 1 { format!(" ✗{}", dead_n) } else { String::new() });
             }
             if let Some(q) = slot.get("quota") {
                 // Codex retired 5h; only weekly(10080)/monthly(43200) are real. Pick the first
@@ -324,7 +325,7 @@ pub fn run() {
             let switch_best = MenuItem::with_id(app, "switch_best", "切到最佳号", true, None::<&str>)?;
             let sep1 = PredefinedMenuItem::separator(app)?;
             let sep2 = PredefinedMenuItem::separator(app)?;
-            let version = MenuItem::with_id(app, "version", "CodexBar v0.4.3", false, None::<&str>)?;
+            let version = MenuItem::with_id(app, "version", "CodexBar v0.4.4", false, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "⏻ 退出 CodexBar", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&show, &refresh, &switch_best, &sep1, &version, &sep2, &quit])?;
 

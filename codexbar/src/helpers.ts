@@ -3,7 +3,7 @@
 export interface Win { used_percent?: number; resets_at?: number; window_minutes?: number }
 export interface Quota { primary?: Win; secondary?: Win; captured_at?: number; source?: string }
 export interface Slot {
-  label?: string; email?: string; quota?: Quota; auth_dead?: boolean;
+  label?: string; email?: string; quota?: Quota; auth_dead?: boolean; auth_dead_at?: number;
   cooling_until?: number; sub_until?: string; file?: string;
 }
 export interface AppState {
@@ -28,6 +28,8 @@ export interface Account {
   exp: string;
   cooldownSec: number;
   tok: string;
+  /** Unix seconds of the death event; a CHANGED value means a new death (not the same one). */
+  deadAt?: number;
 }
 
 export const now = () => Date.now() / 1000;
@@ -115,7 +117,7 @@ export function slotToAccount(aid: string, slot: Slot, tokens: Record<string, To
 
   return {
     aid, node: slot.label ?? "?", email: slot.email ?? "",
-    status, windows, tightest,
+    status, windows, tightest, deadAt: slot.auth_dead_at,
     exp: slot.sub_until?.slice(0, 10) ?? "—",
     cooldownSec: Math.round(coolSec),
     tok: tokH != null ? `${tokH}h` : "—",

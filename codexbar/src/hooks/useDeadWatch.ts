@@ -17,17 +17,30 @@ import { notify } from "./useNotify";
  */
 const KEY = "codexbar_dead_notified";
 
-function loadNotified(): Set<string> {
+/**
+ * aid -> the deadAt of the death we already announced. Storing the TIMESTAMP (not just membership) is
+ * what makes a re-death detectable: if the app is closed while an account is revived and then dies
+ * again, on the next launch the account is simply "still in the set" — a membership-only record would
+ * suppress that alert forever, because the revival that would have re-armed it was never observed.
+ * A changed deadAt means a genuinely new death event.
+ */
+type Notified = Record<string, number>;
+
+function loadNotified(): Notified {
   try {
     const raw = localStorage.getItem(KEY);
-    return new Set<string>(raw ? JSON.parse(raw) : []);
+    const v = raw ? JSON.parse(raw) : {};
+    if (Array.isArray(v)) {                       // migrate the old string[] shape
+      return Object.fromEntries(v.map((k: string) => [k, 0]));
+    }
+    return (v && typeof v === "object") ? v as Notified : {};
   } catch {
-    return new Set<string>();
+    return {};
   }
 }
 
-function saveNotified(s: Set<string>): void {
-  try { localStorage.setItem(KEY, JSON.stringify([...s])); } catch { /* ignore */ }
+function saveNotified(n: Notified): void {
+  try { localStorage.setItem(KEY, JSON.stringify(n)); } catch { /* ignore */ }
 }
 
 /** Pool-level sentinel keys share the persisted set but are NOT account ids. */
@@ -60,16 +73,18 @@ export function useDeadWatch(accounts: Account[], currentNode: string | undefine
       // they are not account ids, so they can never be in deadIds; deleting them here would re-arm the
       // pool alerts every single tick and spam a notification every 60s (verified by simulation).
       // Their lifecycle is owned by the two else-if branches below.
-      for (const aid of [...notified]) {
+      for (const aid of Object.keys(notified)) {
         if (aid.startsWith(SENTINEL)) continue;
-        if (!deadIds.has(aid)) { notified.delete(aid); changed = true; }
+        if (!deadIds.has(aid)) { delete notified[aid]; changed = true; }
       }
 
       const pending = pendingRef.current;
       for (const a of dead) {
-        if (notified.has(a.aid)) continue;
+        const seenAt = notified[a.aid];
+        // Same death we already announced? stay quiet. A different deadAt = a new death event.
+        if (seenAt !== undefined && seenAt === (a.deadAt ?? 0)) continue;
         if (!pending.has(a.aid)) { pending.add(a.aid); continue; }  // first sighting — wait one tick
-        notified.add(a.aid); changed = true;
+        notified[a.aid] = a.deadAt ?? 0; changed = true;
         const isCurrent = a.aid === cur;
         notify(
           isCurrent ? "⚠️ 当前号已失效" : "账号失效",
@@ -80,18 +95,18 @@ export function useDeadWatch(accounts: Account[], currentNode: string | undefine
       for (const aid of [...pending]) if (!deadIds.has(aid)) pending.delete(aid);
 
       // Pool-level alerts. Keyed in the same persisted set so they also fire once per occurrence.
-      if (alive.length === 0 && !notified.has("__pool_empty")) {
-        notified.add("__pool_empty"); changed = true;
-        notify("🚨 全部账号已失效", `${accts.length} 个号全部不可用 — 需要 codex login 重登`);
-      } else if (alive.length > 0 && notified.has("__pool_empty")) {
-        notified.delete("__pool_empty"); changed = true;
+      if (alive.length === 0 && notified.__pool_empty === undefined) {
+        notified.__pool_empty = 1; changed = true;
+        notify("🚨 全部账号已失效", `${accts.length} 个号全部不可用 — 需要 codex-rotate login 重登`);
+      } else if (alive.length > 0 && notified.__pool_empty !== undefined) {
+        delete notified.__pool_empty; changed = true;
       }
 
-      if (alive.length === 1 && accts.length > 1 && !notified.has("__pool_last")) {
-        notified.add("__pool_last"); changed = true;
+      if (alive.length === 1 && accts.length > 1 && notified.__pool_last === undefined) {
+        notified.__pool_last = 1; changed = true;
         notify("⚠️ 仅剩 1 个可用账号", `只有 ${alive[0].node} 还能用 — 建议尽快重登其他号`);
-      } else if (alive.length !== 1 && notified.has("__pool_last")) {
-        notified.delete("__pool_last"); changed = true;
+      } else if (alive.length !== 1 && notified.__pool_last !== undefined) {
+        delete notified.__pool_last; changed = true;
       }
 
       if (changed) saveNotified(notified);

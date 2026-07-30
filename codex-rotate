@@ -298,6 +298,7 @@ def _live_quota():
     except OSError:
         return None
     rl = None
+    event_ts = None
     for ln in data.splitlines():
         if '"used_percent"' not in ln:
             continue
@@ -308,14 +309,21 @@ def _live_quota():
         f = _find_rl(d)
         if f:
             rl = f
+            # ★ The EVENT's own timestamp, not the file's. File mtime is only an upper bound: a session
+            # appended after its last rate-limit event (resume, heartbeat, a response carrying no
+            # telemetry) has mtime NEWER than the reading it holds. Comparing that mtime against a live
+            # probe's captured_at would let stale telemetry win freshest-wins and revert a good reading.
+            event_ts = _iso_ts(d.get("timestamp"))
     if not rl:
         return None
+    mtime = os.path.getmtime(p)
     return {
         "primary": rl.get("primary"),
         "secondary": rl.get("secondary"),
         "plan_type": rl.get("plan_type"),
         "captured_at": time.time(),
-        "source_mtime": os.path.getmtime(p),
+        "source_mtime": mtime,          # attribution window (vs active_since) — unchanged semantics
+        "event_ts": event_ts or mtime,  # when this reading was actually produced
     }
 
 
@@ -414,7 +422,7 @@ def _syncback(s):
     # guard only in cmd_quota left this path — plus switch/ensure, which also call _syncback — able to
     # roll a fresh reading back to a stale one. Fixed here so the whole class is covered in one place.
     q = _attributable_quota(s)
-    if q and not _server_reading_is_fresher(slot.get("quota"), _newest_rollout()):
+    if q and not _server_reading_is_fresher(slot.get("quota"), q):
         slot["quota"] = q
     if s.get("active") != aid:
         _activate(s, aid)  # keep active_since in lockstep with active (attribution window correctness)
@@ -470,15 +478,26 @@ REAL_WINDOW_MIN = 5000
 SERVER_SOURCES = ("usage-api", "probe")
 
 
-def _server_reading_is_fresher(existing, rollout_path):
-    """True when the stored snapshot came STRAIGHT from the server and is newer than the rollout.
-    Freshest-wins: a rollout is only a local echo of an earlier request, so it must never revert a newer
-    authoritative reading (observed flicker: probe 58% -> quotad reverts to 80%)."""
+def _iso_ts(v):
+    """'2026-07-29T02:11:36.830Z' -> unix seconds. None when unparseable."""
+    if not isinstance(v, str):
+        return None
+    try:
+        return datetime.datetime.fromisoformat(v.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def _server_reading_is_fresher(existing, candidate):
+    """True when the stored snapshot came STRAIGHT from the server and is newer than the rollout-derived
+    candidate. Freshest-wins: a rollout is only a local echo of an earlier request, so it must never
+    revert a newer authoritative reading (observed flicker: probe 58% -> quotad reverts to 80%).
+    Compares the candidate's OWN event time (see _live_quota) rather than its file mtime."""
     existing = existing or {}
     if existing.get("source") not in SERVER_SOURCES:
         return False
-    rollout_mtime = rollout_path.stat().st_mtime if rollout_path else 0
-    return existing.get("captured_at", 0) > rollout_mtime
+    cand_ts = (candidate or {}).get("event_ts") or (candidate or {}).get("source_mtime") or 0
+    return existing.get("captured_at", 0) > cand_ts
 
 def _win_real(w):
     return bool(w) and (w.get("window_minutes") or 0) >= REAL_WINDOW_MIN
@@ -487,6 +506,9 @@ def _win_tag(w):
     return "月" if (w or {}).get("window_minutes", 0) >= 40000 else "周"
 
 def _qfmt(q):
+    """★ Prints USED percent — the opposite of what refresh-all and the GUI show (they show REMAINING).
+    The bare `周:0%` was ambiguous enough to be misread as "no quota left" when it means "none used",
+    so the label spells it out."""
     if not q:
         return ""
     bits = []
@@ -494,7 +516,7 @@ def _qfmt(q):
         w = q.get(key) or {}
         used = w.get("used_percent")
         if used is not None and _win_real(w):
-            bits.append(f"{_win_tag(w)}:{used:.0f}%")
+            bits.append(f"{_win_tag(w)}已用:{used:.0f}%")
     return "  " + " ".join(bits) if bits else ""
 
 
@@ -589,6 +611,14 @@ def cmd_list(args):
         if cool > now:
             flags.append(f"cooling {int((cool - now) / 60)}m")
         who = slot.get("email") or _mask(aid)
+        # A dead account's quota is a FROZEN snapshot from before it was revoked — printing it bare made
+        # "周:0%" read as "quota exhausted" when the real problem was a revoked token (the exact question
+        # this ambiguity provoked). Label the account and suppress the misleading number.
+        if slot.get("auth_dead"):
+            flags.append("✗DEAD")
+            print(f"  [{slot.get('label', '?'):<8}] {who:<26} {' '.join(flags)}"
+                  f"  额度未知(token 失效,codex-rotate login 重登)")
+            continue
         print(f"  [{slot.get('label', '?'):<8}] {who:<26} {' '.join(flags)}{_qfmt(slot.get('quota'))}")
 
 
@@ -831,7 +861,7 @@ def cmd_quota(args):
         aid = s.get("active")
         if aid:
             slot = s["slots"].setdefault(aid, {})
-            probe_is_fresher = _server_reading_is_fresher(slot.get("quota"), p)
+            probe_is_fresher = _server_reading_is_fresher(slot.get("quota"), q)
             if q and not probe_is_fresher:
                 slot["quota"] = q          # fresh reading attributable to this account (plain codex)
                 slot["quota_status"] = "ok"
@@ -890,11 +920,16 @@ def _probe_quota(aid, slot, is_active):
         tok = (auth.get("tokens") or {})
     except (OSError, ValueError) as e:
         return None, f"read err: {e}"
-    # refresh-all walks the pool over several seconds; a switch (CodexBar / cxp / ensure-live) landing
-    # mid-loop would leave LIVE holding a DIFFERENT account's token. Probing it and attributing the
-    # result here would mark the wrong account dead — or revive a dead one on someone else's 200.
-    if is_active and _account_id(auth) != aid:
-        return None, "live account switched mid-probe"
+    # ★ Invariant: the token we probe must BELONG to the account we attribute the result to. Violating
+    # it now costs more than a wrong number — a 401 marks that account dead and a 200 revives it, i.e.
+    # it changes pool membership. Both branches are checked:
+    #   • active   — refresh-all walks the pool over seconds, and a switch (CodexBar / cxp / ensure-live)
+    #     landing mid-loop leaves LIVE holding a DIFFERENT account's token.
+    #   • inactive — auth/<aid>.json should always hold account <aid>, so a mismatch means the slot file
+    #     is corrupt or was hand-edited; attributing it is worse than reporting nothing.
+    if _account_id(auth) != aid:
+        return None, ("live account switched mid-probe" if is_active
+                      else "slot file/account mismatch — not attributing")
     if _access_exp(tok) - time.time() < 60:
         return None, "token expired (\\codex login / wait keepalive)"
     conn = http.client.HTTPSConnection("chatgpt.com", 443, context=ssl.create_default_context(), timeout=30)
@@ -924,8 +959,11 @@ def _probe_quota(aid, slot, is_active):
         def _dead(st, a=aid, f=fp):
             sl = st.get("slots", {}).get(a)
             if sl is not None:
+                already = sl.get("auth_dead")
                 sl["auth_dead"] = True
-                sl["auth_dead_at"] = time.time()
+                if not already:                       # keep the ORIGINAL death time — the UI treats a
+                    sl["auth_dead_at"] = time.time()  # changed timestamp as a NEW death event
+                sl["auth_dead_src"] = "probe"         # see _revive: a detector may only retract its own
                 if f:
                     sl["auth_dead_fp"] = f
         _mutate_state(_dead)
@@ -937,13 +975,19 @@ def _probe_quota(aid, slot, is_active):
     except ValueError as e:
         return None, f"parse err: {e}"
 
-    # A 200 from this very token PROVES the account is alive — stronger evidence than the fingerprint
-    # heuristic — so clear a stale auth_dead. Also makes a transient 401 self-heal on the next cycle.
-    if slot.get("auth_dead"):
+    # A 200 from this very token proves the usage endpoint accepts it, so this probe may RETRACT ITS OWN
+    # 401 (self-healing the transient case — a transient 403 was observed in the wild).
+    # ★ But it must not overrule proxy.py: the proxy marks dead from a real /responses failure, i.e. the
+    # endpoint that actually matters for using the account. If the two endpoints ever disagree about the
+    # same token (revocation propagation / rollout), an unconditional clear here would flip auth_dead
+    # every cycle — flapping pool membership and, because a revival re-arms the alert, re-notifying on
+    # every flip. So each detector may only retract its own verdict; a proxy-marked death stands until
+    # the token actually changes (B16 revival via autosync).
+    if slot.get("auth_dead") and slot.get("auth_dead_src") == "probe":
         def _revive(st, a=aid):
             sl = st.get("slots", {}).get(a)
             if sl is not None:
-                for k in ("auth_dead", "auth_dead_at", "auth_dead_fp"):
+                for k in ("auth_dead", "auth_dead_at", "auth_dead_fp", "auth_dead_src"):
                     sl.pop(k, None)
         _mutate_state(_revive)
 
