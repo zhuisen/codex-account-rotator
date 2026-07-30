@@ -521,80 +521,79 @@ def _qfmt(q):
 
 
 def cmd_login(args):
-    """SAFE way to add / re-login an account:  codex-rotate login [label]
+    """Add / re-login an account with the smallest possible blast radius:  codex-rotate login
 
-    ★ MEASURED MECHANISM (2026-07-30, two incidents, 4 accounts) — `codex login` REVOKES, server-side,
-    whichever account is sitting in ~/.codex/auth.json at the moment you run it. It performs an implicit
-    logout of the current session before authorising the new one (`codex logout` does the same thing
-    explicitly — the binary logs "failed to revoke auth tokens during logout").
+    ── What is actually known ──────────────────────────────────────────────────────────────────────
+    OBSERVED (2026-07-30, two rounds): after logging in several accounts back to back, only the last
+    one survived, and the accounts that died were the ones that had been sitting in ~/.codex/auth.json
+    when the NEXT login ran. Confirmed revocations: plus4 and plus3 (401 from /models). plus6, never
+    made live during either round, stayed alive.
 
-        15:56:24 login plus4   ->  (revoked whatever was live)
+        15:56:24 login plus4   ->  (previous live account revoked)
         15:56:57 login plus3   ->  plus4 revoked      <- plus4 was live
         15:58:09 login plus7   ->  plus3 revoked      <- plus3 was live
-        plus6 was never made live during the round -> survived
 
-    So each login costs you the account you were on: log in three, keep one. It looks exactly like
-    "this machine only allows 2 Codex logins" — it is not a limit, it is the login flow.
+    NOT established: WHY. At least three mechanisms fit this data equally well —
+      H1 the login flow revokes the token it finds in auth.json (an implicit logout);
+      H2 the server revokes the previously issued grant for this device when a new one is issued;
+      H3 signing out of chatgpt.com in the browser to switch accounts revokes the grant that session
+         issued.
+    Only 2 positive samples, and in this timeline "the account in auth.json" and "the previously
+    logged-in account" are the same account every time, so they cannot be told apart. The binary
+    string "failed to revoke auth tokens during logout" is about LOGOUT, and it reports a FAILED
+    revoke — it is not evidence for H1. Treat the mechanism as unknown.
 
-    Saving the old token first does NOT help: the copy is revoked server-side too. The only way to add
-    an account without collateral damage is to make sure the token that gets revoked is one you were
-    going to lose anyway. So before launching the login this command parks a SACRIFICIAL account in
-    auth.json, preferring, in order:
-        1. `label`, when re-logging an existing account — its old token is being replaced regardless;
-        2. any already-dead account — its token is worthless already;
-        3. nothing safe available -> refuse, and say which live account would be destroyed."""
-    # First NON-flag arg is the label. Without this filter, `login --sacrifice-current` treats the flag
-    # itself as a label and reports "[--sacrifice-current] 不在池中" before falling through.
-    want = next((a for a in args if not a.startswith("-")), None)
+    ── What this command does about it ─────────────────────────────────────────────────────────────
+    It takes auth.json OUT of the picture rather than betting on a hypothesis: syncback (so the live
+    account's freshest token is preserved in its own slot), then MOVE auth.json aside, run
+    `codex login` against an empty auth state, and adopt whatever comes back.
+
+      • If H1 holds there is no token left for the login to revoke — the previous account survives.
+      • If H2/H3 hold this is no worse than any other approach; nothing can prevent it client-side.
+      • It never requires sacrificing a healthy account, so adding a brand-new account is always
+        allowed, and on failure/Ctrl-C the saved file is put back (no dead account left live).
+
+    This replaces an earlier "park a sacrificial account" design, which only helped under H1 and,
+    worse, printed a reassuring message that would have been actively misleading under H2/H3."""
     with _state_mutex():
         s = _state()
         prev = s.get("active")
         prev_label = (s["slots"].get(prev) or {}).get("label", "?") if prev else None
+        _syncback(s)      # the live account's freshest token is now safe in its own slot
+        _save_state(s)
 
-        target = None   # slot whose token we are willing to see revoked
-        if want:
-            target = next((a for a, sl in s["slots"].items()
-                           if a == want or sl.get("label") == want), None)
-            if not target:
-                print(f"[{want}] 不在池中 —— 当作新号登录")
-        if target is None:
-            target = next((a for a, sl in s["slots"].items() if sl.get("auth_dead")), None)
-            if target:
-                print(f"用已失效的 [{s['slots'][target].get('label')}] 占位,登录时被作废的是它(本就无用)")
-
-        if target and target != prev:
-            # same credential move as cmd_switch: syncback the live account, then load the sacrifice.
-            # ★ slot-read → LIVE-write → state-save must all happen INSIDE the cred lock, exactly as
-            # cmd_switch does it. proxy.py re-reads `active` under this same flock before refreshing a
-            # slot (the B14 guard: never rotate the live account's codex-owned token). Saving the state
-            # outside the lock leaves a window where LIVE already holds the sacrifice account while
-            # state.json still names the old one — the proxy would then treat the now-live account as
-            # inactive and refresh it, racing codex's native refresher for a single-use refresh_token.
-            # That is precisely the B7/B8 death mode.
-            _syncback(s)
-            with _cred_lock():
-                _atomic_write(LIVE, _load_json(AUTH_DIR / s["slots"][target]["file"]))
-                _activate(s, target)
-                _save_state(s)
-        elif target is None:
-            _syncback(s)
-            _save_state(s)
-            live_label = prev_label or "当前号"
-            print(f"⚠️  池中没有可牺牲的号。现在登录会让 [{live_label}] 被服务端作废。")
-            print(f"    要重登 {live_label} 本身:  codex-rotate login {live_label}")
-            print( "    确实要牺牲它:            codex-rotate login --sacrifice-current")
-            if "--sacrifice-current" not in args:
-                sys.exit(1)
-        else:
-            _syncback(s)
-            _save_state(s)
-
-    parked = (s["slots"].get(s.get("active")) or {}).get("label", "?")
-    print(f"auth.json 现在是 [{parked}] —— 登录时被作废的将是它")
+    # Move auth.json aside under the cred lock — the same lock every other credential move takes, so a
+    # concurrent proxy/keepalive refresh can never observe a half-moved state.
+    stash = LIVE.with_suffix(".rotator-stash")
+    moved = False
+    with _cred_lock():
+        if LIVE.exists():
+            os.replace(LIVE, stash)
+            moved = True
+    if prev_label:
+        print(f"已把 [{prev_label}] 的 auth.json 移开并存回槽位 —— 登录期间本机没有可被作废的 token")
     print("launching `codex login`…")
-    rc = subprocess.call(["codex", "login"])
-    if rc != 0:
-        sys.exit(f"codex login exited {rc}")
+
+    try:
+        rc = subprocess.call(["codex", "login"])
+    except KeyboardInterrupt:
+        rc = 130
+    if rc != 0 or not LIVE.exists():
+        # Failed or aborted: put the previous credentials back, otherwise plain codex / omc / the proxy
+        # are left with NO auth at all until the next daily keepalive.
+        if moved:
+            with _cred_lock():
+                if not LIVE.exists():
+                    os.replace(stash, LIVE)
+                    moved = False
+        print(f"登录未完成 (exit {rc}) —— 已恢复原来的 auth.json")
+        sys.exit(1)
+    if moved:
+        with _cred_lock():
+            try:
+                stash.unlink()
+            except OSError:
+                pass
     with _state_mutex():
         s = _state()          # re-read under the lock (same B15 reasoning as above)
         _autosync_live(s)     # adopt the newly logged-in account into the pool
@@ -809,8 +808,10 @@ def _ensure_live_healthy(s, *, force=False, quiet=False):
         except (OSError, ValueError):
             left = -1
         if left > 6 * 3600:
-            q, _ = _probe_quota(active, active_slot, is_active=True)
-            if q is not None:  # 200 + quota headers = 服务端活
+            # ★ 死活只问 /models(未被质询),不要用「能否拿到 quota」当判据:/usage 被 Cloudflare 质询时
+            # _probe_quota 对健康号也返回 None,会把活着的 live 判成死、且下面所有候选全被跳过 —— 保活
+            # 与轮换在质询期整体失效,而这正是 ensure-live 唯一存在的意义。
+            if _token_alive((_load_json(LIVE).get("tokens") or {})) is not False:
                 return "live healthy (no rotation)"
     # 2) live 死/临近过期 → 找最新鲜的**服务端健康**非活跃 slot,switch 进来。
     candidates = []
@@ -824,8 +825,11 @@ def _ensure_live_healthy(s, *, force=False, quiet=False):
         jwt_left = _access_exp(tok) - time.time()
         if jwt_left < 6 * 3600:  # JWT 太近过期(keepalive 本该刷过)→ 跳,别换个也快死的进来
             continue
-        q, _ = _probe_quota(aid, slot, is_active=False)  # 只读探,不刷新
-        if q is None:  # 401/无 quota 头 = 服务端死
+        try:
+            cand_tok = (_load_json(AUTH_DIR / slot["file"]).get("tokens") or {})
+        except (OSError, ValueError):
+            continue
+        if _token_alive(cand_tok) is not True:   # 只接受确证存活的候选(未知也不换)
             continue
         candidates.append((jwt_left, aid, slot))
     if not candidates:
@@ -946,16 +950,34 @@ def _api_get(tok, path, timeout=25):
             "Accept": "application/json"})
         r = conn.getresponse()
         return r.status, r.read()
-    except Exception:
-        return None, b""
+    except Exception as e:
+        return None, str(e).encode()   # keep the cause; callers otherwise只看到 "req err"
     finally:
         conn.close()
 
 
-def _token_alive(tok):
+def _revive_if_probe_marked(aid, slot):
+    """Clear an auth_dead that THIS probe set, once the server accepts the token again.
+    ★ Must be callable from the 403 path too: the revive used to sit after the /usage 200 branch, which
+    is unreachable while /usage is bot-challenged — so a single transient 401 stuck an account dead for
+    as long as the challenge lasted, with `health` printing "服务端:活" and "DEAD" on the same line.
+    Only retracts probe-set deaths; a proxy-set death still needs a genuinely new token (B16)."""
+    if not (slot.get("auth_dead") and slot.get("auth_dead_src") == "probe"):
+        return False
+    def _f(st, a=aid):
+        sl = st.get("slots", {}).get(a)
+        if sl is not None:
+            for k in ("auth_dead", "auth_dead_at", "auth_dead_fp", "auth_dead_src"):
+                sl.pop(k, None)
+    _mutate_state(_f)
+    slot.pop("auth_dead", None)
+    return True
+
+
+def _token_alive(tok, timeout=8):
     """True / False / None(unknown) — is this token still accepted by the server?
     Uses /models because /usage is behind a bot challenge; 401 here is a genuine revocation."""
-    st, _ = _api_get(tok, MODELS_PATH)
+    st, _ = _api_get(tok, MODELS_PATH, timeout=timeout)
     if st == 200:
         return True
     if st == 401:
@@ -1025,6 +1047,8 @@ def _probe_quota(aid, slot, is_active):
         if alive is False:
             status = 401                       # fall through to the dead-marking path below
         else:
+            if alive is True:
+                _revive_if_probe_marked(aid, slot)   # reachable even while /usage is challenged
             return None, "额度接口被 Cloudflare 质询(账号正常)" if alive else "额度接口被质询(死活未知)"
 
     # ★ 401 = the server says this token is REVOKED — the local JWT exp was checked above, so this is the
@@ -1041,7 +1065,8 @@ def _probe_quota(aid, slot, is_active):
                 sl["auth_dead"] = True
                 if not already:                       # keep the ORIGINAL death time — the UI treats a
                     sl["auth_dead_at"] = time.time()  # changed timestamp as a NEW death event
-                sl["auth_dead_src"] = "probe"         # see _revive: a detector may only retract its own
+                if not already:                       # never overwrite another detector's verdict
+                    sl["auth_dead_src"] = "probe"
                 if f:
                     sl["auth_dead_fp"] = f
         _mutate_state(_dead)
@@ -1063,13 +1088,7 @@ def _probe_quota(aid, slot, is_active):
     # every cycle — flapping pool membership and, because a revival re-arms the alert, re-notifying on
     # every flip. So each detector may only retract its own verdict; a proxy-marked death stands until
     # the token actually changes (B16 revival via autosync).
-    if slot.get("auth_dead") and slot.get("auth_dead_src") == "probe":
-        def _revive(st, a=aid):
-            sl = st.get("slots", {}).get(a)
-            if sl is not None:
-                for k in ("auth_dead", "auth_dead_at", "auth_dead_fp", "auth_dead_src"):
-                    sl.pop(k, None)
-        _mutate_state(_revive)
+    _revive_if_probe_marked(aid, slot)
 
     rl = d.get("rate_limit") or {}
     pw = _win_from_usage(rl.get("primary_window"))
@@ -1151,6 +1170,8 @@ def cmd_health(args):
         if online and left > 0:
             alive = _token_alive(auth.get("tokens") or {})
             st += "  服务端:" + {True: "✅活", False: "☠️已作废", None: "?"}[alive]
+            if alive is True:
+                _revive_if_probe_marked(aid, slot)   # 否则同一行会打印「服务端:活」+「DEAD」自相矛盾
             if alive is False and not slot.get("auth_dead"):
                 fp = ((auth.get("tokens") or {}).get("access_token") or "")[-16:] or None
                 def _d(stt, a=aid, f=fp):

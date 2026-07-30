@@ -61,24 +61,25 @@
 
 > ⛔ **加号/重登只用 `codex-rotate login`,别直接跑 `codex login` 或 `codex logout`。**
 >
-> **实测机制(2026-07-30,两次事故 4 个号)**:`codex login` 会把**运行那一刻 `~/.codex/auth.json` 里的号**在服务端 revoke(它自带隐式 logout;`codex logout` 是显式做同一件事)。所以连登三个号只会剩最后一个:
+> **已观测(2026-07-30,两轮)**:连着登几个号,最后只剩最后登的那个;死掉的恰好是「下一次 login 运行时正躺在 `~/.codex/auth.json` 里」的那些。已确证被作废:plus4、plus3(`/models` 返回 401)。plus6 两轮都没被设为活跃 → 存活。
 > ```
-> 15:56:24 登 plus4  →  (作废当时的活跃号)
-> 15:56:57 登 plus3  →  plus4 被作废   ← 登录前 auth.json 里是 plus4
-> 15:58:09 登 plus7  →  plus3 被作废   ← 登录前 auth.json 里是 plus3
-> plus6 全程没被设为活跃            → 幸存
+> 15:56:24 登 plus4  →  (之前的活跃号被作废)
+> 15:56:57 登 plus3  →  plus4 被作废   ← 当时 auth.json 里是 plus4
+> 15:58:09 登 plus7  →  plus3 被作废   ← 当时 auth.json 里是 plus3
 > ```
-> 看起来像「这台机器只能登 2 个 Codex」——**不是限制,是登录流程本身**。
+> **但「为什么」尚未定论**。至少三个机制同样能解释这份数据:①login 流程把 auth.json 里的 token 拿去 revoke(隐式 logout);②服务端在为本设备签发新授权时撤销上一次签发的;③为换号而在浏览器登出 chatgpt.com,连带撤销了该 session 签发的 CLI 授权。**只有 2 个阳性样本**,且这条时间线里「auth.json 里的号」和「上一个登录的号」每次都是同一个,无法区分。二进制里的 `failed to revoke auth tokens during logout` 说的是 **logout**、而且报的是 revoke **失败**,不能当作①的证据。
 >
-> 先把 token 存起来**没用**:服务端那份也被作废了。唯一无损的办法是**让被作废的那个 token 本来就该作废**。`codex-rotate login` 就是这么做的——登录前先把「牺牲号」放进 auth.json:① 你指定要重登的号(`codex-rotate login plus3`,它的旧 token 反正要换);② 任意已失效的号(token 早就没用);③ 都没有就拒绝执行,并告诉你会毁掉哪个活号。
+> 所以 `codex-rotate login` **不赌任何一个假说**:它先 syncback(把活跃号最新 token 存回自己槽位),再把 `auth.json` **整个移开**,在「本机没有任何 token」的状态下跑 `codex login`,登完自动收编;失败或 Ctrl-C 会把移开的文件放回去。①成立时没有 token 可被 revoke;②③成立时也不比任何做法更差(客户端本就无法阻止);而且**永远不需要牺牲健康号**,加全新号也不会被拒。
 >
 > `~/.local/bin/codex` 包装脚本另外拦截了 `codex logout`(含 `\codex logout`——反斜杠只绕 alias 不绕 PATH),需 `--force` 才放行。
+>
+> ⚠️ 待做的受控验证:停一个已死号 → `codex-rotate login` 加号 → 立刻 `codex-rotate health`,若健康号全部存活即可把假说①与②③区分开。
 
 ## Quickstart
 
 ```bash
 # 1) 加号 / 重登死号:★必须用 codex-rotate login,不要自己跑 codex logout
-codex-rotate login [label]           # 先放好牺牲号再登,零连坐;重登某号就带上它的 label
+codex-rotate login                   # 移开 auth.json 再登,失败自动还原;加号/重登都用它
 
 # 2) 日常用 cxp(多号透明轮换)
 cxp                                  # 交互
