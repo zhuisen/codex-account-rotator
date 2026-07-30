@@ -67,13 +67,15 @@
 > 15:56:57 登 plus3  →  plus4 被作废   ← 当时 auth.json 里是 plus4
 > 15:58:09 登 plus7  →  plus3 被作废   ← 当时 auth.json 里是 plus3
 > ```
-> **但「为什么」尚未定论**。至少三个机制同样能解释这份数据:①login 流程把 auth.json 里的 token 拿去 revoke(隐式 logout);②服务端在为本设备签发新授权时撤销上一次签发的;③为换号而在浏览器登出 chatgpt.com,连带撤销了该 session 签发的 CLI 授权。**只有 2 个阳性样本**,且这条时间线里「auth.json 里的号」和「上一个登录的号」每次都是同一个,无法区分。二进制里的 `failed to revoke auth tokens during logout` 说的是 **logout**、而且报的是 revoke **失败**,不能当作①的证据。
+> **受控实验已确证(2026-07-30 第三轮)**。单一变量对照,三轮只改一处:
+> ```
+> 第1轮  codex logout && codex login   登录前的活跃号 → 死    存活 2
+> 第2轮  旧版 login(仅 syncback)        登录前的活跃号 → 死    存活 2
+> 第3轮  新版 login(移开 auth.json)     登录前的活跃号 → 活 ✅  存活 3  ← 首次突破 2
+> ```
+> 结论:**假说①成立**——本机没有 token 时,登录不会作废任何号;前两轮必死的那个位置这次活了下来。同时**假说②被证伪**:plus7 是本设备「上一次签发」的授权,若服务端按设备撤销上一次,它应当死亡,但它存活。(假说③浏览器登出未被完全排除——若你用无痕窗口登录,它与①的预测一致。)
 >
-> 所以 `codex-rotate login` **不赌任何一个假说**:它先 syncback(把活跃号最新 token 存回自己槽位),再把 `auth.json` **整个移开**,在「本机没有任何 token」的状态下跑 `codex login`,登完自动收编;失败或 Ctrl-C 会把移开的文件放回去。①成立时没有 token 可被 revoke;②③成立时也不比任何做法更差(客户端本就无法阻止);而且**永远不需要牺牲健康号**,加全新号也不会被拒。
->
-> `~/.local/bin/codex` 包装脚本另外拦截了 `codex logout`(含 `\codex logout`——反斜杠只绕 alias 不绕 PATH),需 `--force` 才放行。
->
-> ⚠️ 待做的受控验证:停一个已死号 → `codex-rotate login` 加号 → 立刻 `codex-rotate health`,若健康号全部存活即可把假说①与②③区分开。
+> 所以 `codex-rotate login` 的做法是:先 syncback(把活跃号最新 token 存回自己槽位),再把 `auth.json` **整个移开**,在「本机没有任何 token」的状态下跑 `codex login`,登完自动收编;失败或 Ctrl-C 会把移开的文件放回去。**永远不需要牺牲健康号**,加全新号也不会被拒。
 
 ## Quickstart
 
