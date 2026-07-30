@@ -135,8 +135,8 @@ export default function MenuBar() {
       {/* Bottom actions — only refresh, no cool/uncool in menu bar */}
       <div className="mb-actions" style={{ background: t.chromeBorder, borderTop: `1px solid ${t.chromeBorder}` }}>
         {[
-          { id: "refresh-all", label: "刷新全池", loadingLabel: "刷新中…", accent: false, badge: undefined as string | undefined, hint: "⚠️ 探测每个号,各扣一次周额度", action: () => run("refresh-all", ["refresh-all", "--notify"], "已刷新全池 · 各号各扣 1 次周额度") },
-          { id: "refresh-each", label: "刷新各号", loadingLabel: "探测中…", accent: true, badge: "耗额度", hint: "⚠️ 探测每个号,各扣一次周额度", action: () => run("refresh-each", ["refresh-all", "--notify"], "已探测各号 · 各扣 1 次周额度") },
+          { id: "refresh-all", label: "刷新全池", loadingLabel: "刷新中…", accent: true, badge: "免费" as string | undefined, hint: "读取 Codex 官方额度接口(GET),不消耗额度", action: () => run("refresh-all", ["refresh-all", "--notify"], "已刷新全池") },
+          { id: "health", label: "检查token", loadingLabel: "检查中…", accent: false, badge: undefined as string | undefined, hint: "只读检查各号 token 是否存活,不刷新 token", action: () => run("health", ["health"], "已检查 token") },
         ].map((btn) => {
           const isLoading = loadingAction === btn.id;
           return (

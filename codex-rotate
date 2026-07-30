@@ -461,6 +461,10 @@ def cmd_add(args):
 # must not be shown or counted.
 REAL_WINDOW_MIN = 5000
 
+# Quota snapshots read STRAIGHT FROM the server (authoritative, live) vs derived from a local rollout.
+# "usage-api" = official GET /backend-api/codex/usage; "probe" = legacy x-codex-* header read.
+SERVER_SOURCES = ("usage-api", "probe")
+
 def _win_real(w):
     return bool(w) and (w.get("window_minutes") or 0) >= REAL_WINDOW_MIN
 
@@ -761,10 +765,12 @@ def cmd_quota(args):
             slot = s["slots"].setdefault(aid, {})
             existing = slot.get("quota") or {}
             rollout_mtime = p.stat().st_mtime if p else 0
-            # Freshest-wins: never let an OLDER plain rollout revert a NEWER manual probe. Without this,
-            # quotad's 15s tick clobbers a just-made probe reading with the last codex session's stale
-            # value → the displayed % flickers back (observed: probe 58% → quotad reverts to 80%).
-            probe_is_fresher = (existing.get("source") == "probe"
+            # Freshest-wins: never let an OLDER plain rollout revert a NEWER server-authoritative reading.
+            # Without this, quotad's 15s tick clobbers a just-made probe with the last codex session's
+            # stale value → the displayed % flickers back (observed: probe 58% → quotad reverts to 80%).
+            # SERVER_SOURCES are read straight from ChatGPT (usage-api = official GET endpoint, probe =
+            # legacy header read); a rollout is only a local echo of some earlier request.
+            probe_is_fresher = (existing.get("source") in SERVER_SOURCES
                                 and existing.get("captured_at", 0) > rollout_mtime)
             if q and not probe_is_fresher:
                 slot["quota"] = q          # fresh reading attributable to this account (plain codex)
@@ -788,16 +794,34 @@ def cmd_quota(args):
     print(json.dumps(q, ensure_ascii=False) if q else "null")
 
 
-PROBE_BODY = {
-    "model": "gpt-5.5",
-    "instructions": "Reply with exactly: ok",
-    "input": [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "ok"}]}],
-    "stream": True, "store": False,
-}
+USAGE_PATH = "/backend-api/codex/usage"
+
+
+def _win_from_usage(w):
+    """Map one usage-API window {used_percent, limit_window_seconds, reset_at} → our snapshot shape."""
+    if not isinstance(w, dict) or w.get("used_percent") is None:
+        return None
+    secs = w.get("limit_window_seconds")
+    reset = w.get("reset_at")
+    if reset is None and w.get("reset_after_seconds") is not None:
+        reset = time.time() + w["reset_after_seconds"]
+    return {
+        "used_percent": float(w["used_percent"]),
+        "window_minutes": (float(secs) / 60.0) if secs else None,
+        "resets_at": float(reset) if reset is not None else None,
+    }
 
 
 def _probe_quota(aid, slot, is_active):
-    """Send a minimal request from THIS account's own token and read the live x-codex-* quota headers.
+    """Read live quota from Codex's OFFICIAL account-usage endpoint — GET, so it costs ZERO quota.
+
+    ★ Replaces the old probe, which sent a real `POST /backend-api/codex/responses` just to read the
+    x-codex-* response headers: that was a billed completion, so every refresh burned real quota (a big
+    deal since Codex retired the 5h window for a small weekly one). The Codex CLI binary itself exposes
+    GetAccountRateLimitsResponse via `GET /backend-api/codex/usage`; verified 2026-07-30 to return
+    {rate_limit:{primary_window:{used_percent,limit_window_seconds,reset_at},secondary_window},plan_type}
+    for BOTH active and non-active accounts, and 401 for revoked ones (doubles as a health check).
+
     Read-only on the token (never OAuth-refreshes — the active account's live token stays codex-owned);
     active reads live auth.json, inactive reads its slot file. Returns (quota_dict|None, msg)."""
     authpath = LIVE if is_active else (AUTH_DIR / slot["file"])
@@ -807,37 +831,39 @@ def _probe_quota(aid, slot, is_active):
         return None, f"read err: {e}"
     if _access_exp(tok) - time.time() < 60:
         return None, "token expired (\\codex login / wait keepalive)"
-    body = json.dumps(PROBE_BODY).encode()
-    conn = http.client.HTTPSConnection("chatgpt.com", 443, context=ssl.create_default_context(), timeout=60)
+    conn = http.client.HTTPSConnection("chatgpt.com", 443, context=ssl.create_default_context(), timeout=30)
     try:
-        conn.request("POST", "/backend-api/codex/responses", body=body, headers={
+        conn.request("GET", USAGE_PATH, headers={
             "Authorization": f"Bearer {tok.get('access_token', '')}",
             "chatgpt-account-id": tok.get("account_id"),
-            "Content-Type": "application/json", "originator": "codex_cli_rs",
-            "Accept": "text/event-stream", "Content-Length": str(len(body))})
+            "originator": "codex_cli_rs", "User-Agent": "codex_cli_rs/0.144.6",
+            "Accept": "application/json"})
         r = conn.getresponse()
-        h = {k.lower(): v for k, v in r.getheaders()}  # headers carry quota; SSE body not drained
         status = r.status
+        raw = r.read()
     except Exception as e:
         return None, f"req err: {e}"
     finally:
         conn.close()
 
-    def num(key):
-        try:
-            return float(h[key])
-        except (KeyError, ValueError, TypeError):
-            return None
+    if status == 401:
+        return None, "HTTP 401 (token revoked — \\codex login)"
+    if status != 200:
+        return None, f"HTTP {status}"
+    try:
+        d = json.loads(raw)
+    except ValueError as e:
+        return None, f"parse err: {e}"
 
-    pu, su = num("x-codex-primary-used-percent"), num("x-codex-secondary-used-percent")
-    if pu is None and su is None:
-        return None, f"HTTP {status} (no quota headers)"
+    rl = d.get("rate_limit") or {}
+    pw = _win_from_usage(rl.get("primary_window"))
+    sw = _win_from_usage(rl.get("secondary_window"))
+    if pw is None and sw is None:
+        return None, "HTTP 200 (no rate_limit windows)"
     q = {
-        "primary": {"used_percent": pu, "window_minutes": num("x-codex-primary-window-minutes"),
-                    "resets_at": num("x-codex-primary-reset-at")},
-        "secondary": {"used_percent": su, "window_minutes": num("x-codex-secondary-window-minutes"),
-                      "resets_at": num("x-codex-secondary-reset-at")},
-        "plan_type": h.get("x-codex-plan-type"), "captured_at": time.time(), "source": "probe",
+        "primary": pw or {"used_percent": None, "window_minutes": None, "resets_at": None},
+        "secondary": sw or {"used_percent": None, "window_minutes": None, "resets_at": None},
+        "plan_type": d.get("plan_type"), "captured_at": time.time(), "source": "usage-api",
     }
     return q, f"HTTP {status}"
 

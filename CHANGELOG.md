@@ -32,6 +32,21 @@
 - **右键托盘菜单**:打开主窗口 / 刷新全池 / 切到最佳号 /(分隔)版本 /(分隔)退出——退出与常用项隔开防误触。
 - 多轮 Fable/Codex 交叉评审修:失败静默(catch 显 `✗ 失败`)、⌘Q 销毁窗口(改 `ExitRequested` 拦截 hide)、WKWebView `confirm()` 失效(改内联确认)、冷却 `300:00` 时长格式、未探测号假 `0%`(哨兵 `-1` → `—`)、切号后托盘延迟刷新、字体被脚手架 `index.css` 覆盖。
 
+
+### CodexBar v0.4.0 — 官方 usage API 取代计费探测 — 2026-07-30
+
+**根因**:显示额度长期与真实值不符(实测 app 显示 39% / 官方真值 64%)。旧机制两条腿都不可靠——① `_probe_quota` 发**真计费**的 `POST /codex/responses` 只为读 `x-codex-*` 响应头(Codex 取消 5h 改小额周窗后,每次刷新都在烧真实额度,于是被迫关掉自动刷新);② quotad 退回 tail plain rollout,但经 cxp 代理/resume 会话/wrapper 的用量**不产生可读的新鲜 rollout**(实测最新 rollout 陈旧 25 小时,期间账号真实用量已从 39% 涨到 64%)。
+
+**修复**:改用 Codex CLI 自己的官方端点——从 codex 二进制中挖出 `GetAccountRateLimitsResponse` / `backend-client/src/client/rate_limit_resets.rs`,验证 `GET https://chatgpt.com/backend-api/codex/usage` 返回
+`{rate_limit:{primary_window:{used_percent,limit_window_seconds,reset_at},secondary_window},plan_type,credits}`。
+
+- **零消耗**:GET 元数据端点,不计费、不耗 token(对比:旧探测每号每次扣一次真实额度)。
+- **覆盖全池**:活跃号与非活跃号同样可读(旧 rollout 方案只覆盖当前号)。
+- **兼带健康检查**:401 = token 被服务端 revoke,直接识别死号(JWT exp 查不出服务端作废,见 B21)。
+- **恢复自动刷新**:既然免费,quotad 加第二条循环每 180s 刷全池;CodexBar 启动刷新、每日 refreshquota 兜底一并恢复(此前因计费被停)。
+- `source` 新增 `usage-api`;`SERVER_SOURCES` 统一"服务端权威读数"概念,freshest-wins 守卫据此不让旧 rollout 覆盖新读数。
+- 实测:全池刷新 5.7s,state 与官方真值逐号一致(plus4 68%==68%,plus6 0%==0%,plus7 401 死号)。
+
 ---
 
 ## BUG 日志

@@ -74,7 +74,7 @@ export default function App() {
             <span onClick={() => setTheme("light")} style={{ display: "grid", placeItems: "center", width: 24, height: 20, borderRadius: 6, cursor: "pointer", color: t.sunColor, background: t.sunBg, transition: "background .25s, color .25s" }}><IconSun /></span>
             <span onClick={() => setTheme("dark")} style={{ display: "grid", placeItems: "center", width: 24, height: 20, borderRadius: 6, cursor: "pointer", color: t.moonColor, background: t.moonBg, transition: "background .25s, color .25s" }}><IconMoon /></span>
           </div>
-          <span style={{ fontSize: 11, color: t.muted, fontFamily: "'JetBrains Mono'" }}>v0.3.1</span>
+          <span style={{ fontSize: 11, color: t.muted, fontFamily: "'JetBrains Mono'" }}>v0.4.0</span>
         </div>
       </div>
 
@@ -84,7 +84,7 @@ export default function App() {
           {sidebarItems.map((it) => (
             <div key={it.id} onClick={() => setPage(it.id)} style={{ width: 34, height: 34, borderRadius: 9, display: "grid", placeItems: "center", cursor: "pointer", color: page === it.id ? t.accentText : t.muted, background: page === it.id ? t.accent : "transparent", transition: "background .2s, color .2s" }} title={it.tip}><it.Icon /></div>
           ))}
-          <span style={{ marginTop: "auto", fontSize: 9, color: t.faint, fontFamily: "'JetBrains Mono'" }}>0.3</span>
+          <span style={{ marginTop: "auto", fontSize: 9, color: t.faint, fontFamily: "'JetBrains Mono'" }}>0.4</span>
         </div>
 
         {/* Content */}
@@ -98,8 +98,8 @@ export default function App() {
                 </div>
                 <div style={{ display: "flex", gap: 7, alignItems: "center" }}>
                   <GhostButton t={t} onClick={() => run("refresh-all", ["refresh-all", "--notify"], `已刷新全池 · ${counts.total} 个号`)} loading={loadingAction === "refresh-all"} loadingText="刷新中…"><IconRefresh spin={loadingAction === "refresh-all"} />刷新全池</GhostButton>
-                  <GhostButton t={t} onClick={() => run("refresh-each", ["refresh-all", "--notify"], "各号 5h 额度 +1%")} accent loading={loadingAction === "refresh-each"} loadingText="探测中…">
-                    <IconRefresh spin={loadingAction === "refresh-each"} />刷新各号<span style={{ fontSize: 9.5, fontWeight: 700, color: t.accentText, background: t.accent, padding: "1px 5px", borderRadius: 4, letterSpacing: ".02em" }}>+1%</span>
+                  <GhostButton t={t} onClick={() => run("health", ["health"], "已检查各号 token")} accent loading={loadingAction === "health"} loadingText="检查中…">
+                    检查 token
                   </GhostButton>
                   <span style={{ width: 1, height: 18, background: t.divider, margin: "0 1px" }} />
                   <span onClick={() => {

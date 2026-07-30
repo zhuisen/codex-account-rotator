@@ -1,15 +1,24 @@
 #!/usr/bin/env python3
-"""codex-rotate quota daemon — keeps state.json's ACTIVE-account quota continuously accurate from the
-newest plain-codex rollout's rate_limit event, INDEPENDENT of any UI (SwiftBar / CodexBar). cxp traffic
-is already metered live per-request by proxy.py.
+"""codex-rotate quota daemon — keeps state.json's quota continuously accurate, INDEPENDENT of any UI
+(SwiftBar / CodexBar). Two complementary loops, both ZERO quota cost:
 
-Why a daemon: accuracy used to ride on the SwiftBar plugin's 10s `quota --save` tick. Once SwiftBar
-retires (the native CodexBar app only READS state.json), nothing would refresh the active account. This
-daemon owns that job: every INTERVAL it runs codex-rotate's own locked `quota --save` (same attribution
-+ cross-process .state.lock as the CLI), so the displayed quota stays fresh no matter which UI is up.
+  1. rollout tail (every TICK_SECS)  — `quota --save` attributes the newest plain-codex rollout's
+     rate_limit event to the ACTIVE account. Local file read, instant, but only covers the active
+     account and only when plain codex actually wrote a rollout.
 
-Passive — it tails rollouts, it does NOT probe, so it costs zero quota. Non-active accounts stay on the
-daily 07:00 refreshquota probe (+ the manual refresh-all button)."""
+  2. usage API   (every USAGE_SECS) — `refresh-all` reads Codex's OFFICIAL account-usage endpoint
+     (GET /backend-api/codex/usage) for EVERY account. Authoritative, live, covers non-active accounts,
+     and 401 identifies revoked tokens.
+
+★ Why loop 2 exists: rollouts are an unreliable telemetry source. Usage driven through the cxp proxy,
+through resumed sessions, or through wrappers may not produce a fresh readable plain rollout at all —
+observed the newest rollout being 25h stale while the account had really moved 39% → 64%. The displayed
+quota then silently lagged reality. The usage endpoint removes that dependency entirely.
+
+★ Why polling is affordable now: the old probe sent a real (billed) `POST /codex/responses` just to read
+quota headers, so automatic refresh had to be disabled once Codex retired the 5h window for a small
+weekly one. The official endpoint is a plain GET — it costs no quota and no tokens, so we can poll it.
+"""
 import contextlib
 import importlib.machinery
 import io
@@ -18,10 +27,12 @@ import time
 
 ROT = "/Users/you/Projects/tools/codex-account-rotator/codex-rotate"
 cli = importlib.machinery.SourceFileLoader("cli", ROT).load_module()
-INTERVAL = 15  # seconds
+
+TICK_SECS = 15    # rollout tail (local file read)
+USAGE_SECS = 180  # official usage API for the whole pool — GET, zero quota; modest polling rate
 
 
-def tick():
+def tick_rollout():
     # hold the cross-process state mutex for the whole load→attribute→save, exactly as the CLI's main()
     # does for STATE_LOCKED commands — calling cmd_quota directly would otherwise bypass that lock and
     # could race the proxy. Swallow cmd_quota's stdout (it prints the quota JSON).
@@ -30,16 +41,32 @@ def tick():
             cli.cmd_quota(["--save"])
 
 
+def tick_usage():
+    """Refresh EVERY account from the official usage endpoint. cmd_refresh_all does its own targeted
+    _mutate_state per account (it must not hold the state mutex across network I/O)."""
+    with contextlib.redirect_stdout(io.StringIO()):
+        cli.cmd_refresh_all([])
+
+
 def main():
-    sys.stderr.write(f"[quotad] started · interval={INTERVAL}s · tails plain rollouts → active account\n")
+    sys.stderr.write(f"[quotad] started · rollout={TICK_SECS}s · usage-api={USAGE_SECS}s (GET, zero quota)\n")
     sys.stderr.flush()
+    last_usage = 0.0
     while True:
         try:
-            tick()
+            tick_rollout()
         except Exception as e:
-            sys.stderr.write(f"[quotad] err: {e}\n")
+            sys.stderr.write(f"[quotad] rollout err: {e}\n")
             sys.stderr.flush()
-        time.sleep(INTERVAL)
+        now = time.time()
+        if now - last_usage >= USAGE_SECS:
+            last_usage = now
+            try:
+                tick_usage()
+            except Exception as e:
+                sys.stderr.write(f"[quotad] usage err: {e}\n")
+                sys.stderr.flush()
+        time.sleep(TICK_SECS)
 
 
 if __name__ == "__main__":
