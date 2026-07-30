@@ -74,7 +74,7 @@ export default function App() {
             <span onClick={() => setTheme("light")} style={{ display: "grid", placeItems: "center", width: 24, height: 20, borderRadius: 6, cursor: "pointer", color: t.sunColor, background: t.sunBg, transition: "background .25s, color .25s" }}><IconSun /></span>
             <span onClick={() => setTheme("dark")} style={{ display: "grid", placeItems: "center", width: 24, height: 20, borderRadius: 6, cursor: "pointer", color: t.moonColor, background: t.moonBg, transition: "background .25s, color .25s" }}><IconMoon /></span>
           </div>
-          <span style={{ fontSize: 11, color: t.muted, fontFamily: "'JetBrains Mono'" }}>v0.4.0</span>
+          <span style={{ fontSize: 11, color: t.muted, fontFamily: "'JetBrains Mono'" }}>v0.4.1</span>
         </div>
       </div>
 

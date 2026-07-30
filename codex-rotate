@@ -846,7 +846,23 @@ def _probe_quota(aid, slot, is_active):
     finally:
         conn.close()
 
+    # ★ 401 here is the server saying the token is REVOKED — the local JWT exp was already checked above,
+    # so this is exactly the "valid-looking but server-side dead" case that `health` cannot detect (B21).
+    # Until now only proxy.py ever set auth_dead, so an account that died while IDLE (never routed through
+    # the proxy) kept showing its last stale snapshot — plus7 sat at a 26h-old "0% remaining", which reads
+    # as "quota exhausted" when it was really "token revoked". The usage endpoint gives this signal for
+    # FREE on every account, so wire it here. auth_dead_fp = tail of the REJECTED token, preserving B16's
+    # revival gate (autosync only clears the flag when a genuinely DIFFERENT token appears).
     if status == 401:
+        fp = (tok.get("access_token") or "")[-16:] or None
+        def _dead(st, a=aid, f=fp):
+            sl = st.get("slots", {}).get(a)
+            if sl is not None:
+                sl["auth_dead"] = True
+                sl["auth_dead_at"] = time.time()
+                if f:
+                    sl["auth_dead_fp"] = f
+        _mutate_state(_dead)
         return None, "HTTP 401 (token revoked — \\codex login)"
     if status != 200:
         return None, f"HTTP {status}"
@@ -854,6 +870,16 @@ def _probe_quota(aid, slot, is_active):
         d = json.loads(raw)
     except ValueError as e:
         return None, f"parse err: {e}"
+
+    # A 200 from this very token PROVES the account is alive — stronger evidence than the fingerprint
+    # heuristic — so clear a stale auth_dead. Also makes a transient 401 self-heal on the next cycle.
+    if slot.get("auth_dead"):
+        def _revive(st, a=aid):
+            sl = st.get("slots", {}).get(a)
+            if sl is not None:
+                for k in ("auth_dead", "auth_dead_at", "auth_dead_fp"):
+                    sl.pop(k, None)
+        _mutate_state(_revive)
 
     rl = d.get("rate_limit") or {}
     pw = _win_from_usage(rl.get("primary_window"))
