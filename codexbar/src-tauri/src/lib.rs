@@ -206,11 +206,16 @@ fn format_tray_title() -> String {
     let active = state["active"].as_str().unwrap_or("");
     let slots = state["slots"].as_object();
     if let Some(slots) = slots {
+        // Dead accounts other than the active one used to be invisible here: the title only showed ✗ when
+        // the ACTIVE account died, so a node could quietly go dead and nothing on screen said so. Surface
+        // the count so a revoked token is noticeable without opening the app.
+        let dead_n = slots.values().filter(|s| s["auth_dead"].as_bool().unwrap_or(false)).count();
+        let dead_tag = if dead_n > 0 { format!(" ✗{}", dead_n) } else { String::new() };
         if let Some(slot) = slots.get(active) {
             let label = slot["label"].as_str().unwrap_or("?");
             let dead = slot["auth_dead"].as_bool().unwrap_or(false);
             if dead {
-                return format!("✗ {}", label);
+                return format!("✗ {} 失效", label);
             }
             if let Some(q) = slot.get("quota") {
                 // Codex retired 5h; only weekly(10080)/monthly(43200) are real. Pick the first
@@ -220,7 +225,7 @@ fn format_tray_title() -> String {
                     let wm = w["window_minutes"].as_f64().unwrap_or(0.0);
                     if wm >= 5000.0 && w["used_percent"].is_number() { Some(w) } else { None }
                 });
-                let Some(w) = win else { return label.to_string(); };
+                let Some(w) = win else { return format!("{}{}", label, dead_tag); };
                 let used = w["used_percent"].as_f64().unwrap_or(0.0);
                 let wm = w["window_minutes"].as_f64().unwrap_or(0.0);
                 let win_tag = if wm >= 40000.0 { "月" } else { "周" };
@@ -233,9 +238,9 @@ fn format_tray_title() -> String {
                     let m = (secs % 3600) / 60;
                     if h >= 24 { format!(" ↻{}d{}h", h / 24, h % 24) } else if h > 0 { format!(" ↻{}h{:02}m", h, m) } else { format!(" ↻{}m", m) }
                 } else { String::new() };
-                return format!("{} {} {}%{}", label, win_tag, rem, eta);
+                return format!("{} {} {}%{}{}", label, win_tag, rem, eta, dead_tag);
             }
-            return label.to_string();
+            return format!("{}{}", label, dead_tag);
         }
     }
     "codex".into()
@@ -319,7 +324,7 @@ pub fn run() {
             let switch_best = MenuItem::with_id(app, "switch_best", "切到最佳号", true, None::<&str>)?;
             let sep1 = PredefinedMenuItem::separator(app)?;
             let sep2 = PredefinedMenuItem::separator(app)?;
-            let version = MenuItem::with_id(app, "version", "CodexBar v0.4.1", false, None::<&str>)?;
+            let version = MenuItem::with_id(app, "version", "CodexBar v0.4.3", false, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "⏻ 退出 CodexBar", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&show, &refresh, &switch_best, &sep1, &version, &sep2, &quit])?;
 

@@ -12,6 +12,7 @@ import LogsPage from "./pages/LogsPage";
 import SettingsPage, { getSettings } from "./pages/SettingsPage";
 import { useStore } from "./hooks/useStore";
 import { useExpiryWatch } from "./hooks/useExpiryWatch";
+import { useDeadWatch } from "./hooks/useDeadWatch";
 import { useAutoSwitch } from "./hooks/useAutoSwitch";
 import { useKeyboard } from "./hooks/useKeyboard";
 import "./App.css";
@@ -48,6 +49,9 @@ export default function App() {
 
   const aliveByLabel = accounts.filter(a => a.status !== "dead").sort((a, b) => a.node.localeCompare(b.node, undefined, { numeric: true }));
   useExpiryWatch(accounts, tokens);
+  // Dead-account alerts live in the MAIN window only — the menubar popover renders the same store, so
+  // running the watcher in both would double-notify.
+  useDeadWatch(accounts, currentNode);
   useAutoSwitch(accounts, currentNode, run);
   useKeyboard(win, refresh, setPage as (p: string) => void, (idx) => {
     const target = aliveByLabel[idx];
@@ -74,7 +78,7 @@ export default function App() {
             <span onClick={() => setTheme("light")} style={{ display: "grid", placeItems: "center", width: 24, height: 20, borderRadius: 6, cursor: "pointer", color: t.sunColor, background: t.sunBg, transition: "background .25s, color .25s" }}><IconSun /></span>
             <span onClick={() => setTheme("dark")} style={{ display: "grid", placeItems: "center", width: 24, height: 20, borderRadius: 6, cursor: "pointer", color: t.moonColor, background: t.moonBg, transition: "background .25s, color .25s" }}><IconMoon /></span>
           </div>
-          <span style={{ fontSize: 11, color: t.muted, fontFamily: "'JetBrains Mono'" }}>v0.4.1</span>
+          <span style={{ fontSize: 11, color: t.muted, fontFamily: "'JetBrains Mono'" }}>v0.4.3</span>
         </div>
       </div>
 

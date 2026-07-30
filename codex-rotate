@@ -409,8 +409,12 @@ def _syncback(s):
     if slot.get("auth_dead") and _token_fp(live) != slot.get("auth_dead_fp"):
         for k in ("auth_dead", "auth_dead_at", "auth_dead_fp"):  # new token only — see _autosync_live
             slot.pop(k, None)
+    # Freshest-wins, same rule as `quota --save`: a rollout is only a local echo of an earlier request,
+    # so it must never overwrite a NEWER server-authoritative reading (usage-api / probe). Keeping the
+    # guard only in cmd_quota left this path — plus switch/ensure, which also call _syncback — able to
+    # roll a fresh reading back to a stale one. Fixed here so the whole class is covered in one place.
     q = _attributable_quota(s)
-    if q:
+    if q and not _server_reading_is_fresher(slot.get("quota"), _newest_rollout()):
         slot["quota"] = q
     if s.get("active") != aid:
         _activate(s, aid)  # keep active_since in lockstep with active (attribution window correctness)
@@ -465,6 +469,17 @@ REAL_WINDOW_MIN = 5000
 # "usage-api" = official GET /backend-api/codex/usage; "probe" = legacy x-codex-* header read.
 SERVER_SOURCES = ("usage-api", "probe")
 
+
+def _server_reading_is_fresher(existing, rollout_path):
+    """True when the stored snapshot came STRAIGHT from the server and is newer than the rollout.
+    Freshest-wins: a rollout is only a local echo of an earlier request, so it must never revert a newer
+    authoritative reading (observed flicker: probe 58% -> quotad reverts to 80%)."""
+    existing = existing or {}
+    if existing.get("source") not in SERVER_SOURCES:
+        return False
+    rollout_mtime = rollout_path.stat().st_mtime if rollout_path else 0
+    return existing.get("captured_at", 0) > rollout_mtime
+
 def _win_real(w):
     return bool(w) and (w.get("window_minutes") or 0) >= REAL_WINDOW_MIN
 
@@ -481,6 +496,59 @@ def _qfmt(q):
         if used is not None and _win_real(w):
             bits.append(f"{_win_tag(w)}:{used:.0f}%")
     return "  " + " ".join(bits) if bits else ""
+
+
+def cmd_login(args):
+    """SAFE way to add / re-login an account. Use this instead of `codex logout && codex login`.
+
+    ★ Why this exists — `codex logout` REVOKES the tokens server-side (the codex binary literally logs
+    "failed to revoke auth tokens during logout"). The rotator's ACTIVE account keeps its freshest
+    tokens only in ~/.codex/auth.json (by design: codex-native owns them, see B14), so `codex logout`
+    permanently kills whichever account happens to be active — you gain the account you just logged in
+    and lose the one you had. Measured 2026-07-30: plus4 was healthy at 14:13, a logout+login for plus7
+    landed at 14:15, plus4 was 401 token_invalidated by 14:16. That zero-sum churn looked like "this
+    machine only allows 2 Codex logins"; it was self-inflicted.
+
+    This command instead: syncs the live account back into its own slot FIRST (so its freshest token is
+    preserved), then runs a plain `codex login` — never `logout` — and finally re-adopts whatever ended
+    up live. Nothing is revoked, so the previous account stays usable."""
+    # ★ Read state INSIDE the mutex. Reading it outside and then saving that copy under the lock is the
+    # B15 lost-update pattern: if acquiring the lock blocks (quotad ticks every 15s, the proxy mutates
+    # per request), we would wait for the other writer and then overwrite exactly what it just wrote —
+    # losing auth_dead / cooling_until / quota. Contention here means guaranteed loss, not a rare race.
+    with _state_mutex():
+        s = _state()
+        prev = s.get("active")
+        prev_label = (s["slots"].get(prev) or {}).get("label", "?") if prev else None
+        _syncback(s)          # preserve the live account's freshest token before codex overwrites it
+        _save_state(s)
+    if prev_label:
+        print(f"saved current account [{prev_label}] to its slot — it will NOT be revoked")
+    print("launching `codex login` (never `codex logout` — that would revoke the current account)…")
+    rc = subprocess.call(["codex", "login"])
+    if rc != 0:
+        sys.exit(f"codex login exited {rc}")
+    with _state_mutex():
+        s = _state()          # re-read under the lock (same B15 reasoning as above)
+        _autosync_live(s)     # adopt the newly logged-in account into the pool
+        _save_state(s)
+        now_aid = s.get("active")
+        lab = (s["slots"].get(now_aid) or {}).get("label", "?")
+        who = (s["slots"].get(now_aid) or {}).get("email") or _mask(now_aid or "")
+
+    # _autosync_live takes the cred lock NON-blocking and silently returns if it is busy (e.g. keepalive
+    # is mid-OAuth). Don't claim an adoption that did not happen — confirm against the live account.
+    try:
+        live_aid = _account_id(_load_json(LIVE))
+    except (OSError, ValueError):
+        live_aid = None
+    if live_aid and live_aid != now_aid:
+        print("logged in, but the pool was busy — autosync will adopt it within a few seconds "
+              "(check: codex-rotate list)")
+    else:
+        print(f"now active: [{lab}] {who}")
+    if prev and prev != now_aid and prev_label:
+        print(f"previous account [{prev_label}] kept — verify with: codex-rotate refresh-all")
 
 
 def cmd_remove(args):
@@ -763,15 +831,7 @@ def cmd_quota(args):
         aid = s.get("active")
         if aid:
             slot = s["slots"].setdefault(aid, {})
-            existing = slot.get("quota") or {}
-            rollout_mtime = p.stat().st_mtime if p else 0
-            # Freshest-wins: never let an OLDER plain rollout revert a NEWER server-authoritative reading.
-            # Without this, quotad's 15s tick clobbers a just-made probe with the last codex session's
-            # stale value → the displayed % flickers back (observed: probe 58% → quotad reverts to 80%).
-            # SERVER_SOURCES are read straight from ChatGPT (usage-api = official GET endpoint, probe =
-            # legacy header read); a rollout is only a local echo of some earlier request.
-            probe_is_fresher = (existing.get("source") in SERVER_SOURCES
-                                and existing.get("captured_at", 0) > rollout_mtime)
+            probe_is_fresher = _server_reading_is_fresher(slot.get("quota"), p)
             if q and not probe_is_fresher:
                 slot["quota"] = q          # fresh reading attributable to this account (plain codex)
                 slot["quota_status"] = "ok"
@@ -826,9 +886,15 @@ def _probe_quota(aid, slot, is_active):
     active reads live auth.json, inactive reads its slot file. Returns (quota_dict|None, msg)."""
     authpath = LIVE if is_active else (AUTH_DIR / slot["file"])
     try:
-        tok = (_load_json(authpath).get("tokens") or {})
+        auth = _load_json(authpath)
+        tok = (auth.get("tokens") or {})
     except (OSError, ValueError) as e:
         return None, f"read err: {e}"
+    # refresh-all walks the pool over several seconds; a switch (CodexBar / cxp / ensure-live) landing
+    # mid-loop would leave LIVE holding a DIFFERENT account's token. Probing it and attributing the
+    # result here would mark the wrong account dead — or revive a dead one on someone else's 200.
+    if is_active and _account_id(auth) != aid:
+        return None, "live account switched mid-probe"
     if _access_exp(tok) - time.time() < 60:
         return None, "token expired (\\codex login / wait keepalive)"
     conn = http.client.HTTPSConnection("chatgpt.com", 443, context=ssl.create_default_context(), timeout=30)
@@ -979,7 +1045,7 @@ def cmd_ensure(args):
     print(f"auto-switched (prev cooling) → [{s['slots'][target].get('label', '?')}]")
 
 
-CMDS = {"add": cmd_add, "list": cmd_list, "switch": cmd_switch, "cool": cmd_cool,
+CMDS = {"add": cmd_add, "login": cmd_login, "list": cmd_list, "switch": cmd_switch, "cool": cmd_cool,
         "uncool": cmd_uncool, "quota": cmd_quota, "current": cmd_current, "ensure": cmd_ensure,
         "sync": cmd_sync, "rename": cmd_rename, "keepalive": cmd_keepalive, "refresh": cmd_refresh,
         "refresh-all": cmd_refresh_all, "health": cmd_health, "remove": cmd_remove,
@@ -989,7 +1055,7 @@ CMDS = {"add": cmd_add, "list": cmd_list, "switch": cmd_switch, "cool": cmd_cool
 # Commands that change what the menu bar shows → nudge SwiftBar to re-render immediately (so terminal
 # commands update the menu instantly, not on its 10s tick). Excludes quota/sync/keepalive: the plugin
 # runs `quota --save` every 10s, so refreshing there would loop; sync fires from the auth.json watcher.
-REFRESH_AFTER = {"add", "switch", "cool", "uncool", "rename", "refresh", "remove"}
+REFRESH_AFTER = {"add", "login", "switch", "cool", "uncool", "rename", "refresh", "remove"}
 
 # Disk-only commands run their whole load→mutate→save under the cross-process state mutex (lost-update
 # guard). refresh/keepalive do network and write back via _mutate_state instead; health/current are
@@ -1007,7 +1073,7 @@ def _refresh_menu():
 
 def main():
     if len(sys.argv) < 2 or sys.argv[1] not in CMDS:
-        print("usage: codex-rotate {add <label>|remove <label>|list|switch [label]|cool [min]|uncool [label]|"
+        print("usage: codex-rotate {add <label>|login|remove <label>|list|switch [label]|cool [min]|uncool [label]|"
               "quota [--save]|sync|rename <old> <new>|refresh [label|all]|refresh-all|"
               "keepalive [days] [--dry-run]|health|ensure|current}")
         sys.exit(1)
