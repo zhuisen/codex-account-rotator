@@ -325,7 +325,7 @@ pub fn run() {
             let switch_best = MenuItem::with_id(app, "switch_best", "切到最佳号", true, None::<&str>)?;
             let sep1 = PredefinedMenuItem::separator(app)?;
             let sep2 = PredefinedMenuItem::separator(app)?;
-            let version = MenuItem::with_id(app, "version", "CodexBar v0.4.4", false, None::<&str>)?;
+            let version = MenuItem::with_id(app, "version", "CodexBar v0.4.5", false, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "⏻ 退出 CodexBar", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&show, &refresh, &switch_best, &sep1, &version, &sep2, &quit])?;
 

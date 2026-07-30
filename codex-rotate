@@ -932,20 +932,29 @@ def _probe_quota(aid, slot, is_active):
                       else "slot file/account mismatch — not attributing")
     if _access_exp(tok) - time.time() < 60:
         return None, "token expired (\\codex login / wait keepalive)"
-    conn = http.client.HTTPSConnection("chatgpt.com", 443, context=ssl.create_default_context(), timeout=30)
-    try:
-        conn.request("GET", USAGE_PATH, headers={
-            "Authorization": f"Bearer {tok.get('access_token', '')}",
-            "chatgpt-account-id": tok.get("account_id"),
-            "originator": "codex_cli_rs", "User-Agent": "codex_cli_rs/0.144.6",
-            "Accept": "application/json"})
-        r = conn.getresponse()
-        status = r.status
-        raw = r.read()
-    except Exception as e:
-        return None, f"req err: {e}"
-    finally:
-        conn.close()
+    # Cloudflare rate-limits this endpoint per client, and it answers 403/429 (never 401) when it does —
+    # observed all four accounts returning 403 in one burst, then 200 on an immediate retry. Those codes
+    # are transient and MUST NOT be mistaken for an account problem, so back off once and retry.
+    status, raw = None, b""
+    for attempt in range(2):
+        if attempt:
+            time.sleep(2.5)
+        conn = http.client.HTTPSConnection("chatgpt.com", 443, context=ssl.create_default_context(), timeout=30)
+        try:
+            conn.request("GET", USAGE_PATH, headers={
+                "Authorization": f"Bearer {tok.get('access_token', '')}",
+                "chatgpt-account-id": tok.get("account_id"),
+                "originator": "codex_cli_rs", "User-Agent": "codex_cli_rs/0.144.6",
+                "Accept": "application/json"})
+            r = conn.getresponse()
+            status = r.status
+            raw = r.read()
+        except Exception as e:
+            return None, f"req err: {e}"
+        finally:
+            conn.close()
+        if status not in (403, 429):
+            break
 
     # ★ 401 here is the server saying the token is REVOKED — the local JWT exp was already checked above,
     # so this is exactly the "valid-looking but server-side dead" case that `health` cannot detect (B21).
@@ -968,6 +977,8 @@ def _probe_quota(aid, slot, is_active):
                     sl["auth_dead_fp"] = f
         _mutate_state(_dead)
         return None, "HTTP 401 (token revoked — \\codex login)"
+    if status in (403, 429):
+        return None, f"HTTP {status} (限流,稍后自动重试)"
     if status != 200:
         return None, f"HTTP {status}"
     try:
@@ -1028,7 +1039,7 @@ def cmd_refresh_all(args):
             ok_n += 1
         else:
             out.append(f"{label}:{msg}")
-        time.sleep(0.4)  # gentle pacing
+        time.sleep(1.5)  # pacing — the usage endpoint rate-limits bursts (403/429)
     _refresh_menu()
     if "--notify" in args:  # SwiftBar closes the dropdown on tap → a notification is the visible ACK
         total = len(s["slots"])

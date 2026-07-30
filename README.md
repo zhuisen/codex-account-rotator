@@ -61,7 +61,7 @@
 
 > ⛔ **千万别跑 `codex logout`**。它会把**当前活跃号**的 token 在**服务端 revoke**(codex 二进制内含 `failed to revoke auth tokens during logout`;实测 2026-07-30:plus4 在 14:13 还健康,14:15 一次 logout+login 后,14:16 就变成 401 `token_invalidated`)。于是"每加一个号就死一个号",看起来像"这台机器只能登 2 个 Codex",其实是自己打的。
 >
-> 加号/重登一律用 **`codex-rotate login`**:它**先把当前号 syncback 回槽位、再直接 `codex login`,全程不调 logout**。
+> 加号/重登一律用 **`codex-rotate login`**（`~/.local/bin/codex` 包装脚本已内置拦截：直接跑 `codex logout`（含 `\codex logout`，反斜杠只绕 alias 不绕 PATH）会被拒绝并提示，需 `--force` 才放行）:它**先把当前号 syncback 回槽位、再直接 `codex login`,全程不调 logout**。
 > ⚠️ 注意边界:syncback 保的是"槽位里留着的是最新、未被消耗的 refresh_token"(防 B7/B8 类重放致死),**它挡不住服务端 revoke**——本地存几份都一样。另外 **`codex login` 在已登录状态下会不会隐式 revoke 旧号,尚未实测确认**;验证方法:登入另一个号后,立刻与 ~30 分钟后各跑一次 `codex-rotate refresh-all`,原号两次都 200 才算确证(401=被 revoke,该检查零消耗)。
 
 ## Quickstart

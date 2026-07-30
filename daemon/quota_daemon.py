@@ -29,7 +29,8 @@ ROT = "/Users/you/Projects/tools/codex-account-rotator/codex-rotate"
 cli = importlib.machinery.SourceFileLoader("cli", ROT).load_module()
 
 TICK_SECS = 15    # rollout tail (local file read)
-USAGE_SECS = 180  # official usage API for the whole pool — GET, zero quota; modest polling rate
+USAGE_SECS = 300  # official usage API for the whole pool — GET, zero quota; spaced out to stay
+                  # well under the endpoint's per-client rate limit (bursts answer 403)
 
 
 def tick_rollout():
