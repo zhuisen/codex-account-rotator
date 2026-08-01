@@ -15,6 +15,8 @@ import { useExpiryWatch } from "./hooks/useExpiryWatch";
 import { useDeadWatch } from "./hooks/useDeadWatch";
 import { useAutoSwitch } from "./hooks/useAutoSwitch";
 import { useKeyboard } from "./hooks/useKeyboard";
+import { fmtAgo, CARD_WARN_DAYS } from "./helpers";
+import { IconTicket } from "./components/CardBadge";
 import "./App.css";
 
 type Page = "overview" | "logs" | "settings";
@@ -27,7 +29,7 @@ const IconSun = () => <svg width="13" height="13" viewBox="0 0 24 24" fill="none
 const IconMoon = () => <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>;
 
 export default function App() {
-  const { accounts, hero, currentNode, slots, counts, tokens, loadingAction, toast, refresh, run, showToast } = useStore();
+  const { accounts, hero, currentNode, slots, counts, tokens, lastRefreshAt, loadingAction, toast, refresh, run, showToast } = useStore();
   const [theme, setTheme] = useState<"dark" | "light">("dark");
   const [page, setPage] = useState<Page>("overview");
   const [detailModal, setDetailModal] = useState<AccountDetail | null>(null);
@@ -78,7 +80,7 @@ export default function App() {
             <span onClick={() => setTheme("light")} style={{ display: "grid", placeItems: "center", width: 24, height: 20, borderRadius: 6, cursor: "pointer", color: t.sunColor, background: t.sunBg, transition: "background .25s, color .25s" }}><IconSun /></span>
             <span onClick={() => setTheme("dark")} style={{ display: "grid", placeItems: "center", width: 24, height: 20, borderRadius: 6, cursor: "pointer", color: t.moonColor, background: t.moonBg, transition: "background .25s, color .25s" }}><IconMoon /></span>
           </div>
-          <span style={{ fontSize: 11, color: t.muted, fontFamily: "'JetBrains Mono'" }}>v0.4.5</span>
+          <span style={{ fontSize: 11, color: t.muted, fontFamily: "'JetBrains Mono'" }}>v0.5.1</span>
         </div>
       </div>
 
@@ -88,24 +90,24 @@ export default function App() {
           {sidebarItems.map((it) => (
             <div key={it.id} onClick={() => setPage(it.id)} style={{ width: 34, height: 34, borderRadius: 9, display: "grid", placeItems: "center", cursor: "pointer", color: page === it.id ? t.accentText : t.muted, background: page === it.id ? t.accent : "transparent", transition: "background .2s, color .2s" }} title={it.tip}><it.Icon /></div>
           ))}
-          <span style={{ marginTop: "auto", fontSize: 9, color: t.faint, fontFamily: "'JetBrains Mono'" }}>0.4</span>
+          <span style={{ marginTop: "auto", fontSize: 9, color: t.faint, fontFamily: "'JetBrains Mono'" }}>0.5</span>
         </div>
 
         {/* Content */}
         <div style={{ flex: 1, minWidth: 0, padding: "16px 20px", display: "flex", flexDirection: "column", overflow: "hidden" }}>
           {page === "overview" && (
             <>
-              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 13 }}>
+              <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 12 }}>
                 <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
                   <span style={{ fontSize: 20, fontWeight: 700, letterSpacing: "-.01em" }}>总览</span>
                   <span style={{ fontSize: 11.5, color: t.muted, fontFamily: "'JetBrains Mono'" }}>{summary}</span>
                 </div>
+                <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 5 }}>
                 <div style={{ display: "flex", gap: 7, alignItems: "center" }}>
                   <GhostButton t={t} onClick={() => run("refresh-all", ["refresh-all", "--notify"], `已刷新全池 · ${counts.total} 个号`)} loading={loadingAction === "refresh-all"} loadingText="刷新中…"><IconRefresh spin={loadingAction === "refresh-all"} />刷新全池</GhostButton>
                   <GhostButton t={t} onClick={() => run("health", ["health"], "已检查各号 token")} accent loading={loadingAction === "health"} loadingText="检查中…">
                     检查 token
                   </GhostButton>
-                  <span style={{ width: 1, height: 18, background: t.divider, margin: "0 1px" }} />
                   <span onClick={() => {
                     const next = !autoSwitch;
                     setAutoSwitch(next);
@@ -124,6 +126,10 @@ export default function App() {
                   <span style={{ width: 1, height: 18, background: t.divider, margin: "0 1px" }} />
                   <GhostButton t={t} onClick={() => run("cool", ["cool", "300"], `已冷却 ${slots[currentNode ?? ""]?.label ?? "当前号"}`)} loading={loadingAction === "cool"} loadingText="冷却中…">冷却当前号</GhostButton>
                   <GhostButton t={t} onClick={() => run("uncool", ["uncool", "all"], "已清除所有冷却")} loading={loadingAction === "uncool"} loadingText="解冻中…">清除冷却</GhostButton>
+                </div>
+                <span style={{ fontSize: 10, color: t.muted, fontFamily: "'JetBrains Mono'" }}>
+                  {lastRefreshAt ? `上次全池刷新 ${fmtAgo(lastRefreshAt)}` : "尚未刷新过全池"}
+                </span>
                 </div>
               </div>
 
@@ -150,6 +156,17 @@ export default function App() {
                         ))}
                         {cur.windows.length > 0 && <span style={{ color: t.faint }}>·</span>}
                         <span>订阅至 {cur.exp}</span>
+                        {cur.cards > 0 && (
+                          <>
+                            <span style={{ color: t.faint }}>·</span>
+                            <span style={{ display: "inline-flex", alignItems: "center", gap: 5, color: cur.cardDays != null && cur.cardDays <= CARD_WARN_DAYS ? "#f2b45c" : t.accent }}>
+                              <IconTicket size={11} />重置卡 ×{cur.cards}
+                              {cur.cardExp
+                                ? (cur.cardsExpiring > 0 ? ` · ${cur.cardsExpiring} 张 ${cur.cardExp} 到期` : ` · 至 ${cur.cardExp}`)
+                                : " · 到期未知"}
+                            </span>
+                          </>
+                        )}
                       </div>
                     </div>
                     {betterExists && hero ? (
@@ -165,15 +182,21 @@ export default function App() {
               })()}
 
               {(() => {
-                const alive = accounts.filter(a => a.status !== "dead");
+                // Grid order is by LABEL, not by quota. The store sorts quota-desc, which made the
+                // ⌘N hints (derived from label order) read 1,3,4,2 across the grid — the shortcut
+                // numbers have to match reading order to be usable, and the handoff grid is label-
+                // ordered too. The "which should I use" answer is the Hero + USE badge, not position.
+                const alive = aliveByLabel;
                 const dead = accounts.filter(a => a.status === "dead");
+                // Delta baseline = best remaining quota among usable accounts.
+                const bestPct = alive.reduce((m, a) => Math.max(m, a.windows[0]?.pct ?? -1), -1);
                 return (
                   <div style={{ flex: 1, overflow: "auto" }}>
-                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 11, alignContent: "start" }}>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12, alignContent: "start" }}>
                       {alive.map((a) => {
                         const shortcutIdx = aliveByLabel.findIndex(x => x.aid === a.aid);
                         return (
-                        <AccountCard key={a.aid} a={a} isCurrent={a.aid === currentNode} isBest={hero?.aid === a.aid} isSelected={selectedCard === a.aid} shortcut={shortcutIdx >= 0 && shortcutIdx < 9 ? shortcutIdx + 1 : undefined} t={t}
+                        <AccountCard key={a.aid} a={a} isCurrent={a.aid === currentNode} isBest={hero?.aid === a.aid} isSelected={selectedCard === a.aid} shortcut={shortcutIdx >= 0 && shortcutIdx < 9 ? shortcutIdx + 1 : undefined} bestPct={bestPct} t={t}
                           onSelect={() => setSelectedCard(selectedCard === a.aid ? null : a.aid)}
                           onSwitch={() => run(`switch-${a.aid}`, ["switch", a.node], `当前号 → ${a.node}`)}
                           onShowDetail={(aid) => { invoke<AccountDetail>("read_account_detail", { aid }).then(d => setDetailModal(d)).catch(() => {}); }}

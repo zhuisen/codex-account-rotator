@@ -3,7 +3,6 @@ use std::fs;
 use std::process::Command;
 use std::time::Duration;
 use tauri::{
-    menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     webview::WebviewWindowBuilder,
     AppHandle, Emitter, Manager, PhysicalPosition, WebviewUrl,
@@ -16,7 +15,35 @@ fn store_dir() -> String {
     })
 }
 
-const ALLOWED_CMDS: &[&str] = &["switch", "cool", "uncool", "refresh-all", "health", "list", "quota", "remove"];
+const ALLOWED_CMDS: &[&str] = &["switch", "cool", "uncool", "refresh-all", "health", "list", "quota", "remove", "credits"];
+
+/// Interpreter for codex-rotate. NOT a bare `python3`: Cloudflare fingerprints the TLS ClientHello,
+/// and macOS's `/usr/bin/python3` (LibreSSL 2.8.3) gets a hard 403 from /backend-api/codex/usage while
+/// an OpenSSL 3.x build gets 200 with the identical token, headers and IP (measured 2026-08-01, 3
+/// trials each). A bare `python3` resolved through whatever PATH the app inherits at launch, which
+/// worked only by luck — the login PATH happened to put an OpenSSL build first. Pin it, and fall back
+/// only if the preferred one is gone.
+fn python_bin() -> String {
+    if let Ok(p) = std::env::var("CODEXBAR_PYTHON") {
+        if !p.is_empty() {
+            return p;
+        }
+    }
+    for cand in ["/opt/homebrew/bin/python3", "/usr/local/bin/python3"] {
+        if std::path::Path::new(cand).exists() {
+            return cand.into();
+        }
+    }
+    "python3".into()
+}
+
+/// The tray has no native menu any more (a menu forces macOS to open it on right-click, and both
+/// buttons must open the popover instead), so this is the ONLY quit path besides ⌘Q. It lives in
+/// Settings.
+#[tauri::command]
+fn quit_app(app: AppHandle) {
+    app.exit(0);
+}
 
 // ---- IPC commands ----
 
@@ -35,7 +62,7 @@ async fn run_rotate(app: AppHandle, args: Vec<String>) -> Result<String, String>
     }
     let rot = format!("{}/codex-rotate", store);
     let out = tauri::async_runtime::spawn_blocking(move || {
-        Command::new("python3").arg(&rot).args(&args).output()
+        Command::new(python_bin()).arg(&rot).args(&args).output()
     })
     .await
     .map_err(|e| format!("join: {}", e))?
@@ -320,63 +347,17 @@ pub fn run() {
             let tray_bytes = include_bytes!("../icons/tray.png");
             let tray_icon = tauri::image::Image::from_bytes(tray_bytes)?;
 
-            let show = MenuItem::with_id(app, "show", "打开主窗口", true, None::<&str>)?;
-            let refresh = MenuItem::with_id(app, "refresh", "刷新全池额度", true, None::<&str>)?;
-            let switch_best = MenuItem::with_id(app, "switch_best", "切到最佳号", true, None::<&str>)?;
-            let sep1 = PredefinedMenuItem::separator(app)?;
-            let sep2 = PredefinedMenuItem::separator(app)?;
-            let version = MenuItem::with_id(app, "version", "CodexBar v0.4.5", false, None::<&str>)?;
-            let quit = MenuItem::with_id(app, "quit", "⏻ 退出 CodexBar", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show, &refresh, &switch_best, &sep1, &version, &sep2, &quit])?;
-
+            // ★ NO native menu is attached. On macOS a tray icon with a menu ALWAYS opens that menu on
+            // right-click — there is no per-button opt-out — so the only way to make both buttons show
+            // our own popover is to have no menu at all. The actions that lived there moved: 打开主窗口
+            // = click any account row, 刷新全池/检查 token = popover footer, 退出 = Settings (quit_app).
             let _tray = TrayIconBuilder::with_id("main")
                 .icon(tray_icon)
                 .icon_as_template(true)
                 .title(format_tray_title())
-                .menu(&menu)
-                .show_menu_on_left_click(false)
-                .on_menu_event(|app, event| match event.id().as_ref() {
-                    "show" => {
-                        if let Some(w) = app.get_webview_window("main") {
-                            let _ = w.show();
-                            let _ = w.set_focus();
-                            let _ = w.center();
-                        }
-                    }
-                    "refresh" => {
-                        let store = store_dir();
-                        let app_h = app.clone();
-                        tauri::async_runtime::spawn(async move {
-                            let rot = format!("{}/codex-rotate", store);
-                            let _ = tokio::task::spawn_blocking(move || {
-                                std::process::Command::new("python3").arg(&rot).args(["refresh-all", "--notify"]).output()
-                            }).await;
-                            let _ = app_h.emit("state-changed", ());
-                            if let Some(tray) = app_h.tray_by_id("main") {
-                                let _ = tray.set_title(Some(&format_tray_title()));
-                            }
-                        });
-                    }
-                    "switch_best" => {
-                        let store = store_dir();
-                        let app_h = app.clone();
-                        tauri::async_runtime::spawn(async move {
-                            let rot = format!("{}/codex-rotate", store);
-                            let _ = tokio::task::spawn_blocking(move || {
-                                std::process::Command::new("python3").arg(&rot).args(["switch"]).output()
-                            }).await;
-                            let _ = app_h.emit("state-changed", ());
-                            if let Some(tray) = app_h.tray_by_id("main") {
-                                let _ = tray.set_title(Some(&format_tray_title()));
-                            }
-                        });
-                    }
-                    "quit" => { app.exit(0); }
-                    _ => {}
-                })
                 .on_tray_icon_event(|tray, event| {
                     if let TrayIconEvent::Click {
-                        button: MouseButton::Left,
+                        button: MouseButton::Left | MouseButton::Right,
                         button_state: MouseButtonState::Up,
                         rect,
                         ..
@@ -396,7 +377,13 @@ pub fn run() {
                 tokio::time::sleep(Duration::from_secs(3)).await;
                 let rot = format!("{}/codex-rotate", store_startup);
                 let _ = tokio::task::spawn_blocking(move || {
-                    std::process::Command::new("python3").arg(&rot).arg("refresh-all").output()
+                    // refresh-all brings back the free credit COUNTS; `credits` then fills in the
+                    // expiry dates the banner needs. It self-limits — it only hits the rate-limited
+                    // detail endpoint when an account actually holds cards and the 12h cache is
+                    // stale — so running it on every launch costs nothing on a warm cache.
+                    let c = std::process::Command::new(python_bin()).arg(&rot).arg("refresh-all").output();
+                    let _ = std::process::Command::new(python_bin()).arg(&rot).arg("credits").output();
+                    c
                 }).await;
                 let _ = handle_startup.emit("state-changed", ());
                 if let Some(tray) = handle_startup.tray_by_id("main") {
@@ -404,14 +391,41 @@ pub fn run() {
                 }
             });
 
-            // ---- periodic tray title refresh (every 30s) ----
+            // ---- state.json watcher: push, don't poll ----
+            // quotad writes state.json from ANOTHER process, so the UI had no way to learn about it and
+            // sat on its own 30s poll — stacking up to 30s of lag on top of the daemon's. Watching the
+            // file's mtime/len costs one stat per second and turns that into "visible within ~1s".
+            // Deliberately a stat loop rather than the `notify` crate: one dependency-free stat on a
+            // single known path, and an fsevents subscription would still need this fallback anyway.
+            // The 30s branch stays as the tray-title floor (the countdown text ages even when the file
+            // does not change).
             let handle_timer = handle.clone();
             tauri::async_runtime::spawn(async move {
+                let path = format!("{}/state.json", store_dir());
+                let mut seen: Option<(std::time::SystemTime, u64)> = None;
+                let mut since_tick = 0u32;
                 loop {
-                    tokio::time::sleep(Duration::from_secs(30)).await;
-                    let title = format_tray_title();
-                    if let Some(tray) = handle_timer.tray_by_id("main") {
-                        let _ = tray.set_title(Some(&title));
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    since_tick += 1;
+
+                    let stamp = fs::metadata(&path)
+                        .ok()
+                        .and_then(|m| m.modified().ok().map(|t| (t, m.len())));
+                    // `seen.is_some()` guards the first observation: without it a cold start would fire
+                    // a spurious state-changed before the UI has even read anything.
+                    let changed = stamp.is_some() && seen.is_some() && stamp != seen;
+                    if stamp.is_some() {
+                        seen = stamp;
+                    }
+
+                    if changed || since_tick >= 30 {
+                        since_tick = 0;
+                        if changed {
+                            let _ = handle_timer.emit("state-changed", ());
+                        }
+                        if let Some(tray) = handle_timer.tray_by_id("main") {
+                            let _ = tray.set_title(Some(&format_tray_title()));
+                        }
                     }
                 }
             });
@@ -445,7 +459,8 @@ pub fn run() {
             run_rotate,
             read_auth_tokens,
             read_logs,
-            read_account_detail
+            read_account_detail,
+            quit_app
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

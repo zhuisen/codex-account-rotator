@@ -662,7 +662,7 @@ def cmd_list(args):
             print(f"  [{slot.get('label', '?'):<8}] {who:<26} {' '.join(flags)}"
                   f"  额度未知(token 失效,codex-rotate login 重登)")
             continue
-        print(f"  [{slot.get('label', '?'):<8}] {who:<26} {' '.join(flags)}{_qfmt(slot.get('quota'))}")
+        print(f"  [{slot.get('label', '?'):<8}] {who:<26} {' '.join(flags)}{_qfmt(slot.get('quota'))}{_credit_fmt(slot)}")
 
 
 def cmd_switch(args):
@@ -933,10 +933,34 @@ def cmd_quota(args):
 
 
 USAGE_PATH = "/backend-api/codex/usage"
+# Reset credits ("重置卡") — a granted one-shot that clears an exhausted rate-limit window. Two tiers,
+# because the cheap one carries no dates:
+#   • /usage    — rides along free on every quota probe, but only {available_count,
+#                 applicable_available_count}. No expiry, no per-credit identity.
+#   • this path — the actual list: id / status / granted_at / expires_at / title. Rate-limited HARD
+#                 (two calls back-to-back already return 429 `connector_rate_limit`), so it is fetched
+#                 only when the free count says there is something to list. Verified 2026-07-30.
+CREDITS_PATH = "/backend-api/codex/rate-limit-reset-credits"
+CREDIT_DETAIL_TTL = 12 * 3600      # dates are near-static; a stale-by-hours cache is fine
+CREDIT_EXPIRY_WARN_DAYS = 3.0
+CREDIT_PACE_SECS = 20              # between accounts, to stay under connector_rate_limit
 # Liveness endpoint. /usage carries a Cloudflare bot challenge (403 for every client, healthy or not),
 # so it cannot answer "is this token revoked". /models is unchallenged, is a GET, costs no quota, and
 # still 401s on a revoked token — which makes it the reliable health signal.
 MODELS_PATH = "/backend-api/codex/models?client_version=0.146.0"
+
+
+def _tls_is_stale():
+    """True when this interpreter's TLS stack is the ancient LibreSSL that Cloudflare fingerprints.
+
+    ★ MEASURED 2026-08-01, single variable, 3 trials each, same token / headers / IP / minute:
+        /usr/bin/python3        LibreSSL 2.8.3   GET /usage → 403, 403, 403
+        /opt/homebrew/bin/py3   OpenSSL 3.6.3    GET /usage → 200, 200, 200
+    So a 403 here is a property of the CLIENT BINARY, not of the endpoint, the account, or our request
+    rate. This function exists so that verdict is stated in the log instead of being re-derived: the
+    previous investigation concluded "the endpoint is challenged for everyone" partly because macOS
+    `curl` also links LibreSSL and reproduced the 403 — same failure mode, mistaken for corroboration."""
+    return ssl.OPENSSL_VERSION.startswith("LibreSSL")
 
 
 def _api_get(tok, path, timeout=25):
@@ -1049,6 +1073,11 @@ def _probe_quota(aid, slot, is_active):
         else:
             if alive is True:
                 _revive_if_probe_marked(aid, slot)   # reachable even while /usage is challenged
+            # Name the client-side cause when it applies — a bare "被质询" sent the last investigation
+            # chasing the endpoint and the request rate for hours.
+            if _tls_is_stale():
+                return None, (f"额度接口 403 — 本解释器 TLS 过旧({ssl.OPENSSL_VERSION})被指纹拦截,"
+                              f"换 /opt/homebrew/bin/python3 跑")
             return None, "额度接口被 Cloudflare 质询(账号正常)" if alive else "额度接口被质询(死活未知)"
 
     # ★ 401 = the server says this token is REVOKED — the local JWT exp was checked above, so this is the
@@ -1089,6 +1118,22 @@ def _probe_quota(aid, slot, is_active):
     # every flip. So each detector may only retract its own verdict; a proxy-marked death stands until
     # the token actually changes (B16 revival via autosync).
     _revive_if_probe_marked(aid, slot)
+
+    # ★ Reset-credit counts ride along free on this same response — but they must NOT be nested inside
+    # `quota`: quotad rewrites slot["quota"] every 15s from a local rollout event, which carries no
+    # credit field, so nesting would blank the count on the very next tick. Sibling key, written here.
+    # Recorded BEFORE the no-windows early return, since the counts are valid either way.
+    rc = d.get("rate_limit_reset_credits")
+    if isinstance(rc, dict):
+        def _cred(st, a=aid, r=rc):
+            sl = st.get("slots", {}).get(a)
+            if sl is not None:
+                sl["credits"] = {"available": r.get("available_count"),
+                                 "applicable": r.get("applicable_available_count"),
+                                 "at": time.time()}
+        _mutate_state(_cred)
+        slot["credits"] = {"available": rc.get("available_count"),
+                           "applicable": rc.get("applicable_available_count"), "at": time.time()}
 
     rl = d.get("rate_limit") or {}
     pw = _win_from_usage(rl.get("primary_window"))
@@ -1139,6 +1184,129 @@ def cmd_refresh_all(args):
         except Exception:
             pass
     print("refresh-all " + " ".join(out))
+
+
+def _credit_days_left(c, now=None):
+    ts = _iso_ts(c.get("expires_at"))
+    return None if ts is None else (ts - (now or time.time())) / 86400.0
+
+
+def _soonest_credit(slot):
+    """Days until the nearest still-available credit expires, from the cached detail. None if unknown."""
+    soon = None
+    for c in ((slot.get("credits_detail") or {}).get("credits") or []):
+        if c.get("status") != "available":
+            continue
+        d = _credit_days_left(c)
+        if d is not None and d > 0 and (soon is None or d < soon):
+            soon = d
+    return soon
+
+
+def _credit_fmt(slot):
+    """Count comes from the free /usage summary; the expiry warning needs the cached detail, so an
+    account that has never run `credits` shows the count alone rather than a fake all-clear."""
+    n = (slot.get("credits") or {}).get("available")
+    if not n:
+        return ""
+    soon = _soonest_credit(slot)
+    if soon is not None and soon <= CREDIT_EXPIRY_WARN_DAYS:
+        return f"  卡:{n}(⚠{soon:.1f}天后过期)"
+    return f"  卡:{n}"
+
+
+def _fetch_credit_detail(aid, slot, is_active):
+    """One account's reset-credit list, the only source of per-credit expires_at. -> (list|None, msg)."""
+    authpath = LIVE if is_active else (AUTH_DIR / slot["file"])
+    try:
+        auth = _load_json(authpath)
+        tok = (auth.get("tokens") or {})
+    except (OSError, ValueError) as e:
+        return None, f"read err: {e}"
+    # Same attribution invariant as _probe_quota: a live switch mid-loop leaves LIVE holding another
+    # account's token, and credits are per-account.
+    if _account_id(auth) != aid:
+        return None, ("live account switched mid-fetch" if is_active
+                      else "slot file/account mismatch — not attributing")
+    if _access_exp(tok) - time.time() < 60:
+        return None, "token expired (codex-rotate login / wait keepalive)"
+    st, raw = _api_get(tok, CREDITS_PATH, timeout=20)
+    if st == 429:
+        return None, "HTTP 429 (端点限流,稍后再试)"
+    if st != 200:
+        return None, f"HTTP {st}"
+    try:
+        d = json.loads(raw)
+    except ValueError as e:
+        return None, f"parse err: {e}"
+    return (d.get("credits") or []), "HTTP 200"
+
+
+def cmd_credits(args):
+    """重置卡:每个账号有几张、每张什么时候过期。
+
+    数量走免费层(每次额度探测都带回来,零额外请求);到期时间只有明细端点有,而它限流很凶,所以只在
+    「免费计数 > 0 且缓存过期/计数变了」时才打,并在账号之间限速。--force 绕过缓存。
+
+    ★ applicable_available_count 的门槛尚未确定:目前 2 次观测(周用量 0% 和 74%)都是 0,说明"有卡"
+    不等于"现在能用"。同样能解释这组数据的至少有「必须 limit_reached」和「必须超过某个高水位」两种,
+    现有证据无法区分。判别实验是免费的:盯着高用量那个号的 applicable 在 used_percent 爬升时何时翻正
+    ——所以下面只如实呈现两个计数,不替服务端推断可用性。"""
+    force = "--force" in args
+    as_json = "--json" in args
+    s = _state()
+    active = s.get("active")
+    now = time.time()
+    rows, fetched = [], 0
+    for aid, slot in s["slots"].items():
+        label = slot.get("label", _mask(aid))
+        if slot.get("auth_dead"):
+            rows.append({"label": label, "email": slot.get("email"), "dead": True})
+            continue
+        summary = slot.get("credits") or {}
+        n = summary.get("available")
+        cached = slot.get("credits_detail") or {}
+        stale = (now - cached.get("fetched_at", 0) > CREDIT_DETAIL_TTL
+                 or cached.get("available") != n)
+        msg = "cached"
+        if n and (force or stale):
+            if fetched:
+                time.sleep(CREDIT_PACE_SECS)
+            fetched += 1
+            credits, msg = _fetch_credit_detail(aid, slot, aid == active)
+            if credits is not None:
+                cached = {"credits": credits, "available": n, "fetched_at": time.time()}
+                _mutate_state(lambda st, a=aid, c=cached: (st.get("slots", {}).get(a) or {}).update(
+                    {"credits_detail": c}))
+                slot["credits_detail"] = cached
+        rows.append({"label": label, "email": slot.get("email"), "dead": False,
+                     "available": n, "applicable": summary.get("applicable"),
+                     "credits": cached.get("credits") or [], "msg": msg})
+    if as_json:
+        print(json.dumps(rows, ensure_ascii=False))
+        return
+    for r in rows:
+        who = r.get("email") or "?"
+        if r["dead"]:
+            print(f"  [{r['label']:<8}] {who:<26} ✗DEAD")
+            continue
+        n = r.get("available") or 0
+        head = f"  [{r['label']:<8}] {who:<26} {n} 张可用"
+        if n and r.get("applicable") == 0:
+            head += "(当前无可重置的窗口)"
+        print(head)
+        for c in r["credits"]:
+            if c.get("status") != "available":
+                continue
+            d = _credit_days_left(c)
+            ts = _iso_ts(c.get("expires_at"))
+            when = (datetime.datetime.fromtimestamp(ts).strftime("%m-%d %H:%M")
+                    if ts is not None else "?")
+            left = "" if d is None else f"  剩 {d:.1f} 天"
+            warn = " ⚠️" if d is not None and d <= CREDIT_EXPIRY_WARN_DAYS else ""
+            print(f"      · {c.get('title', '重置卡')}  到期 {when}{left}{warn}")
+        if n and not r["credits"]:
+            print(f"      (到期时间未取到: {r['msg']})")
 
 
 def cmd_current(args):
@@ -1216,7 +1384,7 @@ CMDS = {"add": cmd_add, "login": cmd_login, "list": cmd_list, "switch": cmd_swit
         "uncool": cmd_uncool, "quota": cmd_quota, "current": cmd_current, "ensure": cmd_ensure,
         "sync": cmd_sync, "rename": cmd_rename, "keepalive": cmd_keepalive, "refresh": cmd_refresh,
         "refresh-all": cmd_refresh_all, "health": cmd_health, "remove": cmd_remove,
-        "ensure-live": cmd_ensure_live}
+        "ensure-live": cmd_ensure_live, "credits": cmd_credits}
 
 
 # Commands that change what the menu bar shows → nudge SwiftBar to re-render immediately (so terminal
@@ -1242,7 +1410,7 @@ def main():
     if len(sys.argv) < 2 or sys.argv[1] not in CMDS:
         print("usage: codex-rotate {add <label>|login|remove <label>|list|switch [label]|cool [min]|uncool [label]|"
               "quota [--save]|sync|rename <old> <new>|refresh [label|all]|refresh-all|"
-              "keepalive [days] [--dry-run]|health|ensure|current}")
+              "keepalive [days] [--dry-run]|health|credits [--force] [--json]|ensure|current}")
         sys.exit(1)
     cmd = sys.argv[1]
     if cmd in STATE_LOCKED:

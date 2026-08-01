@@ -12,7 +12,7 @@
 |---|---|
 | ① token 失效要重登 | keepalive 定期 OAuth 刷新闲置号 + 代理发现过期当场刷新 → **永不手动重登** |
 | ② 会话内切号要重启 | 代理逐请求透明轮换;Codex 每请求发完整上下文(无 `previous_response_id`)→ **中途换号无感、不重启** |
-| ③ 额度不实时 | **官方 usage API**(`GET /backend-api/codex/usage`,零消耗)每 3 分钟刷全池 + 代理逐请求读 `x-codex-*` 响应头精确记账 |
+| ③ 额度不实时 | **事件驱动**:quotad 监测 codex 活动(4 路本地信号)→ 数秒内读**官方 usage API**(零消耗)刷当前号;实测发起调用后 **+8s** 见数、运行中每 20s 续刷。另有 300s 全池扫描兜底 + 代理逐请求记账 |
 | ④ 撞限要手动换 | 代理撞 429 → 标冷却 → 下个请求自动换号 |
 
 ## 架构:两层协作
@@ -51,7 +51,7 @@
 | `proxy/auth-token` | codex `auth.command` 占位 token(代理会覆盖) |
 | `proxy/test-home/config.toml` | 隔离测试用 CODEX_HOME(非日常) |
 | `proxy/README.md` | 代理层细节文档 |
-| `launchd/*.plist` | 3 个常驻服务(装到 `~/Library/LaunchAgents/`) |
+| `scripts/install-launchd.sh` | **生成并加载 5 个 launchd 服务**(autosync/keepalive/refreshquota/quotad/proxy)。生成而非提交成文件:plist 内嵌绝对路径,提交的副本换台机器就是错的,且会静默漂移(旧的 `launchd/*.plist` 就漂到了写死 `/usr/bin/python3`)。★脚本会**解析并钉住 OpenSSL 版的 python3**,见「维护约定」 |
 | `auth/`(gitignored) | 每号凭证槽位 `<account_id>.json`(0600) |
 | `state.json`(gitignored) | 池状态(slots/active/last_aid/last_proxy_ts) |
 | `RUNBOOK.md` | 运维手册(起停/排障/常见操作/踩坑) |
@@ -94,7 +94,7 @@ codex-rotate switch plus2            # 手动切号(单号模式)
 codex-rotate refresh all             # 手动 OAuth 刷新非活跃号
 ```
 
-菜单栏(CodexBar)装好后顶部显示当前号周额度余量 + 重置倒计时,点击弹窗看每号油表、推荐切号、失效号折叠;主窗口(设置页)可开「开机自启」。构建:`bash codexbar/scripts/deploy.sh`。
+菜单栏(CodexBar)装好后顶部显示当前号周额度余量 + 重置倒计时。**左键右键都打开弹窗**(托盘没有原生菜单——macOS 无法让右键不弹它);弹窗里看每号油表、号间差值、重置卡状态、失效号折叠,**点任意账号会弹出主界面**,切号在主界面卡片上做。退出在主界面「设置」页(本 app 不占 Dock,没有别的退出口)。构建:`bash codexbar/scripts/deploy.sh`。
 
 ## 安全边界(红线)
 
@@ -102,5 +102,7 @@ codex-rotate refresh all             # 手动 OAuth 刷新非活跃号
 
 ## 维护约定
 
-- **改插件必 bump `swiftbar/codex-status.10s.py` 的 `VERSION`**——菜单栏显示它,用户靠它判断更新生效没。
+- ★ **绝不让 python 解释器由 PATH 或 shebang 决定**。Cloudflare 按 TLS ClientHello 指纹拦截,macOS 的 `/usr/bin/python3`(LibreSSL 2.8.3)对 `GET /backend-api/codex/usage` 恒返 **403**,OpenSSL 3.x 同请求恒 **200**(2026-08-01 受控实验,单一变量,各 3 次,同 token/header/IP)。launchd 默认 PATH 只有 `/usr/bin:/bin:...`,所以 `#!/usr/bin/env python3` 必踩。装服务一律走 `scripts/install-launchd.sh`;CodexBar 侧见 `python_bin()`。
+  - 排查提示:用 macOS 自带 `curl` 复现"也被挡"**不算独立证据**——它同样链 LibreSSL,是同一个失败模式。换 TLS 栈才是对照组。
+- 改 `launchd` 的日志路径要同步 `codexbar/src-tauri/src/lib.rs` 的 `read_logs`(路径是写死的字面量,`proxy` 那条是 `proxy/proxy.log` 不是 `proxy.log`)。
 - 改 `state.json` schema 或凭证逻辑要谨慎:proxy / codex-rotate / autosync / keepalive 都读写它。

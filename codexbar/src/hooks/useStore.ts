@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { type AppState, type TokenInfo, type Account, type Slot, slotToAccount, recommended } from "../helpers";
+import { type AppState, type TokenInfo, type Account, type Slot, slotToAccount, recommended, poolRefreshedAt, CARD_WARN_DAYS } from "../helpers";
 
 export interface StoreCounts {
   total: number; live: number; cool: number; dead: number;
@@ -104,5 +104,14 @@ export function useStore() {
     dead: accounts.filter(a => a.status === "dead").length,
   };
 
-  return { state, tokens, accounts, hero, currentNode, slots, counts, loadingAction, toast, refresh, run, showToast };
+  // Relative time re-renders for free: refresh() replaces `state` every 30s, so no extra timer.
+  const lastRefreshAt = poolRefreshedAt(slots);
+
+  // Pool-wide banner subject = the single most urgent expiring card (design handoff §4).
+  const cardAlert = accounts
+    .filter(a => a.status !== "dead" && a.cards > 0 && a.cardDays != null && a.cardDays <= CARD_WARN_DAYS)
+    .sort((x, y) => (x.cardDays ?? 0) - (y.cardDays ?? 0))[0] ?? null;
+
+  return { state, tokens, accounts, hero, currentNode, slots, counts, lastRefreshAt, cardAlert,
+           loadingAction, toast, refresh, run, showToast };
 }

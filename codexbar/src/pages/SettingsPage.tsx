@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { enable as enableAutostart, disable as disableAutostart, isEnabled as isAutostartEnabled } from "@tauri-apps/plugin-autostart";
 import type { Theme } from "../theme";
 
@@ -31,6 +32,7 @@ export default function SettingsPage({ t }: { t: Theme }) {
     const next = { ...s, ...patch }; setS(next); save(next);
   };
 
+  const [confirmQuit, setConfirmQuit] = useState(false);
   const [autostart, setAutostart] = useState(false);
   const [autostartBusy, setAutostartBusy] = useState(false);
   useEffect(() => { isAutostartEnabled().then(setAutostart).catch(() => {}); }, []);
@@ -92,10 +94,24 @@ export default function SettingsPage({ t }: { t: Theme }) {
         <NumInput value={s.tokenExpiryWarnHours} onChange={v => update({ tokenExpiryWarnHours: v })} min={6} max={120} suffix="h" />
       </Row>
 
+      {/* The tray no longer carries a native menu (both mouse buttons open the popover instead), so
+          this is the quit path. Confirm first — CodexBar has no Dock icon, and a stray click here
+          would leave the menu bar empty with no obvious way back. */}
+      <Row label="退出 CodexBar" desc="完全退出(菜单栏图标消失);仅关闭窗口用 ⌘W">
+        {!confirmQuit ? (
+          <span onClick={() => setConfirmQuit(true)} style={{ fontSize: 11.5, fontWeight: 600, color: "#E0524D", border: "1px solid #E0524D40", padding: "6px 13px", borderRadius: 8, cursor: "pointer", userSelect: "none" }}>退出</span>
+        ) : (
+          <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+            <span onClick={() => invoke("quit_app").catch(() => {})} style={{ fontSize: 11.5, fontWeight: 700, color: "#fff", background: "#E0524D", padding: "6px 13px", borderRadius: 8, cursor: "pointer", userSelect: "none" }}>确认退出</span>
+            <span onClick={() => setConfirmQuit(false)} style={{ fontSize: 11.5, color: t.muted, padding: "6px 10px", cursor: "pointer", userSelect: "none" }}>取消</span>
+          </div>
+        )}
+      </Row>
+
       <div style={{ marginTop: 20, padding: "12px 0", borderTop: `1px solid ${t.divider}` }}>
         <div style={{ fontSize: 12, fontWeight: 600, color: t.muted, marginBottom: 6 }}>关于</div>
         <div style={{ fontSize: 11, color: t.faint, fontFamily: "'JetBrains Mono'", lineHeight: 1.8 }}>
-          CodexBar v0.4.5<br />
+          CodexBar v0.5.1<br />
           Tauri 2 + React · macOS<br />
           github.com/zhuisen/codex-account-rotator
         </div>

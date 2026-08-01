@@ -49,6 +49,86 @@
 
 ---
 
+### CodexBar v0.5.0 — 设计稿 1:1 改版 + 重置卡可视化 — 2026-07-31
+
+按 `design_handoff_codexbar`(主界面定稿 `#1a` / 菜单栏定稿 `v2`)像素级复刻两个界面,并新增重置卡(reset credit)图层。
+
+**托盘交互(用户指定)**
+- **左键、右键都打开弹窗**。macOS 上只要给托盘挂了原生菜单,右键就一定弹那个菜单、无法按键分流——所以**整个原生菜单被移除**。原菜单里的动作各自找到新家:打开主窗口 = 点弹窗里任意账号行;刷新全池 / 检查 token = 弹窗底栏;**退出 = 设置页**(带二次确认——本 app 没有 Dock 图标,误点就找不回来了)。
+- 弹窗里**点任意账号 = 直接弹出主界面窗口**(不再是切号)。切号统一收敛到主界面卡片的动作条。
+
+**重置卡图层**(数据源见 v0.4.9 的 `codex-rotate credits`)
+- 卡片底部徽章:青色 `重置卡 ×N` / 琥珀脉冲 `重置卡 ×N · M张剩D天`(≤3 天) / 灰字 `无重置卡`。
+  **张数在任何状态下都不消失**——稿子的即将到期态只写天数(`重置卡 2 天后到期`),既丢了持有量又和"2 张"读起来同形;而真实数据恰是 plus4 持 2 张、只有 1 张次日作废,所以徽章必须同时给出"共几张"和"其中几张要没"。`cardsExpiring` 因此独立于 `cards`,并 `min(cardsExpiring, cards)` 钳位——两个数来自不同时刻的两次拉取(计数随每次 usage 探测刷新、明细只在 `credits` 跑时刷新),缓存可能还留着服务端已经扣掉的那张。
+- 菜单栏顶部琥珀横幅取全池最紧急的一张;命中的行左缘色条同步转琥珀。
+- Hero 指标行追加 `🎟 重置卡 ×N · 至 YYYY-MM-DD`。
+- **数量与到期分层**:数量随每次 usage 探测免费带回;到期只存在于限流的明细端点,所以 `cards>0 && cardDays==null` 是合法状态(显示"到期未知"而非假装没有)。启动时跑一次 `credits` 补齐日期(12h 缓存,冷启动才真发请求)。
+
+**号间对比 / 刷新时间**
+- 非当前号右上角差值角标(`最优` / `-N%`,≤-50% 转琥珀);菜单栏行同款。
+- `上次全池刷新 HH:MM · N 分钟前` —— **由各号快照的 `captured_at` 派生**,且只认 `source ∈ {usage-api, probe}`:rollout 快照是本地回声不是"刷新过全池",计进去会把池子说得比实际新。
+
+**修掉的两个自伤**
+- **网格顺序**:store 按额度降序排,而 ⌘N 提示按 label 顺序生成,结果格子里读出来是 ⌘1/⌘3/⌘4/⌘2。改为网格按 label 排(与 `#1a` 一致),"该用哪个"交给 Hero + `USE` 徽章表达。
+- **弹窗自适应高度**:面板在稿里是 `height: fit-content`,而 Tauri 窗口是固定框 → 用 ResizeObserver 量内容再 `setSize`。两个坑:① `core:window:allow-set-size` 没在 capabilities 里,`setSize` 会被静默拒绝;② `.mb-root` 原有 `min-height:100vh` 会让 `scrollHeight` 被当前窗口高托住,**窗口只能变大不能变小**(闩死在最高的一次)。改为面板 auto 高、由 `.mb-list` 持有 `max-height`。
+
+**验证**:tsc / cargo check / oxlint 全绿;两界面用打桩 Tauri IPC 的真实产物在 Chrome headless 渲染比对(注:`--window-size` 小于 500 会被 Chrome 钳到 500 而截图仍按传入宽度裁,一度伪装成横向溢出——量了 `root.scrollWidth=498` 才排除)。
+
+---
+
+### ★ v0.5.1 — 额度长期不准的真根因:LibreSSL 被 TLS 指纹拦截 — 2026-08-01
+
+**症状**:界面显示 plus3 周额度 **100%**,官方真值 **16%**。用户报"滞后性太严重"。
+
+**一路误诊**:此前把 `GET /backend-api/codex/usage` 的 403 归因为「Cloudflare 对该端点的机器人质询,与账号无关、间歇性发作」,依据是"连 curl 也一样被挡,所以是端点级不是客户端问题"。**这条依据是错的**——macOS 自带的 `curl` 同样链接 LibreSSL,复现的是同一个失败模式,却被当成了独立佐证。
+
+**受控实验**(单一变量=解释器,各 3 次,同 token / 同 header / 同 IP / 同一分钟):
+
+| 解释器 | TLS 栈 | GET /usage |
+|---|---|---|
+| `/usr/bin/python3` | LibreSSL 2.8.3 | **403 · 403 · 403** |
+| `/opt/homebrew/bin/python3` | OpenSSL 3.6.3 | **200 · 200 · 200** |
+
+Cloudflare 按 TLS ClientHello 指纹拦截,LibreSSL 2.8.3 的握手被判为非常规客户端。**403 是客户端二进制的属性,不是端点、账号或请求速率的属性。**
+
+**影响面**(全部 launchd 任务都中招,持续了很久):
+
+| 任务 | 原解释器 | 后果 |
+|---|---|---|
+| `quotad` / `proxy` | `/usr/bin/python3` 显式 | 所有服务端读数 403,额度只能靠不可靠的 rollout 兜底 |
+| `autosync` / `keepalive` / `refreshquota` | shebang `env python3`,而 launchd 默认 PATH 只有 `/usr/bin:/bin:...` | 同上;每天的全池刷新一直在空转 |
+| CodexBar | `Command::new("python3")` 走继承 PATH | **侥幸没事**——登录 PATH 里恰好有个 OpenSSL 的 venv 排在前面。这正是手动点「刷新全池」有效、后台却一直不更新的原因 |
+
+**修**:五个 plist 全部显式钉 `/opt/homebrew/bin/python3`;Rust 侧 `python_bin()` 按 `CODEXBAR_PYTHON` → `/opt/homebrew` → `/usr/local` → `python3` 顺序解析,不再听 PATH 摆布。
+
+**防复发**:`_tls_is_stale()` 检测 `ssl.OPENSSL_VERSION` 是否为 LibreSSL,403 分支据此把消息从含糊的「被 Cloudflare 质询」换成「本解释器 TLS 过旧(LibreSSL x.y)被指纹拦截,换 … 跑」。上一次就是那句含糊的日志把排查引向了端点和速率。
+
+### v0.5.1 — 事件驱动刷新(额度只在你用 codex 时才变) — 2026-08-01
+
+定时轮询的两段滞后叠加:quotad → state.json 最长 **300s**,state.json → UI 最长 **30s**。
+
+- **quotad 新增活动驱动回路**:1s 轮询四个廉价本地信号(稳态 0.02ms/次),防抖 3s 后只刷**当前号**(cxp 场景加 `last_aid`)。四路信号刻意冗余,各自补对方的盲区——`history.jsonl`(交互提问,漏 `codex exec`)/ 当天 session 目录 mtime(新会话建文件,漏会话内追加)/ 当前 rollout 文件 mtime(会话内追加,需 60s 重扫才跟得上新文件)/ `last_proxy_ts`(cxp 流量,可能完全绕开前三者)。
+- **只刷一个号不刷全池**:该端点对突发答 403,而被消耗的就是当前号,全池扫描换不来新信息。全池扫描留在 300s 兜底。
+- **重试阶梯 8/20/45s**:一次 403 原本会把这轮更新整个丢掉。重试**不受 `MIN_GAP` 约束**——被挡的那次没拿到任何数据,重试是"第一次成功读取"而非"重复轮询"。
+- **Rust 侧监视 state.json**:每秒一个 stat,mtime/size 变化即 `emit("state-changed")`。原来 UI 只能靠自己 30s 轮询,对另一个进程的写入一无所知。首次观测不触发(否则冷启动会误发)。
+
+**实测**(真实 `codex exec`,非模拟触发):
+
+```
+00:40:50  codex 发起
+00:40:58  [quotad] activity → plus6:HTTP 200     ← +8s,codex 仍在运行
+00:41:18  [quotad] activity → plus6:HTTP 200     ← +28s
+00:41:38  [quotad] activity → plus6:HTTP 200     ← +48s
+00:41:39  codex 结束
+plus6 周已用 9.0% → 10.0%,captured_at=00:41:37
+```
+
+首次响应 **+8s**(检测 ≤1s + 防抖 3s + 请求 ~3s),此后每 20s 续刷 —— **运行过程中持续更新,不是跑完才更新**。此前最坏 330s。
+
+日志加了时间戳:没有它就无法从日志判断刷新发生在 codex 运行中还是结束后,而这正是调触发器时唯一要问的问题。
+
+---
+
 ## BUG 日志
 
 ### B1 · 两个号显示完全相同额度 ✅修

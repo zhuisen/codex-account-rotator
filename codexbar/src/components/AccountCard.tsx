@@ -1,82 +1,104 @@
 import { useState, useEffect } from "react";
 import { STATUS_COLORS, STATUS_TEXT, type Theme } from "../theme";
-import { type Account, fmtCd } from "../helpers";
+import { type Account, fmtCd, quotaColor } from "../helpers";
 import Ring from "./Ring";
+import CardBadge, { isCardExpiring } from "./CardBadge";
 
-export default function AccountCard({ a, isCurrent, isBest, isSelected, shortcut, t, onSelect, onSwitch, onShowDetail, onRemove }: {
-  a: Account; isCurrent: boolean; isBest: boolean; isSelected: boolean; shortcut?: number; t: Theme;
+/** Delta vs the best account in the pool — "最优" / "-19%". ≤-50 is amber (handoff §5.0). */
+function DeltaChip({ delta, t }: { delta: number; t: Theme }) {
+  const best = delta === 0;
+  const far = delta <= -50;
+  return (
+    <span style={{
+      marginLeft: "auto", flexShrink: 0,
+      fontSize: 9, fontWeight: 700, padding: "2px 8px", borderRadius: 999,
+      fontVariantNumeric: "tabular-nums",
+      color: best ? t.accent : far ? "#E0901C" : t.email,
+      background: best ? t.accentSoft : far ? "rgba(224,144,28,.12)" : t.ghostBg,
+    }}>{best ? "最优" : `${delta}%`}</span>
+  );
+}
+
+export default function AccountCard({ a, isCurrent, isBest, isSelected, shortcut, bestPct, t, onSelect, onSwitch, onShowDetail, onRemove }: {
+  a: Account; isCurrent: boolean; isBest: boolean; isSelected: boolean; shortcut?: number;
+  /** Highest remaining quota in the pool — the baseline the delta chip compares against. */
+  bestPct: number; t: Theme;
   onSelect: () => void; onSwitch: () => void; onShowDetail: (aid: string) => void; onRemove: (label: string) => void;
 }) {
   const [confirmDelete, setConfirmDelete] = useState(false);
   useEffect(() => { if (!isSelected) setConfirmDelete(false); }, [isSelected]);
-  const sc = STATUS_COLORS[a.status] ?? STATUS_COLORS.live;
+
   const isDead = a.status === "dead";
   const isCool = a.status === "cool";
-  const mainPct = a.windows[0]?.pct ?? -1;
-  const glowColor = mainPct >= 0 && mainPct <= 10 && !isDead ? "#E0524D" : mainPct >= 0 && mainPct <= 20 && !isDead ? "#E0901C" : undefined;
+  const sc = STATUS_COLORS[a.status] ?? STATUS_COLORS.live;
+  const pct = a.windows[0]?.pct ?? -1;
+  const known = pct >= 0 && !isDead;
+  // Quota-driven colour for live/low (handoff rule), status colour for cool/dead where the state
+  // matters more than the number.
+  const qc = isDead || isCool ? sc : quotaColor(pct);
+  const glow = known && pct <= 20 ? (pct <= 10 ? "#E0524D" : "#E0901C") : undefined;
+  const expiring = isCardExpiring(a);
+
+  const border = isSelected ? t.accent
+    : expiring ? "rgba(224,144,28,.4)"
+    : isCurrent ? t.accentBorder
+    : t.cardBorder;
 
   return (
     <div
       onClick={onSelect}
       style={{
-        background: `linear-gradient(135deg, ${isDead ? "rgba(224,82,77,.06)" : `${sc}0a`} 0%, transparent 60%)`,
-        border: isSelected ? `1px solid ${t.accent}` : `1px solid ${t.cardBorder}`,
-        borderLeftWidth: 2, borderLeftColor: isSelected ? t.accent : sc,
-        borderRadius: 12, padding: 12, display: "flex", flexDirection: "column", gap: 10,
-        overflow: "hidden", position: "relative",
-        cursor: "pointer", userSelect: "none",
-        opacity: isDead ? 0.55 : 1,
+        position: "relative", background: isCurrent ? t.curCardBg : t.cardBg,
+        border: `1px solid ${border}`, borderRadius: 12,
+        padding: "16px 14px 12px", display: "flex", flexDirection: "column",
+        cursor: "pointer", userSelect: "none", opacity: isDead ? 0.55 : 1,
         transition: "background .2s ease, border-color .2s ease",
       }}>
 
-      {shortcut && <span style={{ position: "absolute", top: 4, left: 8, fontSize: 9, color: t.faint, fontFamily: "'JetBrains Mono'" }}>⌘{shortcut}</span>}
+      {shortcut && <span style={{ position: "absolute", top: 6, left: 10, fontSize: 9, color: t.faint, fontFamily: "'JetBrains Mono'" }}>⌘{shortcut}</span>}
 
       <div style={{ display: "flex", gap: 11, alignItems: "center" }}>
-        <Ring pct={mainPct < 0 || isDead ? 0 : mainPct} r={21} sw={5} color={sc} track={t.ringTrack} size={52} glow={glowColor}>
-          <span style={{ fontSize: 13, fontWeight: 700, color: t.text, fontVariantNumeric: "tabular-nums", lineHeight: 1 }}>{isDead || mainPct < 0 ? "—" : mainPct}</span>
+        <Ring pct={known ? pct : 0} r={21} sw={5} color={qc} track={t.ringTrack} size={52} glow={glow}>
+          <span style={{ fontSize: 13, fontWeight: 700, color: t.text, fontVariantNumeric: "tabular-nums", lineHeight: 1 }}>{known ? pct : "—"}</span>
         </Ring>
 
-        <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 3, overflow: "hidden" }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-            <span style={{ fontSize: 13, fontWeight: 700, color: t.text }}>{a.node}</span>
-            <span style={{ fontSize: 9.5, fontWeight: 600, color: sc }}>{STATUS_TEXT[a.status]}</span>
+        <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 4 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
+            <span style={{ fontSize: 13.5, fontWeight: 700, color: t.text }}>{a.node}</span>
+            <span style={{ fontSize: 10, fontWeight: 600, color: sc }}>{STATUS_TEXT[a.status]}</span>
             {isBest && <span style={{ fontSize: 8, fontWeight: 700, color: t.accentText, background: t.accent, padding: "1px 5px", borderRadius: 4, flexShrink: 0 }}>USE</span>}
-            {isCurrent && <span style={{ marginLeft: "auto", fontSize: 8.5, fontWeight: 700, color: t.accent, border: `1px solid ${t.accentBorder}`, padding: "1px 6px", borderRadius: 999, flexShrink: 0 }}>当前</span>}
+            {isCurrent
+              ? <span style={{ marginLeft: "auto", flexShrink: 0, fontSize: 8.5, fontWeight: 700, color: t.accent, border: `1px solid ${t.accentBorder}`, padding: "1px 7px", borderRadius: 999 }}>当前</span>
+              : known && bestPct >= 0 && <DeltaChip delta={pct - bestPct} t={t} />}
           </div>
-          <div style={{ fontSize: 10.5, color: t.email, fontFamily: "'JetBrains Mono'", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: "100%" }}>{a.email}</div>
 
-          {!isDead && a.windows.length > 0 && (
-            <div style={{ display: "flex", flexDirection: "column", gap: 3, marginTop: 3 }}>
-              {a.windows.map(w => {
-                const barColor = w.pct <= 10 ? "#E0524D" : w.pct <= 30 ? "#E0901C" : sc;
-                return (
-                  <div key={w.label} style={{ display: "flex", alignItems: "center", gap: 5 }}>
-                    <span style={{ fontSize: 8, color: w.pct <= 30 ? barColor : t.muted, fontFamily: "'JetBrains Mono'", width: 14, textAlign: "right", fontWeight: w.pct <= 30 ? 600 : 400 }}>{w.label}</span>
-                    <div style={{ flex: 1, height: 4, borderRadius: 2, background: t.barTrack, overflow: "hidden" }}>
-                      <div style={{ height: "100%", width: `${w.pct}%`, background: barColor, borderRadius: 2, transition: "width .55s cubic-bezier(.4,0,.2,1)" }} />
-                    </div>
-                    <span style={{ fontSize: 9, color: w.pct <= 30 ? barColor : t.text2, fontFamily: "'JetBrains Mono'", fontWeight: w.pct <= 30 ? 700 : 600, width: 30 }}>{w.pct}%</span>
-                    <span style={{ fontSize: 8, color: t.muted, fontFamily: "'JetBrains Mono'" }}>↻{w.reset}</span>
-                  </div>
-                );
-              })}
-              {isCool && <span style={{ fontSize: 9, color: "#2BA0C0", fontWeight: 600 }}>❄ 冷却 {fmtCd(a.cooldownSec)}</span>}
-              <div style={{ fontSize: 9, color: t.muted, fontFamily: "'JetBrains Mono'" }}>到期 {a.exp}</div>
+          <div style={{ fontSize: 10.5, color: t.email, fontFamily: "'JetBrains Mono'", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{a.email}</div>
+
+          {known && a.windows.map(w => (
+            <div key={w.label} style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <span style={{ fontSize: 9, color: t.muted, fontFamily: "'JetBrains Mono'" }}>{w.label}</span>
+              <div style={{ flex: 1, height: 4, borderRadius: 2, background: t.barTrack, overflow: "hidden" }}>
+                <div style={{ height: "100%", width: `${w.pct}%`, background: quotaColor(w.pct), borderRadius: 2, transition: "width .55s cubic-bezier(.4,0,.2,1)" }} />
+              </div>
+              <span style={{ fontSize: 10, fontWeight: 600, color: w.pct < 50 ? "#E0901C" : t.text2, fontFamily: "'JetBrains Mono'", fontVariantNumeric: "tabular-nums" }}>{w.pct}%</span>
+              <span style={{ fontSize: 9, color: t.muted, fontFamily: "'JetBrains Mono'" }}>↻{w.reset}</span>
             </div>
-          )}
+          ))}
+          {!isDead && a.windows.length === 0 && <span style={{ fontSize: 9, color: t.muted }}>未探测 · 刷新一次</span>}
+          {isDead && <span style={{ fontSize: 9.5, color: "#E0524D", fontWeight: 600 }}>token 失效 · 需重登</span>}
+          {isCool && <span style={{ fontSize: 9, color: "#2BA0C0", fontWeight: 600 }}>❄ 冷却 {fmtCd(a.cooldownSec)}</span>}
 
-          {!isDead && a.windows.length === 0 && (
-            <span style={{ fontSize: 9, color: t.muted, marginTop: 2 }}>未探测 · 刷新一次</span>
-          )}
-
-          {isDead && (
-            <span style={{ fontSize: 9.5, color: "#E0524D", fontWeight: 600, marginTop: 2 }}>token 失效 · 已到期</span>
-          )}
+          {/* wrap + nowrap date: a long amber badge must push itself onto a second line rather than
+              break "到期 2026-08-10" mid-date (observed with 重置卡 ×2 · 1张剩1天 on a 3-col grid). */}
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 6, marginTop: 5, paddingTop: 7, borderTop: `1px solid ${t.divider}` }}>
+            <span style={{ fontSize: 9.5, color: t.muted, fontFamily: "'JetBrains Mono'", whiteSpace: "nowrap" }}>到期 {a.exp}</span>
+            <span style={{ marginLeft: "auto" }}><CardBadge a={a} t={t} /></span>
+          </div>
         </div>
       </div>
 
       {isSelected && (
-        <div onClick={(e) => e.stopPropagation()} style={{ display: "flex", gap: 6, paddingTop: 6, borderTop: `1px solid ${t.divider}` }}>
+        <div onClick={(e) => e.stopPropagation()} style={{ display: "flex", gap: 6, marginTop: 10, paddingTop: 8, borderTop: `1px solid ${t.divider}` }}>
           {!isCurrent && !isDead && (
             <span onClick={onSwitch} style={{ flex: 1, textAlign: "center", fontSize: 11, fontWeight: 700, color: t.accentText, background: t.accent, padding: "5px 0", borderRadius: 6, cursor: "pointer" }}>切换到此号</span>
           )}
