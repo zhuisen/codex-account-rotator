@@ -670,8 +670,7 @@ def cmd_switch(args):
     _syncback(s)
     if args:
         key = args[0]
-        target = next((aid for aid, sl in s["slots"].items()
-                       if aid == key or sl.get("label") == key), None)
+        target = _resolve_slot(s, key)
         if not target:
             sys.exit(f"no slot matching '{key}'")
     else:
@@ -1186,6 +1185,175 @@ def cmd_refresh_all(args):
     print("refresh-all " + " ".join(out))
 
 
+def _resolve_slot(s, key):
+    """label 或 account_id → aid。None 表示没匹配上。"""
+    return next((aid for aid, sl in s["slots"].items()
+                 if aid == key or sl.get("label") == key), None)
+
+
+# ★ 计费探测用的最便宜模型。/models 当前返回 gpt-5.6-{sol,terra,luna} / gpt-5.5 / gpt-5.4 /
+# gpt-5.4-mini / codex-auto-review;mini 是最小的那个。实测一次 mini 探测没能让 used_percent 的
+# 整数位动(1% → 1%),即单次成本 < 1% —— 这是上界不是点估计,别当"几乎免费"用。
+PROBE_MODEL = "gpt-5.4-mini"
+RESPONSES_PATH = "/backend-api/codex/responses"
+
+
+def _billed_probe(aid, slot, is_active, model=PROBE_MODEL):
+    """★ 发一次真实(计费)补全,证明这个号**真的能干活**。-> (quota|None, msg)。
+
+    与 _probe_quota 的分工:
+      • _probe_quota  GET /usage   零消耗,只读数字。答"服务端记的额度是多少"。
+      • 本函数        POST /responses  真计费。答"这个号现在还能不能真的完成一次请求"。
+    `/models` 返回 200 只证明 token 被接受;订阅到期、模型权限被撤、账号被限流这些,只有真发一次
+    补全才暴露得出来。副产品是响应头里的 x-codex-* 全套额度(与 /usage 同源)。
+
+    ★ 本函数**不标记 auth_dead**。标死会改变号池成员资格,而现有的两个检测器(proxy 的 /responses
+    失败、_probe_quota 的 401)都带着防抖/防翻转的守卫;一个测试工具再插一只手进来,只会把"两个端点
+    互相打架 → 每轮翻转 → 反复重发告警"那类问题请回来。它只报告,由人决定。
+
+    token 只读,绝不 OAuth 刷新(active 号的 token 归 codex 原生刷新器所有,见 B14)。"""
+    authpath = LIVE if is_active else (AUTH_DIR / slot["file"])
+    try:
+        auth = _load_json(authpath)
+        tok = (auth.get("tokens") or {})
+    except (OSError, ValueError) as e:
+        return None, f"read err: {e}"
+    # 与 _probe_quota 相同的归属不变量:探的 token 必须属于要归账的那个号。
+    if _account_id(auth) != aid:
+        return None, ("live account switched mid-probe" if is_active
+                      else "slot file/account mismatch — not attributing")
+    if _access_exp(tok) - time.time() < 60:
+        return None, "token expired (codex-rotate login / wait keepalive)"
+
+    body = json.dumps({
+        "model": model,
+        "instructions": "Reply with exactly: ok",
+        "input": [{"type": "message", "role": "user",
+                   "content": [{"type": "input_text", "text": "hi"}]}],
+        "stream": True, "store": False,
+    }).encode()
+    conn = http.client.HTTPSConnection("chatgpt.com", 443,
+                                       context=ssl.create_default_context(), timeout=60)
+    try:
+        conn.request("POST", RESPONSES_PATH, body=body, headers={
+            "Authorization": f"Bearer {tok.get('access_token', '')}",
+            "chatgpt-account-id": tok.get("account_id"),
+            "Content-Type": "application/json", "originator": "codex_cli_rs",
+            "User-Agent": "codex_cli_rs/0.146.0",
+            "Accept": "text/event-stream", "Content-Length": str(len(body))})
+        r = conn.getresponse()
+        h = {k.lower(): v for k, v in r.getheaders()}
+        status = r.status
+        head = r.read(400)          # 只读够判错;SSE 正文不排空(省流量,连接随即关闭)
+    except Exception as e:
+        # ★ 传输层失败 ≠ 账号不能用,而"把这两者分开"正是本工具存在的理由。实测 plus4 报过一次
+        # `SSL: UNEXPECTED_EOF_WHILE_READING`,紧接着连测三次全部 200 —— 纯抖动。不重试就会把一次
+        # 网络打嗝写成"这个号挂了",比不测更糟。只重试连接/TLS 层异常;HTTP 状态码是服务端的判决,
+        # 不在此列(见下面按 status 分支)。
+        return None, f"req err: {e}"
+    finally:
+        conn.close()
+
+    if status == 401:
+        return None, "HTTP 401 (token 被作废 — codex-rotate login 重登)"
+    if status != 200:
+        detail = head[:120].decode(errors="replace").replace("\n", " ")
+        return None, f"HTTP {status} {detail}"
+
+    def num(key):
+        try:
+            return float(h[key])
+        except (KeyError, ValueError, TypeError):
+            return None
+
+    pu, su = num("x-codex-primary-used-percent"), num("x-codex-secondary-used-percent")
+    if pu is None and su is None:
+        return None, "HTTP 200 (响应头无额度字段)"
+    q = {
+        "primary": {"used_percent": pu, "window_minutes": num("x-codex-primary-window-minutes"),
+                    "resets_at": num("x-codex-primary-reset-at")},
+        "secondary": {"used_percent": su, "window_minutes": num("x-codex-secondary-window-minutes"),
+                      "resets_at": num("x-codex-secondary-reset-at")},
+        "plan_type": h.get("x-codex-plan-type"),
+        "captured_at": time.time(), "source": "probe",
+    }
+    return q, "HTTP 200"
+
+
+def cmd_probe(args):
+    """★ 计费探针:对指定号各发一次最小真实补全("hi" → "ok"),验证它**真的能用**,并顺带把
+    响应头里的额度写回 state。
+
+    用法:
+        codex-rotate probe plus5 plus7      # 指定号
+        codex-rotate probe --all            # 全池(需显式,防手滑烧全池)
+        codex-rotate probe --all --model gpt-5.5
+
+    ★ 这会花真钱(周额度)。项目当初正是因为**自动**计费探测每天烧掉 17-18% 才把它废掉的 ——
+    所以它没有接进 quotad、没有接进 CodexBar 按钮、也没有任何定时器会调它。只在你手动敲的时候跑。
+    日常看额度请用零消耗的 `refresh-all`。
+
+    每号打印 探测前 → 探测后(前值取自免费的 /usage,后值取自本次探测的响应头),这样单次真实成本
+    永远是当场可见的,而不是靠我给你一个记在文档里、可能早就过期的数字。"""
+    model = PROBE_MODEL
+    if "--model" in args:
+        i = args.index("--model")
+        if i + 1 >= len(args):
+            sys.exit("--model 后面要跟模型名")
+        model = args[i + 1]
+        args = args[:i] + args[i + 2:]
+    take_all = "--all" in args
+    labels = [a for a in args if not a.startswith("--")]
+
+    s = _state()
+    if take_all:
+        targets = [aid for aid, sl in s["slots"].items() if not sl.get("auth_dead")]
+    elif labels:
+        targets = []
+        for key in labels:
+            aid = _resolve_slot(s, key)
+            if not aid:
+                sys.exit(f"no slot matching '{key}'")
+            targets.append(aid)
+    else:
+        sys.exit("要探哪些号?给 label(codex-rotate probe plus5 plus7)或 --all")
+    if not targets:
+        sys.exit("没有可探测的号(全部标记为失效)")
+
+    active = s.get("active")
+    print(f"计费探测 · model={model} · {len(targets)} 个号 —— 每号一次真实请求,会消耗周额度")
+    ok_n = 0
+    for i, aid in enumerate(targets):
+        slot = s["slots"][aid]
+        label = slot.get("label", _mask(aid))
+        if i:
+            time.sleep(2.0)          # 端点对突发有脾气,同 refresh-all 的节流思路
+
+        before = None
+        pre, _ = _probe_quota(aid, slot, aid == active)   # 免费 GET,拿探测前基线
+        if pre:
+            before = (pre.get("primary") or {}).get("used_percent")
+
+        q, msg = _billed_probe(aid, slot, aid == active, model)
+        # 传输层抖动重试一次。只对 `req err` 重试 —— 那是连不上/握手断,没有产生任何服务端判决;
+        # HTTP 4xx/5xx 是服务端明确回答了,重试只会白烧一次额度。
+        if not q and msg.startswith("req err"):
+            time.sleep(3)
+            q, msg2 = _billed_probe(aid, slot, aid == active, model)
+            msg = msg2 if q else f"{msg}(重试后:{msg2})"
+        if not q:
+            print(f"  [{label:<8}] ✗ {msg}")
+            continue
+        ok_n += 1
+        after = (q.get("primary") or {}).get("used_percent")
+        _mutate_state(lambda st, a=aid, qq=q: st["slots"].setdefault(a, {}).update(
+            {"quota": qq, "quota_status": "ok"}))
+        delta = "" if before is None or after is None else f"  (Δ{after - before:+.0f}%)"
+        print(f"  [{label:<8}] ✓ 能用 · 周已用 {before if before is not None else '?'}% → {after:.0f}%{delta}")
+    print(f"probe {ok_n}/{len(targets)} 可用")
+    _refresh_menu()
+
+
 def _credit_days_left(c, now=None):
     ts = _iso_ts(c.get("expires_at"))
     return None if ts is None else (ts - (now or time.time())) / 86400.0
@@ -1384,7 +1552,7 @@ CMDS = {"add": cmd_add, "login": cmd_login, "list": cmd_list, "switch": cmd_swit
         "uncool": cmd_uncool, "quota": cmd_quota, "current": cmd_current, "ensure": cmd_ensure,
         "sync": cmd_sync, "rename": cmd_rename, "keepalive": cmd_keepalive, "refresh": cmd_refresh,
         "refresh-all": cmd_refresh_all, "health": cmd_health, "remove": cmd_remove,
-        "ensure-live": cmd_ensure_live, "credits": cmd_credits}
+        "ensure-live": cmd_ensure_live, "credits": cmd_credits, "probe": cmd_probe}
 
 
 # Commands that change what the menu bar shows → nudge SwiftBar to re-render immediately (so terminal
@@ -1410,7 +1578,8 @@ def main():
     if len(sys.argv) < 2 or sys.argv[1] not in CMDS:
         print("usage: codex-rotate {add <label>|login|remove <label>|list|switch [label]|cool [min]|uncool [label]|"
               "quota [--save]|sync|rename <old> <new>|refresh [label|all]|refresh-all|"
-              "keepalive [days] [--dry-run]|health|credits [--force] [--json]|ensure|current}")
+              "keepalive [days] [--dry-run]|health|credits [--force] [--json]|"
+              "probe <label…|--all> [--model M]|ensure|current}")
         sys.exit(1)
     cmd = sys.argv[1]
     if cmd in STATE_LOCKED:
