@@ -17,6 +17,7 @@ import { useAutoSwitch } from "./hooks/useAutoSwitch";
 import { useKeyboard } from "./hooks/useKeyboard";
 import { fmtAgo, CARD_WARN_DAYS } from "./helpers";
 import { IconTicket } from "./components/CardBadge";
+import ProbeButton from "./components/ProbeButton";
 import "./App.css";
 
 type Page = "overview" | "logs" | "settings";
@@ -108,6 +109,10 @@ export default function App() {
                   <GhostButton t={t} onClick={() => run("health", ["health"], "已检查各号 token")} accent loading={loadingAction === "health"} loadingText="检查中…">
                     检查 token
                   </GhostButton>
+                  <ProbeButton t={t} label="探针 全池"
+                    hint={`对 ${counts.total} 个号各发一次真实补全(问 hi 要求答 ok),证明"真的还能干活"——token 有效但订阅到期/模型权限被撤/被限流,只有这个测得出来。⚠️ 消耗周额度(实测单次 <1%),约 ${counts.total * 7}s`}
+                    loading={loadingAction === "probe-all"} loadingText="探测中…"
+                    onConfirm={() => run("probe-all", ["probe", "--all"], "探针 全池")} />
                   <span onClick={() => {
                     const next = !autoSwitch;
                     setAutoSwitch(next);
@@ -196,11 +201,12 @@ export default function App() {
                       {alive.map((a) => {
                         const shortcutIdx = aliveByLabel.findIndex(x => x.aid === a.aid);
                         return (
-                        <AccountCard key={a.aid} a={a} isCurrent={a.aid === currentNode} isBest={hero?.aid === a.aid} isSelected={selectedCard === a.aid} shortcut={shortcutIdx >= 0 && shortcutIdx < 9 ? shortcutIdx + 1 : undefined} bestPct={bestPct} t={t}
+                        <AccountCard key={a.aid} a={a} isCurrent={a.aid === currentNode} isBest={hero?.aid === a.aid} isSelected={selectedCard === a.aid} shortcut={shortcutIdx >= 0 && shortcutIdx < 9 ? shortcutIdx + 1 : undefined} bestPct={bestPct} probing={loadingAction === `probe-${a.aid}`} t={t}
                           onSelect={() => setSelectedCard(selectedCard === a.aid ? null : a.aid)}
                           onSwitch={() => run(`switch-${a.aid}`, ["switch", a.node], `当前号 → ${a.node}`)}
                           onShowDetail={(aid) => { invoke<AccountDetail>("read_account_detail", { aid }).then(d => setDetailModal(d)).catch(() => {}); }}
-                          onRemove={(label) => run(`remove-${label}`, ["remove", label], `已删除 ${label}`)} />
+                          onRemove={(label) => run(`remove-${label}`, ["remove", label], `已删除 ${label}`)}
+                          onProbe={(label) => run(`probe-${a.aid}`, ["probe", label], `探针 ${label}`)} />
                       );})}
                     </div>
                     {dead.length > 0 && (

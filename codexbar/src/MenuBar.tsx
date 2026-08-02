@@ -4,6 +4,7 @@ import { LogicalSize } from "@tauri-apps/api/dpi";
 import { THEMES, STATUS_COLORS } from "./theme";
 import Toast from "./components/Toast";
 import AccountRow from "./components/AccountRow";
+import ProbeButton from "./components/ProbeButton";
 import { useStore } from "./hooks/useStore";
 import { fmtAgo } from "./helpers";
 import "./App.css";
@@ -173,7 +174,7 @@ export default function MenuBar() {
         )}
       </div>
 
-      {/* Bottom actions */}
+      {/* Bottom actions — 三格。第三格是唯一会花额度的,靠 ProbeButton 的琥珀+两段确认与前两格区分 */}
       <div className="mb-actions" style={{ borderTop: `1px solid ${t.chromeBorder}` }}>
         {actions.map((btn, i) => {
           const isLoading = loadingAction === btn.id;
@@ -193,6 +194,11 @@ export default function MenuBar() {
             </Fragment>
           );
         })}
+        <span className="mb-action-divider" style={{ background: t.chromeBorder }} />
+        <ProbeButton t={t} variant="menubar" label="探针"
+          hint={`对 ${alive.length} 个号各发一次真实补全(问 hi 要求答 ok),证明"真的还能干活"——token 有效但订阅到期/模型权限被撤/被限流,只有这个测得出来。⚠️ 消耗周额度(实测单次 <1%)`}
+          loading={loadingAction === "probe-all"} loadingText="探测中…"
+          onConfirm={() => run("probe-all", ["probe", "--all"], "探针 全池")} />
       </div>
 
       {toast && <Toast msg={toast} t={t} />}

@@ -1,5 +1,6 @@
 export const THEMES = {
   dark: {
+    isDark:true,
     appBg:"#0e1117", deskBg:"radial-gradient(130% 120% at 50% -10%, #151c26 0%, #080a0e 65%)",
     chromeBg:"#0c1015", chromeBorder:"rgba(255,255,255,.07)", titleText:"#cfd6df",
     railBg:"#0a0e12", railBorder:"rgba(255,255,255,.06)",
@@ -17,6 +18,7 @@ export const THEMES = {
     sunBg:"transparent", sunColor:"#6b7480", moonBg:"#2dd4bf", moonColor:"#06231f",
   },
   light: {
+    isDark:false,
     appBg:"#eef1f5", deskBg:"radial-gradient(130% 120% at 50% -10%, #f4f7fb 0%, #dbe1e9 100%)",
     chromeBg:"#f7f9fb", chromeBorder:"rgba(0,0,0,.1)", titleText:"#39414b",
     railBg:"#e7ebf0", railBorder:"rgba(0,0,0,.06)",

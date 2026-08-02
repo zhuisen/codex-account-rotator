@@ -3,6 +3,7 @@ import { STATUS_COLORS, STATUS_TEXT, type Theme } from "../theme";
 import { type Account, fmtCd, quotaColor } from "../helpers";
 import Ring from "./Ring";
 import CardBadge, { isCardExpiring } from "./CardBadge";
+import ProbeButton from "./ProbeButton";
 
 /** Delta vs the best account in the pool — "最优" / "-19%". ≤-50 is amber (handoff §5.0). */
 function DeltaChip({ delta, t }: { delta: number; t: Theme }) {
@@ -19,11 +20,11 @@ function DeltaChip({ delta, t }: { delta: number; t: Theme }) {
   );
 }
 
-export default function AccountCard({ a, isCurrent, isBest, isSelected, shortcut, bestPct, t, onSelect, onSwitch, onShowDetail, onRemove }: {
+export default function AccountCard({ a, isCurrent, isBest, isSelected, shortcut, bestPct, probing, t, onSelect, onSwitch, onShowDetail, onRemove, onProbe }: {
   a: Account; isCurrent: boolean; isBest: boolean; isSelected: boolean; shortcut?: number;
   /** Highest remaining quota in the pool — the baseline the delta chip compares against. */
-  bestPct: number; t: Theme;
-  onSelect: () => void; onSwitch: () => void; onShowDetail: (aid: string) => void; onRemove: (label: string) => void;
+  bestPct: number; /** 该号正在探测中 */ probing: boolean; t: Theme;
+  onSelect: () => void; onSwitch: () => void; onShowDetail: (aid: string) => void; onRemove: (label: string) => void; onProbe: (label: string) => void;
 }) {
   const [confirmDelete, setConfirmDelete] = useState(false);
   useEffect(() => { if (!isSelected) setConfirmDelete(false); }, [isSelected]);
@@ -104,6 +105,11 @@ export default function AccountCard({ a, isCurrent, isBest, isSelected, shortcut
           )}
           {isCurrent && (
             <span style={{ flex: 1, textAlign: "center", fontSize: 11, fontWeight: 600, color: t.accent, padding: "5px 0" }}>✓ 当前使用中</span>
+          )}
+          {!isDead && (
+            <ProbeButton t={t} variant="inline" label="探针"
+              hint={`对 ${a.node} 发一次真实补全,验它是否真能干活。⚠️ 消耗周额度(实测单次 <1%)`}
+              loading={probing} onConfirm={() => onProbe(a.node)} loadingText="探测…" />
           )}
           <span onClick={() => onShowDetail(a.aid)} style={{ fontSize: 11, color: t.muted, padding: "5px 10px", borderRadius: 6, cursor: "pointer", border: `1px solid ${t.ghostBorder}` }}>详情</span>
           {!confirmDelete ? (
