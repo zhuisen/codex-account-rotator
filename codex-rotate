@@ -1191,15 +1191,38 @@ def _resolve_slot(s, key):
                  if aid == key or sl.get("label") == key), None)
 
 
-# ★ 计费探测用的最便宜模型。/models 当前返回 gpt-5.6-{sol,terra,luna} / gpt-5.5 / gpt-5.4 /
-# gpt-5.4-mini / codex-auto-review;mini 是最小的那个。实测一次 mini 探测没能让 used_percent 的
-# 整数位动(1% → 1%),即单次成本 < 1% —— 这是上界不是点估计,别当"几乎免费"用。
-PROBE_MODEL = "gpt-5.4-mini"
+# 计费探测的默认模型与推理档。/models 当前给 gpt-5.6-{sol,terra,luna} / gpt-5.5 / gpt-5.4 /
+# gpt-5.4-mini / codex-auto-review。默认取 gpt-5.4 + effort=low:够小,又是真正在用的主力档位,
+# 比 mini 更能代表"日常真能不能干活"。实测单次探测没能让 used_percent 的整数位动(Δ+0%),
+# 即成本 < 1% —— 这是上界不是点估计,别当"几乎免费"用。
+PROBE_MODEL = "gpt-5.4"
+PROBE_EFFORT = "low"
+PROBE_PROMPT = "hi"
+PROBE_EXPECT = "ok"      # instructions 要求原样回这两个字母;拿它核对"真的答出话"
 RESPONSES_PATH = "/backend-api/codex/responses"
+PROBE_READ_CAP = 256 * 1024   # SSE 正文读取上限,防病态长流把探针拖死
 
 
-def _billed_probe(aid, slot, is_active, model=PROBE_MODEL):
-    """★ 发一次真实(计费)补全,证明这个号**真的能干活**。-> (quota|None, msg)。
+def _sse_answer(raw):
+    """把 SSE 正文里的 output_text.delta 拼回模型的实际回答。
+
+    ★ 判"能用"必须看到这段文字,不能只看 HTTP 200:200 只说明请求被受理,流在中途断掉、模型没吐字
+    也照样是 200,那种情况报"能用"就是假阳性。"""
+    text = []
+    for line in raw.split(b"\n"):
+        if not line.startswith(b"data: "):
+            continue
+        try:
+            d = json.loads(line[6:])
+        except ValueError:
+            continue
+        if d.get("type") == "response.output_text.delta":
+            text.append(d.get("delta", ""))
+    return "".join(text).strip()
+
+
+def _billed_probe(aid, slot, is_active, model=PROBE_MODEL, effort=PROBE_EFFORT):
+    """★ 发一次真实(计费)补全,证明这个号**真的能干活**。-> (quota|None, msg, answer)。
 
     与 _probe_quota 的分工:
       • _probe_quota  GET /usage   零消耗,只读数字。答"服务端记的额度是多少"。
@@ -1217,19 +1240,20 @@ def _billed_probe(aid, slot, is_active, model=PROBE_MODEL):
         auth = _load_json(authpath)
         tok = (auth.get("tokens") or {})
     except (OSError, ValueError) as e:
-        return None, f"read err: {e}"
+        return None, f"read err: {e}", ""
     # 与 _probe_quota 相同的归属不变量:探的 token 必须属于要归账的那个号。
     if _account_id(auth) != aid:
         return None, ("live account switched mid-probe" if is_active
-                      else "slot file/account mismatch — not attributing")
+                      else "slot file/account mismatch — not attributing"), ""
     if _access_exp(tok) - time.time() < 60:
-        return None, "token expired (codex-rotate login / wait keepalive)"
+        return None, "token expired (codex-rotate login / wait keepalive)", ""
 
     body = json.dumps({
         "model": model,
-        "instructions": "Reply with exactly: ok",
+        "instructions": f"Reply with exactly: {PROBE_EXPECT}",
         "input": [{"type": "message", "role": "user",
-                   "content": [{"type": "input_text", "text": "hi"}]}],
+                   "content": [{"type": "input_text", "text": PROBE_PROMPT}]}],
+        "reasoning": {"effort": effort},
         "stream": True, "store": False,
     }).encode()
     conn = http.client.HTTPSConnection("chatgpt.com", 443,
@@ -1244,21 +1268,25 @@ def _billed_probe(aid, slot, is_active, model=PROBE_MODEL):
         r = conn.getresponse()
         h = {k.lower(): v for k, v in r.getheaders()}
         status = r.status
-        head = r.read(400)          # 只读够判错;SSE 正文不排空(省流量,连接随即关闭)
+        raw = r.read(PROBE_READ_CAP)   # 读全:要从中抽出模型的实际回答,而不只是判状态码
     except Exception as e:
         # ★ 传输层失败 ≠ 账号不能用,而"把这两者分开"正是本工具存在的理由。实测 plus4 报过一次
         # `SSL: UNEXPECTED_EOF_WHILE_READING`,紧接着连测三次全部 200 —— 纯抖动。不重试就会把一次
         # 网络打嗝写成"这个号挂了",比不测更糟。只重试连接/TLS 层异常;HTTP 状态码是服务端的判决,
         # 不在此列(见下面按 status 分支)。
-        return None, f"req err: {e}"
+        return None, f"req err: {e}", ""
     finally:
         conn.close()
 
     if status == 401:
-        return None, "HTTP 401 (token 被作废 — codex-rotate login 重登)"
+        return None, "HTTP 401 (token 被作废 — codex-rotate login 重登)", ""
     if status != 200:
-        detail = head[:120].decode(errors="replace").replace("\n", " ")
-        return None, f"HTTP {status} {detail}"
+        detail = raw[:120].decode(errors="replace").replace("\n", " ")
+        return None, f"HTTP {status} {detail}", ""
+
+    answer = _sse_answer(raw)
+    if not answer:
+        return None, "HTTP 200 但模型没吐字(流中断?)", ""
 
     def num(key):
         try:
@@ -1268,7 +1296,7 @@ def _billed_probe(aid, slot, is_active, model=PROBE_MODEL):
 
     pu, su = num("x-codex-primary-used-percent"), num("x-codex-secondary-used-percent")
     if pu is None and su is None:
-        return None, "HTTP 200 (响应头无额度字段)"
+        return None, "HTTP 200 (响应头无额度字段)", answer
     q = {
         "primary": {"used_percent": pu, "window_minutes": num("x-codex-primary-window-minutes"),
                     "resets_at": num("x-codex-primary-reset-at")},
@@ -1277,7 +1305,7 @@ def _billed_probe(aid, slot, is_active, model=PROBE_MODEL):
         "plan_type": h.get("x-codex-plan-type"),
         "captured_at": time.time(), "source": "probe",
     }
-    return q, "HTTP 200"
+    return q, "HTTP 200", answer
 
 
 def cmd_probe(args):
@@ -1295,13 +1323,17 @@ def cmd_probe(args):
 
     每号打印 探测前 → 探测后(前值取自免费的 /usage,后值取自本次探测的响应头),这样单次真实成本
     永远是当场可见的,而不是靠我给你一个记在文档里、可能早就过期的数字。"""
-    model = PROBE_MODEL
-    if "--model" in args:
-        i = args.index("--model")
-        if i + 1 >= len(args):
-            sys.exit("--model 后面要跟模型名")
-        model = args[i + 1]
-        args = args[:i] + args[i + 2:]
+    model, effort = PROBE_MODEL, PROBE_EFFORT
+    for flag, setter in (("--model", "model"), ("--effort", "effort")):
+        if flag in args:
+            i = args.index(flag)
+            if i + 1 >= len(args):
+                sys.exit(f"{flag} 后面要跟值")
+            if setter == "model":
+                model = args[i + 1]
+            else:
+                effort = args[i + 1]
+            args = args[:i] + args[i + 2:]
     take_all = "--all" in args
     labels = [a for a in args if not a.startswith("--")]
 
@@ -1321,7 +1353,8 @@ def cmd_probe(args):
         sys.exit("没有可探测的号(全部标记为失效)")
 
     active = s.get("active")
-    print(f"计费探测 · model={model} · {len(targets)} 个号 —— 每号一次真实请求,会消耗周额度")
+    print(f"计费探测 · model={model} effort={effort} · {len(targets)} 个号 "
+          f"—— 每号一次真实请求(问「{PROBE_PROMPT}」),会消耗周额度")
     ok_n = 0
     for i, aid in enumerate(targets):
         slot = s["slots"][aid]
@@ -1334,12 +1367,12 @@ def cmd_probe(args):
         if pre:
             before = (pre.get("primary") or {}).get("used_percent")
 
-        q, msg = _billed_probe(aid, slot, aid == active, model)
+        q, msg, answer = _billed_probe(aid, slot, aid == active, model, effort)
         # 传输层抖动重试一次。只对 `req err` 重试 —— 那是连不上/握手断,没有产生任何服务端判决;
         # HTTP 4xx/5xx 是服务端明确回答了,重试只会白烧一次额度。
         if not q and msg.startswith("req err"):
             time.sleep(3)
-            q, msg2 = _billed_probe(aid, slot, aid == active, model)
+            q, msg2, answer = _billed_probe(aid, slot, aid == active, model, effort)
             msg = msg2 if q else f"{msg}(重试后:{msg2})"
         if not q:
             print(f"  [{label:<8}] ✗ {msg}")
@@ -1349,7 +1382,11 @@ def cmd_probe(args):
         _mutate_state(lambda st, a=aid, qq=q: st["slots"].setdefault(a, {}).update(
             {"quota": qq, "quota_status": "ok"}))
         delta = "" if before is None or after is None else f"  (Δ{after - before:+.0f}%)"
-        print(f"  [{label:<8}] ✓ 能用 · 周已用 {before if before is not None else '?'}% → {after:.0f}%{delta}")
+        # 把模型的原话打出来 —— 这才是"能答"的证据。答非所问(不含期望词)标 ⚠️ 但不算失败:
+        # 模型偶尔加标点/换措辞,那不代表账号有问题,只是不该被静默当成完美通过。
+        odd = "" if PROBE_EXPECT in answer.lower() else " ⚠️答非所问"
+        print(f"  [{label:<8}] ✓ 答「{answer[:40]}」{odd} · "
+              f"周已用 {before if before is not None else '?'}% → {after:.0f}%{delta}")
     print(f"probe {ok_n}/{len(targets)} 可用")
     _refresh_menu()
 
@@ -1579,7 +1616,7 @@ def main():
         print("usage: codex-rotate {add <label>|login|remove <label>|list|switch [label]|cool [min]|uncool [label]|"
               "quota [--save]|sync|rename <old> <new>|refresh [label|all]|refresh-all|"
               "keepalive [days] [--dry-run]|health|credits [--force] [--json]|"
-              "probe <label…|--all> [--model M]|ensure|current}")
+              "probe <label…|--all> [--model M] [--effort low|medium|high]|ensure|current}")
         sys.exit(1)
     cmd = sys.argv[1]
     if cmd in STATE_LOCKED:

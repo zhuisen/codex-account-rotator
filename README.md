@@ -94,8 +94,9 @@ codex-rotate switch plus2            # 手动切号(单号模式)
 codex-rotate refresh all             # 手动 OAuth 刷新非活跃号
 
 # 4) 验"这号真的还能干活吗"(⚠️ 计费:每号一次最小补全,实测单次 <1%)
-codex-rotate probe plus5 plus7       # 指定号
+codex-rotate probe plus5 plus7       # 指定号:问 hi,要求答 ok;答出来才算通过
 codex-rotate probe --all             # 全池(必须显式,防手滑)
+codex-rotate probe plus5 --model gpt-5.5 --effort low
 ```
 
 菜单栏(CodexBar)装好后顶部显示当前号周额度余量 + 重置倒计时。**左键右键都打开弹窗**(托盘没有原生菜单——macOS 无法让右键不弹它);弹窗里看每号油表、号间差值、重置卡状态、失效号折叠,**点任意账号会弹出主界面**,切号在主界面卡片上做。退出在主界面「设置」页(本 app 不占 Dock,没有别的退出口)。构建:`bash codexbar/scripts/deploy.sh`。
