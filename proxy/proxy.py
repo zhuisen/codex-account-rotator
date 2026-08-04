@@ -320,19 +320,23 @@ class Handler(BaseHTTPRequestHandler):
         sys.stderr.write(f"[proxy] → {self.command} {self.path} [{label}] {reason}"
                          f" prev={prev_id[:18] if prev_id else '-'}\n")
         sys.stderr.flush()
-        conn = http.client.HTTPSConnection(UPSTREAM_HOST, 443,
-                                           context=ssl.create_default_context(), timeout=180)
-        # ★ 显式先 connect。只有「连都没连上」才能断言字节一个没出去。
-        # conn.request() 内部不是原子的:先 send(headers) 再单独 sendall(body),而 TLS 上 sendall 是
-        # 循环写 —— body 最后一段写失败时,对端可能已经收到完整的 Content-Length 帧并开始计费。
-        # 所以 connect 之后抛出的任何异常(含 request())都按「已提交」处理,不再假定它安全。
+        # ★ 相位分界 = request() vs getresponse(),不是 connect() vs 其后。
+        # 依据:`sendall` 是循环写,**当且仅当仍有尾段没写进去时才抛异常** —— 尾段没出去,上游拿到的
+        # 就是不完整的 body,Content-Length 框架下这种请求永远不会被 dispatch,也就不可能计费。
+        # 所以 request() 抛错 = 可证明未计费 = 换号安全;只有 getresponse() 抛错才是「已完整交给内核、
+        # 到没到不可知」。(上一版我按「connect 之后一律算已提交」画界,依据是"sendall 可能已送出完整帧",
+        # 那个前提是错的 —— 四方评审里 Fable 指出并驳倒了它。)
+        # 连接构造/TLS ctx 也放进这一段:它们抛错时零字节送出,同属 SendFailed。
+        conn = None
         try:
-            conn.connect()
+            conn = http.client.HTTPSConnection(UPSTREAM_HOST, 443,
+                                               context=ssl.create_default_context(), timeout=180)
+            conn.request(self.command, path, body=body, headers=hdrs)
         except Exception as e:
-            conn.close()
+            if conn is not None:
+                conn.close()
             raise SendFailed(e) from e
         try:
-            conn.request(self.command, path, body=body, headers=hdrs)
             resp = conn.getresponse()
         except Exception as e:
             conn.close()
@@ -342,33 +346,57 @@ class Handler(BaseHTTPRequestHandler):
         return conn, resp
 
     def _billable(self):
-        """这次请求失败会不会烧钱。只有 POST /responses 是计费补全;`GET /models` 之类是元数据。
+        """这次请求失败会不会烧钱。
 
-        ★ 没有这个判据,防双计费的 abort 会误伤:实测 228 次 upstream err 里 **212 次(93%)是
-        GET /models** —— 把它们也 502 掉,等于为了省钱把一堆零成本、本可安全重试的请求打死。
-        计费与否才是「能不能换号重发」的真正分界,而不是「有没有送出去」。"""
-        return self.command == "POST" and self.path.startswith("/responses")
+        ★ 判据是「不是 GET/HEAD」,而**不是**白名单 `POST /responses`。方向很重要:白名单一旦漏掉
+        某个计费端点(上游新增路由、absolute-form 请求行、路径前缀变化),漏网的那个会被当成非计费 →
+        照旧换号重发 → **原双计费 bug 静默复活,而计数器对它零感知**。反过来用黑名单,误判方向是
+        「多 abort 一个本可重试的请求」,代价是一次请求而不是一次静默扣费。
+        与全部观测数据兼容:实测 228 次 upstream err 中的 212 次非计费请求**全部是 GET**。"""
+        return self.command not in ("GET", "HEAD")
+
+    # ★ ABORT 用 400 而不是 502 —— 实测出来的,不是猜的。
+    # 拿一个恒定返回指定状态码的假上游顶掉真代理,让 cxp 打它,数 POST /responses 的次数:
+    #     502 → 30 次    409 → 6 次    429 → 1 次    400 → 1 次
+    # 502 是可重试码,codex 会带退避猛重发;而每一次重发在真代理里都会重新挑号转发上去。也就是说
+    # 上一版返 502 的"修复"把「可能两个号各计一次」放大成了「最多 N 个号轮着计费」——比它要修的
+    # bug 更糟。400 让 codex 一次就停,这是唯一能让 abort 策略真正成立的前提。
+    ABORT_STATUS = 400
+
+    def _abort(self, label, exc):
+        """计费请求已提交但读不到回应 → 终止本轮,绝不换号重发。响应体只给固定文案。
+
+        单独成 helper 是因为评审指出:上一版把 send_error 那段在两个调用点手抄了一遍,
+        "第三个调用点不可能退化"并没达成 —— 退化点只是从 except 块挪到了 if 块。"""
+        _bump("committed_aborts")
+        sys.stderr.write(f"[proxy] ⚠️ committed [{label}]: {exc} — 计费请求已送出,中止而非换号(防双计费)\n")
+        sys.stderr.flush()
+        try:
+            # 不回显 str(exc):它含本地路径 / TLS / 系统错误文本,没有理由暴露给客户端。
+            self.send_error(self.ABORT_STATUS,
+                            "upstream committed but unreadable; not retried to avoid double-billing")
+        except Exception:
+            pass
 
     def _open_or_fail(self, body, token, account_id, label, reason, prev_id):
-        """包住 _open,把三种结局压成一个判定:(conn, resp) | "NEXT" | "ABORT"。
+        """包住 _open,把结局压成 (conn, resp) | "NEXT" | "ABORT"。
 
-        ★ 两个调用点(首发 + 401 强刷后重发)必须共用这段。评审在初版里抓到:我只重接了首发那个,
-        401 那条仍是 bare `except Exception: continue` —— 同一个双计费 bug 原封不动地活着。
-        收成一个 helper,是为了让「第三个调用点又退化」这件事不可能发生。"""
+        返回 "ABORT" 时**响应已经发出去了**,调用方只需 `return`。
+
+        ★ 两个调用点(首发 + 401 强刷后重发)必须共用这段。评审在初版里抓到:我只改了首发那个,
+        401 那条仍是 bare `except Exception: continue` —— 同一个双计费 bug 原封不动地活着。"""
         try:
             return self._open(body, token, account_id, label, reason, prev_id)
         except SendFailed as e:
-            sys.stderr.write(f"[proxy] send err [{label}]: {e} — 未连上,安全换号\n")
+            sys.stderr.write(f"[proxy] send err [{label}]: {e} — 未完整送达,安全换号\n")
             sys.stderr.flush()
             return "NEXT"
         except UpstreamCommitted as e:
             if not self._billable():
-                sys.stderr.write(f"[proxy] committed [{label}] (非计费 {self.command} {self.path.split('?')[0]}): {e} — 换号重试\n")
+                sys.stderr.write(f"[proxy] committed [{label}] (非计费 {self.command}): {e} — 换号重试\n")
                 sys.stderr.flush()
                 return "NEXT"
-            _bump("committed_aborts")
-            sys.stderr.write(f"[proxy] ⚠️ committed [{label}]: {e} — 计费请求已送出,中止而非换号(防双计费)\n")
-            sys.stderr.flush()
+            self._abort(label, e)
             return "ABORT"
 
     def _finish(self, conn, resp, aid, label):
@@ -434,11 +462,7 @@ class Handler(BaseHTTPRequestHandler):
                 if got == "NEXT":
                     continue
                 if got == "ABORT":
-                    try:
-                        self.send_error(502, "upstream committed but unreadable; not retried to avoid double-billing")
-                    except Exception:
-                        pass
-                    return
+                    return          # 响应已由 _abort() 发出
                 conn, resp = got
                 if resp.status == 401:
                     conn.close()  # stored token rejected → one forced refresh, retry SAME account once
@@ -451,12 +475,15 @@ class Handler(BaseHTTPRequestHandler):
                         if got == "NEXT":
                             continue
                         if got == "ABORT":
-                            try:
-                                self.send_error(502, "upstream committed but unreadable; not retried to avoid double-billing")
-                            except Exception:
-                                pass
-                            return
+                            return          # 响应已由 _abort() 发出
                         conn, resp = got
+                        if resp.status == 429:
+                            # 评审指出:强刷后拿到 429 原本被当成功直接转发,绕过了下面的冷却+换号,
+                            # 该号不进冷却,codex 退避后大概率再次选中它。
+                            _record_quota(aid, resp.getheaders())
+                            _cool(aid)
+                            sys.stderr.write(f"[proxy] 429 (retry-refresh) → cooled [{label}], failing over\n")
+                            continue
                         if resp.status != 401:
                             streamed = True
                             self._finish(conn, resp, aid, label)
@@ -475,6 +502,10 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 # response already partially relayed (or client hung up) — a retry on another account
                 # would double-send; abort. send_error only if no headers went out yet.
+                # ★ 这是**频率最高**的一类双计费源(实测 542 次,其中 85 次紧跟客户端重试):上游已 200
+                # 并计费,流却断了,codex 会把整轮重发到另一个号。代理侧无解(响应已部分转发,abort 是
+                # 唯一正确动作),但必须可量化 —— 本 commit 声讨的正是"只留一行没人聚合的日志"。
+                _bump("stream_aborts")
                 sys.stderr.write(f"[proxy] stream err [{label}]: {e}\n")
                 if not streamed:
                     try:
