@@ -502,14 +502,27 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 # response already partially relayed (or client hung up) — a retry on another account
                 # would double-send; abort. send_error only if no headers went out yet.
-                # ★ 这是**频率最高**的一类双计费源(实测 542 次,其中 85 次紧跟客户端重试):上游已 200
-                # 并计费,流却断了,codex 会把整轮重发到另一个号。代理侧无解(响应已部分转发,abort 是
-                # 唯一正确动作),但必须可量化 —— 本 commit 声讨的正是"只留一行没人聚合的日志"。
-                _bump("stream_aborts")
+                # ★ 计费请求的断流是**最大的一类真实浪费**:上游已 200 并计费,流却断了,codex 会把
+                # 整轮重发到另一个号(实测 85 次紧跟新请求)。代理侧无解 —— 响应已部分转发,abort 是唯一
+                # 正确动作(伪造 response.completed 收尾更糟)。但必须可量化。
+                # ★ 只数计费的:实测 545 次 stream err 里 **491 次(90%)是 GET /models** —— 客户端拿完
+                # 模型列表就关连接,完全无害。无条件累加会让这个指标 9 成是噪音,看着吓人却没有信息量,
+                # 正是它要取代的那种"没人看得懂的日志"。
+                if self._billable():
+                    _bump("stream_aborts")
                 sys.stderr.write(f"[proxy] stream err [{label}]: {e}\n")
                 if not streamed:
+                    # ★ 这里原本是 `send_error(502, str(e))`,两处都不对:
+                    #   ① 502 是可重试码 —— 实测 codex 对 502 会重发 30 次,每次在代理里重新挑号。
+                    #      能走到这儿(streamed 尚未置位)说明异常出在 _slot_token/_pick/_record_quota
+                    #      这类地方;若本次是计费请求,那 30 次重试就是 30 次挑号扣费的机会。
+                    #   ② str(e) 会把本地路径、TLS/系统错误原文回显给客户端,没有理由暴露。
+                    # 计费请求一律用不可重试的 400 掐断;非计费的保留 502(重试免费,能自愈更好)。
                     try:
-                        self.send_error(502, str(e))
+                        if self._billable():
+                            self.send_error(self.ABORT_STATUS, "upstream relay failed; not retried to avoid double-billing")
+                        else:
+                            self.send_error(502, "upstream relay failed")
                     except Exception:
                         pass
                 return
