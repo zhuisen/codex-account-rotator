@@ -2,12 +2,19 @@
 """Phase-1b rotating proxy for the Codex ChatGPT-subscription backend.
 
 Codex (custom model_provider, base_url=http://127.0.0.1:PORT) → this proxy → chatgpt.com, with:
-  • pool-based account selection (least-used 5h quota, skip cooling) from codex-rotate slots
-  • session affinity: previous_response_id sticks the whole conversation to one account (solves the
-    cross-account context break); only NEW conversations pick a fresh account
+  • pool-based account selection (least-used WEEKLY quota, skip cooling) from codex-rotate slots
   • on-expiry OAuth refresh of the selected account's token (reuses the proven refresh flow)
   • 429 → mark the account cooling in state.json
+  • billing safety: a request that reached the upstream is NEVER re-sent to another account
 stdlib-only; streams the SSE response back close-delimited.
+
+★ 两处曾经写在这里、现已被实测推翻的说法,留下以免有人照着旧描述推理:
+  • "session affinity: previous_response_id sticks the whole conversation to one account" ——
+    **从未生效**。实测 2291 次请求 100% 不带 previous_response_id,选号原因全是 `new`,
+    `_affinity` 一次都没命中。每一轮都重新挑用量最少的号,所以一次会话必然跨号。
+    (轮换本身不浪费:同一 prompt 发同号两次 vs 发两个号,input_tokens 一致;cached_tokens
+     恒为 0,`store:true` 被端点 400 拒 —— 没有 prompt cache 可失去。)
+  • "least-used 5h quota" —— Codex 于 2026-07 废掉 5h 窗口,现在只有周/月。
 """
 import base64
 import datetime
