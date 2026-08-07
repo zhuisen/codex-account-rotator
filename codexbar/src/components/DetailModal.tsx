@@ -12,7 +12,7 @@ export interface AccountDetail {
 export default function DetailModal({ detail, privacy, t, onClose }: { detail: AccountDetail; /** 打码:遮蔽 account_id / email / token 尾巴 —— 截图时它们和邮箱一样能认人 */ privacy: boolean; t: Theme; onClose: () => void }) {
   const fmtTs = (ts?: number) => ts ? new Date(ts * 1000).toLocaleString("zh-CN", { timeZone: "Asia/Singapore" }) : "—";
   const rows: [string, string, string?][] = [
-    ["account_id", maskId(detail.account_id, privacy, 4) || (detail.account_id ?? "—")],
+    ["account_id", maskId(detail.account_id, privacy, 8) || (detail.account_id ?? "—")],
     ["email", maskId(detail.email, privacy) || (detail.email ?? "—")],
     ["文件", `auth/${detail.file}`],
     ["access_token", `…${privacy ? "••••••••" : detail.access_token_tail}  (${detail.access_token_len} chars)`],

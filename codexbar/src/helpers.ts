@@ -111,10 +111,14 @@ export function quotaColor(pct: number): string {
 }
 
 /**
- * 打码模式下的身份文本。保留首字符是刻意的:你自己还能认出是哪个号,别人认不出。
+ * 打码模式下的身份文本。保留前 3 个字符:够你自己认出是哪个号,又不足以让别人还原。
+ * 1 个字符试过,用户反馈认不出来(huo/553/dou/xsh/qq5 这五个前缀刚好两两可分)。
  * 定宽输出,所以开关打码时整列不会跳动。
+ *
+ * `keep` 按「前缀之后还剩几个可区分字符」来给:邮箱直接 3;`account_id` 全都以 `user-` 开头,
+ * 保 3 个只会得到五个一样的 `use`,所以调用处传 8。
  */
-export function maskId(s: string | undefined, on: boolean, keep = 1): string {
+export function maskId(s: string | undefined, on: boolean, keep = 3): string {
   if (!on) return s ?? "";
   if (!s) return "—";
   return s.slice(0, keep) + "•".repeat(11);
