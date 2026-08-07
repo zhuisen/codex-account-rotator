@@ -7,6 +7,7 @@ import AccountRow from "./components/AccountRow";
 import ProbeButton from "./components/ProbeButton";
 import { useStore } from "./hooks/useStore";
 import { fmtAgo } from "./helpers";
+import { usePrivacy } from "./hooks/usePrivacy";
 import "./App.css";
 import "./menubar.css";
 
@@ -24,12 +25,15 @@ function loadTheme(): "dark" | "light" {
 
 const IconBolt = () => <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M13 2 4 14h6l-1 8 9-12h-6z"/></svg>;
 const IconRefresh = ({ size = 13 }: { size?: number }) => <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 12a9 9 0 1 1-3-6.7M21 4v4h-4"/></svg>;
+const IconEye = () => <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M1.6 12S5.3 5.5 12 5.5 22.4 12 22.4 12 18.7 18.5 12 18.5 1.6 12 1.6 12z"/><circle cx="12" cy="12" r="3"/></svg>;
+const IconEyeOff = () => <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M9.9 5.8A9.6 9.6 0 0 1 12 5.5c6.7 0 10.4 6.5 10.4 6.5a18 18 0 0 1-3.4 4.2M6.2 7.8A18 18 0 0 0 1.6 12S5.3 18.5 12 18.5c1.6 0 3-.4 4.3-.9M3 3l18 18"/></svg>;
 const IconWarn = () => <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2 1 21h22L12 2zm1 14h-2v2h2v-2zm0-7h-2v5h2V9z"/></svg>;
 
 export default function MenuBar() {
   const { accounts, hero, currentNode, counts, lastRefreshAt, cardAlert, loadingAction, toast, refresh, run, showToast } = useStore();
   const [theme, setTheme] = useState<"dark" | "light">(loadTheme);
   const rootRef = useRef<HTMLDivElement>(null);
+  const { privacy, toggle: togglePrivacy } = usePrivacy();
   const t = THEMES[theme];
 
   const toggleTheme = (v: "dark" | "light") => {
@@ -114,6 +118,11 @@ export default function MenuBar() {
               <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
             </span>
           </div>
+          <span className="mb-settings-btn" onClick={togglePrivacy}
+            title={privacy ? "打码中 — 邮箱已遮蔽,可安全截图。点击恢复" : "打码:遮蔽邮箱,方便截图分享"}
+            style={{ color: privacy ? t.accent : t.muted }}>
+            {privacy ? <IconEyeOff /> : <IconEye />}
+          </span>
           <span className="mb-settings-btn" onClick={() => openMain("navigate-settings")} title="设置" style={{ color: t.muted }}>
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><circle cx="12" cy="12" r="3.2"/><path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6l1.4 1.4M17 17l1.4 1.4M18.4 5.6 17 7M7 17l-1.4 1.4"/></svg>
           </span>
@@ -155,7 +164,7 @@ export default function MenuBar() {
       <div className="mb-list">
         {alive.map(a => (
           <AccountRow key={a.aid} a={a} isCurrent={a.aid === currentNode} isBest={hero?.aid === a.aid}
-            bestPct={bestPct} t={t} onSelect={() => openMain()} />
+            bestPct={bestPct} privacy={privacy} t={t} onSelect={() => openMain()} />
         ))}
 
         {dead.length > 0 && (
@@ -167,7 +176,7 @@ export default function MenuBar() {
             </summary>
             <div className="mb-dead-list">
               {dead.map(a => (
-                <AccountRow key={a.aid} a={a} isCurrent={a.aid === currentNode} isBest={false} bestPct={bestPct} t={t} onSelect={() => openMain()} />
+                <AccountRow key={a.aid} a={a} isCurrent={a.aid === currentNode} isBest={false} bestPct={bestPct} privacy={privacy} t={t} onSelect={() => openMain()} />
               ))}
             </div>
           </details>

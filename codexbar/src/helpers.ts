@@ -110,6 +110,16 @@ export function quotaColor(pct: number): string {
   return pct < 50 ? "#E0901C" : "#27B26B";
 }
 
+/**
+ * 打码模式下的身份文本。保留首字符是刻意的:你自己还能认出是哪个号,别人认不出。
+ * 定宽输出,所以开关打码时整列不会跳动。
+ */
+export function maskId(s: string | undefined, on: boolean, keep = 1): string {
+  if (!on) return s ?? "";
+  if (!s) return "—";
+  return s.slice(0, keep) + "•".repeat(11);
+}
+
 /** "14:32 · 3 分钟前". Empty when never refreshed. */
 export function fmtAgo(ts?: number): string {
   if (!ts) return "";

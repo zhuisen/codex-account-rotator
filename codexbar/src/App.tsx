@@ -15,7 +15,8 @@ import { useExpiryWatch } from "./hooks/useExpiryWatch";
 import { useDeadWatch } from "./hooks/useDeadWatch";
 import { useAutoSwitch } from "./hooks/useAutoSwitch";
 import { useKeyboard } from "./hooks/useKeyboard";
-import { fmtAgo, CARD_WARN_DAYS } from "./helpers";
+import { fmtAgo, CARD_WARN_DAYS, maskId } from "./helpers";
+import { usePrivacy } from "./hooks/usePrivacy";
 import { IconTicket } from "./components/CardBadge";
 import ProbeButton from "./components/ProbeButton";
 import "./App.css";
@@ -27,6 +28,8 @@ const IconClip = () => <svg width="18" height="18" viewBox="0 0 24 24" fill="non
 const IconGear = () => <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7"><circle cx="12" cy="12" r="3.2"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9 17 7M7 17l-2.1 2.1"/></svg>;
 const IconRefresh = ({ spin }: { spin?: boolean }) => <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ animation: spin ? "cbSpin .7s linear" : "none", transformOrigin: "center" }}><path d="M21 12a9 9 0 1 1-3-6.7M21 4v4h-4"/></svg>;
 const IconSun = () => <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9"><circle cx="12" cy="12" r="4.2"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M19.1 4.9 17.7 6.3M6.3 17.7 4.9 19.1"/></svg>;
+const IconEye = () => <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9"><path d="M1.6 12S5.3 5.5 12 5.5 22.4 12 22.4 12 18.7 18.5 12 18.5 1.6 12 1.6 12z"/><circle cx="12" cy="12" r="3"/></svg>;
+const IconEyeOff = () => <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9"><path d="M9.9 5.8A9.6 9.6 0 0 1 12 5.5c6.7 0 10.4 6.5 10.4 6.5a18 18 0 0 1-3.4 4.2M6.2 7.8A18 18 0 0 0 1.6 12S5.3 18.5 12 18.5c1.6 0 3-.4 4.3-.9M3 3l18 18"/></svg>;
 const IconMoon = () => <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>;
 
 export default function App() {
@@ -36,6 +39,7 @@ export default function App() {
   const [detailModal, setDetailModal] = useState<AccountDetail | null>(null);
   const [selectedCard, setSelectedCard] = useState<string | null>(null);
   const [autoSwitch, setAutoSwitch] = useState(() => getSettings().autoSwitchEnabled);
+  const { privacy, toggle: togglePrivacy } = usePrivacy();
 
   const t = THEMES[theme];
   const win = useMemo(() => getCurrentWindow(), []);
@@ -77,6 +81,11 @@ export default function App() {
         <span style={{ width: 12, height: 12, borderRadius: "50%", background: "#28c840" }} />
         <span data-tauri-drag-region style={{ position: "absolute", left: 0, right: 0, textAlign: "center", fontSize: 12.5, fontWeight: 600, letterSpacing: ".02em", color: t.titleText, pointerEvents: "none" }}>CodexBar</span>
         <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 10 }}>
+          <span onClick={togglePrivacy} title={privacy ? "打码中 — 邮箱与 account_id 已遮蔽,可安全截图。点击恢复" : "打码:遮蔽邮箱与 account_id,方便截图分享"}
+            style={{ display: "grid", placeItems: "center", width: 24, height: 20, borderRadius: 6, cursor: "pointer",
+                     color: privacy ? t.accentText : t.muted, background: privacy ? t.accent : "transparent", transition: "background .2s, color .2s" }}>
+            {privacy ? <IconEyeOff /> : <IconEye />}
+          </span>
           <div style={{ display: "flex", alignItems: "center", gap: 2, padding: 2, border: `1px solid ${t.ghostBorder}`, borderRadius: 8 }}>
             <span onClick={() => setTheme("light")} style={{ display: "grid", placeItems: "center", width: 24, height: 20, borderRadius: 6, cursor: "pointer", color: t.sunColor, background: t.sunBg, transition: "background .25s, color .25s" }}><IconSun /></span>
             <span onClick={() => setTheme("dark")} style={{ display: "grid", placeItems: "center", width: 24, height: 20, borderRadius: 6, cursor: "pointer", color: t.moonColor, background: t.moonBg, transition: "background .25s, color .25s" }}><IconMoon /></span>
@@ -153,7 +162,7 @@ export default function App() {
                       <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: ".14em", color: t.accent, fontFamily: "'JetBrains Mono'" }}>当前使用中</div>
                       <div style={{ display: "flex", alignItems: "baseline", gap: 9, marginTop: 3 }}>
                         <span style={{ fontSize: 24, fontWeight: 700, letterSpacing: "-.01em" }}>{cur.node}</span>
-                        <span style={{ fontSize: 12, color: t.email, fontFamily: "'JetBrains Mono'" }}>{cur.email}</span>
+                        <span style={{ fontSize: 12, color: t.email, fontFamily: "'JetBrains Mono'" }}>{maskId(cur.email, privacy)}</span>
                       </div>
                       <div style={{ display: "flex", alignItems: "center", gap: 13, marginTop: 8, fontSize: 12, color: t.text2, fontFamily: "'JetBrains Mono'" }}>
                         {cur.windows.map((w, i) => (
@@ -201,7 +210,7 @@ export default function App() {
                       {alive.map((a) => {
                         const shortcutIdx = aliveByLabel.findIndex(x => x.aid === a.aid);
                         return (
-                        <AccountCard key={a.aid} a={a} isCurrent={a.aid === currentNode} isBest={hero?.aid === a.aid} isSelected={selectedCard === a.aid} shortcut={shortcutIdx >= 0 && shortcutIdx < 9 ? shortcutIdx + 1 : undefined} bestPct={bestPct} probing={loadingAction === `probe-${a.aid}`} t={t}
+                        <AccountCard key={a.aid} a={a} isCurrent={a.aid === currentNode} isBest={hero?.aid === a.aid} isSelected={selectedCard === a.aid} shortcut={shortcutIdx >= 0 && shortcutIdx < 9 ? shortcutIdx + 1 : undefined} bestPct={bestPct} probing={loadingAction === `probe-${a.aid}`} privacy={privacy} t={t}
                           onSelect={() => setSelectedCard(selectedCard === a.aid ? null : a.aid)}
                           onSwitch={() => run(`switch-${a.aid}`, ["switch", a.node], `当前号 → ${a.node}`)}
                           onShowDetail={(aid) => { invoke<AccountDetail>("read_account_detail", { aid }).then(d => setDetailModal(d)).catch(() => {}); }}
@@ -220,7 +229,7 @@ export default function App() {
                             <span key={a.aid} onClick={() => setSelectedCard(selectedCard === a.aid ? null : a.aid)}
                               style={{ display: "flex", alignItems: "center", gap: 6, padding: "5px 12px", background: t.cardBg, borderRadius: 8, fontSize: 11, cursor: "pointer", border: selectedCard === a.aid ? `1px solid ${t.accent}` : `1px solid ${t.cardBorder}`, opacity: 0.65 }}>
                               <span style={{ width: 6, height: 6, borderRadius: "50%", background: "#E0524D" }} />
-                              {a.node} · {a.email.split("@")[0]}
+                              {a.node} · {maskId(a.email.split("@")[0], privacy)}
                               {selectedCard === a.aid && (
                                 <span onClick={(e) => { e.stopPropagation(); run(`remove-${a.node}`, ["remove", a.node], `已删除 ${a.node}`); }}
                                   style={{ fontSize: 10, color: "#E0524D", cursor: "pointer", marginLeft: 4 }}>删除</span>
@@ -241,7 +250,7 @@ export default function App() {
         </div>
       </div>
 
-      {detailModal && <DetailModal detail={detailModal} t={t} onClose={() => setDetailModal(null)} />}
+      {detailModal && <DetailModal detail={detailModal} privacy={privacy} t={t} onClose={() => setDetailModal(null)} />}
       {toast && <Toast msg={toast} t={t} />}
     </div>
   );

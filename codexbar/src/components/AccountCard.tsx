@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { STATUS_COLORS, STATUS_TEXT, type Theme } from "../theme";
-import { type Account, fmtCd, quotaColor } from "../helpers";
+import { type Account, fmtCd, quotaColor, maskId } from "../helpers";
 import Ring from "./Ring";
 import CardBadge, { isCardExpiring } from "./CardBadge";
 import ProbeButton from "./ProbeButton";
@@ -20,10 +20,10 @@ function DeltaChip({ delta, t }: { delta: number; t: Theme }) {
   );
 }
 
-export default function AccountCard({ a, isCurrent, isBest, isSelected, shortcut, bestPct, probing, t, onSelect, onSwitch, onShowDetail, onRemove, onProbe }: {
+export default function AccountCard({ a, isCurrent, isBest, isSelected, shortcut, bestPct, probing, privacy, t, onSelect, onSwitch, onShowDetail, onRemove, onProbe }: {
   a: Account; isCurrent: boolean; isBest: boolean; isSelected: boolean; shortcut?: number;
   /** Highest remaining quota in the pool — the baseline the delta chip compares against. */
-  bestPct: number; /** 该号正在探测中 */ probing: boolean; t: Theme;
+  bestPct: number; /** 该号正在探测中 */ probing: boolean; /** 打码模式 */ privacy: boolean; t: Theme;
   onSelect: () => void; onSwitch: () => void; onShowDetail: (aid: string) => void; onRemove: (label: string) => void; onProbe: (label: string) => void;
 }) {
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -73,7 +73,7 @@ export default function AccountCard({ a, isCurrent, isBest, isSelected, shortcut
               : known && bestPct >= 0 && <DeltaChip delta={pct - bestPct} t={t} />}
           </div>
 
-          <div style={{ fontSize: 10.5, color: t.email, fontFamily: "'JetBrains Mono'", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{a.email}</div>
+          <div style={{ fontSize: 10.5, color: t.email, fontFamily: "'JetBrains Mono'", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{maskId(a.email, privacy)}</div>
 
           {known && a.windows.map(w => (
             <div key={w.label} style={{ display: "flex", alignItems: "center", gap: 6 }}>

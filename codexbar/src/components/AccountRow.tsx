@@ -1,10 +1,10 @@
 import { STATUS_COLORS, STATUS_TEXT, type Theme } from "../theme";
-import { type Account, quotaColor } from "../helpers";
+import { type Account, quotaColor, maskId } from "../helpers";
 import Ring from "./Ring";
 import CardBadge, { isCardExpiring, AMBER } from "./CardBadge";
 
-export default function AccountRow({ a, isCurrent, isBest, bestPct, t, onSelect }: {
-  a: Account; isCurrent: boolean; isBest: boolean; bestPct: number; t: Theme; onSelect: () => void;
+export default function AccountRow({ a, isCurrent, isBest, bestPct, privacy, t, onSelect }: {
+  a: Account; isCurrent: boolean; isBest: boolean; bestPct: number; privacy: boolean; t: Theme; onSelect: () => void;
 }) {
   const isDead = a.status === "dead";
   const isCool = a.status === "cool";
@@ -48,7 +48,7 @@ export default function AccountRow({ a, isCurrent, isBest, bestPct, t, onSelect 
         </div>
 
         <div className="mb-row-sub">
-          <span className="mb-row-email" style={{ color: t.email }}>{a.email}</span>
+          <span className="mb-row-email" style={{ color: t.email }}>{maskId(a.email, privacy)}</span>
           <span className="mb-row-exp-text" style={{ color: t.muted }}>到期 {a.exp}</span>
         </div>
 

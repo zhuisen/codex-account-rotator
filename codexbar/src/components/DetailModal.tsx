@@ -1,4 +1,5 @@
 import type { Theme } from "../theme";
+import { maskId } from "../helpers";
 
 export interface AccountDetail {
   account_id?: string; email?: string; label?: string; plan?: string; sub_until?: string;
@@ -8,16 +9,16 @@ export interface AccountDetail {
   quota_source?: string; quota_captured_at?: number;
 }
 
-export default function DetailModal({ detail, t, onClose }: { detail: AccountDetail; t: Theme; onClose: () => void }) {
+export default function DetailModal({ detail, privacy, t, onClose }: { detail: AccountDetail; /** 打码:遮蔽 account_id / email / token 尾巴 —— 截图时它们和邮箱一样能认人 */ privacy: boolean; t: Theme; onClose: () => void }) {
   const fmtTs = (ts?: number) => ts ? new Date(ts * 1000).toLocaleString("zh-CN", { timeZone: "Asia/Singapore" }) : "—";
   const rows: [string, string, string?][] = [
-    ["account_id", detail.account_id ?? "—"],
-    ["email", detail.email ?? "—"],
+    ["account_id", maskId(detail.account_id, privacy, 4) || (detail.account_id ?? "—")],
+    ["email", maskId(detail.email, privacy) || (detail.email ?? "—")],
     ["文件", `auth/${detail.file}`],
-    ["access_token", `…${detail.access_token_tail}  (${detail.access_token_len} chars)`],
+    ["access_token", `…${privacy ? "••••••••" : detail.access_token_tail}  (${detail.access_token_len} chars)`],
     ["access 签发", fmtTs(detail.access_iat)],
     ["access 过期", fmtTs(detail.access_exp), detail.access_exp && detail.access_exp < Date.now()/1000 ? "#E0524D" : t.accent],
-    ["refresh_token", `…${detail.refresh_token_tail}  (${detail.refresh_token_len} chars)`],
+    ["refresh_token", `…${privacy ? "••••••••" : detail.refresh_token_tail}  (${detail.refresh_token_len} chars)`],
     ["last_refresh", detail.last_refresh?.slice(0, 19) ?? "—"],
     ["plan", detail.plan || "—"],
     ["订阅至", detail.sub_until?.slice(0, 10) ?? "—"],
