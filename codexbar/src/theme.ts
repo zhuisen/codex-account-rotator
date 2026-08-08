@@ -45,3 +45,19 @@ export const STATUS_COLORS: Record<string, string> = {
 export const STATUS_TEXT: Record<string, string> = {
   live: "活", low: "低", cool: "冷却", dead: "死",
 };
+
+/** 模型配色。堆叠面积图里每个模型一条带,颜色必须稳定 —— 同一个模型在不同日期/不同窗口下
+ *  换色就没法读了。未知模型走 fallback 的灰,不参与语义色。 */
+export const MODEL_COLORS: Record<string, string> = {
+  "gpt-5.6-sol":   "#2dd4bf",
+  "gpt-5.6-luna":  "#2BA0C0",
+  "gpt-5.6-terra": "#27B26B",
+  "gpt-5.5":       "#8b5cf6",
+  "gpt-5.4":       "#E0901C",
+  "gpt-5.4-mini":  "#c08a3e",
+  "gpt-5.3":       "#E0524D",
+};
+export const MODEL_FALLBACK = "#5b6472";
+export function modelColor(m: string): string {
+  return MODEL_COLORS[m] ?? MODEL_FALLBACK;
+}

@@ -1563,7 +1563,20 @@ def _scan_tokens(days=90):
             except OSError:
                 continue
             if '"token_count"' in txt:
+                # ★ 模型按 **ordinal 顺序** 归属:每个 token_count 记到它之前最近一次 turn_context 的
+                # model。不能按会话整体归 —— 实测 310 个文件里有 5 个在会话中途换过模型。
+                cur_model = None
                 for line in txt.splitlines():
+                    if '"turn_context"' in line:
+                        try:
+                            td = json.loads(line)
+                        except ValueError:
+                            continue
+                        if td.get("type") == "turn_context":
+                            m = (td.get("payload") or {}).get("model")
+                            if m:
+                                cur_model = m
+                        continue
                     if '"token_count"' not in line:
                         continue
                     try:
@@ -1580,26 +1593,34 @@ def _scan_tokens(days=90):
                     day = (d.get("timestamp") or "")[:10]
                     if not day:
                         continue
-                    b = per_day.setdefault(day, [0, 0, 0, 0, 0, 0])
+                    b = per_day.setdefault(day, [0, 0, 0, 0, 0, 0, {}])
                     b[0] += lt.get("input_tokens") or 0
                     b[1] += lt.get("output_tokens") or 0
                     b[2] += lt.get("reasoning_output_tokens") or 0
                     b[3] += lt.get("cached_input_tokens") or 0
                     b[4] += tot
                     b[5] += 1
+                    mk = cur_model or "unknown"
+                    mb = b[6].setdefault(mk, [0, 0])
+                    mb[0] += tot; mb[1] += 1
             scanned += 1
         fresh[key] = {"sig": sig, "days": per_day}
         for day, b in per_day.items():
-            o = out.setdefault(day, [0, 0, 0, 0, 0, 0])
+            o = out.setdefault(day, [0, 0, 0, 0, 0, 0, {}])
             for i in range(6):
                 o[i] += b[i]
+            for mk, mv in (b[6] if len(b) > 6 else {}).items():
+                t2 = o[6].setdefault(mk, [0, 0])
+                t2[0] += mv[0]; t2[1] += mv[1]
 
     try:
         _atomic_write(TOKENS_CACHE, {"files": fresh}, mode=0o644)  # 无凭证,不必 0600
     except Exception:
         pass   # 缓存是加速手段,写不进去不该让统计失败
     keys = ("input", "output", "reasoning", "cached", "total", "turns")
-    return ({d: dict(zip(keys, b)) for d, b in out.items()},
+    return ({d: {**dict(zip(keys, b[:6])),
+                 "models": {k: {"total": v[0], "turns": v[1]} for k, v in (b[6] or {}).items()}}
+             for d, b in out.items()},
             {"scanned": scanned, "reused": reused})
 
 
