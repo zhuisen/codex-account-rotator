@@ -1,14 +1,14 @@
 // shared helpers — data transforms & formatters
 
 export interface Win { used_percent?: number; resets_at?: number; window_minutes?: number }
-export interface Quota { primary?: Win; secondary?: Win; captured_at?: number; source?: string }
+export interface Quota { primary?: Win; secondary?: Win; captured_at?: number; source?: string; plan_type?: string }
 /** One reset credit ("重置卡") as returned by /backend-api/codex/rate-limit-reset-credits. */
 export interface CreditDetail {
   id?: string; status?: string; granted_at?: string; expires_at?: string; title?: string;
 }
 export interface Slot {
   label?: string; email?: string; quota?: Quota; auth_dead?: boolean; auth_dead_at?: number;
-  cooling_until?: number; sub_until?: string; file?: string;
+  cooling_until?: number; sub_until?: string; file?: string; plan?: string;
   /** Free summary, refreshed on every usage probe. */
   credits?: { available?: number; applicable?: number; at?: number };
   /** Rate-limited detail fetch — the only source of per-credit expiry. */
@@ -38,6 +38,9 @@ export interface Account {
   tok: string;
   /** Unix seconds of the death event; a CHANGED value means a new death (not the same one). */
   deadAt?: number;
+  /** 套餐(plus/pro/…),来自 id_token,**权威**。label 只是昵称:老号从 Plus 升 Pro 时 label 不变,
+   *  所以任何"这是不是 Pro"的判断都必须看这里,不能看 node 名以 pro 开头。 */
+  plan: string;
   /** Reset credits held. Count comes free with every usage probe. */
   cards: number;
   /** Days until the soonest still-available credit expires — needs the detail fetch, so it stays
@@ -186,6 +189,8 @@ export function slotToAccount(aid: string, slot: Slot, tokens: Record<string, To
   // Card COUNT comes from the free summary; EXPIRY only exists in the rate-limited detail fetch, so
   // the two are read independently — an account can legitimately know it holds 2 cards while having
   // no dates yet. Only `status === "available"` counts: a redeemed card is still in the list.
+  const plan = (slot.quota?.plan_type || slot.plan || "").toLowerCase();
+
   const cards = slot.credits?.available ?? 0;
   let cardDays: number | undefined;
   let cardExp: string | undefined;
@@ -205,6 +210,7 @@ export function slotToAccount(aid: string, slot: Slot, tokens: Record<string, To
     exp: slot.sub_until?.slice(0, 10) ?? "—",
     cooldownSec: Math.round(coolSec),
     tok: tokH != null ? `${tokH}h` : "—",
+    plan,
     cards, cardDays, cardExp,
     // The two numbers come from different fetches at different times: the count is refreshed on every
     // usage probe, the detail only when `credits` runs. So the cached detail can legitimately still

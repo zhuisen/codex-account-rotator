@@ -195,12 +195,18 @@ def _autosync_live(s):
         return
     new = aid not in s["slots"]
     if new:
+        # ★ 按真实套餐命名,别再一律 plusN。plan 在 id_token 里,加号时本地就解得出(无需联网),
+        # 所以没有理由先猜成 plus 再等人来纠。新增 Pro 号会得到 pro1/pro2…
+        # 注意:label 只是昵称,**不是**判断套餐的依据 —— 老号从 Plus 升级到 Pro 时 label 不会变。
+        # 要判套餐一律看 slot["plan"](UI 的 PRO 徽章也走它)。
+        plan = ((_decode_identity(live) or {}).get("plan") or "plus").lower()
+        prefix = "pro" if plan.startswith("pro") else "plus"
         existing = {sl.get("label") for sl in s["slots"].values()}
         n = len(s["slots"])
-        label = "main" if n == 0 else f"plus{n + 1}"
+        label = "main" if n == 0 else f"{prefix}{n + 1}"
         while label in existing:
             n += 1
-            label = f"plus{n + 1}"
+            label = f"{prefix}{n + 1}"
     slot = s["slots"].setdefault(aid, {})
     slot["file"] = f"{aid}.json"
     if new:
@@ -1514,6 +1520,119 @@ def cmd_credits(args):
             print(f"      (到期时间未取到: {r['msg']})")
 
 
+TOKENS_CACHE = STORE / ".tokens-cache.json"
+
+
+def _scan_tokens(days=90):
+    """按天汇总 token 消耗。-> {"YYYY-MM-DD": {in,out,reason,cached,total,turns}}
+
+    ★ 口径:逐轮累加 `last_token_usage`,**不是** `total_token_usage`。后者是会话累计值,跨事件求和会
+    重复计数;实测单个会话「逐轮 last 求和 == 末条 total」(4,316,795 == 4,316,795,42 轮),所以
+    逐轮求和才是这段时间真实烧掉的量。
+    ★ input 每轮都含完整上下文、重发即重计费(实测 cached_tokens 恒 0,该端点拒绝 store:true,没有
+    prompt cache 可省),所以这里不做任何"扣掉重复上下文"的修正 —— 那样反而会低估账单。
+    ★ rollout **不记账号**,所以这只能是全池合计,无法拆到某个号。这也正是它想回答的问题。
+
+    增量缓存:按 (mtime, size) 判定文件是否变过,没变直接用上次的结果。3508 个文件全解析要分钟级,
+    有缓存后只解析当天在写的那几个。"""
+    try:
+        cache = _load_json(TOKENS_CACHE)
+    except (OSError, ValueError):
+        cache = {}
+    files_cache = cache.get("files") or {}
+    cut = time.time() - days * 86400
+    out, fresh = {}, {}
+    scanned = reused = 0
+
+    for f in SESSIONS.rglob("rollout-*.jsonl"):
+        try:
+            st = f.stat()
+        except OSError:
+            continue
+        if st.st_mtime < cut:
+            continue
+        key = str(f)
+        sig = [int(st.st_mtime), st.st_size]
+        hit = files_cache.get(key)
+        if hit and hit.get("sig") == sig:
+            per_day = hit["days"]; reused += 1
+        else:
+            per_day = {}
+            try:
+                txt = f.read_text(errors="replace")
+            except OSError:
+                continue
+            if '"token_count"' in txt:
+                for line in txt.splitlines():
+                    if '"token_count"' not in line:
+                        continue
+                    try:
+                        d = json.loads(line)
+                    except ValueError:
+                        continue
+                    pl = d.get("payload") or {}
+                    if pl.get("type") != "token_count":
+                        continue
+                    lt = (pl.get("info") or {}).get("last_token_usage") or {}
+                    tot = lt.get("total_tokens") or 0
+                    if not tot:
+                        continue
+                    day = (d.get("timestamp") or "")[:10]
+                    if not day:
+                        continue
+                    b = per_day.setdefault(day, [0, 0, 0, 0, 0, 0])
+                    b[0] += lt.get("input_tokens") or 0
+                    b[1] += lt.get("output_tokens") or 0
+                    b[2] += lt.get("reasoning_output_tokens") or 0
+                    b[3] += lt.get("cached_input_tokens") or 0
+                    b[4] += tot
+                    b[5] += 1
+            scanned += 1
+        fresh[key] = {"sig": sig, "days": per_day}
+        for day, b in per_day.items():
+            o = out.setdefault(day, [0, 0, 0, 0, 0, 0])
+            for i in range(6):
+                o[i] += b[i]
+
+    try:
+        _atomic_write(TOKENS_CACHE, {"files": fresh}, mode=0o644)  # 无凭证,不必 0600
+    except Exception:
+        pass   # 缓存是加速手段,写不进去不该让统计失败
+    keys = ("input", "output", "reasoning", "cached", "total", "turns")
+    return ({d: dict(zip(keys, b)) for d, b in out.items()},
+            {"scanned": scanned, "reused": reused})
+
+
+def cmd_tokens(args):
+    """全池 token 消耗按天统计。`--json` 给 GUI 用,`--days N` 改窗口。
+
+    数据源是 codex 自己写的 rollout(`~/.codex/sessions/**/rollout-*.jsonl`)里的 `token_count`
+    事件 —— 不联网、不消耗任何额度。"""
+    days = 30
+    if "--days" in args:
+        i = args.index("--days")
+        if i + 1 >= len(args):
+            sys.exit("--days 后面要跟天数")
+        days = max(1, int(args[i + 1]))
+    per_day, stat = _scan_tokens(days=max(days, 90))
+    picked = dict(sorted(per_day.items())[-days:])
+    if "--json" in args:
+        print(json.dumps({"days": picked, "scan": stat}, ensure_ascii=False))
+        return
+    if not picked:
+        print("没有 token 记录(检查 ~/.codex/sessions)")
+        return
+    peak = max(v["total"] for v in picked.values()) or 1
+    total = sum(v["total"] for v in picked.values())
+    turns = sum(v["turns"] for v in picked.values())
+    print(f"全池 token 消耗 · 近 {len(picked)} 天 · 合计 {total:,} · {turns} 轮 "
+          f"(解析 {stat['scanned']} 文件, 缓存命中 {stat['reused']})")
+    for d, v in picked.items():
+        bar = "█" * max(1, round(v["total"] / peak * 42))
+        print(f"  {d}  {v['total']:>12,}  {bar}")
+    print(f"  日均 {total // max(1, len(picked)):,} · 单轮均 {total // max(1, turns):,}")
+
+
 def cmd_current(args):
     s = _state()
     print(_mask(s.get("active")))
@@ -1589,7 +1708,8 @@ CMDS = {"add": cmd_add, "login": cmd_login, "list": cmd_list, "switch": cmd_swit
         "uncool": cmd_uncool, "quota": cmd_quota, "current": cmd_current, "ensure": cmd_ensure,
         "sync": cmd_sync, "rename": cmd_rename, "keepalive": cmd_keepalive, "refresh": cmd_refresh,
         "refresh-all": cmd_refresh_all, "health": cmd_health, "remove": cmd_remove,
-        "ensure-live": cmd_ensure_live, "credits": cmd_credits, "probe": cmd_probe}
+        "ensure-live": cmd_ensure_live, "credits": cmd_credits, "probe": cmd_probe,
+        "tokens": cmd_tokens}
 
 
 # Commands that change what the menu bar shows → nudge SwiftBar to re-render immediately (so terminal
@@ -1616,7 +1736,8 @@ def main():
         print("usage: codex-rotate {add <label>|login|remove <label>|list|switch [label]|cool [min]|uncool [label]|"
               "quota [--save]|sync|rename <old> <new>|refresh [label|all]|refresh-all|"
               "keepalive [days] [--dry-run]|health|credits [--force] [--json]|"
-              "probe <label…|--all> [--model M] [--effort low|medium|high]|ensure|current}")
+              "probe <label…|--all> [--model M] [--effort low|medium|high]|"
+              "tokens [--days N] [--json]|ensure|current}")
         sys.exit(1)
     cmd = sys.argv[1]
     if cmd in STATE_LOCKED:

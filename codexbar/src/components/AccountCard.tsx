@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { STATUS_COLORS, STATUS_TEXT, type Theme } from "../theme";
 import { type Account, fmtCd, quotaColor, maskId } from "../helpers";
 import Ring from "./Ring";
+import PlanBadge from "./PlanBadge";
 import CardBadge, { isCardExpiring } from "./CardBadge";
 import ProbeButton from "./ProbeButton";
 
@@ -66,6 +67,7 @@ export default function AccountCard({ a, isCurrent, isBest, isSelected, shortcut
         <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 4 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
             <span style={{ fontSize: 13.5, fontWeight: 700, color: t.text }}>{a.node}</span>
+            <PlanBadge plan={a.plan} t={t} />
             <span style={{ fontSize: 10, fontWeight: 600, color: sc }}>{STATUS_TEXT[a.status]}</span>
             {isBest && <span style={{ fontSize: 8, fontWeight: 700, color: t.accentText, background: t.accent, padding: "1px 5px", borderRadius: 4, flexShrink: 0 }}>USE</span>}
             {isCurrent

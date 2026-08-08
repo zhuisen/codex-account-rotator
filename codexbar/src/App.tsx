@@ -9,6 +9,7 @@ import GhostButton from "./components/GhostButton";
 import AccountCard from "./components/AccountCard";
 import DetailModal, { type AccountDetail } from "./components/DetailModal";
 import LogsPage from "./pages/LogsPage";
+import TokensPage from "./pages/TokensPage";
 import SettingsPage, { getSettings } from "./pages/SettingsPage";
 import { useStore } from "./hooks/useStore";
 import { useExpiryWatch } from "./hooks/useExpiryWatch";
@@ -19,11 +20,13 @@ import { fmtAgo, CARD_WARN_DAYS, maskId } from "./helpers";
 import { usePrivacy } from "./hooks/usePrivacy";
 import { IconTicket } from "./components/CardBadge";
 import ProbeButton from "./components/ProbeButton";
+import PlanBadge from "./components/PlanBadge";
 import "./App.css";
 
-type Page = "overview" | "logs" | "settings";
+type Page = "overview" | "tokens" | "logs" | "settings";
 
 const IconChart = () => <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><rect x="3" y="12" width="4" height="9" rx="1"/><rect x="10" y="7" width="4" height="14" rx="1"/><rect x="17" y="3" width="4" height="18" rx="1"/></svg>;
+const IconChart2 = () => <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M3 20h18M6 20V9m5 11V4m5 16v-7"/></svg>;
 const IconClip = () => <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7"><rect x="5" y="4" width="14" height="17" rx="2"/><path d="M9 3.5h6v3H9z" fill="currentColor" stroke="none"/></svg>;
 const IconGear = () => <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7"><circle cx="12" cy="12" r="3.2"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9 17 7M7 17l-2.1 2.1"/></svg>;
 const IconRefresh = ({ spin }: { spin?: boolean }) => <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ animation: spin ? "cbSpin .7s linear" : "none", transformOrigin: "center" }}><path d="M21 12a9 9 0 1 1-3-6.7M21 4v4h-4"/></svg>;
@@ -67,6 +70,7 @@ export default function App() {
 
   const sidebarItems: { id: Page; Icon: React.FC; tip: string }[] = [
     { id: "overview", Icon: IconChart, tip: "总览" },
+    { id: "tokens", Icon: IconChart2, tip: "Token 消耗" },
     { id: "logs", Icon: IconClip, tip: "日志" },
     { id: "settings", Icon: IconGear, tip: "设置" },
   ];
@@ -162,6 +166,7 @@ export default function App() {
                       <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: ".14em", color: t.accent, fontFamily: "'JetBrains Mono'" }}>当前使用中</div>
                       <div style={{ display: "flex", alignItems: "baseline", gap: 9, marginTop: 3 }}>
                         <span style={{ fontSize: 24, fontWeight: 700, letterSpacing: "-.01em" }}>{cur.node}</span>
+                        <PlanBadge plan={cur.plan} t={t} size={10} />
                         <span style={{ fontSize: 12, color: t.email, fontFamily: "'JetBrains Mono'" }}>{maskId(cur.email, privacy)}</span>
                       </div>
                       <div style={{ display: "flex", alignItems: "center", gap: 13, marginTop: 8, fontSize: 12, color: t.text2, fontFamily: "'JetBrains Mono'" }}>
@@ -245,6 +250,7 @@ export default function App() {
             </>
           )}
 
+          {page === "tokens" && <TokensPage t={t} />}
           {page === "logs" && <LogsPage t={t} />}
           {page === "settings" && <SettingsPage t={t} />}
         </div>

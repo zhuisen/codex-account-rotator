@@ -26,3 +26,4 @@ proxy/test-home/*
 app/**/*.app
 app/**/.build
 app/**/.build_number
+.tokens-cache.json

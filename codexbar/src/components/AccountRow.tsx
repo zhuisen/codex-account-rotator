@@ -1,6 +1,7 @@
 import { STATUS_COLORS, STATUS_TEXT, type Theme } from "../theme";
 import { type Account, quotaColor, maskId } from "../helpers";
 import Ring from "./Ring";
+import PlanBadge from "./PlanBadge";
 import CardBadge, { isCardExpiring, AMBER } from "./CardBadge";
 
 export default function AccountRow({ a, isCurrent, isBest, bestPct, privacy, t, onSelect }: {
@@ -34,6 +35,7 @@ export default function AccountRow({ a, isCurrent, isBest, bestPct, privacy, t, 
       <div className="mb-row-info">
         <div className="mb-row-name-line">
           <span className="mb-row-name" style={{ color: t.text }}>{a.node}</span>
+            <PlanBadge plan={a.plan} t={t} />
           <span className="mb-row-status" style={{ color: sc }}>{STATUS_TEXT[a.status]}</span>
           {isBest && <span className="mb-row-badge-use" style={{ color: t.accentText, background: t.accent }}>USE</span>}
           {isCurrent && <span className="mb-row-badge-cur" style={{ color: t.accent, border: `1px solid ${t.accentBorder}` }}>当前</span>}
