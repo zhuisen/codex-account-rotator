@@ -83,6 +83,19 @@ def _mutate_state(fn):
             raise
 
 
+def _plog(msg, rid=None):
+    """代理日志的唯一出口:时间戳 + 请求 ID。
+
+    ★ 为什么必须有这两样:proxy 跑在 ThreadingHTTPServer 上,并发请求的日志行天然交错。没有请求 ID
+    时,连续两行 `→ POST [plus5]` 到底是「同一轮被重发」(=双计费)还是「两个并发请求」(=正常),
+    **物理上无法区分** —— 排查「一次对话是不是打了两个号」时就卡死在这里,只能靠重跑实验。
+    rid 让每一轮的生命周期可以被 grep 出来。"""
+    ts = time.strftime("%m-%d %H:%M:%S")
+    tag = f" #{rid}" if rid else ""
+    sys.stderr.write(f"[proxy {ts}{tag}] {msg}\n")
+    sys.stderr.flush()
+
+
 def _bump(key):
     """把一类事件累加到 state.json 的 `proxy_counters`。
 
@@ -151,7 +164,7 @@ def _slot_token(aid, slot, force=False):
             with urllib.request.urlopen(req, timeout=30) as r:
                 d = json.loads(r.read())
         except Exception as e:
-            sys.stderr.write(f"[proxy] refresh {slot.get('label')} FAILED: {e}\n")
+            _plog(f"refresh {slot.get('label')} FAILED: {e}")
             return at, tok.get("account_id")
         if d.get("access_token"):
             tok["access_token"] = d["access_token"]
@@ -165,7 +178,7 @@ def _slot_token(aid, slot, force=False):
                 f.write(json.dumps(auth))
             os.chmod(tmp, 0o600)
             os.replace(tmp, sf)
-            sys.stderr.write(f"[proxy] refreshed {slot.get('label')} (slot)\n")
+            _plog(f"refreshed {slot.get('label')} (slot)")
             return d["access_token"], tok.get("account_id")
         return at, tok.get("account_id")
 
@@ -312,7 +325,7 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
 
-    def _open(self, body, token, account_id, label, reason, prev_id):
+    def _open(self, body, token, account_id, label, reason, prev_id, rid=None):
         """Send the request upstream under one account's token; return (conn, resp). Caller closes conn.
 
         两阶段分开抛异常,让调用方**无法**再把「没送出去」和「送出去了但没读到回应」当成一回事。"""
@@ -324,9 +337,8 @@ class Handler(BaseHTTPRequestHandler):
             hdrs["chatgpt-account-id"] = account_id
         hdrs.setdefault("originator", "codex_cli_rs")
         hdrs["Content-Length"] = str(len(body))
-        sys.stderr.write(f"[proxy] → {self.command} {self.path} [{label}] {reason}"
-                         f" prev={prev_id[:18] if prev_id else '-'}\n")
-        sys.stderr.flush()
+        _plog(f"→ {self.command} {self.path} [{label}] {reason}"
+              f" prev={prev_id[:18] if prev_id else '-'}", rid)
         # ★ 相位分界 = request() vs getresponse(),不是 connect() vs 其后。
         # 依据:`sendall` 是循环写,**当且仅当仍有尾段没写进去时才抛异常** —— 尾段没出去,上游拿到的
         # 就是不完整的 body,Content-Length 框架下这种请求永远不会被 dispatch,也就不可能计费。
@@ -348,8 +360,7 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:
             conn.close()
             raise UpstreamCommitted(e) from e
-        sys.stderr.write(f"[proxy] ← {resp.status} [{label}]\n")
-        sys.stderr.flush()
+        _plog(f"← {resp.status} [{label}]", rid)
         return conn, resp
 
     def _billable(self):
@@ -370,14 +381,13 @@ class Handler(BaseHTTPRequestHandler):
     # bug 更糟。400 让 codex 一次就停,这是唯一能让 abort 策略真正成立的前提。
     ABORT_STATUS = 400
 
-    def _abort(self, label, exc):
+    def _abort(self, label, exc, rid=None):
         """计费请求已提交但读不到回应 → 终止本轮,绝不换号重发。响应体只给固定文案。
 
         单独成 helper 是因为评审指出:上一版把 send_error 那段在两个调用点手抄了一遍,
         "第三个调用点不可能退化"并没达成 —— 退化点只是从 except 块挪到了 if 块。"""
         _bump("committed_aborts")
-        sys.stderr.write(f"[proxy] ⚠️ committed [{label}]: {exc} — 计费请求已送出,中止而非换号(防双计费)\n")
-        sys.stderr.flush()
+        _plog(f"⚠️ committed [{label}]: {exc} — 计费请求已送出,中止而非换号(防双计费)", rid)
         try:
             # 不回显 str(exc):它含本地路径 / TLS / 系统错误文本,没有理由暴露给客户端。
             self.send_error(self.ABORT_STATUS,
@@ -385,7 +395,7 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             pass
 
-    def _open_or_fail(self, body, token, account_id, label, reason, prev_id):
+    def _open_or_fail(self, body, token, account_id, label, reason, prev_id, rid=None):
         """包住 _open,把结局压成 (conn, resp) | "NEXT" | "ABORT"。
 
         返回 "ABORT" 时**响应已经发出去了**,调用方只需 `return`。
@@ -393,17 +403,15 @@ class Handler(BaseHTTPRequestHandler):
         ★ 两个调用点(首发 + 401 强刷后重发)必须共用这段。评审在初版里抓到:我只改了首发那个,
         401 那条仍是 bare `except Exception: continue` —— 同一个双计费 bug 原封不动地活着。"""
         try:
-            return self._open(body, token, account_id, label, reason, prev_id)
+            return self._open(body, token, account_id, label, reason, prev_id, rid)
         except SendFailed as e:
-            sys.stderr.write(f"[proxy] send err [{label}]: {e} — 未完整送达,安全换号\n")
-            sys.stderr.flush()
+            _plog(f"send err [{label}]: {e} — 未完整送达,安全换号", rid)
             return "NEXT"
         except UpstreamCommitted as e:
             if not self._billable():
-                sys.stderr.write(f"[proxy] committed [{label}] (非计费 {self.command}): {e} — 换号重试\n")
-                sys.stderr.flush()
+                _plog(f"committed [{label}] (非计费 {self.command}): {e} — 换号重试", rid)
                 return "NEXT"
-            self._abort(label, e)
+            self._abort(label, e, rid)
             return "ABORT"
 
     def _finish(self, conn, resp, aid, label):
@@ -434,11 +442,14 @@ class Handler(BaseHTTPRequestHandler):
                         while len(_affinity) > 256:  # FIFO cap — codex never sends previous_response_id
                             _affinity.pop(next(iter(_affinity)))  # today, so entries only accumulate
                     got = True
-                    sys.stderr.write(f"[proxy] affinity {rid[:18]} → [{label}]\n")
+                    _plog(f"affinity {rid[:18]} → [{label}]", rid)
                 elif len(scanbuf) > 65536:
                     scanbuf = scanbuf[-4096:]
 
     def _proxy(self):
+        # 每轮一个短 ID:ThreadingHTTPServer 下并发请求的日志行会交错,没有它就分不清
+        # 「同一轮被重发」和「两个并发请求」—— 而这正是排查双计费时唯一要回答的问题。
+        rid = f"{threading.get_ident() % 0x1000:03x}{int(time.time() * 1000) % 0x1000:03x}"
         length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(length) if length else b""
         prev_id = None
@@ -460,12 +471,12 @@ class Handler(BaseHTTPRequestHandler):
             label = slot.get("label", aid[:6])
             token, account_id = _slot_token(aid, slot)
             if not token:
-                sys.stderr.write(f"[proxy] skip [{label}]: live token expired (codex owns its refresh)\n")
+                _plog(f"skip [{label}]: live token expired (codex owns its refresh)", rid)
                 continue
             conn = None
             streamed = False
             try:
-                got = self._open_or_fail(body, token, account_id, label, reason, prev_id)
+                got = self._open_or_fail(body, token, account_id, label, reason, prev_id, rid)
                 if got == "NEXT":
                     continue
                 if got == "ABORT":
@@ -478,7 +489,7 @@ class Handler(BaseHTTPRequestHandler):
                     if token2 and token2 != token:
                         # ★ 评审抓到的 blocker:这里原本是 bare `except Exception: continue`,
                         # 与首发路径同一个双计费 bug。第一发 401 说明没计费,但这一发是真 billable POST。
-                        got = self._open_or_fail(body, token2, account_id2, label, "retry-refresh", prev_id)
+                        got = self._open_or_fail(body, token2, account_id2, label, "retry-refresh", prev_id, rid)
                         if got == "NEXT":
                             continue
                         if got == "ABORT":
@@ -489,19 +500,19 @@ class Handler(BaseHTTPRequestHandler):
                             # 该号不进冷却,codex 退避后大概率再次选中它。
                             _record_quota(aid, resp.getheaders())
                             _cool(aid)
-                            sys.stderr.write(f"[proxy] 429 (retry-refresh) → cooled [{label}], failing over\n")
+                            _plog(f"429 (retry-refresh) → cooled [{label}], failing over", rid)
                             continue
                         if resp.status != 401:
                             streamed = True
                             self._finish(conn, resp, aid, label)
                             return
                     _mark_dead(aid, (token2 or token)[-16:])
-                    sys.stderr.write(f"[proxy] 401 invalidated → marked dead [{label}], failing over\n")
+                    _plog(f"401 invalidated → marked dead [{label}], failing over", rid)
                     continue
                 if resp.status == 429:
                     _record_quota(aid, resp.getheaders())
                     _cool(aid)
-                    sys.stderr.write(f"[proxy] 429 → cooled [{label}], failing over\n")
+                    _plog(f"429 → cooled [{label}], failing over", rid)
                     continue
                 streamed = True
                 self._finish(conn, resp, aid, label)
@@ -517,7 +528,7 @@ class Handler(BaseHTTPRequestHandler):
                 # 正是它要取代的那种"没人看得懂的日志"。
                 if self._billable():
                     _bump("stream_aborts")
-                sys.stderr.write(f"[proxy] stream err [{label}]: {e}\n")
+                _plog(f"stream err [{label}]: {e}", rid)
                 if not streamed:
                     # ★ 这里原本是 `send_error(502, str(e))`,两处都不对:
                     #   ① 502 是可重试码 —— 实测 codex 对 502 会重发 30 次,每次在代理里重新挑号。
@@ -549,6 +560,5 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    sys.stderr.write(f"[proxy] rotating proxy on 127.0.0.1:{PORT} → https://{UPSTREAM_HOST}{UPSTREAM_BASE}\n")
-    sys.stderr.flush()
+    _plog(f"rotating proxy on 127.0.0.1:{PORT} → https://{UPSTREAM_HOST}{UPSTREAM_BASE}")
     ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
