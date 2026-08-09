@@ -1,4 +1,5 @@
 import { costOf, cacheSavingOf } from "./rates";
+import { platformColor } from "./theme";
 
 /** traffic/scan.py 的输出契约。四个 token 类**互不相交**,相加才是 total(见 scan.py 头部)。 */
 export interface ModelBucket {
@@ -10,6 +11,8 @@ export interface Bucket extends ModelBucket {
 }
 export interface Platform {
   name: string;
+  /** 由 scan.py 的注册表下发。加平台只改 scan.py,前端自动跟上 */
+  color?: string;
   days: Record<string, Bucket>;   // 已按自然日窗口补零
   hours: Record<string, Bucket>;  // 今日 00 点到当前小时,已补零
   available: boolean;
@@ -18,6 +21,11 @@ export interface TrafficData {
   platforms: Record<string, Platform>;
   scan: { scanned: number; reused: number; files: number; elapsed_ms?: number };
   generated_at: number;
+}
+
+/** 取平台色:优先用 scan.py 下发的,拿不到才回落到 `theme.ts` 的兜底表。 */
+export function colorOf(data: TrafficData | null, key: string): string {
+  return data?.platforms[key]?.color || platformColor(key);
 }
 
 export const RANGES = ["today", 7, 14, 30, 90] as const;

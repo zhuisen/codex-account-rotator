@@ -1,5 +1,5 @@
 import type { Theme } from "../theme";
-import { platformColor } from "../theme";
+
 import { fmtUSD } from "../rates";
 import { fmtTok, type TodayView } from "../traffic";
 
@@ -51,14 +51,19 @@ const IconRefresh = ({ spin }: { spin?: boolean }) => (
 );
 
 /** 菜单栏「今日」Tab · 交接稿 `菜单栏v3-交接说明.md` §2(1b 迷你仪表盘)。 */
-export default function MenuBarToday({ t, view, refreshedAt, busy, onRefresh, onOpenPlatform }: {
+export default function MenuBarToday({ t, view, colors, refreshedAt, busy,
+                                      onRefresh, onOpenPlatform, onOpenOverview }: {
   t: Theme;
   view: TodayView | null;
+  /** 平台色,由 scan.py 的注册表下发(见 traffic.ts 的 colorOf) */
+  colors: Record<string, string>;
   /** 数据的生成时刻(快照时间),不是"现在" */
   refreshedAt: number | null;
   busy: boolean;
   onRefresh: () => void;
   onOpenPlatform: (key: string) => void;
+  /** 点图表任意处 → 主窗流量总览(用户 2026-08-09 要求) */
+  onOpenOverview: () => void;
 }): React.ReactElement {
   if (!view) {
     return (
@@ -118,15 +123,18 @@ export default function MenuBarToday({ t, view, refreshedAt, busy, onRefresh, on
         </span>
       </div>
 
-      {/* 小时堆叠图 —— 无 tooltip(§5:要明细走底栏「打开流量总览 ↗」) */}
-      <div className="mb-today-chart">
+      {/* 小时堆叠图 —— 无 tooltip(§5:要明细走底栏「打开流量总览 ↗」)。
+          ★ 整块可点 → 直接开主窗总览:弹窗里既然不给 tooltip,"想看细节"这个意图最自然的落点
+          就是图本身,而不是逼用户去找底栏那个按钮(用户 2026-08-09 指定)。 */}
+      <div className="mb-today-chart mb-today-chart-click" onClick={onOpenOverview}
+           title="打开主窗口的 AI用量信息">
         <div className="mb-today-peak" style={{ color: t.faint }}>
           {view.peak ? `峰值 ${fmtTok(view.peak.v)} · ${hourLabel(view.peak.hour)}` : "今日暂无用量"}
         </div>
         <svg viewBox={`0 0 ${VW} ${VH}`} style={{ width: "100%", height: "auto", display: "block" }}>
           {/* 自上而下画(最后一层在最下面),靠遮挡形成带 —— 与稿子的 a3/a2/a1 同序 */}
           {[...cum].reverse().map((c) => (
-            <path key={c.key} d={area(c.top, yMax)} fill={platformColor(c.key)} />
+            <path key={c.key} d={area(c.top, yMax)} fill={colors[c.key]} />
           ))}
           <line x1={0} x2={VW} y1={VH - 0.5} y2={VH - 0.5}
                 stroke="rgba(255,255,255,.16)" strokeWidth={1} />
@@ -147,7 +155,7 @@ export default function MenuBarToday({ t, view, refreshedAt, busy, onRefresh, on
       <div className="mb-today-legend">
         {per.map((p) => (
           <div key={p.key} className="mb-today-row" onClick={() => onOpenPlatform(p.key)}>
-            <span className="mb-today-swatch" style={{ background: platformColor(p.key) }} />
+            <span className="mb-today-swatch" style={{ background: colors[p.key] }} />
             <span className="mb-today-name">{p.name}</span>
             <span className="mb-today-pct" style={{ color: t.faint }}>{p.pct.toFixed(1)}%</span>
             <span className="mb-today-tok">{fmtTok(p.tok)}</span>

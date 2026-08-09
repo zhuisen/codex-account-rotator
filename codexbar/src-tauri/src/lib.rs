@@ -8,11 +8,28 @@ use tauri::{
     AppHandle, Emitter, Manager, PhysicalPosition, WebviewUrl,
 };
 
+/// 仓库根目录 —— `codex-rotate` / `traffic/scan.py` / `state.json` 都从这里找。
+///
+/// ★ **GUI app 从 Finder / launchd 启动时不继承 shell 环境**,所以"让用户配个 `CODEXBAR_STORE`"
+/// 对别人的机器根本不成立(他 `export` 完双击图标,进程里依然读不到)。唯一可靠的做法是
+/// **构建期烧进去**:`deploy.sh` 把自己所在仓库的绝对路径传成 `CODEXBAR_STORE_DEFAULT`,
+/// `option_env!` 在编译时取到它。这样别人 clone 到任何目录、跑一次 deploy.sh 就能用。
+///
+/// 运行期 env 仍然优先 —— 那条留给隔离测试(从终端起 app 时才有效)。
 fn store_dir() -> String {
-    std::env::var("CODEXBAR_STORE").unwrap_or_else(|_| {
-        let home = std::env::var("HOME").unwrap_or_default();
-        format!("{}/Projects/tools/codex-account-rotator", home)
-    })
+    if let Ok(p) = std::env::var("CODEXBAR_STORE") {
+        if !p.is_empty() {
+            return p;
+        }
+    }
+    if let Some(p) = option_env!("CODEXBAR_STORE_DEFAULT") {
+        if !p.is_empty() {
+            return p.to_string();
+        }
+    }
+    // 兜底:仓库默认位置。走到这里说明不是用 deploy.sh 构建的。
+    let home = std::env::var("HOME").unwrap_or_default();
+    format!("{}/Projects/tools/codex-account-rotator", home)
 }
 
 const ALLOWED_CMDS: &[&str] = &["switch", "cool", "uncool", "refresh-all", "health", "list", "quota", "remove", "credits", "probe", "tokens"];

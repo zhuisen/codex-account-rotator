@@ -76,6 +76,23 @@
 
 ---
 
+### v0.8.0 — 平台注册表 + 接入 Kimi + 可分发 — 2026-08-09
+
+- **平台注册表**:加一家 = 写一个 `_scan_*` + 在 `SOURCES` 加一行。平台名/配色随扫描结果下发,前端不用改(`theme.ts` 的色表降级为兜底)。停用走 `--exclude k` / `--only k` 或 `traffic/sources.local.json` 的 `{"disabled":[…]}`。输出新增 `scan.enabled` / `scan.registered` —— 少一家时能直接区分「被停用」与「解析器坏了」。
+- **接入 Kimi**(`~/.kimi-code/sessions/**/agents/*/wire.jsonl`)。口径实测锁定:只认 `type=="usage.record"` 且 `usageScope=="turn"`。
+  - ★ **差点翻倍**:`usage.record`(1746 条)与 `step.end` 的 `event.usage`(1745 条)是同一批调用,四类逐项**零差**,两个都加就虚高一倍。取前者是因为它带 `model`(后者没有)。
+  - ★ `usageScope` 里混着 **1 条 `session`** 累计记录,滤掉之后与 `step.end` 四类逐项对上。
+  - kimi 的四个字段本来就互不相交(与 Claude 同族),**不做减法**;`main` 与 `agent-N` 的 uuid 零交集,文件直接相加;`time` 是 epoch 毫秒。
+  - 集成后用一份**不走 scan.py 的独立实现**重算 14 天窗口对账:total / rounds / 四类**逐项一致**。
+- **可移植性:仓库路径改为构建期烧进二进制**。`store_dir()` 原来写死 `~/Projects/tools/codex-account-rotator`,别人 clone 到别处就找不到 `scan.py`/`state.json`;而 **GUI app 从 Finder/launchd 启动不继承 shell 环境**,`export CODEXBAR_STORE` 对双击启动无效。改为 `deploy.sh` 把自己所在仓库的绝对路径传成 `CODEXBAR_STORE_DEFAULT`、Rust 用 `option_env!` 编译期取到。运行期 env 仍优先(隔离测试用)。`daemon/quota_daemon.py` 的绝对路径同步改为自解析。
+- **`deploy.sh` 首次运行自动装 npm 依赖**(有 lockfile 走 `npm ci`)。全新 clone 没有 `node_modules`,原来直接 `tauri build` 会挂 —— 实测移走 `node_modules` 复现并验证修复。
+- **模型配色不再出现灰色**:未登记模型从死灰 `#5b6472` 改为**按模型名确定性散列**取色(10 色盘,不含灰)。多个未登记模型原本共用同一个灰,堆叠图上并成一条带看不出是几个 —— 而"新模型没来得及登记"是常态。登记过的仍优先用手挑色。饼图的「其余」轨道仍是灰(它不是模型,是余量)。
+- **文档面向"别人也能部署"重写**:README 开头讲清这套是**两半**(A 用量总览 = 零凭证人人可用 / B 账号池 = 需自备多个 ChatGPT 订阅、风险自负)+ 三步快速开始;`SETUP.md` §0 补 Node/Rust 前置与"可以只装一半"对照表、§6 从已退役的 SwiftBar 整节重写为 CodexBar 的主界面/菜单栏部署说明;RUNBOOK 补三条应用层排查(换 clone 目录、签名、别人机器上是空的)。
+- **菜单栏今日 Tab:点图表任意处 → 主窗流量总览**(弹窗不给 tooltip,想看细节的落点就是图本身)。
+- **调查负面结论**:**Antigravity(agy) 本机拿不到用量** —— 会话是 protobuf blob 存在 SQLite,字段名不在数据里;全树搜五个候选字段零命中;CLI 无 usage 子命令。注意 **agy ≠ gemini CLI**,本机两个都装。官方 Gemini CLI **可接**(435 条实测 `total = input+output+thoughts+tool` 且 `cached ⊆ input`),但数据停在 2026-06-18。
+
+---
+
 ### v0.7.0 — 多 AI 流量总览 + 会话粘性 — 2026-08-09
 
 **新增**

@@ -11,7 +11,7 @@ import { useStore } from "./hooks/useStore";
 import { useTraffic } from "./hooks/useTraffic";
 import { fmtAgo } from "./helpers";
 import { usePrivacy } from "./hooks/usePrivacy";
-import { todayView, fmtTok } from "./traffic";
+import { todayView, fmtTok, colorOf } from "./traffic";
 import "./App.css";
 import "./menubar.css";
 
@@ -55,6 +55,10 @@ export default function MenuBar() {
   const { data: traffic, busy: trafficBusy, refresh: refreshTraffic, refreshIfStale } =
     useTraffic({ revalidate: false });
   const today = useMemo(() => todayView(traffic), [traffic]);
+  // 平台色从 scan.py 下发的注册表取,前端不再各写一份色表(加平台只改 scan.py)
+  const platColors = useMemo(
+    () => Object.fromEntries(Object.keys(traffic?.platforms ?? {}).map((k) => [k, colorOf(traffic, k)])),
+    [traffic]);
 
   // ★ 托盘弹出时按新鲜度重扫。`document.visibilityState` 那条定时器在弹窗隐藏时不跑,
   //   所以刚点开的这一刻数据可能已经很旧了 —— 这个信号补的正是那一刻。
@@ -186,9 +190,11 @@ export default function MenuBar() {
 
       {tab === "today" ? (
         <div className="mb-pane">
-          <MenuBarToday t={t} view={today} refreshedAt={traffic?.generated_at ?? null}
+          <MenuBarToday t={t} view={today} colors={platColors}
+                        refreshedAt={traffic?.generated_at ?? null}
                         busy={trafficBusy} onRefresh={refreshTraffic}
-                        onOpenPlatform={(k) => void openMain("navigate-platform", k)} />
+                        onOpenPlatform={(k) => void openMain("navigate-platform", k)}
+                        onOpenOverview={() => void openMain("navigate-traffic")} />
         </div>
       ) : (
       <div className="mb-pane">

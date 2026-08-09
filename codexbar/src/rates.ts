@@ -49,6 +49,9 @@ const FALLBACK: Record<string, Price> = {
   claude: { in: 5.0,  cacheRead: 0.5,   out: 25.0, cacheWrite: 6.25, est: true },
   codex:  { in: 1.75, cacheRead: 0.175, out: 14.0, est: true },
   grok:   { in: 2.0,  cacheRead: 0.3,   out: 6.0,  est: true },
+  // ⚠️ kimi k3 的官方牌价我没有可信来源,这里是**占位数**,只为让费用列不空着。
+  //    拿到真价改这里(以及下面 RATES 里补一条 `kimi-code/k3`),UI 会一直标 * 提醒它是估算。
+  kimi:   { in: 0.6,  cacheRead: 0.06,  out: 2.5,  est: true, note: "k3 牌价未核实,占位" },
 };
 
 export function priceOf(model: string, platform: string): Price {

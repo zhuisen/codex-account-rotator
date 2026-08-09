@@ -6,6 +6,29 @@
 
 > 🆕 **新电脑从零搭建** → [**SETUP.md**](SETUP.md)(凭证不搬运,新机 `codex login` 重新生成)。日常用法 / 排障 / 不变量 → [RUNBOOK.md](RUNBOOK.md)。
 
+## 先看这个:这套东西是两半
+
+| | 【A】AI 用量信息 | 【B】账号池 + 轮换代理 |
+|---|---|---|
+| 干什么 | 汇总本机各 AI CLI **已经落盘**的 token 消耗 | 多个 ChatGPT 订阅做成池子,给 Codex CLI 逐请求透明轮换 |
+| 要凭证吗 | **不要**。只读本机文件、不联网、不碰 token | 要,每号 OAuth |
+| 谁能用 | **任何 macOS 用户**,装了下面四家 CLI 中任意一家就有数据 | 需要自备多个 ChatGPT Plus/Pro |
+| 风险 | 无 | ⚠️ 自负,多账号轮换受 OpenAI 条款约束(本仓库 CHANGELOG 的 B7/B8/B14/B21 记过实测掉号) |
+
+**只想看自己电脑烧了多少 token,只装 A 就行**,三步:
+
+```bash
+brew install python3 node && curl https://sh.rustup.rs -sSf | sh   # 前置(python3 必须 OpenSSL 构建)
+git clone https://github.com/zhuisen/codex-account-rotator.git && cd codex-account-rotator
+bash codexbar/scripts/setup-signing.sh && bash codexbar/scripts/deploy.sh
+```
+
+clone 到哪个目录都行 —— `deploy.sh` 会把仓库路径烧进二进制。完整说明见 [SETUP.md §6](SETUP.md)。
+
+覆盖的 CLI:**Claude Code · Codex · Grok · Kimi**(Antigravity/agy **不支持**,它把会话存成 protobuf blob,本地没有可读用量)。加一家 = 在 `traffic/scan.py` 写个解析器 + 注册表加一行,前端自动跟上。
+
+---
+
 ## 它解决的 4 个痛点
 
 | 痛点 | 怎么解的 |
@@ -53,7 +76,8 @@
 | `proxy/README.md` | 代理层细节文档 |
 | `.traffic-cache.json`(gitignored) | `traffic/scan.py` 的**逐文件增量缓存**(~10MB,按 `(mtime,size)` 命中)。冷 ~18s → 热 ~1.4s 靠它。删了只是重扫一次,不丢数据 |
 | `.traffic-latest.json`(gitignored) | 最近一次扫描的**成品快照**(~91KB)。两个 webview 都先读它再后台重扫,所以进页面/点托盘不再等 1~3 秒。由 `run_traffic` 原子写入(`.tmp<pid>` → `rename`) |
-| `traffic/scan.py` | **多 AI 流量总览扫描器**(`[--days N] [--json] [--no-cache]`)。读 Claude `~/.claude/projects/**/*.jsonl` + Codex `~/.codex/sessions/**/rollout-*.jsonl` + Grok `~/.grok/**/updates.jsonl`,**纯本地只读、不联网、不消耗任何额度**,与账号池无关。CodexBar「AI用量信息」页的数据源 |
+| `traffic/sources.local.json`(gitignored) | 本机停用哪些平台:`{"disabled": ["grok"]}`。等价 CLI:`--exclude grok` / `--only kimi` |
+| `traffic/scan.py` | **多 AI 流量总览扫描器**(`[--days N] [--json] [--no-cache]`)。读 Claude / Codex / Grok / Kimi 四家 transcript（平台注册表在文件里，**加一家 = 写个解析器 + 加一行**，前端自动跟上）,**纯本地只读、不联网、不消耗任何额度**,与账号池无关。CodexBar「AI用量信息」页的数据源 |
 | `claude/claude_tokens.py` | ⚠️ 只统计 Claude 的旧扫描器,能力已被 `traffic/scan.py` 完全覆盖(v0.7.0 起 app 不再调用)。保留仅作 CLI |
 | `scripts/install-launchd.sh` | **生成并加载 5 个 launchd 服务**(autosync/keepalive/refreshquota/quotad/proxy)。生成而非提交成文件:plist 内嵌绝对路径,提交的副本换台机器就是错的,且会静默漂移(旧的 `launchd/*.plist` 就漂到了写死 `/usr/bin/python3`)。★脚本会**解析并钉住 OpenSSL 版的 python3**,见「维护约定」 |
 | `auth/`(gitignored) | 每号凭证槽位 `<account_id>.json`(0600) |
@@ -112,7 +136,7 @@ codex-rotate probe plus5 --model gpt-5.5 --effort low
 
 > **Dock 图标默认关**(纯菜单栏形态),可在「设置」页打开——`Info.plist` 的 `LSUIElement` 保持 `true`(决定冷启动瞬间不闪图标),运行期用 `setActivationPolicy` 来回切,不需重启。
 
-主界面侧栏 4 页:**总览** / **AI用量信息** / 日志 / 设置。消耗页汇总 **Claude + Codex + Grok** 三家(v0.7.0 起,取代原来分开的「Token 消耗」与「Claude 消耗」两页):堆叠面积图 + 今日/7/14/30/90d 五档,点任一平台进「详情」看分模型拆解与费率卡。数据源全是**本机 CLI 自己落的盘**、零额度消耗——`~/.claude/projects/**/*.jsonl` · `~/.codex/sessions/**/rollout-*.jsonl` · `~/.grok/**/updates.jsonl`。费用一栏是**按牌价折算的等效 API 成本**(四类 token 分别计价,缓存读按 10%),订阅制下并非实付。
+主界面侧栏 4 页:**总览** / **AI用量信息** / 日志 / 设置。消耗页汇总 **Claude + Codex + Grok + Kimi** 四家(v0.7.0 起,取代原来分开的「Token 消耗」与「Claude 消耗」两页):堆叠面积图 + 今日/7/14/30/90d 五档,点任一平台进「详情」看分模型拆解与费率卡。数据源全是**本机 CLI 自己落的盘**、零额度消耗——`~/.claude/projects/**/*.jsonl` · `~/.codex/sessions/**/rollout-*.jsonl` · `~/.grok/**/updates.jsonl`。费用一栏是**按牌价折算的等效 API 成本**(四类 token 分别计价,缓存读按 10%),订阅制下并非实付。
 
 > ⚠️ **消耗页只有 token 量,没有 Claude 的额度油表**,这是刻意的:Claude Code **不把额度写进任何本地文件**(实测 300 文件 / 10,316 条 assistant 记录,`usage` 里只有 token 计数,零 `rate_limit`/`resets_at`/`remaining` 字段;`~/.claude` 下也无额度快照),`/usage` 的额度条是实时从服务端拉的。要拿它就必须用订阅凭证调 Anthropic 端点,而 Anthropic Consumer Terms §3 明文禁止「非 API key 的自动化访问」。codex 那页能有油表,是因为 codex **把额度写进了本地 rollout**——两边没有对等物。
 

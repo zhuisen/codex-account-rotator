@@ -35,3 +35,4 @@ app/**/.build_number
 codexbar/src/_*_probe.json
 codexbar/harness.html
 codexbar/src/harness-entry.tsx
+traffic/sources.local.json

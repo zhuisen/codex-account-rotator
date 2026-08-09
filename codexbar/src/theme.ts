@@ -76,17 +76,51 @@ export const MODEL_COLORS: Record<string, string> = {
   "grok-4.5-code":  "#a78bfa",
   "grok-4":         "#6d5ce0",
   "grok-4-fast":    "#b8a9ff",
+
+  // Kimi。平台色是粉,模型按新旧在同一色系内深浅排开(与 Claude/Grok 同规则)。
+  "kimi-code/k3":     "#f472b6",
+  "kimi-code/k3-256k": "#f9a8d4",
+  "kimi-code/k2":     "#c2557f",
 };
 /** 平台品牌色(交接稿 §0/§10)。导航激活态、图层、图例、卡片描边统一走这里。 */
+/**
+ * 平台配色的**兜底**表。真值由 `traffic/scan.py` 的注册表随扫描结果一起下发
+ * (`data.platforms[k].color`),前端优先用那个 —— 这样"加一家平台"只需改 scan.py 一处,
+ * 不用再回来同步这里。这张表只在拿不到数据时(首扫前/该平台被停用)兜底。
+ */
 export const PLATFORM_COLORS: Record<string, string> = {
   claude: "#E0784F",
   codex:  "#2dd4bf",
   grok:   "#8b7cf6",
-  gemini: "#4d9fff",
+  kimi:   "#f472b6",
 };
 export const platformColor = (k: string): string => PLATFORM_COLORS[k] ?? "#5b6472";
 
-export const MODEL_FALLBACK = "#5b6472";
+/**
+ * ★ **项目级规则:模型面积图里不出现灰色**(用户 2026-08-09 定稿)。
+ *
+ * 以前没登记的模型一律回落到一个死灰 `#5b6472`。问题有两层:一是灰在深色底上本来就发闷、跟
+ * 背景和分隔线混在一起不好看;二是**多个未登记模型会共用同一个灰**,堆叠图上直接糊成一条带,
+ * 看不出是几个模型 —— 而"新模型还没来得及登记"恰恰是最常见的状态(本机 gpt-5.6-sol、
+ * kimi-code/k3 都曾是这样)。
+ *
+ * 所以兜底改成**按模型名做确定性散列取色**:同名恒同色(满足"同一模型换窗口不换色"这条老规矩),
+ * 不同名基本不撞,且色相盘里**不含灰**。登记过的模型仍然优先用手挑的色 —— 手挑的能表达家族关系,
+ * 散列表达不了。
+ */
+const FALLBACK_HUES = [
+  "#f472b6", "#fb923c", "#facc15", "#4ade80", "#22d3ee",
+  "#60a5fa", "#a78bfa", "#f87171", "#34d399", "#e879f9",
+];
+
+/** @deprecated 保留只为不破坏外部引用;新代码别用,见 `modelColor` 的散列兜底。 */
+export const MODEL_FALLBACK = FALLBACK_HUES[0];
+
 export function modelColor(m: string): string {
-  return MODEL_COLORS[m] ?? MODEL_FALLBACK;
+  const hit = MODEL_COLORS[m];
+  if (hit) return hit;
+  // djb2 的简化版。要的是"稳定 + 分散",不是密码学强度。
+  let h = 5381;
+  for (let i = 0; i < m.length; i++) h = ((h << 5) + h + m.charCodeAt(i)) | 0;
+  return FALLBACK_HUES[Math.abs(h) % FALLBACK_HUES.length];
 }

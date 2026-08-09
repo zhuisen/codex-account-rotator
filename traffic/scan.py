@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """多 AI 流量总览的统一扫描器 —— Claude / Codex / Grok 三平台,读本机 CLI 落盘记录。
 
-    scan.py [--days N] [--json] [--no-cache]
+    scan.py [--days N] [--json] [--no-cache] [--only k1,k2] [--exclude k1]
 
 **全部本地只读、不联网、不消耗任何额度。**三家的 transcript 都是各自 CLI 自己写在硬盘上的。
 
@@ -43,6 +43,7 @@ HOME = Path.home()
 CLAUDE_ROOT = Path(os.environ.get("CLAUDE_CONFIG_DIR") or (HOME / ".claude")) / "projects"
 CODEX_ROOT = Path(os.environ.get("CODEX_HOME") or (HOME / ".codex")) / "sessions"
 GROK_ROOT = Path(os.environ.get("GROK_HOME") or (HOME / ".grok")) / "sessions"
+KIMI_ROOT = Path(os.environ.get("KIMI_HOME") or (HOME / ".kimi-code")) / "sessions"
 CACHE = Path(__file__).resolve().parent.parent / ".traffic-cache.json"
 
 CACHE_V = 1
@@ -234,12 +235,100 @@ def _scan_grok_file(path):
     return rows
 
 
+
+def _scan_kimi_file(path):
+    """-> [row]。kimi 的 wire 日志,一个 `agents/<agent>/wire.jsonl` 一个代理。
+
+    ★★ **只认 `type == "usage.record"` 且 `usageScope == "turn"`**,三条都是实测定的
+    (2026-08-09,75 个 wire.jsonl / 1745 条):
+
+    1. **同一笔账记了两遍**。`usage.record`(1746 条)与 `event.type == "step.end"` 里的
+       `event.usage`(1745 条)是同一批调用,四类逐项**零差**。两个都加 = 虚高一倍。选
+       `usage.record` 是因为它多带 `model` 和 `usageScope`,`step.end` 里没有模型名。
+       (与 codex 那边「取 `last_token_usage` 不取 `total_token_usage`」是同一个形状的坑。)
+    2. **`usageScope` 里混着累计口径**:1745 条 `turn` + **1 条 `session`**。那条 session 是
+       整个会话的累计,不滤掉就把它重复计一遍 —— 滤掉之后与 `step.end` 四类逐项对上,零差。
+    3. **四个字段本来就互不相交**(`inputOther | inputCacheRead | inputCacheCreation | output`),
+       与 Claude 同族、与 codex/Grok 相反(那两家的缓存读**含在** input 里要减)。**别在这里做减法。**
+
+    另外两条实测结论:
+    - `main` 与 `agent-N` 的 wire 日志 **uuid 零交集**(1388 / 357),主代理日志不含子代理的步骤,
+      所有文件直接相加即可,不会重复。
+    - `time` 是 epoch **毫秒**,不是秒。
+    """
+    rows = []
+    try:
+        fh = open(path, encoding="utf-8", errors="replace")
+    except OSError:
+        return rows
+    with fh:
+        for line in fh:
+            if '"usage.record"' not in line:
+                continue
+            try:
+                o = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(o, dict) or o.get("type") != "usage.record":
+                continue
+            # 累计口径的那条必须丢。将来若出现新的 scope 取值,一律按"不是 turn 就不认"处理 ——
+            # 宁可漏记也不能把累计值混进逐笔求和。
+            if o.get("usageScope") != "turn":
+                continue
+            ms = o.get("time")
+            u = o.get("usage")
+            if not isinstance(ms, (int, float)) or not isinstance(u, dict):
+                continue
+            i = _num(u, "inputOther")
+            cr = _num(u, "inputCacheRead")
+            cw = _num(u, "inputCacheCreation")
+            out = _num(u, "output")
+            if not (i or cr or cw or out):
+                continue
+            model = o.get("model")
+            rows.append([int(ms / 1000), model if isinstance(model, str) else "unknown",
+                         i, cr, cw, out])
+    return rows
+
+
+# ---------------------------------------------------------------- 平台注册表
+#
+# ★ **加一家 = 写一个 `_scan_*` + 在这里加一行**,前端不用动:平台名、配色、是否可用都从这份
+#   注册表随扫描结果一起输出,UI 照着渲染(`theme.ts` 只留兜底色)。
+#
+# ⚠️ **解析器必须一家一写,这部分不该自动化**。实测四家是四种完全不同的形状:Claude 三个 input
+#   字段互不相交、codex/Grok 的缓存读**含在** input 里、kimi 自带四类还混着一条累计记录。
+#   写个"通用适配器"去猜字段名,正是会静默算错数的做法 —— 宁可每家多写 30 行。
+#
+# 停用某家:`--exclude grok`,或在 `traffic/sources.local.json` 写 {"disabled": ["grok"]}
+# (该文件 gitignored,是本机偏好不是仓库配置)。停用后它不出现在输出里,UI 上自然消失。
 SOURCES = (
-    # key,      名称,      根目录,       glob,                     解析函数,           要不要按 id 全局去重
-    ("claude", "Claude", CLAUDE_ROOT, "**/*.jsonl",              _scan_claude_file, True),
-    ("codex",  "Codex",  CODEX_ROOT,  "**/rollout-*.jsonl",      _scan_codex_file,  False),
-    ("grok",   "Grok",   GROK_ROOT,   "*/*/updates.jsonl",       _scan_grok_file,   False),
+    {"key": "claude", "name": "Claude", "root": CLAUDE_ROOT, "color": "#E0784F",
+     "glob": "**/*.jsonl",         "parse": _scan_claude_file, "dedup": True},
+    {"key": "codex",  "name": "Codex",  "root": CODEX_ROOT,  "color": "#2dd4bf",
+     "glob": "**/rollout-*.jsonl", "parse": _scan_codex_file,  "dedup": False},
+    {"key": "grok",   "name": "Grok",   "root": GROK_ROOT,   "color": "#8b7cf6",
+     "glob": "*/*/updates.jsonl",  "parse": _scan_grok_file,   "dedup": False},
+    {"key": "kimi",   "name": "Kimi",   "root": KIMI_ROOT,   "color": "#f472b6",
+     "glob": "**/wire.jsonl",      "parse": _scan_kimi_file,   "dedup": False},
 )
+
+LOCAL_CFG = Path(__file__).resolve().parent / "sources.local.json"
+
+
+def _enabled_sources(only=None, exclude=None):
+    """按 CLI 参数 + 本机配置过滤注册表。三者取交集,CLI 优先级最高。"""
+    disabled = set(exclude or ())
+    if not only:
+        try:
+            cfg = json.loads(LOCAL_CFG.read_text(encoding="utf-8"))
+            disabled |= set(cfg.get("disabled") or ())
+        except (OSError, ValueError):
+            pass          # 没有配置文件是常态,不是错误
+    picked = [s for s in SOURCES if s["key"] not in disabled]
+    if only:
+        picked = [s for s in picked if s["key"] in set(only)]
+    return picked
 
 
 # ---------------------------------------------------------------- 聚合
@@ -261,7 +350,7 @@ def _add(b, model, i, cr, cw, out):
     m["output"] += out; m["total"] += t; m["rounds"] += 1
 
 
-def scan(days=90, use_cache=True):
+def scan(days=90, use_cache=True, only=None, exclude=None):
     cached = _load_cache() if use_cache else {}
     cut = time.time() - max(days, 90) * 86400
     fresh = {}
@@ -274,7 +363,9 @@ def scan(days=90, use_cache=True):
     end_date = _date.fromtimestamp(now_ts)
     today = end_date.isoformat()
 
-    for key, name, root, pattern, parse, dedup in SOURCES:
+    for src in _enabled_sources(only, exclude):
+        key, name, root = src["key"], src["name"], src["root"]
+        pattern, parse, dedup = src["glob"], src["parse"], src["dedup"]
         days_b, hours_b = {}, {}
         merged, seq = {}, []
         if root.is_dir():
@@ -334,12 +425,17 @@ def scan(days=90, use_cache=True):
         cur_h = int(strftime("%H", localtime(now_ts)))
         hours = {f"{today}T{h:02d}": (hours_b.get(f"{today}T{h:02d}") or _blank())
                  for h in range(cur_h + 1)}
-        out[key] = {"name": name, "days": picked, "hours": hours,
+        out[key] = {"name": name, "color": src["color"], "days": picked, "hours": hours,
                     "available": root.is_dir()}
 
     if use_cache and not (scanned == 0 and len(fresh) == len(cached)):
         _save_cache(fresh)
-    return out, {"scanned": scanned, "reused": reused, "files": scanned + reused}
+    # ★ 把"这一次实际启用了哪些源"记进结果。快照是会被落盘复用的成品,不记这个的话,
+    #   一旦某次扫描少了一家(临时 --exclude、sources.local.json 没删干净、根目录暂时不可读),
+    #   事后完全无法判断是"当时被停用了"还是"解析器坏了"—— 2026-08-09 就吃过一次这个哑巴亏。
+    return out, {"scanned": scanned, "reused": reused, "files": scanned + reused,
+                 "enabled": [s["key"] for s in _enabled_sources(only, exclude)],
+                 "registered": [s["key"] for s in SOURCES]}
 
 
 # ---------------------------------------------------------------- CLI
@@ -353,6 +449,7 @@ def _fmt(n):
 
 def main(argv):
     days, use_cache, as_json = 14, True, False
+    only = exclude = None
     i = 0
     while i < len(argv):
         a = argv[i]
@@ -364,12 +461,24 @@ def main(argv):
             as_json = True
         elif a == "--no-cache":
             use_cache = False
+        elif a in ("--only", "--exclude"):
+            if i + 1 >= len(argv):
+                sys.exit(f"{a} 后面要跟平台 key(逗号分隔): {','.join(x['key'] for x in SOURCES)}")
+            vals = [x.strip() for x in argv[i + 1].split(",") if x.strip()]
+            bad = [v for v in vals if v not in {x["key"] for x in SOURCES}]
+            if bad:
+                sys.exit(f"未知平台 {bad};已注册: {','.join(x['key'] for x in SOURCES)}")
+            if a == "--only":
+                only = vals
+            else:
+                exclude = vals
+            i += 1
         else:
             sys.exit(f"未知参数: {a}")
         i += 1
 
     t0 = time.time()
-    platforms, stat = scan(days=days, use_cache=use_cache)
+    platforms, stat = scan(days=days, use_cache=use_cache, only=only, exclude=exclude)
     stat["elapsed_ms"] = int((time.time() - t0) * 1000)
 
     if as_json:

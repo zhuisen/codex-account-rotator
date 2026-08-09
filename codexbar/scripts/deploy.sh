@@ -10,6 +10,17 @@ BUILD="$ROOT/src-tauri/target/release/bundle/macos/CodexBar.app"
 
 cd "$ROOT"
 
+# ★ 把仓库根烧进二进制。GUI app 不继承 shell 环境,不能指望运行期 env(见 lib.rs 的 store_dir)。
+#   别人 clone 到任何路径,跑一次这个脚本就能用。
+export CODEXBAR_STORE_DEFAULT="$(cd "$ROOT/.." && pwd)"
+echo "==> store dir: $CODEXBAR_STORE_DEFAULT"
+
+# 全新 clone 没有 node_modules,直接 tauri build 会挂。有 lockfile 用 ci(可复现),否则 install。
+if [ ! -d "$ROOT/node_modules" ]; then
+    echo "==> installing npm deps (first run)…"
+    if [ -f "$ROOT/package-lock.json" ]; then npm ci; else npm install; fi
+fi
+
 echo "==> building…"
 npx tauri build --bundles app 2>&1 | tail -3
 

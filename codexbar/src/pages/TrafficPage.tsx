@@ -1,10 +1,10 @@
 import { useMemo, useState } from "react";
-import { type Theme, platformColor, modelColor } from "../theme";
+import { type Theme, modelColor } from "../theme";
 import { fmtUSD } from "../rates";
 import StackedArea, { type Layer } from "../components/StackedArea";
 import Seg from "../components/Seg";
 import type { TrafficData, Bucket, Range } from "../traffic";
-import { RANGES, rangeLabel, bucketsFor, sumBuckets, costOfBucket, savingOfBucket, fmtTok, topModels } from "../traffic";
+import { RANGES, rangeLabel, bucketsFor, sumBuckets, costOfBucket, savingOfBucket, fmtTok, topModels, colorOf } from "../traffic";
 
 const AMBER = "#E0A21C";
 
@@ -101,7 +101,7 @@ export default function TrafficPage({ t, data, range, setRange, onDrill, busy, e
   //   曾按用户要求反成升序,同日看到实物后又改回:占大头的那家铺满基线、小的作为顶上的带,
   //   比"85% 悬在半空、15% 被压在轴线上"清楚得多。`per` 已是降序,直接用,别再 reverse。
   const layers: Layer[] = (view?.per ?? []).map((p) => ({
-    key: p.key, name: p.name, color: platformColor(p.key),
+    key: p.key, name: p.name, color: colorOf(data, p.key),
     values: p.buckets.map((b) => b.total),
   }));
 
@@ -130,7 +130,7 @@ export default function TrafficPage({ t, data, range, setRange, onDrill, busy, e
       : { k: "日均费用", v: fmtUSD((view?.grandCost ?? 0) / Math.max(1, view?.labels.length ?? 1)), c: AMBER },
     { k: "最大占比",
       v: top ? `${top.name} ${((top.total / Math.max(1, view!.grand)) * 100).toFixed(1)}%` : "—",
-      c: top ? platformColor(top.key) : undefined },
+      c: top ? colorOf(data, top.key) : undefined },
     // 缓存排最后(用户 2026-08-09 定稿):它是对首格「总 token」的**限定**而不是并列指标,
     // 夹在前面会把「总量 → 环比 → 费用」这条主线打断。
     { k: "缓存", v: view?.grand ? `${cacheShare.toFixed(1)}%` : "—" },
@@ -194,7 +194,7 @@ export default function TrafficPage({ t, data, range, setRange, onDrill, busy, e
       {/* 平台图例行 */}
       <div style={{ marginTop: 9 }}>
         {view?.per.map((p) => {
-          const c = platformColor(p.key);
+          const c = colorOf(data, p.key);
           return (
             <div key={p.key} onClick={() => onDrill(p.key)}
                  onMouseEnter={() => setHoverKey(p.key)} onMouseLeave={() => setHoverKey(null)}
@@ -228,15 +228,22 @@ export default function TrafficPage({ t, data, range, setRange, onDrill, busy, e
       <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 11, marginTop: 10,
                     paddingBottom: 4 }}>
         {view?.per.map((p) => (
-          <PlatformCard key={p.key} t={t} pk={p.key} name={p.name} buckets={p.buckets}
+          <PlatformCard key={p.key} t={t} name={p.name} color={colorOf(data, p.key)} buckets={p.buckets}
                         total={p.total} cost={p.cost} isToday={isToday}
                         yTotal={isToday ? yesterdayOf(data, p.key) : 0}
                         onDrill={() => onDrill(p.key)} rangeTxt={rangeLabel(range)} />
         ))}
-        <div style={{ border: `1px dashed ${t.ghostBorder}`, borderRadius: 13, display: "grid",
-                      placeItems: "center", color: t.faint, fontSize: 11.5, minHeight: 118 }}>
-          Gemini 待接入
-        </div>
+        {/* ★ 占位卡只在**没坐满一行**时出现,而且文案是通用的:平台由 `traffic/scan.py` 的注册表
+            决定,写死某一家的名字会在加/停平台后变成谎话(上一版写的是「Gemini 待接入」,
+            而实测 Antigravity 根本不落用量、官方 gemini CLI 又是另一个东西)。 */}
+        {(view?.per.length ?? 0) < 4 && (
+          <div style={{ border: `1px dashed ${t.ghostBorder}`, borderRadius: 13, display: "grid",
+                        placeItems: "center", color: t.faint, fontSize: 11.5, minHeight: 118,
+                        textAlign: "center", lineHeight: 1.6, padding: "0 10px" }}>
+            更多平台<br />
+            <span style={{ fontSize: 10 }}>在 traffic/scan.py 的注册表加一行</span>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -250,12 +257,12 @@ function yesterdayOf(data: TrafficData | null, key: string): number {
 }
 
 /** §1 平台卡片 / §4 今日模型饼图卡片 */
-function PlatformCard({ t, pk, name, buckets, total, cost, isToday, yTotal, onDrill, rangeTxt }: {
-  t: Theme; pk: string; name: string; buckets: Bucket[]; total: number; cost: number;
+function PlatformCard({ t, name, color, buckets, total, cost, isToday, yTotal, onDrill, rangeTxt }: {
+  t: Theme; name: string; color: string; buckets: Bucket[]; total: number; cost: number;
   isToday: boolean; yTotal: number; onDrill: () => void; rangeTxt: string;
 }): React.ReactElement {
   const [hov, setHov] = useState(false);
-  const c = platformColor(pk);
+  const c = color;
   const cur = buckets.length ? buckets[buckets.length - 1].total : 0;
   const shown = isToday ? total : cur;
   const d = yTotal ? ((total - yTotal) / yTotal) * 100 : null;

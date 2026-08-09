@@ -33,7 +33,8 @@ import sys
 import time
 from pathlib import Path
 
-ROT = "/Users/you/Projects/tools/codex-account-rotator/codex-rotate"
+# 自解析仓库根(本文件在 <repo>/daemon/ 下),别写死绝对路径 —— 换台机器/换 clone 路径就废。
+ROT = str(Path(__file__).resolve().parent.parent / "codex-rotate")
 cli = importlib.machinery.SourceFileLoader("cli", ROT).load_module()
 
 WATCH_SECS = 1      # activity poll — 4 cheap stats (~0.02ms), no network

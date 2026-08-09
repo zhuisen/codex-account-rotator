@@ -273,3 +273,7 @@
 }
 .mb-today-cost-cell { width: 48px; text-align: right; font-size: 11px; font-weight: 700; }
 .mb-today-delta-cell { width: 52px; text-align: right; font-size: 9.5px; }
+
+/* 图表整块可点 → 主窗流量总览(弹窗不给 tooltip,想看细节就点图) */
+.mb-today-chart-click { cursor: pointer; border-radius: 10px; transition: background .15s; }
+.mb-today-chart-click:hover { background: rgba(255, 255, 255, .03); }
