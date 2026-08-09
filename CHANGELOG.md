@@ -76,6 +76,18 @@
 
 ---
 
+### v0.8.1 — 偏好持久化 + 关于版块 — 2026-08-09
+
+- **★ 窗口尺寸/位置现在跨更新保留**。用户报「调好高度适配内容，每次更新都要再调一遍」。两处根因，**修一处不够**:
+  - 尺寸写死在 `tauri.conf.json`(`1000×660` + `center: true`),每次启动重置 → 装 `tauri-plugin-window-state`,flags 只取 `SIZE | POSITION`(不带 `VISIBLE`,否则主窗口每次开机弹出来;不带 `DECORATIONS`,自绘标题栏;`menubar` denylist,弹窗几何由 ResizeObserver + 托盘定位决定)。
+  - **`deploy.sh` 的 `pkill -9` 会吃掉状态** —— 读插件 2.4.1 源码确认它只在 `CloseRequested` / `RunEvent::Exit` 写盘,`Moved`/`Resized` 只更新内存。SIGKILL 不给退出处理机会,于是"调完再更新一次照样丢",等于白修。已改成 `osascript … to quit` 优雅退出 + 轮询等待 + 超时才强杀(强杀时打印警告)。
+  - 实测:写入 1512×987 → 重启 1512×988(±1px 为 Retina 取整,默认是 2000×1322)→ 跑完 `deploy.sh` 仍是 1512×988。
+- **版本号同步从 5 处降到 2 处**。前端三处硬编码(标题栏 / 侧栏 / 设置页)改为运行期 `getVersion()`,只剩 `tauri.conf.json` + `Cargo.toml`。发版漏改前端字符串这个老毛病从结构上消除。
+- **设置页「关于」重做**:64px 应用图标 + 版本 + 可点的 GitHub 外链(走 shell 插件在系统浏览器开,webview 内直接导航会把整个 app 变成网页)+ **检查更新**按钮。
+- **检查更新走 `git ls-remote` 而非 GitHub API**:仓库私有,匿名调 `/releases/latest` 一律 404,API 那条路在当前可见性下永远查不出结果。tag 比较按 (major,minor,patch) 数值 —— 字符串排会把 v0.10.0 排在 v0.9.0 前面。只在点按钮时联网,无定时器。
+
+---
+
 ### v0.8.0 — 平台注册表 + 接入 Kimi + 可分发 — 2026-08-09
 
 - **平台注册表**:加一家 = 写一个 `_scan_*` + 在 `SOURCES` 加一行。平台名/配色随扫描结果下发,前端不用改(`theme.ts` 的色表降级为兜底)。停用走 `--exclude k` / `--only k` 或 `traffic/sources.local.json` 的 `{"disabled":[…]}`。输出新增 `scan.enabled` / `scan.registered` —— 少一家时能直接区分「被停用」与「解析器坏了」。

@@ -190,6 +190,50 @@ fn read_traffic_snapshot() -> Result<Option<String>, String> {
     }
 }
 
+/// 查远端最新的 `vX.Y.Z` tag。
+///
+/// ★ **走 `git ls-remote` 而不是 GitHub Releases API**:这个仓库是私有的,匿名调
+/// `/repos/…/releases/latest` 一律返回 404(GitHub 对无权限私仓统一报 404 而非 403,防探测),
+/// 所以 API 那条路在当前可见性下**永远查不出结果**。`git ls-remote` 复用本机 git 已有的凭证
+/// (keychain / gh auth),对仓库所有者和已接受邀请的协作者都能用;仓库将来转公开也照样能用。
+///
+/// **只在用户点按钮时才跑**,没有任何定时器 —— 这是本 app 除探针外唯一会主动联网的动作。
+#[tauri::command]
+async fn check_update() -> Result<String, String> {
+    let store = store_dir();
+    let out = tauri::async_runtime::spawn_blocking(move || {
+        Command::new("git")
+            .args(["-C", &store, "ls-remote", "--tags", "--refs", "origin"])
+            .output()
+    })
+    .await
+    .map_err(|e| format!("join: {}", e))?
+    .map_err(|e| format!("git 起不来: {}", e))?;
+    if !out.status.success() {
+        return Err(format!(
+            "git ls-remote 失败(网络或凭证): {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    // 每行形如 "<sha>\trefs/tags/v0.8.0"。按 (major, minor, patch) 数值比较,
+    // **不能按字符串排** —— 那样 v0.10.0 会排在 v0.9.0 前面。
+    let mut best: Option<(u32, u32, u32, String)> = None;
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        let Some(tag) = line.rsplit('/').next() else { continue };
+        let Some(rest) = tag.strip_prefix('v') else { continue };
+        let mut it = rest.split('.');
+        let (Some(a), Some(b), Some(c)) = (it.next(), it.next(), it.next()) else { continue };
+        let (Ok(a), Ok(b), Ok(c)) = (a.parse::<u32>(), b.parse::<u32>(), c.parse::<u32>()) else {
+            continue;
+        };
+        if best.as_ref().map_or(true, |(x, y, z, _)| (a, b, c) > (*x, *y, *z)) {
+            best = Some((a, b, c, tag.to_string()));
+        }
+    }
+    best.map(|(_, _, _, t)| t)
+        .ok_or_else(|| "远端没有 vX.Y.Z 形态的 tag".to_string())
+}
+
 #[tauri::command]
 fn read_auth_tokens() -> Result<Value, String> {
     let state: Value = read_state()?;
@@ -420,6 +464,25 @@ fn toggle_menubar(app: &AppHandle, tray_rect: Option<tauri::Rect>) {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // ★ 主窗口的尺寸/位置持久化。用户 2026-08-09:"我调整了高度适配内容,每次更新都要再调一遍"。
+        //   根因是尺寸写死在 tauri.conf.json + `center: true`,每次启动都回到 1000×660。
+        //   其余偏好(主题/打码/Dock/菜单栏 Tab/自动切号)在 localStorage,数据在 app bundle **之外**,
+        //   deploy.sh 只换 bundle,所以那些本来就跨更新存活 —— 唯独窗口几何在 Rust 侧,需要这个插件。
+        //
+        //   三个刻意的取舍:
+        //   - **不含 `VISIBLE`**:主窗口是故意以隐藏态创建的(菜单栏优先),恢复可见性会让它每次开机弹出来。
+        //   - **不含 `DECORATIONS`**:我们用自绘标题栏(`decorations: false`),恢复它可能把原生边框加回来。
+        //   - **denylist 掉 `menubar`**:弹窗的高度由 ResizeObserver 按内容算、位置每次按托盘图标定位,
+        //     恢复上次几何会同时和这两件事打架,把弹窗放到错误的位置。
+        .plugin(
+            tauri_plugin_window_state::Builder::default()
+                .with_state_flags(
+                    tauri_plugin_window_state::StateFlags::SIZE
+                        | tauri_plugin_window_state::StateFlags::POSITION,
+                )
+                .with_denylist(&["menubar"])
+                .build(),
+        )
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_autostart::init(
@@ -573,6 +636,7 @@ pub fn run() {
             run_rotate,
             run_traffic,
             read_traffic_snapshot,
+            check_update,
             set_dock_visible,
             read_auth_tokens,
             read_logs,

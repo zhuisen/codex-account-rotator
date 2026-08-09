@@ -1,5 +1,10 @@
 import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { getVersion } from "@tauri-apps/api/app";
+import { open as openExternal } from "@tauri-apps/plugin-shell";
+// ★ 版本号只从 tauri 运行期取,前端不再写死。此前"版本号同步 5 处"里有 3 处在前端,
+//   发一次版要手改三个字符串,漏一个就显示错版本。现在只剩 tauri.conf.json + Cargo.toml 两处。
+import logo from "../../src-tauri/icons/128x128@2x.png";
 import { enable as enableAutostart, disable as disableAutostart, isEnabled as isAutostartEnabled } from "@tauri-apps/plugin-autostart";
 import type { Theme } from "../theme";
 
@@ -123,12 +128,104 @@ export default function SettingsPage({ t }: { t: Theme }) {
         )}
       </Row>
 
-      <div style={{ marginTop: 20, padding: "12px 0", borderTop: `1px solid ${t.divider}` }}>
-        <div style={{ fontSize: 12, fontWeight: 600, color: t.muted, marginBottom: 6 }}>关于</div>
-        <div style={{ fontSize: 11, color: t.faint, fontFamily: "'JetBrains Mono'", lineHeight: 1.8 }}>
-          CodexBar v0.8.0<br />
-          Tauri 2 + React · macOS<br />
-          github.com/zhuisen/codex-account-rotator
+      <About t={t} />
+    </div>
+  );
+}
+
+const REPO = "zhuisen/codex-account-rotator";
+const REPO_URL = `https://github.com/${REPO}`;
+
+/** 语义化版本比较。**不能按字符串比** —— 那样 0.10.0 会被判成小于 0.9.0。 */
+function isNewer(remote: string, current: string): boolean {
+  const parse = (v: string) => v.replace(/^v/, "").split(".").map((x) => parseInt(x, 10) || 0);
+  const [a, b, c] = parse(remote), [x, y, z] = parse(current);
+  return a !== x ? a > x : b !== y ? b > y : c > z;
+}
+
+type UpdateState =
+  | { k: "idle" }
+  | { k: "busy" }
+  | { k: "latest"; v: string }
+  | { k: "new"; v: string }
+  | { k: "err"; msg: string };
+
+function About({ t }: { t: Theme }) {
+  const [ver, setVer] = useState("");
+  const [up, setUp] = useState<UpdateState>({ k: "idle" });
+  useEffect(() => { getVersion().then(setVer).catch(() => setVer("?")); }, []);
+
+  const check = async () => {
+    if (up.k === "busy") return;
+    setUp({ k: "busy" });
+    try {
+      const tag = await invoke<string>("check_update");
+      setUp(isNewer(tag, ver) ? { k: "new", v: tag } : { k: "latest", v: tag });
+    } catch (e: unknown) {
+      setUp({ k: "err", msg: String(e).slice(0, 120) });
+    }
+  };
+
+  const link: React.CSSProperties = {
+    color: t.accent, cursor: "pointer", textDecoration: "none",
+    borderBottom: `1px solid ${t.accent}44`,
+  };
+
+  return (
+    <div style={{ marginTop: 22, paddingTop: 16, borderTop: `1px solid ${t.divider}` }}>
+      <div style={{ fontSize: 12, fontWeight: 600, color: t.muted, marginBottom: 12 }}>关于</div>
+      <div style={{ display: "flex", gap: 16, alignItems: "flex-start" }}>
+        <img src={logo} width={64} height={64} alt="CodexBar"
+             style={{ borderRadius: 14, flexShrink: 0,
+                      boxShadow: "0 4px 16px rgba(0,0,0,.35)" }} />
+        <div style={{ minWidth: 0, flex: 1 }}>
+          <div style={{ display: "flex", alignItems: "baseline", gap: 9 }}>
+            <span style={{ fontSize: 19, fontWeight: 700 }}>CodexBar</span>
+            <span style={{ fontSize: 12.5, fontWeight: 700, color: t.accent,
+                           fontFamily: "'JetBrains Mono'" }}>{ver ? `v${ver}` : "…"}</span>
+          </div>
+          <div style={{ fontSize: 11, color: t.faint, marginTop: 3,
+                        fontFamily: "'JetBrains Mono'" }}>
+            Tauri 2 + React · macOS
+          </div>
+          {/* 外链走 shell 插件在系统浏览器打开;webview 里直接导航会把整个 app 变成网页 */}
+          <div style={{ fontSize: 11, marginTop: 7, fontFamily: "'JetBrains Mono'" }}>
+            <span style={link} onClick={() => { void openExternal(REPO_URL); }}
+                  title="在浏览器打开">github.com/{REPO} ↗</span>
+          </div>
+
+          <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 12,
+                        flexWrap: "wrap" }}>
+            <span onClick={() => { void check(); }}
+                  title="向远端查最新 tag(私有仓库走 git 凭证)。这是本页唯一联网的动作"
+                  style={{ fontSize: 11.5, fontWeight: 600,
+                           color: up.k === "busy" ? t.muted : t.accentText,
+                           background: up.k === "busy" ? t.barTrack : t.accent,
+                           padding: "6px 13px", borderRadius: 8,
+                           cursor: up.k === "busy" ? "default" : "pointer", userSelect: "none",
+                           transition: "background .15s" }}>
+              {up.k === "busy" ? "检查中…" : "检查更新"}
+            </span>
+            {up.k === "latest" && (
+              <span style={{ fontSize: 11, color: "#27B26B", fontFamily: "'JetBrains Mono'" }}>
+                ✓ 已是最新（远端 {up.v}）
+              </span>
+            )}
+            {up.k === "new" && (
+              <span style={{ fontSize: 11, fontFamily: "'JetBrains Mono'" }}>
+                <span style={{ color: "#E0A21C", fontWeight: 700 }}>有新版 {up.v}</span>{" "}
+                <span style={link} onClick={() => { void openExternal(`${REPO_URL}/releases`); }}>
+                  查看更新说明 ↗
+                </span>
+                <span style={{ color: t.faint }}>　·　更新：<code>git pull && bash codexbar/scripts/deploy.sh</code></span>
+              </span>
+            )}
+            {up.k === "err" && (
+              <span style={{ fontSize: 10.5, color: "#E0524D", fontFamily: "'JetBrains Mono'" }}>
+                ✗ {up.msg}
+              </span>
+            )}
+          </div>
         </div>
       </div>
     </div>

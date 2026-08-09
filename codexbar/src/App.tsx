@@ -1,4 +1,5 @@
 import { useState, useMemo, useEffect } from "react";
+import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -43,6 +44,9 @@ const IconMoon = () => <svg width="13" height="13" viewBox="0 0 24 24" fill="cur
 export default function App() {
   const { accounts, hero, currentNode, slots, counts, tokens, lastRefreshAt, loadingAction, toast, refresh, run, showToast } = useStore();
   const [theme, setTheme] = useState<"dark" | "light">("dark");
+  // 版本号运行期从 tauri 取,别再写死(发版时漏改前端字符串是老毛病)
+  const [ver, setVer] = useState("");
+  useEffect(() => { getVersion().then(setVer).catch(() => {}); }, []);
   const [page, setPage] = useState<Page>("overview");
   const [trafficRange, setTrafficRange] = useState<Range>(14);
   const [drill, setDrill] = useState<string | null>(null);   // 平台详情:null = 停在总览
@@ -117,7 +121,7 @@ export default function App() {
             <span onClick={() => setTheme("light")} style={{ display: "grid", placeItems: "center", width: 24, height: 20, borderRadius: 6, cursor: "pointer", color: t.sunColor, background: t.sunBg, transition: "background .25s, color .25s" }}><IconSun /></span>
             <span onClick={() => setTheme("dark")} style={{ display: "grid", placeItems: "center", width: 24, height: 20, borderRadius: 6, cursor: "pointer", color: t.moonColor, background: t.moonBg, transition: "background .25s, color .25s" }}><IconMoon /></span>
           </div>
-          <span style={{ fontSize: 11, color: t.muted, fontFamily: "'JetBrains Mono'" }}>v0.8.0</span>
+          <span style={{ fontSize: 11, color: t.muted, fontFamily: "'JetBrains Mono'" }}>{ver ? `v${ver}` : ""}</span>
         </div>
       </div>
 
@@ -127,7 +131,7 @@ export default function App() {
           {sidebarItems.map((it) => (
             <div key={it.id} onClick={() => setPage(it.id)} style={{ width: 34, height: 34, borderRadius: 9, display: "grid", placeItems: "center", cursor: "pointer", color: page === it.id ? t.accentText : t.muted, background: page === it.id ? t.accent : "transparent", transition: "background .2s, color .2s" }} title={it.tip}><it.Icon /></div>
           ))}
-          <span style={{ marginTop: "auto", fontSize: 9, color: t.faint, fontFamily: "'JetBrains Mono'" }}>0.8</span>
+          <span style={{ marginTop: "auto", fontSize: 9, color: t.faint, fontFamily: "'JetBrains Mono'" }}>{ver ? ver.split(".").slice(0, 2).join(".") : ""}</span>
         </div>
 
         {/* Content */}
