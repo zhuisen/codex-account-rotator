@@ -1,3 +1,4 @@
+import { useState } from "react";
 import type { Theme } from "../theme";
 
 import { fmtUSD } from "../rates";
@@ -65,6 +66,7 @@ export default function MenuBarToday({ t, view, colors, refreshedAt, busy,
   /** 点图表任意处 → 主窗流量总览(用户 2026-08-09 要求) */
   onOpenOverview: () => void;
 }): React.ReactElement {
+  const [hvRaw, setHv] = useState<number | null>(null);
   if (!view) {
     return (
       <div className="mb-today" style={{ padding: "26px 16px", textAlign: "center",
@@ -98,35 +100,56 @@ export default function MenuBarToday({ t, view, colors, refreshedAt, busy,
   const tickIdx = hours.map((_, i) => i).filter((i) => i % step === 0);
 
   const d = view.deltaPct;
+  // 索引一旦越界就作废(小时桶会随时间增长)。与主图同一条纪律:clamp 只防越界,
+  // 真正换数据集靠调用方的 key —— 这里数据集不换(恒是"今日"),所以 clamp 足够。
+  const hv = hvRaw != null && hvRaw < hours.length ? hvRaw : null;
 
   return (
     <div className="mb-today">
-      {/* 摘要行 */}
+      {/* ★ 摘要行:悬浮图表时**就地替换**成那一小时的读数,不弹浮层。
+          412px 的弹窗里,主窗那个 130px 浮层要占掉图表 34% 宽、还会盖住相邻的小时格;
+          而整块图现在又是"点了跳主窗"的按钮,再叠一个悬浮读数会让同一块区域既像可读区
+          又像按钮。就地替换零遮挡、鼠标移开自动复原、且完全不影响点击跳转。 */}
       <div className="mb-today-sum">
-        <span className="mb-today-tot">{fmtTok(view.totalTok)}</span>
-        <span className="mb-today-cost" style={{ color: AMBER }}>{fmtUSD(view.totalCost)}</span>
-        {d != null && (
+        <span className="mb-today-tot">
+          {fmtTok(hv != null ? view.hourTok[hv] : view.totalTok)}
+        </span>
+        <span className="mb-today-cost" style={{ color: AMBER }}>
+          {fmtUSD(hv != null ? view.hourCost[hv] : view.totalCost)}
+        </span>
+        {hv != null ? (
+          <span className="mb-today-delta" style={{ color: t.accentText, background: t.accent }}>
+            {hourLabel(hours[hv])}
+          </span>
+        ) : d != null ? (
           <span className="mb-today-delta" style={{
             color: d >= 0 ? UP : DOWN,
             background: d >= 0 ? "rgba(39,178,107,.12)" : "rgba(224,82,77,.12)",
           }}>{d >= 0 ? "↑" : "↓"}{Math.abs(d).toFixed(1)}%</span>
-        )}
+        ) : null}
         {/* ★ 刷新时刻做成按钮:快照是"上次扫描的成品",不点就一直是那一份。用户 2026-08-09 要求
             能自主刷新 —— 把时间戳本身变成入口,比再塞一个图标省一格宽度,而且"这个数是几点的"
             和"重取"本来就是同一件事。 */}
-        <span className="mb-today-when" onClick={busy ? undefined : onRefresh}
-              title={busy ? "扫描中…" : "重新扫描本机 CLI 记录(只读本地文件,不消耗额度)"}
-              style={{ color: busy ? t.accent : t.faint, cursor: busy ? "default" : "pointer" }}>
-          <IconRefresh spin={busy} />
-          {hours[0].slice(5, 10)}
-          {refreshedAt ? ` · 刷新 ${new Date(refreshedAt * 1000).toTimeString().slice(0, 5)}` : ""}
-        </span>
+        {hv != null ? (
+          <span className="mb-today-when hover" style={{ color: t.text2, cursor: "default" }}>
+            {breakdown(series, colors, hv)}
+          </span>
+        ) : (
+          <span className="mb-today-when" onClick={busy ? undefined : onRefresh}
+                title={busy ? "扫描中…" : "重新扫描本机 CLI 记录(只读本地文件,不消耗额度)"}
+                style={{ color: busy ? t.accent : t.faint, cursor: busy ? "default" : "pointer" }}>
+            <IconRefresh spin={busy} />
+            {hours[0].slice(5, 10)}
+            {refreshedAt ? ` · 刷新 ${new Date(refreshedAt * 1000).toTimeString().slice(0, 5)}` : ""}
+          </span>
+        )}
       </div>
 
       {/* 小时堆叠图 —— 无 tooltip(§5:要明细走底栏「打开流量总览 ↗」)。
           ★ 整块可点 → 直接开主窗总览:弹窗里既然不给 tooltip,"想看细节"这个意图最自然的落点
           就是图本身,而不是逼用户去找底栏那个按钮(用户 2026-08-09 指定)。 */}
       <div className="mb-today-chart mb-today-chart-click" onClick={onOpenOverview}
+           onMouseLeave={() => setHv(null)}
            title="打开主窗口的 AI用量信息">
         <div className="mb-today-peak" style={{ color: t.faint }}>
           {view.peak ? `峰值 ${fmtTok(view.peak.v)} · ${hourLabel(view.peak.hour)}` : "今日暂无用量"}
@@ -138,6 +161,18 @@ export default function MenuBarToday({ t, view, colors, refreshedAt, busy,
           ))}
           <line x1={0} x2={VW} y1={VH - 0.5} y2={VH - 0.5}
                 stroke="rgba(255,255,255,.16)" strokeWidth={1} />
+          {hv != null && (
+            <line x1={xAt(hv, n)} x2={xAt(hv, n)} y1={0} y2={VH}
+                  stroke="rgba(255,255,255,.34)" strokeWidth={1}
+                  vectorEffect="non-scaling-stroke" pointerEvents="none" />
+          )}
+          {/* 命中带铺满绘图区。**不吃 click** —— 点击照旧冒泡到外层的"打开流量总览"。 */}
+          <rect x={0} y={0} width={VW} height={VH} fill="transparent"
+                onMouseMove={(e) => {
+                  const r = (e.currentTarget as SVGRectElement).getBoundingClientRect();
+                  const i = Math.round(((e.clientX - r.left) / r.width) * (n - 1));
+                  setHv(Math.max(0, Math.min(n - 1, i)));
+                }} />
         </svg>
         <div className="mb-today-xaxis" style={{ color: t.faint }}>
           {tickIdx.map((i) => (
@@ -170,5 +205,46 @@ export default function MenuBarToday({ t, view, colors, refreshedAt, busy,
         ))}
       </div>
     </div>
+  );
+}
+
+/** 数据点在 viewBox 里的 x。与 `area()` 的取点公式必须一致,否则参考线和曲线对不上。 */
+function xAt(i: number, n: number): number {
+  return n <= 1 ? VW / 2 : (i / (n - 1)) * VW;
+}
+
+/**
+ * 某一小时的分平台明细,如 `●82M ●36M ●3M`。
+ *
+ * ★ **用色块代替平台名**。带全称的版本(`Codex 82M · Claude 36M · Kimi 3M +1`)在 412px 的面板里
+ * 放不下 —— 左侧大数+金额+小时胶囊已占掉约 200px,剩给这里的只有 ~176px,而三家全称约 210px,
+ * 于是在"名字"和"数值"之间折行,排版断成两截(用户 2026-08-09 实测截图)。
+ *
+ * 色块不是省略,是**换一种同样明确的标识**:图表正下方的平台图例用的就是这套颜色,一一对应。
+ * 换掉之后四家全能列出,不再需要 `+N` —— 那个才是真的在藏数据。
+ */
+function breakdown(
+  series: { key: string; name: string; values: number[] }[],
+  colors: Record<string, string>,
+  i: number,
+): React.ReactElement {
+  const rows = series
+    .map((s) => ({ name: s.name, key: s.key, v: s.values[i] ?? 0 }))
+    .filter((r) => r.v > 0)
+    .sort((a, b) => b.v - a.v);
+  if (!rows.length) return <span style={{ opacity: 0.6 }}>该小时无用量</span>;
+  return (
+    <>
+      {rows.map((r) => (
+        // 每项自身 nowrap:即使整组被挤,也只会在**项与项之间**断,不会把色块和数值拆散
+        <span key={r.key} title={`${r.name} ${fmtTok(r.v)}`}
+              style={{ display: "inline-flex", alignItems: "center", gap: 3.5,
+                       whiteSpace: "nowrap" }}>
+          <span style={{ width: 7, height: 7, borderRadius: 2,
+                         background: colors[r.key], flexShrink: 0 }} />
+          {fmtTok(r.v)}
+        </span>
+      ))}
+    </>
   );
 }

@@ -99,6 +99,9 @@ export interface TodayView {
   /** vs 昨日**整天**;null = 昨天没数据,不能算 */
   deltaPct: number | null;
   peak: { v: number; hour: string } | null;
+  /** 每个小时的合计 token 与等效费用,与 `hours` 等长。菜单栏悬浮读数用。 */
+  hourTok: number[];
+  hourCost: number[];
   /** 自下而上 = 占比降序(与主窗口同规则) */
   series: { key: string; name: string; values: number[] }[];
   per: { key: string; name: string; pct: number; tok: number; cost: number; deltaPct: number | null }[];
@@ -136,6 +139,8 @@ export function todayView(data: TrafficData | null): TodayView | null {
   const yTok = rows.reduce((s, r) => s + r.yTok, 0);
 
   const stacked = hours.map((_, i) => rows.reduce((s, r) => s + r.values[i], 0));
+  const hourCost = hours.map((h) =>
+    keys.reduce((s, k) => s + (data.platforms[k].hours[h] ? costOfBucket(data.platforms[k].hours[h], k) : 0), 0));
   let pi = -1;
   stacked.forEach((v, i) => { if (pi < 0 || v > stacked[pi]) pi = i; });
 
@@ -143,6 +148,7 @@ export function todayView(data: TrafficData | null): TodayView | null {
     hours, totalTok, totalCost,
     deltaPct: pctDelta(totalTok, yTok),
     peak: pi >= 0 && stacked[pi] > 0 ? { v: stacked[pi], hour: hours[pi] } : null,
+    hourTok: stacked, hourCost,
     series: rows.map((r) => ({ key: r.key, name: r.name, values: r.values })),
     per: rows.map((r) => ({
       key: r.key, name: r.name, tok: r.tok, cost: r.cost, deltaPct: r.deltaPct,
