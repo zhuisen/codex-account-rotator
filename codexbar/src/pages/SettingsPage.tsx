@@ -69,8 +69,14 @@ export default function SettingsPage({ t }: { t: Theme }) {
   );
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 0 }}>
-      <span style={{ fontSize: 20, fontWeight: 700, marginBottom: 12 }}>设置</span>
+    // ★ 外层内容区是 `overflow: hidden`(App.tsx),**每个页面自带滚动容器**是本项目的约定 ——
+    //   总览和用量页都有,设置页原来漏了,于是窗口一矮下面的「关于」整块就被裁掉、没有滚动条
+    //   (用户 2026-08-09 实测截图)。加页面时别忘这一条。
+    <div style={{ display: "flex", flexDirection: "column", gap: 0,
+                  minHeight: 0, height: "100%", overflowY: "auto",
+                  // 滚动条压住右侧滑块/开关不好点,给一点右内边距
+                  paddingRight: 4 }}>
+      <span style={{ fontSize: 20, fontWeight: 700, marginBottom: 12, flexShrink: 0 }}>设置</span>
 
       <Row label="开机自启" desc="登录 macOS 时自动启动 CodexBar(后台常驻菜单栏)">
         <div onClick={toggleAutostart} style={{
