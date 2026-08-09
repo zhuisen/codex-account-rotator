@@ -19,6 +19,7 @@ stdlib-only; streams the SSE response back close-delimited.
 import base64
 import datetime
 import fcntl
+import hashlib
 import http.client
 import json
 import os
@@ -46,6 +47,14 @@ REFRESH_LOCK = STORE / ".refresh.lock"   # cross-process: shared with codex-rota
 STATE_LOCK = STORE / ".state.lock"       # cross-process state.json RMW mutex (codex-rotate takes the same)
 
 _affinity = {}            # previous_response_id → account_id
+# ★ 会话粘性的**真正**key。codex 每个 POST /responses 都带 `prompt_cache_key`(实测 2026-08-09
+# 的 body 键:client_metadata,include,input,model,parallel_tool_calls,**prompt_cache_key**,
+# reasoning,service_tier,store,stream,text,tool_choice) —— 那是 OpenAI 用来标识 prompt cache
+# 血缘的字段,同一会话恒定。以前用 `previous_response_id` 做 key 是选错了字段:codex 从不发它
+# (实测 2291/2291),所以 `_affinity` 从未命中过一次,每轮都在重新挑号。
+# 换号的代价不是"多一次请求",而是**整段历史在新号上冷缓存全价重算**(实测冷启动单次 17~24 万
+# input,占未命中 input 的 29.7%)。所以这条粘性是省钱的主力,迟滞只是它的兜底。
+_conv = {}                # prompt_cache_key → account_id
 _lock = threading.Lock()
 _state_lock = threading.Lock()     # serialize state.json read-modify-write across ThreadingHTTPServer threads
 _refresh_lock = threading.Lock()   # serialize refreshes — concurrent refresh of ONE account kills its single-use refresh_token
@@ -199,9 +208,28 @@ def _used(slot):
     return (_win_used(slot, "primary"), _win_used(slot, "secondary"))
 
 
-def _pick(prev_id, exclude=None):
-    """(aid, slot, reason). Affinity: stick to prev_id's account; else least-used, skipping cooling,
-    auth-dead, and already-tried (exclude) accounts."""
+# ★ 选号迟滞(百分点)。0 = 旧行为「谁低选谁」。
+#
+# 为什么需要它:`_affinity` 依赖 `previous_response_id`,而 codex 从不发(实测 2291/2291),所以粘性
+# 从未生效,每轮都重新挑号。服务端只回**整数** used_percent,于是多个号打平后会来回横跳,而**每一次
+# 换号 = 该轮整段历史在新号上冷缓存全价重算**。
+#
+# 代价有多大:实测全量 rollout,`cached_input_tokens/input_tokens` 逐月 95%~99%(推翻了项目里
+# 「cached_tokens 恒 0、没有 prompt cache 可失去」的旧结论)。定义冷大请求=`cached==0 且 input>50k`,
+# 它占**未命中 input**(真正贵的那部分)的比例逐月为 9.2/6.0/13.1/0/18.7/**27.2%(8月)**,在恶化。
+#
+# 迟滞只放弃「百分比完全拉平」这个**本来就不是目标**的性质:只要当前号没比最省的号贵出 N 个百分点
+# 就继续用它。耗尽/冷却/dead 的判断完全不变 —— 那几条是安全性,不参与迟滞。
+# 取 5:仿真 A/B(scratch/picker_ab_20260809.py,跑的就是本函数)在 30~300 轮 × 4 档消耗速率下,
+# 合计换号 H=0→78 · H=3→13 · H=5→6 · H=10→3,5 之后收益递减。它同时把池内不平衡的上界钉在
+# 5 个百分点(超过即换号),不会出现「一个号跑到 100% 而别人闲着」。
+# 回退:`CRP_PICK_HYSTERESIS=0` 即逐字节回到旧行为(已单测覆盖)。
+PICK_HYSTERESIS = float(os.environ.get("CRP_PICK_HYSTERESIS", "5"))
+
+
+def _pick(prev_id, exclude=None, conv=None):
+    """(aid, slot, reason). 优先级:会话粘性(conv) > previous_response_id 粘性 > 迟滞 > 最少使用者。
+    每一层都先过 `ok()`(排除 dead / 冷却 / 本轮已试过),所以粘性永远不会挡住 failover。"""
     exclude = exclude or set()
     s = _load(STATE)
     slots = s.get("slots", {})
@@ -220,9 +248,15 @@ def _pick(prev_id, exclude=None):
         return aid not in exclude and not sl.get("auth_dead") and not cooling(sl)
 
     with _lock:
+        # ★ 会话粘性优先:同一个 prompt_cache_key = 同一段对话 = 同一份 prompt cache。
+        # 只要该号还能用就绝不换 —— 换了就等于把这段对话的缓存扔掉重建。
+        if conv and conv in _conv:
+            aid = _conv[conv]
+            if aid not in exclude and aid in slots and ok(aid, slots[aid]):
+                return aid, slots[aid], "conv"
         if prev_id and prev_id in _affinity:
             aid = _affinity[prev_id]
-            if aid in slots and ok(aid, slots[aid]):
+            if aid not in exclude and aid in slots and ok(aid, slots[aid]):
                 return aid, slots[aid], "affinity"
     avail = [(aid, sl) for aid, sl in slots.items() if ok(aid, sl)]
     if not avail:  # nothing cleanly available → relax cooling, but never a dead or already-tried one
@@ -231,6 +265,17 @@ def _pick(prev_id, exclude=None):
     if not avail:
         return None, None, "exhausted"
     avail.sort(key=lambda kv: _used(kv[1]))
+
+    # ★ 迟滞:上一次真正服务过的号(`last_aid` 由 _record_quota 在成功响应后写入 —— 用它而不是
+    # 「上次被挑中的号」,因为挑中但 401/429 失败的那个不该被粘住)如果仍可用、且没比最省的号贵出
+    # PICK_HYSTERESIS 个百分点,就继续用它。exclude 里的(本轮已试过的)绝不粘 —— 那会把 failover
+    # 变成死循环。
+    if PICK_HYSTERESIS > 0:
+        last = s.get("last_aid")
+        if last and last not in exclude and last in slots and ok(last, slots[last]):
+            if _win_used(slots[last], "primary") <= _win_used(avail[0][1], "primary") + PICK_HYSTERESIS:
+                return last, slots[last], "sticky"
+
     return avail[0][0], avail[0][1], "new"
 
 
@@ -294,10 +339,19 @@ def _record_quota(aid, headers):
     }
     def f(s):
         if aid in s.get("slots", {}):
+            prev = (((s["slots"][aid].get("quota") or {}).get("primary") or {}).get("used_percent"))
             s["slots"][aid]["quota"] = q
             s["slots"][aid]["quota_status"] = "ok"
             s["last_aid"] = aid
             s["last_proxy_ts"] = time.time()  # lets codex-rotate/plugin tell "via cxp" from "plain codex"
+            # ★ 只在**跨过整数百分点**时记一行:服务端只回整数,所以这就是能拿到的最细粒度。
+            # 目的是攒「每 1% 对应多少 token」的样本,判定额度计量到底算不算缓存命中的部分 ——
+            # 这一条决定了会话粘性/迟滞是省额度还是只省钱(订阅制下后者=什么也没省)。
+            # 现有证据只有 n=3、Δ% 只有 2~3(整数量化 ±50%),不足以下结论。
+            if prev is not None and pu is not None and pu != prev:
+                s.setdefault("quota_marks", []).append(
+                    {"aid": aid, "t": round(time.time(), 1), "from": prev, "to": pu})
+                del s["quota_marks"][:-400]      # 上界,避免 state.json 无限长
     _mutate_state(f)
 
 
@@ -337,8 +391,15 @@ class Handler(BaseHTTPRequestHandler):
             hdrs["chatgpt-account-id"] = account_id
         hdrs.setdefault("originator", "codex_cli_rs")
         hdrs["Content-Length"] = str(len(body))
+        # ★ body 指纹。三方评审(codex/grok/kimi)收敛到同一个残余双计费机制:上游已 200 并计费 →
+        # SSE 在 completed 前断掉 → codex 把**整轮当成全新 POST 重发** → 代理重新挑号 → 第二个号
+        # 再计一次。代理的 400-abort 拦不住它(那是一个新的 HTTP 请求,与首发无任何关联标识)。
+        # 闭环证据只差一件:两次 POST 的 body 是否同一个。rid 证明不了 —— 它只标识一次 handler 调用。
+        # 只记 sha256 前 12 位:单向摘要,不含任何明文/凭证,足以判等。
+        bh = hashlib.sha256(body).hexdigest()[:12] if body else "-"
+        ck = getattr(self, "_conv_key", None)
         _plog(f"→ {self.command} {self.path} [{label}] {reason}"
-              f" prev={prev_id[:18] if prev_id else '-'}", rid)
+              f" conv={ck[:12] if ck else '-'} body={bh}", rid)
         # ★ 相位分界 = request() vs getresponse(),不是 connect() vs 其后。
         # 依据:`sendall` 是循环写,**当且仅当仍有尾段没写进去时才抛异常** —— 尾段没出去,上游拿到的
         # 就是不完整的 body,Content-Length 框架下这种请求永远不会被 dispatch,也就不可能计费。
@@ -417,6 +478,13 @@ class Handler(BaseHTTPRequestHandler):
     def _finish(self, conn, resp, aid, label):
         """Relay the chosen upstream response back to codex, recording quota + session affinity."""
         _record_quota(aid, resp.getheaders())
+        # ★ 只在**真正成功服务过**之后才登记会话归属 —— 挑中但 401/429 失败的号不该被粘住。
+        conv = getattr(self, "_conv_key", None)
+        if conv:
+            with _lock:
+                _conv[conv] = aid
+                while len(_conv) > 512:          # FIFO 上界:长跑的代理不能无限攒会话
+                    _conv.pop(next(iter(_conv)))
         self.send_response(resp.status)
         hop = {"connection", "transfer-encoding", "content-length", "keep-alive"}
         for k, v in resp.getheaders():
@@ -452,19 +520,26 @@ class Handler(BaseHTTPRequestHandler):
         rid = f"{threading.get_ident() % 0x1000:03x}{int(time.time() * 1000) % 0x1000:03x}"
         length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(length) if length else b""
-        prev_id = None
+        prev_id = conv = None
         if body:
             try:
-                prev_id = json.loads(body).get("previous_response_id")
+                _b = json.loads(body)
+                if isinstance(_b, dict):
+                    prev_id = _b.get("previous_response_id")
+                    c = _b.get("prompt_cache_key")
+                    conv = c if isinstance(c, str) and c else None
             except Exception:
                 pass
+        # 放到实例上而不是往 _finish 传参:_finish 有两个调用点(首发 + 401 强刷后重发),
+        # 靠参数传递意味着漏掉一处就静默失去粘性。Handler 每请求一个实例,这样存是安全的。
+        self._conv_key = conv
         # failover loop: pick least-used → on 401 (dead token) mark dead + try next; on 429 cool + try
         # next; on a network error before any bytes reach codex, try next. First usable account wins.
         # One dead/exhausted/unreachable attempt never blocks the whole request.
         tried = set()
         pool_n = len(_load(STATE).get("slots", {}))
         for _ in range(max(1, pool_n)):
-            aid, slot, reason = _pick(prev_id, exclude=tried)
+            aid, slot, reason = _pick(prev_id, exclude=tried, conv=conv)
             if not aid:
                 break
             tried.add(aid)

@@ -56,7 +56,36 @@ export const MODEL_COLORS: Record<string, string> = {
   "gpt-5.4":       "#E0901C",
   "gpt-5.4-mini":  "#c08a3e",
   "gpt-5.3":       "#E0524D",
+
+  // Claude 侧。分家族给色系,一眼能读出"这天主要在用哪一档":暖色=Opus、紫=Fable/Mythos、
+  // 冷色=Sonnet/Haiku。同一家族按版本由新到旧依次变暗。
+  "claude-opus-5":     "#D97757",
+  "claude-opus-4-8":   "#E8A33D",
+  "claude-opus-4-7":   "#B5793F",
+  // 比 4-7 明显更暗:两者原来是 #B5793F / #8C6244,实测截图里图例色块几乎分不开(明度差太小)。
+  // 家族内"越老越暗"既解决可辨性,本身也是自解释的。
+  "claude-opus-4-6":   "#6E5138",
+  "claude-fable-5":    "#7C6BF0",
+  "claude-mythos-5":   "#A78BFA",
+  "claude-sonnet-5":   "#2BA0C0",
+  "claude-sonnet-4-6": "#2dd4bf",
+  "claude-haiku-4-5":  "#27B26B",
+
+  // Grok
+  "grok-4.5-build": "#8b7cf6",
+  "grok-4.5-code":  "#a78bfa",
+  "grok-4":         "#6d5ce0",
+  "grok-4-fast":    "#b8a9ff",
 };
+/** 平台品牌色(交接稿 §0/§10)。导航激活态、图层、图例、卡片描边统一走这里。 */
+export const PLATFORM_COLORS: Record<string, string> = {
+  claude: "#E0784F",
+  codex:  "#2dd4bf",
+  grok:   "#8b7cf6",
+  gemini: "#4d9fff",
+};
+export const platformColor = (k: string): string => PLATFORM_COLORS[k] ?? "#5b6472";
+
 export const MODEL_FALLBACK = "#5b6472";
 export function modelColor(m: string): string {
   return MODEL_COLORS[m] ?? MODEL_FALLBACK;

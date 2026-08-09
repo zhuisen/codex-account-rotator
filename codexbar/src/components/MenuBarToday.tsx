@@ -1,0 +1,166 @@
+import type { Theme } from "../theme";
+import { platformColor } from "../theme";
+import { fmtUSD } from "../rates";
+import { fmtTok, type TodayView } from "../traffic";
+
+const AMBER = "#E0A21C";
+const UP = "#27B26B", DOWN = "#E0524D";
+
+/** 交接稿 §2 的 svg 尺寸。这里是**独立的一份小图**,不复用主窗口的 `StackedArea`:
+ *  弹窗要的是"无 tooltip、无坐标轴刻度、无 hover"的轻量版,把那些都做成开关反而会让主图长出
+ *  一堆只有弹窗用的分支(要明细走底栏「打开流量总览 ↗」,交接稿 §5 就是这么定的)。 */
+const VW = 380, VH = 104;
+/** 横轴给 6 个时刻标签(§2)。 */
+const X_LABELS = 6;
+
+/**
+ * Catmull-Rom(§2 明写"与主窗同算法")。
+ *
+ * ⚠️ 与主窗口的实际实现有意保持一致地**换成单调三次插值**是不必要的:这里每层都是"填到基线"的
+ * 独立面积、自下而上叠画,而且不显示数值,轻微过冲不会造成误读。真要改也只改这一处。
+ */
+function smooth(pts: [number, number][]): string {
+  if (!pts.length) return "";
+  let d = `M${pts[0][0].toFixed(1)} ${pts[0][1].toFixed(1)}`;
+  for (let i = 0; i < pts.length - 1; i++) {
+    const p0 = pts[Math.max(i - 1, 0)], p1 = pts[i];
+    const p2 = pts[i + 1], p3 = pts[Math.min(i + 2, pts.length - 1)];
+    d += ` C${(p1[0] + (p2[0] - p0[0]) / 6).toFixed(1)} ${(p1[1] + (p2[1] - p0[1]) / 6).toFixed(1)}`
+       + ` ${(p2[0] - (p3[0] - p1[0]) / 6).toFixed(1)} ${(p2[1] - (p3[1] - p1[1]) / 6).toFixed(1)}`
+       + ` ${p2[0].toFixed(1)} ${p2[1].toFixed(1)}`;
+  }
+  return d;
+}
+
+function area(vals: number[], yMax: number): string {
+  if (vals.length < 2) return "";
+  const pts = vals.map((v, i) => [
+    (i / (vals.length - 1)) * VW,
+    VH - (v / yMax) * VH,
+  ] as [number, number]);
+  return `${smooth(pts)} L ${VW} ${VH} L 0 ${VH} Z`;
+}
+
+const hourLabel = (h: string): string => `${h.slice(11)}:00`;
+
+const IconRefresh = ({ spin }: { spin?: boolean }) => (
+  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
+       style={{ animation: spin ? "cbSpin .8s linear infinite" : "none", transformOrigin: "center" }}>
+    <path d="M21 12a9 9 0 1 1-3-6.7M21 4v4h-4" />
+  </svg>
+);
+
+/** 菜单栏「今日」Tab · 交接稿 `菜单栏v3-交接说明.md` §2(1b 迷你仪表盘)。 */
+export default function MenuBarToday({ t, view, refreshedAt, busy, onRefresh, onOpenPlatform }: {
+  t: Theme;
+  view: TodayView | null;
+  /** 数据的生成时刻(快照时间),不是"现在" */
+  refreshedAt: number | null;
+  busy: boolean;
+  onRefresh: () => void;
+  onOpenPlatform: (key: string) => void;
+}): React.ReactElement {
+  if (!view) {
+    return (
+      <div className="mb-today" style={{ padding: "26px 16px", textAlign: "center",
+                                         fontSize: 11.5, color: t.muted }}>
+        {busy ? "正在首次汇总本机 CLI 记录…" : "暂无数据"}
+      </div>
+    );
+  }
+
+  const { hours, series, per } = view;
+  // 各层**累计**上沿,自下而上叠画;`series` 已是占比降序 = 大的贴基线(与主窗口同规则)。
+  const acc = new Array(hours.length).fill(0) as number[];
+  const cum = series.map((s) => {
+    s.values.forEach((v, i) => { acc[i] += v; });
+    return { key: s.key, top: [...acc] };
+  });
+  const yMax = Math.max(1, ...acc) * 1.08;
+
+  /**
+   * ★ 横轴标签有两处**刻意偏离交接稿**,都是为了不让坐标轴说假话:
+   *
+   * 1. 稿子写死 `00:00 04:00 … 20:00` 六个标签。真实数据只覆盖**已过去的小时**(现在是上午就只有
+   *    00:00–11:00),照抄会让坐标轴标出一个当天还没发生的时间范围。所以标签从真实小时里取。
+   * 2. 稿子用 `justify-content:space-between` 平铺。那要求刻度在**索引上等距**;从 12 个小时里挑
+   *    6 个必然挑出 0/2/4/7/9/11 这种不等距序列,平铺后标签落点(20%)和它代表的数据点(18%)对不上 ——
+   *    坐标轴指错位置。这里改成**取规整的整点步长(2/3/4/6/8/12 里最小的够用者)+ 按真实 x 绝对定位**。
+   *    满一天(n=24)时步长正好是 4,标签退化成稿子里那六个,像素一致。
+   */
+  const n = hours.length;
+  const step = [1, 2, 3, 4, 6, 8, 12].find((s) => Math.ceil(n / s) <= X_LABELS) ?? 12;
+  const tickIdx = hours.map((_, i) => i).filter((i) => i % step === 0);
+
+  const d = view.deltaPct;
+
+  return (
+    <div className="mb-today">
+      {/* 摘要行 */}
+      <div className="mb-today-sum">
+        <span className="mb-today-tot">{fmtTok(view.totalTok)}</span>
+        <span className="mb-today-cost" style={{ color: AMBER }}>{fmtUSD(view.totalCost)}</span>
+        {d != null && (
+          <span className="mb-today-delta" style={{
+            color: d >= 0 ? UP : DOWN,
+            background: d >= 0 ? "rgba(39,178,107,.12)" : "rgba(224,82,77,.12)",
+          }}>{d >= 0 ? "↑" : "↓"}{Math.abs(d).toFixed(1)}%</span>
+        )}
+        {/* ★ 刷新时刻做成按钮:快照是"上次扫描的成品",不点就一直是那一份。用户 2026-08-09 要求
+            能自主刷新 —— 把时间戳本身变成入口,比再塞一个图标省一格宽度,而且"这个数是几点的"
+            和"重取"本来就是同一件事。 */}
+        <span className="mb-today-when" onClick={busy ? undefined : onRefresh}
+              title={busy ? "扫描中…" : "重新扫描本机 CLI 记录(只读本地文件,不消耗额度)"}
+              style={{ color: busy ? t.accent : t.faint, cursor: busy ? "default" : "pointer" }}>
+          <IconRefresh spin={busy} />
+          {hours[0].slice(5, 10)}
+          {refreshedAt ? ` · 刷新 ${new Date(refreshedAt * 1000).toTimeString().slice(0, 5)}` : ""}
+        </span>
+      </div>
+
+      {/* 小时堆叠图 —— 无 tooltip(§5:要明细走底栏「打开流量总览 ↗」) */}
+      <div className="mb-today-chart">
+        <div className="mb-today-peak" style={{ color: t.faint }}>
+          {view.peak ? `峰值 ${fmtTok(view.peak.v)} · ${hourLabel(view.peak.hour)}` : "今日暂无用量"}
+        </div>
+        <svg viewBox={`0 0 ${VW} ${VH}`} style={{ width: "100%", height: "auto", display: "block" }}>
+          {/* 自上而下画(最后一层在最下面),靠遮挡形成带 —— 与稿子的 a3/a2/a1 同序 */}
+          {[...cum].reverse().map((c) => (
+            <path key={c.key} d={area(c.top, yMax)} fill={platformColor(c.key)} />
+          ))}
+          <line x1={0} x2={VW} y1={VH - 0.5} y2={VH - 0.5}
+                stroke="rgba(255,255,255,.16)" strokeWidth={1} />
+        </svg>
+        <div className="mb-today-xaxis" style={{ color: t.faint }}>
+          {tickIdx.map((i) => (
+            // 首个左对齐、末个右对齐,其余居中 —— 否则两端各有一半标签溢出被裁(主图同款处理)
+            <span key={i} style={{
+              position: "absolute", left: `${n === 1 ? 50 : (i / (n - 1)) * 100}%`,
+              transform: i === 0 ? "translateX(0)"
+                       : i === n - 1 ? "translateX(-100%)" : "translateX(-50%)",
+            }}>{hourLabel(hours[i])}</span>
+          ))}
+        </div>
+      </div>
+
+      {/* 平台图例 —— 点一行进主窗对应平台详情 */}
+      <div className="mb-today-legend">
+        {per.map((p) => (
+          <div key={p.key} className="mb-today-row" onClick={() => onOpenPlatform(p.key)}>
+            <span className="mb-today-swatch" style={{ background: platformColor(p.key) }} />
+            <span className="mb-today-name">{p.name}</span>
+            <span className="mb-today-pct" style={{ color: t.faint }}>{p.pct.toFixed(1)}%</span>
+            <span className="mb-today-tok">{fmtTok(p.tok)}</span>
+            <span className="mb-today-cost-cell" style={{ color: AMBER }}>{fmtUSD(p.cost)}</span>
+            <span className="mb-today-delta-cell" style={{
+              color: p.deltaPct == null ? t.faint : p.deltaPct >= 0 ? UP : DOWN,
+            }}>
+              {p.deltaPct == null ? "—"
+                : `${p.deltaPct >= 0 ? "↑" : "↓"}${Math.abs(p.deltaPct).toFixed(1)}%`}
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}

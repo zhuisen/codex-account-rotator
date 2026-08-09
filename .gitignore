@@ -27,3 +27,11 @@ app/**/*.app
 app/**/.build
 app/**/.build_number
 .tokens-cache.json
+.claude-tokens-cache.json
+.traffic-cache.json
+.traffic-latest.json
+*.bak
+# UI 验证 harness 的一次性夹具(含脱敏后的账号池快照,仍不入库)
+codexbar/src/_*_probe.json
+codexbar/harness.html
+codexbar/src/harness-entry.tsx

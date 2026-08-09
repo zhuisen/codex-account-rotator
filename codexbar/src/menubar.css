@@ -200,3 +200,76 @@
   animation: cbSpin .65s linear infinite;
   display: inline-block;
 }
+
+/* ── 菜单栏 v3:账号｜今日 Tab(交接稿 `菜单栏v3-交接说明.md`) ─────────────────────── */
+
+@keyframes cbFade { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: none; } }
+
+.mb-tabs {
+  margin: 10px 12px 0;
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 9px;
+  font-family: 'JetBrains Mono';
+  font-size: 11px;
+}
+.mb-tab {
+  flex: 1;
+  text-align: center;
+  padding: 6px 0;
+  border-radius: 7px;
+  font-weight: 700;
+  cursor: pointer;
+  user-select: none;
+  transition: background .18s, color .18s;
+}
+.mb-tab-val { font-size: 10px; }
+
+/* Tab 内容淡入(§3):切 Tab 时给 22ms 的位移淡入,和主窗口分段控件的手感一致 */
+.mb-pane { animation: cbFade .22s ease; }
+
+.mb-today-sum { padding: 12px 16px 0; display: flex; align-items: baseline; gap: 10px; }
+.mb-today-tot {
+  font-size: 26px; font-weight: 700;
+  font-family: 'JetBrains Mono'; font-variant-numeric: tabular-nums;
+}
+.mb-today-cost { font-size: 13px; font-weight: 700; font-family: 'JetBrains Mono'; }
+.mb-today-delta {
+  font-size: 10px; font-weight: 700; padding: 2px 8px;
+  border-radius: 999px; font-family: 'JetBrains Mono';
+}
+.mb-today-when {
+  margin-left: auto; font-size: 10px; font-family: 'JetBrains Mono';
+  display: inline-flex; align-items: center; gap: 4px; user-select: none;
+  transition: color .15s;
+}
+.mb-today-when:hover { color: #2dd4bf !important; }
+
+.mb-today-chart { padding: 10px 16px 0; }
+.mb-today-peak {
+  display: flex; justify-content: flex-end; margin-bottom: 2px;
+  font-size: 9px; font-family: 'JetBrains Mono';
+}
+.mb-today-xaxis {
+  position: relative; height: 11px; margin-top: 4px;
+  font-family: 'JetBrains Mono'; font-size: 8.5px; white-space: nowrap;
+}
+
+.mb-today-legend { padding: 10px 12px 12px; display: flex; flex-direction: column; gap: 2px; }
+.mb-today-row {
+  display: flex; align-items: center; gap: 9px;
+  padding: 8px 6px; border-radius: 9px; cursor: pointer;
+  font-family: 'JetBrains Mono';
+  transition: background .15s;
+}
+.mb-today-row:hover { background: rgba(255, 255, 255, .04); }
+.mb-today-swatch { width: 10px; height: 10px; border-radius: 3px; flex: none; }
+.mb-today-name { font-size: 12px; font-weight: 700; font-family: 'Space Grotesk'; }
+.mb-today-pct { font-size: 9.5px; }
+.mb-today-tok {
+  margin-left: auto; font-size: 12.5px; font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.mb-today-cost-cell { width: 48px; text-align: right; font-size: 11px; font-weight: 700; }
+.mb-today-delta-cell { width: 52px; text-align: right; font-size: 9.5px; }

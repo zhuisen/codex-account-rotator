@@ -9,7 +9,9 @@ import GhostButton from "./components/GhostButton";
 import AccountCard from "./components/AccountCard";
 import DetailModal, { type AccountDetail } from "./components/DetailModal";
 import LogsPage from "./pages/LogsPage";
-import TokensPage from "./pages/TokensPage";
+import TrafficPage from "./pages/TrafficPage";
+import PlatformPage from "./pages/PlatformPage";
+import type { Range } from "./traffic";
 import SettingsPage, { getSettings } from "./pages/SettingsPage";
 import { useStore } from "./hooks/useStore";
 import { useExpiryWatch } from "./hooks/useExpiryWatch";
@@ -18,15 +20,18 @@ import { useAutoSwitch } from "./hooks/useAutoSwitch";
 import { useKeyboard } from "./hooks/useKeyboard";
 import { fmtAgo, CARD_WARN_DAYS, maskId } from "./helpers";
 import { usePrivacy } from "./hooks/usePrivacy";
+import { useTraffic } from "./hooks/useTraffic";
 import { IconTicket } from "./components/CardBadge";
 import ProbeButton from "./components/ProbeButton";
 import PlanBadge from "./components/PlanBadge";
 import "./App.css";
 
-type Page = "overview" | "tokens" | "logs" | "settings";
+// 平台详情页不进导航栏,只能从流量总览钻取(图例行 / 卡片「明细→」/ 点图层),用户定稿 2026-08-09。
+type Page = "overview" | "traffic" | "logs" | "settings";
 
 const IconChart = () => <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><rect x="3" y="12" width="4" height="9" rx="1"/><rect x="10" y="7" width="4" height="14" rx="1"/><rect x="17" y="3" width="4" height="18" rx="1"/></svg>;
-const IconChart2 = () => <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M3 20h18M6 20V9m5 11V4m5 16v-7"/></svg>;
+// 流量总览 = 四宫格(交接稿 §0)
+const IconGrid = () => <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><rect x="3" y="3" width="8" height="8" rx="2"/><rect x="13" y="3" width="8" height="8" rx="2"/><rect x="3" y="13" width="8" height="8" rx="2"/><rect x="13" y="13" width="8" height="8" rx="2"/></svg>;
 const IconClip = () => <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7"><rect x="5" y="4" width="14" height="17" rx="2"/><path d="M9 3.5h6v3H9z" fill="currentColor" stroke="none"/></svg>;
 const IconGear = () => <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7"><circle cx="12" cy="12" r="3.2"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9 17 7M7 17l-2.1 2.1"/></svg>;
 const IconRefresh = ({ spin }: { spin?: boolean }) => <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ animation: spin ? "cbSpin .7s linear" : "none", transformOrigin: "center" }}><path d="M21 12a9 9 0 1 1-3-6.7M21 4v4h-4"/></svg>;
@@ -39,6 +44,8 @@ export default function App() {
   const { accounts, hero, currentNode, slots, counts, tokens, lastRefreshAt, loadingAction, toast, refresh, run, showToast } = useStore();
   const [theme, setTheme] = useState<"dark" | "light">("dark");
   const [page, setPage] = useState<Page>("overview");
+  const [trafficRange, setTrafficRange] = useState<Range>(14);
+  const [drill, setDrill] = useState<string | null>(null);   // 平台详情:null = 停在总览
   const [detailModal, setDetailModal] = useState<AccountDetail | null>(null);
   const [selectedCard, setSelectedCard] = useState<string | null>(null);
   const [autoSwitch, setAutoSwitch] = useState(() => getSettings().autoSwitchEnabled);
@@ -48,13 +55,22 @@ export default function App() {
   const win = useMemo(() => getCurrentWindow(), []);
   const summary = `${counts.total} nodes · ${counts.live} 活 · ${counts.cool} 冷 · ${counts.dead} 死`;
 
-  // menubar gear button → jump to settings page + reveal window
+  // ★ Dock 显示开关在 localStorage,Rust 侧读不到 —— 每次启动由主窗口 webview 应用一次,
+  //   否则重启后 Dock 图标会消失(设置还开着,行为却回到纯菜单栏)。
   useEffect(() => {
-    const un = listen("navigate-settings", () => {
-      setPage("settings");
-      win.show(); win.setFocus();
-    });
-    return () => { un.then(f => f()); };
+    invoke("set_dock_visible", { on: getSettings().dockVisible }).catch(() => {});
+  }, []);
+
+  // menubar → 主窗口的三个跳转入口。齿轮=设置;今日 Tab 底栏=流量总览;点平台图例行=该平台详情。
+  useEffect(() => {
+    const uns = [
+      listen("navigate-settings", () => { setPage("settings"); win.show(); win.setFocus(); }),
+      listen("navigate-traffic", () => { setDrill(null); setPage("traffic"); win.show(); win.setFocus(); }),
+      listen<string>("navigate-platform", (e) => {
+        setDrill(e.payload); setPage("traffic"); win.show(); win.setFocus();
+      }),
+    ];
+    return () => { uns.forEach((u) => { void u.then((f) => f()); }); };
   }, [win]);
 
   const aliveByLabel = accounts.filter(a => a.status !== "dead").sort((a, b) => a.node.localeCompare(b.node, undefined, { numeric: true }));
@@ -68,9 +84,16 @@ export default function App() {
     if (target && target.aid !== currentNode) run(`switch-${target.aid}`, ["switch", target.node], `⌘${idx + 1} → ${target.node}`);
   });
 
+  // ★ 一次取满最大窗口(90d),换档位纯前端切片。scan.py 内部恒扫 max(days,90),所以五个档位的
+  //   底层数据本就一样;每换一档重调一次 IPC 等于白付一次全量扫描。
+  //   进页面才取,不在启动时取 —— 账号池才是启动要的东西。
+  //   取数走 `useTraffic`:先画上次的快照(一次文件读),再后台重扫,所以进页面不再有那 1~4 秒白屏。
+  const { data: traffic, busy: trafficBusy, err: trafficErr, refresh: refreshTraffic } =
+    useTraffic({ enabled: page === "traffic", revalidate: true });
+
   const sidebarItems: { id: Page; Icon: React.FC; tip: string }[] = [
     { id: "overview", Icon: IconChart, tip: "总览" },
-    { id: "tokens", Icon: IconChart2, tip: "Token 消耗" },
+    { id: "traffic", Icon: IconGrid, tip: "AI用量信息(Claude / Codex / Grok)" },
     { id: "logs", Icon: IconClip, tip: "日志" },
     { id: "settings", Icon: IconGear, tip: "设置" },
   ];
@@ -94,7 +117,7 @@ export default function App() {
             <span onClick={() => setTheme("light")} style={{ display: "grid", placeItems: "center", width: 24, height: 20, borderRadius: 6, cursor: "pointer", color: t.sunColor, background: t.sunBg, transition: "background .25s, color .25s" }}><IconSun /></span>
             <span onClick={() => setTheme("dark")} style={{ display: "grid", placeItems: "center", width: 24, height: 20, borderRadius: 6, cursor: "pointer", color: t.moonColor, background: t.moonBg, transition: "background .25s, color .25s" }}><IconMoon /></span>
           </div>
-          <span style={{ fontSize: 11, color: t.muted, fontFamily: "'JetBrains Mono'" }}>v0.6.0</span>
+          <span style={{ fontSize: 11, color: t.muted, fontFamily: "'JetBrains Mono'" }}>v0.7.0</span>
         </div>
       </div>
 
@@ -104,7 +127,7 @@ export default function App() {
           {sidebarItems.map((it) => (
             <div key={it.id} onClick={() => setPage(it.id)} style={{ width: 34, height: 34, borderRadius: 9, display: "grid", placeItems: "center", cursor: "pointer", color: page === it.id ? t.accentText : t.muted, background: page === it.id ? t.accent : "transparent", transition: "background .2s, color .2s" }} title={it.tip}><it.Icon /></div>
           ))}
-          <span style={{ marginTop: "auto", fontSize: 9, color: t.faint, fontFamily: "'JetBrains Mono'" }}>0.6</span>
+          <span style={{ marginTop: "auto", fontSize: 9, color: t.faint, fontFamily: "'JetBrains Mono'" }}>0.7</span>
         </div>
 
         {/* Content */}
@@ -250,7 +273,12 @@ export default function App() {
             </>
           )}
 
-          {page === "tokens" && <TokensPage t={t} />}
+          {page === "traffic" && (drill
+            ? <PlatformPage t={t} data={traffic} pk={drill} range={trafficRange}
+                            setRange={setTrafficRange} onBack={() => setDrill(null)} busy={trafficBusy} />
+            : <TrafficPage t={t} data={traffic} range={trafficRange} setRange={setTrafficRange}
+                           onDrill={setDrill} busy={trafficBusy} err={trafficErr}
+                           onRefresh={refreshTraffic} />)}
           {page === "logs" && <LogsPage t={t} />}
           {page === "settings" && <SettingsPage t={t} />}
         </div>

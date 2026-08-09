@@ -80,6 +80,99 @@ async fn run_rotate(app: AppHandle, args: Vec<String>) -> Result<String, String>
     }
 }
 
+/// 程序坞(Dock)图标的显示开关。
+///
+/// ★ `Info.plist` 的 `LSUIElement=true` **保持不变** —— 它决定的是"启动瞬间要不要出现在 Dock",
+/// 留 true 才不会在冷启动时闪一下图标。macOS 允许运行期用 `setActivationPolicy(.regular)` 给
+/// LSUIElement 应用补上 Dock 图标,所以这条命令能在两种形态间来回切,不需要重启。
+///
+/// 做成开关而不是直接改成常驻 Dock:纯菜单栏形态是现有行为,砍掉它属于"顺手简化掉已有功能"。
+#[tauri::command]
+#[allow(unused_variables)]
+fn set_dock_visible(app: AppHandle, on: bool) {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = app.set_activation_policy(if on {
+            tauri::ActivationPolicy::Regular
+        } else {
+            tauri::ActivationPolicy::Accessory
+        });
+    }
+}
+
+/// 多 AI 流量总览(Claude / Codex / Grok)。
+///
+/// **刻意不复用 `run_rotate`**:那条通道的白名单守的是账号池命令(switch/probe/remove…),把一个只读
+/// `~/.claude`、`~/.codex`、`~/.grok` 的脚本挂进去,等于让同一个白名单同时管两套语义完全不同的东西,
+/// 迟早有人往里加错命令。这里自带一份极小的参数白名单。
+///
+/// 脚本只读本机 CLI 落盘记录,**不碰凭证、不动 state.json、不联网**,所以既不广播 `state-changed`
+/// 也不刷托盘标题 —— 那两件事是账号池状态变更的信号,在这里发就是噪音。
+#[tauri::command]
+async fn run_traffic(args: Vec<String>) -> Result<String, String> {
+    const ALLOWED_FLAGS: &[&str] = &["--days", "--json", "--no-cache"];
+    if let Some(bad) = args
+        .iter()
+        .find(|a| !ALLOWED_FLAGS.contains(&a.as_str()) && a.parse::<u32>().is_err())
+    {
+        return Err(format!("disallowed arg: {:?}", bad));
+    }
+    let script = format!("{}/traffic/scan.py", store_dir());
+    let out = tauri::async_runtime::spawn_blocking(move || {
+        Command::new(python_bin()).arg(&script).args(&args).output()
+    })
+    .await
+    .map_err(|e| format!("join: {}", e))?
+    .map_err(|e| format!("exec: {}", e))?;
+    if out.status.success() {
+        let body = String::from_utf8_lossy(&out.stdout).to_string();
+        write_traffic_snapshot(&body);
+        Ok(body)
+    } else {
+        Err(format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        ))
+    }
+}
+
+/// 最近一次成功扫描的完整结果。**两个 webview 共用的"立刻能画"的那份数据。**
+///
+/// 为什么需要它:`scan.py` 的逐文件增量缓存已经把冷启动 18s 压到热路径 ~1s,但那 1s 是
+/// **每次进页面都要付**的(读 10MB 缓存 + stat 8500 个文件 + 重新聚合),而菜单栏弹窗是"点一下就要
+/// 立刻出来"的东西 —— 交接稿 §5 明写「弹窗只读缓存,不重复解析」。所以在扫描之外再落一份**成品**,
+/// 读它就是一次 100KB 的文件读。
+const SNAPSHOT: &str = ".traffic-latest.json";
+
+fn snapshot_path() -> String {
+    format!("{}/{}", store_dir(), SNAPSHOT)
+}
+
+/// 原子落盘:先写同目录临时文件再 `rename`。直接覆写会让并发的读者读到半截 JSON —— 主窗口在扫描、
+/// 用户同时点开菜单栏,是每天都会发生的时序。
+fn write_traffic_snapshot(body: &str) {
+    let path = snapshot_path();
+    let tmp = format!("{}.tmp{}", path, std::process::id());
+    if fs::write(&tmp, body).is_ok() && fs::rename(&tmp, &path).is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+}
+
+/// 读快照。返回 `null` 表示"还没有任何一次成功扫描",调用方据此显示首扫提示而不是空图。
+///
+/// 只读、无解析、不起 python。**故意不判断新鲜度** —— 新鲜度是展示层的策略(菜单栏能接受几分钟前的
+/// 数字、主窗口进页面就该顺手刷新),放在这里会把两种策略焊死成一种。
+#[tauri::command]
+fn read_traffic_snapshot() -> Result<Option<String>, String> {
+    match fs::read_to_string(snapshot_path()) {
+        Ok(s) if !s.trim().is_empty() => Ok(Some(s)),
+        Ok(_) => Ok(None),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("read snapshot: {}", e)),
+    }
+}
+
 #[tauri::command]
 fn read_auth_tokens() -> Result<Value, String> {
     let state: Value = read_state()?;
@@ -297,6 +390,10 @@ fn toggle_menubar(app: &AppHandle, tray_rect: Option<tauri::Rect>) {
             }
             let _ = win.show();
             let _ = win.set_focus();
+            // ★ 弹窗**只在启动时挂载一次**(show/hide 不重建 webview),所以前端的"首次取数"守卫
+            //   之后再也不会触发 —— 不给这个信号,今日 Tab 的数字会冻在开机那一刻。
+            //   收到后前端按新鲜度自行决定要不要重扫(见 `useTraffic.refreshIfStale`)。
+            let _ = win.emit("menubar-shown", ());
         }
     }
 }
@@ -457,6 +554,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             read_state,
             run_rotate,
+            run_traffic,
+            read_traffic_snapshot,
+            set_dock_visible,
             read_auth_tokens,
             read_logs,
             read_account_detail,

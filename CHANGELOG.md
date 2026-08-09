@@ -76,6 +76,39 @@
 
 ---
 
+### v0.7.0 — 多 AI 流量总览 + 会话粘性 — 2026-08-09
+
+**新增**
+
+- **「AI用量信息」页**(`traffic/scan.py` + `TrafficPage` / `PlatformPage`),汇总 **Claude + Codex + Grok** 三家本机 CLI 的 transcript。堆叠面积图 + 今日/7/14/30/90d 五档;点平台进详情看分模型拆解 + 费率卡。**取代**原来分开的「Token 消耗」与「Claude 消耗」两页(`TokensPage.tsx` / `ClaudeTokensPage.tsx` / `AreaChart.tsx` 已删,IPC 命令 `run_claude_tokens` 一并移除)。
+- **菜单栏 v3:账号 ｜ 今日 双 Tab**(交接稿 `design_handoff_codexbar 4/菜单栏v3-交接说明.md`)。账号 Tab 是实机版原样 + 一行全宽分段控件;今日 Tab = 摘要行(今日总量/等效费用/较昨日) + 小时堆叠图 + 三家平台明细(点一行跳主窗该平台详情)。停留页记进 localStorage,重开弹窗直达;底栏中键随 Tab 变(账号页=检查 token,今日页=打开流量总览 ↗)。
+  - **两处刻意偏离稿子**(稿子数据是 mock,照抄会让坐标轴说假话):横轴标签从**真实小时**里取而不是写死 `00:00…20:00`;刻度用**规整整点步长 + 按真实 x 绝对定位**而不是 `justify-between` 平铺(从 12 个小时挑 6 个必然不等距,平铺后标签会指向错误的数据位置)。满一天时退化成稿子那六个标签,像素一致。
+- **成品快照 `.traffic-latest.json` + `useTraffic`**:`run_traffic` 每次成功都原子落一份成品(`.tmp<pid>` → `rename`),两个 webview 先读快照再后台重扫。实测 **快照 1.1ms vs 全量热路径 1350~2785ms**,进页面/点托盘不再空一拍(用户报的「token 页面新打开有几秒停顿」)。菜单栏只在**没有快照或超过 10 分钟**时才补扫(交接稿 §5「弹窗只读缓存,不重复解析」)。
+- **自动保鲜**:三个触发点共用一个 2 分钟新鲜窗 —— 挂载 / 30s 心跳(**仅页面可见时**)/ 托盘弹出的 `menubar-shown` 事件(阈值收紧到 30s)。菜单栏 webview 只在 app 启动时挂载一次(托盘 show/hide 不重建),不补这两条,今日 Tab 会冻在开机那一刻。可见性门已实测:弹窗关闭 3 分钟零重扫。
+- **手动刷新入口**:主窗口「AI用量信息」页顶栏和菜单栏今日 Tab 摘要行,时间戳本身就是按钮(`↻ 上次刷新 HH:MM`)——「这数是几点的」和「重取」本来是同一件事。
+- **费用估算**(`src/rates.ts`):四类 token 分别乘牌价求和,缓存读按 10% 计价,KPI 显式给出「缓存已省」金额。是**等效 API 成本**,订阅制下不是实付,UI 各处标注。
+- **Dock 图标开关**(设置页)。`LSUIElement` 保持 `true`,运行期 `setActivationPolicy` 切换,不需重启;默认关 = 保留原有纯菜单栏形态。
+- **proxy 会话粘性改用 `prompt_cache_key`**:实测 codex 每个 `POST /responses` 都带它、**从不带** `previous_response_id`,所以老 `_affinity` 2291/2291 次一次没命中过。优先级 `conv > affinity > 迟滞 > 最少使用者`,每层先过 `ok()`,粘性永远挡不住 failover。这是「一段对话恒定落一个号」的硬保证。
+- **proxy 选号迟滞** `PICK_HYSTERESIS=5`(百分点,`CRP_PICK_HYSTERESIS=0` 逐字节回旧行为)。A/B 跑生产 `_pick` 本体:换号 H=0→78 · H=3→13 · **H=5→6** · H=10→3。
+- **proxy 请求体指纹** `body=<sha256前12>`,用来闭合「200 后断流 → codex 整轮重发 → 落到另一个号再计一次」这条链;单向摘要,不含明文。
+- **`state.json` 的 `quota_marks`**:`used_percent` 跨整数百分点时记一条 `{aid,t,from,to}`(上限 400),给「额度计量到底折不折价缓存」攒每请求级样本。
+
+**修复 / 口径**
+
+- ★ **Claude token 朴素求和虚高 2.23x**。去重键是 `message.id` 且**必须全局去重**:一次响应按 content block 拆成多行各带同一份 usage(文件内 115,413 条),会话 resume/fork 复制历史(**跨文件** 1,497 条,per-file 去重挡不住)。跨文件重复里有 16 条两边 usage 不一致(一份全 0 / 一份真值),合并时**显式取总量大者**,不靠字典序覆盖。
+- ★ **缓存只存 epoch,日期在聚合层现算**。旧写法把派生的本地日期存进缓存,而缓存键只有 `(mtime,size)` 不含时区——以别的 TZ 跑过一次(launchd 默认环境 / CI / `export TZ`),5000+ 个此生不再变 mtime 的文件就永久保留旧时区日期,两种口径混进同一张图且不自愈。同理**日期不能按 UTC 小时记忆化**:+05:30 这类偏移的本地午夜落在整点小时中间,会把两天折叠成一天。缓存带 `v`+`pv` 双版本号。
+- ★ **窗口按自然日切**,不是「最近 N 个有数据的日期」——旧写法让 `--days 90` 的合计随时区浮动 **3.2%**。现用 `date` 算术生成连续 N 天再补零。
+- ★ **三家 `total` 语义不同,必须归一化**:codex/Grok 的缓存读**包含在** input 里,Claude 的三个 input 字段**互不相交**。统一折成 `uncached_in | cache_read | cache_write | output` 四个不相交的类。直接摞三家的 `total` 等于拿三把尺量一根线。
+- ★ **堆叠面积图改画「真带」**:旧画法每层都填到基线、靠遮挡成 band,最上层那张 path 覆盖整个图区——hover 降透明度时,占 0.2% 的 Grok 看起来占满全图。改用「上沿=本层累计线、下沿=前一层累计线倒序闭合」;旧的「堆叠带必须 `opacity:1`」约束随之作废。顺序改为**小的在下、大的在上**,被 hover 的层额外描上沿线(0.2% 的带高不足 1px,只靠填充高亮了也看不见)。
+- **切时间段的两个 UI 缺陷**:① `Seg` 定义在 render 里 ⇒ 每次渲染都是新组件类型 ⇒ 整组卸载重建,表现为点档位卡顿掉帧(已提到模块作用域 `components/Seg.tsx`)。② **hover 残留**:连续切档位后浮层/参考线仍停在上一档的索引上,显示一个从未 hover 过的日期。先用 `useEffect` 清 `hover` + 渲染期 clamp,**实测无效**——`hover` 只是索引、不带所属档位,切档后往往仍在范围内(clamp 防越界不防语义过期),而 `labels.length` 不是数据集 identity 且 effect 在 commit 之后才跑。**正解是调用方传 `key={档位}` 让实例作废**(详情页并入 `mode`)。反向对照:去掉 `key` 即复现,加回即消失。
+
+**推翻的旧结论**(两条,都写进了 CLAUDE.md §8)
+
+- ~~`cached_tokens` 恒 0,所以轮换不丢 prompt cache~~ → 实测全量 rollout,`cached_input/input` 逐月 **95%~99%**(2026-03 至 08 全覆盖)。当年那次测量大概率只覆盖了会话首轮(首轮本就恒 0)。
+- ~~由此推出的「换号 = 浪费额度」~~ → **也是错的**(用户 08-09 当场纠正)。`total_tokens` 本就包含缓存命中部分,冷启动改的是**价格**不是**数量**,订阅制下没有价格。按 token 对齐后 plus3/5/6 的缓存命中率 **92~98%**,与 pro1 的 95.3% 无差异。「6 次请求比 139 次还贵」全部由分母解释:**Pro 周预算 ≈1.85B token、Plus ≈250M,差 7~8 倍**。
+
+---
+
 ### v0.6.0 — 计费探针 + 代理双计费修复 — 2026-08-05
 
 **计费探针 `codex-rotate probe`**
@@ -272,6 +305,29 @@ plus6 周已用 9.0% → 10.0%,captured_at=00:41:37
 - **B25 [P2] log 把 no-op 写成刷成功**:`_refresh_slot` 返回 "still valid" 时原进 `refreshed=[...]`,现进 `skipped=[...]`(log 不再假装刷新)。顺带删死代码 `_age_days`。
 **不改(设计权衡,三方认同)**:active 号不由 keepalive 刷(codex 拥有 live token,强刷抢一次性 RT = B14 红线);三处刷新阈值分层(proxy 60s / 手动 1h / keepalive 48h)是有意的。
 **验证**:误报警告 0 条;`access_left_h` 实测每号 ~70h;`keepalive --dry-run` → `70h-left > 48h → 不刷`(明天 <48h 才刷);AST + 渲染通过。
+
+---
+
+### B26 · 会话粘性建在 codex 从不发的字段上,两年一次没命中 — 2026-08-09 ✅修 ★根因级
+
+**症状**:用户报「一个会话一个问题请求了两个账号」,多个号的 `used_percent` 长期被拉平到同一个值。
+
+**根因**:`proxy.py` 的 `_affinity` 用 **`previous_response_id`** 做 key,而 codex **从不发这个字段**(实测 2291/2291 次请求全无,选号原因 100% 是 `new`)。于是粘性代码写在那儿却**一次都没命中过**,每个请求都重新 `_pick`;叠加 `_pick` 的「最少使用者优先」+ 服务端只回**整数** `used_percent`,几个号一打平就来回横跳。
+
+**正确的 key 在请求体里**:实测 codex 每个 `POST /responses` 的 body 键为
+`client_metadata, include, input, model, parallel_tool_calls, **prompt_cache_key**, reasoning, service_tier, store, stream, text, tool_choice`
+—— `prompt_cache_key` 是 OpenAI 标识 prompt cache 血缘的字段,同一会话恒定。
+
+**修**:选号优先级改为 `conv(prompt_cache_key) > affinity > 迟滞(PICK_HYSTERESIS,默认5点) > 最少使用者`,每一层都先过 `ok()`(dead/冷却/本轮已试过一律不粘,粘性永远挡不住 failover)。回退开关 `CRP_PICK_HYSTERESIS=0`。
+
+**验证**:6+7 条不变量单测全绿;仿真 A/B(`scratch/picker_ab_20260809.py`,跑生产 `_pick` 本体)合计换号 H=0→78 · H=3→13 · H=5→6 · H=10→3;现场实证 —— 修复前 15 分钟窗口 98 个 POST 换号 4 次,修复后 61 个连续 POST 换号 **0** 次,2 个会话 6 请求跨号 **0**。
+
+**★ 两条被本轮推翻的旧结论(别再照着它们推理)**:
+1. ~~「实测 `cached_tokens` 恒 0,该端点没有 prompt cache 可失去」~~ —— **错**。全量 rollout 实测 `cached_input_tokens/input_tokens` 逐月 **95%~99%**(2026-03 至 08 全覆盖)。当年那次测量大概率只覆盖了会话首轮(首轮本就是 0)。
+2. ~~「换号 ⇒ 冷缓存 ⇒ 整段历史全价重算 ⇒ 浪费额度」~~ —— **也错**(这是我在修复过程中推的,被用户当场纠正后实测证伪)。`total_tokens` **本就包含**缓存命中部分,冷启动改的是这些 token 的**价格**不是**数量**;订阅制下只有额度百分比、没有价格。按 token 对齐后 plus3/5/6 的缓存命中率 **92~98%**,与 pro1 的 95.3% 无差异 —— 切过去根本没冷启动。
+   **「6 次请求比 139 次还贵」的真因是分母不同**:实测 **Pro 周预算 ≈1.85B token、Plus ≈250M,差 7~8 倍**。
+   ⇒ **多号轮换在额度上是中性的**:它只决定"谁被扣",不决定"扣多少"。conv 粘性的价值是**可预测性**,不是省额度。
+3. **未定**:额度计量到底算不算缓存命中的 token。方向性证据(n=3,Δ% 只有 2~3,整数量化 ±50%)是「每 1% 对应的 **total**」离散 1.5 倍 vs「对应的**未命中**」离散 6.6 倍 ⇒ 更像按 total 计。已加 `state.json.quota_marks`(跨整数百分点时记 `{aid,t,from,to}`,上界 400)攒每请求级样本。**有结论前别用"省缓存=省额度"做决策。**
 
 ---
 

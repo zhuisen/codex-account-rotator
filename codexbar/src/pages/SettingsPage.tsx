@@ -8,6 +8,7 @@ interface Settings {
   autoSwitchThreshold: number;
   subExpiryWarnDays: number;
   tokenExpiryWarnHours: number;
+  dockVisible: boolean;
 }
 
 const DEFAULTS: Settings = {
@@ -15,6 +16,7 @@ const DEFAULTS: Settings = {
   autoSwitchThreshold: 15,
   subExpiryWarnDays: 7,
   tokenExpiryWarnHours: 48,
+  dockVisible: false,        // 默认保持纯菜单栏形态(现有行为)
 };
 
 const KEY = "codexbar_settings";
@@ -74,6 +76,19 @@ export default function SettingsPage({ t }: { t: Theme }) {
         </div>
       </Row>
 
+      <Row label="在程序坞显示" desc="开启后 CodexBar 出现在 Dock,可从那里唤起/⌘Tab 切换;关闭则只留菜单栏图标。即时生效,无需重启">
+        <div onClick={() => {
+          const next = !s.dockVisible;
+          update({ dockVisible: next });
+          invoke("set_dock_visible", { on: next }).catch(() => {});
+        }} style={{
+          width: 38, height: 22, borderRadius: 11, padding: 2, cursor: "pointer",
+          background: s.dockVisible ? t.accent : t.barTrack, transition: "background .2s",
+        }}>
+          <div style={{ width: 18, height: 18, borderRadius: 9, background: "#fff", transform: s.dockVisible ? "translateX(16px)" : "translateX(0)", transition: "transform .2s" }} />
+        </div>
+      </Row>
+
       <Row label="额度低自动切号" desc="当前号额度低于阈值时自动切到最佳号(默认关)">
         <div onClick={() => update({ autoSwitchEnabled: !s.autoSwitchEnabled })} style={{
           width: 38, height: 22, borderRadius: 11, padding: 2, cursor: "pointer",
@@ -95,8 +110,8 @@ export default function SettingsPage({ t }: { t: Theme }) {
       </Row>
 
       {/* The tray no longer carries a native menu (both mouse buttons open the popover instead), so
-          this is the quit path. Confirm first — CodexBar has no Dock icon, and a stray click here
-          would leave the menu bar empty with no obvious way back. */}
+          this is the quit path. Confirm first — with the Dock icon off (the default) a stray click
+          here would leave the menu bar empty with no obvious way back. */}
       <Row label="退出 CodexBar" desc="完全退出(菜单栏图标消失);仅关闭窗口用 ⌘W">
         {!confirmQuit ? (
           <span onClick={() => setConfirmQuit(true)} style={{ fontSize: 11.5, fontWeight: 600, color: "#E0524D", border: "1px solid #E0524D40", padding: "6px 13px", borderRadius: 8, cursor: "pointer", userSelect: "none" }}>退出</span>
@@ -111,7 +126,7 @@ export default function SettingsPage({ t }: { t: Theme }) {
       <div style={{ marginTop: 20, padding: "12px 0", borderTop: `1px solid ${t.divider}` }}>
         <div style={{ fontSize: 12, fontWeight: 600, color: t.muted, marginBottom: 6 }}>关于</div>
         <div style={{ fontSize: 11, color: t.faint, fontFamily: "'JetBrains Mono'", lineHeight: 1.8 }}>
-          CodexBar v0.6.0<br />
+          CodexBar v0.7.0<br />
           Tauri 2 + React · macOS<br />
           github.com/zhuisen/codex-account-rotator
         </div>

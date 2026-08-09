@@ -1,13 +1,17 @@
-import { useState, useEffect, useRef, useCallback, Fragment } from "react";
+import { useState, useEffect, useMemo, useRef, useCallback, Fragment } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { listen } from "@tauri-apps/api/event";
 import { LogicalSize } from "@tauri-apps/api/dpi";
 import { THEMES, STATUS_COLORS } from "./theme";
 import Toast from "./components/Toast";
 import AccountRow from "./components/AccountRow";
 import ProbeButton from "./components/ProbeButton";
+import MenuBarToday from "./components/MenuBarToday";
 import { useStore } from "./hooks/useStore";
+import { useTraffic } from "./hooks/useTraffic";
 import { fmtAgo } from "./helpers";
 import { usePrivacy } from "./hooks/usePrivacy";
+import { todayView, fmtTok } from "./traffic";
 import "./App.css";
 import "./menubar.css";
 
@@ -23,6 +27,14 @@ function loadTheme(): "dark" | "light" {
   return "dark";
 }
 
+type Tab = "acc" | "today";
+const TAB_KEY = "codexbar_mb_tab";
+
+/** 交接稿 §3:**记忆上次停留页**,重开弹窗直达。 */
+function loadTab(): Tab {
+  try { return localStorage.getItem(TAB_KEY) === "today" ? "today" : "acc"; } catch { return "acc"; }
+}
+
 const IconBolt = () => <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M13 2 4 14h6l-1 8 9-12h-6z"/></svg>;
 const IconRefresh = ({ size = 13 }: { size?: number }) => <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 12a9 9 0 1 1-3-6.7M21 4v4h-4"/></svg>;
 const IconEye = () => <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M1.6 12S5.3 5.5 12 5.5 22.4 12 22.4 12 18.7 18.5 12 18.5 1.6 12 1.6 12z"/><circle cx="12" cy="12" r="3"/></svg>;
@@ -32,9 +44,30 @@ const IconWarn = () => <svg width="15" height="15" viewBox="0 0 24 24" fill="cur
 export default function MenuBar() {
   const { accounts, hero, currentNode, counts, lastRefreshAt, cardAlert, loadingAction, toast, refresh, run, showToast } = useStore();
   const [theme, setTheme] = useState<"dark" | "light">(loadTheme);
+  const [tab, setTabState] = useState<Tab>(loadTab);
   const rootRef = useRef<HTMLDivElement>(null);
   const { privacy, toggle: togglePrivacy } = usePrivacy();
   const t = THEMES[theme];
+
+  // ★ `revalidate: false` —— 交接稿 §5「弹窗只读缓存,不重复解析」。弹窗是"点一下就要出来"的东西,
+  //   每次打开都跑一遍 scan.py(热路径也要 0.6~1.5s)会让它每次都空一拍。只有**快照不存在或已过期**
+  //   时 `useTraffic` 才会在后台补扫,前台照样先画快照。要立刻要准数就点摘要行那个 ↻。
+  const { data: traffic, busy: trafficBusy, refresh: refreshTraffic, refreshIfStale } =
+    useTraffic({ revalidate: false });
+  const today = useMemo(() => todayView(traffic), [traffic]);
+
+  // ★ 托盘弹出时按新鲜度重扫。`document.visibilityState` 那条定时器在弹窗隐藏时不跑,
+  //   所以刚点开的这一刻数据可能已经很旧了 —— 这个信号补的正是那一刻。
+  //   30s 的阈值比定时器的 2 分钟更紧:用户主动点开就是想看现在的数。
+  useEffect(() => {
+    const un = listen("menubar-shown", () => { refreshIfStale(30_000); });
+    return () => { void un.then((f) => f()); };
+  }, [refreshIfStale]);
+
+  const setTab = useCallback((v: Tab) => {
+    setTabState(v);
+    try { localStorage.setItem(TAB_KEY, v); } catch { /* ignore */ }
+  }, []);
 
   const toggleTheme = (v: "dark" | "light") => {
     setTheme(v);
@@ -42,7 +75,7 @@ export default function MenuBar() {
   };
 
   /** Reveal the main window and dismiss the popover. */
-  const openMain = useCallback(async (navigateTo?: string) => {
+  const openMain = useCallback(async (navigateTo?: string, payload?: unknown) => {
     try {
       const [{ WebviewWindow }, { emit }] = await Promise.all([
         import("@tauri-apps/api/webviewWindow"),
@@ -50,7 +83,7 @@ export default function MenuBar() {
       ]);
       const main = await WebviewWindow.getByLabel("main");
       if (main) { await main.show(); await main.setFocus(); await main.center(); }
-      if (navigateTo) await emit(navigateTo);
+      if (navigateTo) await emit(navigateTo, payload);
       getCurrentWindow().hide();
     } catch (e) { console.error(e); }
   }, []);
@@ -90,11 +123,19 @@ export default function MenuBar() {
 
   const actions = [
     { id: "refresh-all", label: "刷新全池", loadingLabel: "刷新中…", accent: true, badge: "免费",
+      icon: true,
       hint: "读取 Codex 官方额度接口(GET),不消耗额度",
       action: () => run("refresh-all", ["refresh-all", "--notify"], "已刷新全池") },
-    { id: "health", label: "检查 token", loadingLabel: "检查中…", accent: false, badge: undefined as string | undefined,
-      hint: "逐号问服务端 token 是否被作废(零消耗,不刷新 token);发现失效会记录。约 10s",
-      action: () => run("health", ["health"], "已检查 token") },
+    // 中键随 Tab 变(交接稿 §3):账号页查 token,今日页跳主窗流量总览要明细。
+    tab === "today"
+      ? { id: "open-traffic", label: "打开流量总览 ↗", loadingLabel: "", accent: false,
+          badge: undefined as string | undefined, icon: false,
+          hint: "在主窗口看分平台/分模型明细、切时间段、看费率卡",
+          action: () => void openMain("navigate-traffic") }
+      : { id: "health", label: "检查 token", loadingLabel: "检查中…", accent: false,
+          badge: undefined as string | undefined, icon: true,
+          hint: "逐号问服务端 token 是否被作废(零消耗,不刷新 token);发现失效会记录。约 10s",
+          action: () => run("health", ["health"], "已检查 token") },
   ];
 
   return (
@@ -129,6 +170,28 @@ export default function MenuBar() {
         </div>
       </div>
 
+      {/* Tab 行(v3 新增):全宽分段控件,带活值小字 */}
+      <div className="mb-tabs" style={{ border: `1px solid ${t.ghostBorder}` }}>
+        {([
+          ["acc", "账号", String(alive.length)],
+          ["today", "今日", today ? fmtTok(today.totalTok) : "—"],
+        ] as [Tab, string, string][]).map(([id, label, val]) => (
+          <span key={id} className="mb-tab" onClick={() => setTab(id)}
+                style={{ color: tab === id ? t.accentText : t.muted,
+                         background: tab === id ? t.accent : "transparent" }}>
+            {label} <span className="mb-tab-val">{val}</span>
+          </span>
+        ))}
+      </div>
+
+      {tab === "today" ? (
+        <div className="mb-pane">
+          <MenuBarToday t={t} view={today} refreshedAt={traffic?.generated_at ?? null}
+                        busy={trafficBusy} onRefresh={refreshTraffic}
+                        onOpenPlatform={(k) => void openMain("navigate-platform", k)} />
+        </div>
+      ) : (
+      <div className="mb-pane">
       {/* Sub-header */}
       <div className="mb-list-header">
         <span className="mb-list-title" style={{ color: t.muted }}>可用账号</span>
@@ -182,6 +245,8 @@ export default function MenuBar() {
           </details>
         )}
       </div>
+      </div>
+      )}
 
       {/* Bottom actions — 三格。第三格是唯一会花额度的,靠 ProbeButton 的琥珀+两段确认与前两格区分 */}
       <div className="mb-actions" style={{ borderTop: `1px solid ${t.chromeBorder}` }}>
@@ -195,7 +260,7 @@ export default function MenuBar() {
                 onClick={isLoading ? undefined : btn.action}
                 style={{ color: btn.accent ? t.accent : t.ghostText, background: btn.accent ? "rgba(45,212,191,.07)" : "transparent" }}>
                 {isLoading ? <><span className="mb-spinner" />{btn.loadingLabel}</> : <>
-                  <IconRefresh />
+                  {btn.icon && <IconRefresh />}
                   {btn.label}
                   {btn.badge && <span className="mb-action-badge" style={{ color: t.accentText, background: t.accent }}>{btn.badge}</span>}
                 </>}

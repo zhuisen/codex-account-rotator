@@ -1,0 +1,383 @@
+import { useMemo, useState } from "react";
+import { type Theme, platformColor, modelColor } from "../theme";
+import { fmtUSD } from "../rates";
+import StackedArea, { type Layer } from "../components/StackedArea";
+import Seg from "../components/Seg";
+import type { TrafficData, Bucket, Range } from "../traffic";
+import { RANGES, rangeLabel, bucketsFor, sumBuckets, costOfBucket, savingOfBucket, fmtTok, topModels } from "../traffic";
+
+const AMBER = "#E0A21C";
+
+interface Kpi {
+  k: string;
+  v: string;
+  /** 主数值颜色,缺省用正文色 */
+  c?: string;
+  /** 数值下方的小字 */
+  sub?: string;
+  /** 小字颜色(环比涨绿跌红),缺省 `t.text2` */
+  subC?: string;
+}
+
+/** AI用量信息 · 总览（交接稿 §1–§4）。数据源是各 CLI 自己写在本机的 transcript,零额度消耗。 */
+const IconRefresh = ({ spin }: { spin?: boolean }) => (
+  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
+       style={{ animation: spin ? "cbSpin .8s linear infinite" : "none", transformOrigin: "center" }}>
+    <path d="M21 12a9 9 0 1 1-3-6.7M21 4v4h-4" />
+  </svg>
+);
+
+export default function TrafficPage({ t, data, range, setRange, onDrill, busy, err, onRefresh }: {
+  t: Theme;
+  data: TrafficData | null;
+  range: Range;
+  setRange: (r: Range) => void;
+  onDrill: (platform: string) => void;
+  busy: boolean;
+  err: string | null;
+  onRefresh?: () => void;
+}): React.ReactElement {
+  const [hoverKey, setHoverKey] = useState<string | null>(null);
+  const isToday = range === "today";
+
+  const view = useMemo(() => {
+    if (!data) return null;
+    const keys = Object.keys(data.platforms);
+    const series = keys.map((k) => {
+      const { labels, buckets } = bucketsFor(data, k, range);
+      return { key: k, name: data.platforms[k].name, labels, buckets };
+    });
+    const labels = series[0]?.labels ?? [];
+    const per = series.map((s) => {
+      const agg = sumBuckets(s.buckets);
+      return { ...s, agg, total: agg.total, rounds: agg.rounds, cost: costOfBucket(agg, s.key),
+             saving: savingOfBucket(agg, s.key) };
+    });
+    // per 按占比降序 —— 图例行/卡片用这个顺序(大的在上,好读)。
+    // 图层顺序是**反过来**的,见下面 layers。
+    per.sort((a, b) => b.total - a.total);
+    const grand = per.reduce((s, p) => s + p.total, 0);
+    const grandRounds = per.reduce((s, p) => s + p.rounds, 0);
+    const grandCost = per.reduce((s, p) => s + p.cost, 0);
+    const grandSaving = per.reduce((s, p) => s + p.saving, 0);
+    return { labels, per, grand, grandRounds, grandCost, grandSaving };
+  }, [data, range]);
+
+  /**
+   * 环比基准 = **与当前窗口等长的上一段**(今日 → 昨日整天;7d → 再往前 7 天;以此类推)。
+   *
+   * App 恒按 `--days 90` 取数,所以 7/14/30 档都有完整上期;**90d 档没有上一个 90 天,返回 null,
+   * UI 显示「—」** —— 拿不足 90 天的一段当上期算出来的百分比是假的,宁可不给。
+   */
+  const prev = useMemo(() => {
+    if (!data) return null;
+    let tok = 0, cost = 0, ok = false;
+    for (const k of Object.keys(data.platforms)) {
+      const p = data.platforms[k];
+      const days = Object.keys(p.days).sort();
+      if (isToday) {
+        const yd = days[days.length - 2];
+        if (yd) { ok = true; tok += p.days[yd].total; cost += costOfBucket(p.days[yd], k); }
+      } else {
+        const n = range as number;
+        const win = days.slice(-2 * n, -n);
+        if (win.length === n) {
+          ok = true;
+          for (const d of win) { tok += p.days[d].total; cost += costOfBucket(p.days[d], k); }
+        }
+      }
+    }
+    return ok ? { tok, cost } : null;
+  }, [data, range, isToday]);
+
+
+  const delta = (now: number, base: number) => {
+    if (!base) return null;
+    const p = ((now - base) / base) * 100;
+    return { up: p >= 0, txt: `${p >= 0 ? "↑" : "↓"}${Math.abs(p).toFixed(1)}%` };
+  };
+
+  // ★ 图层自下而上 = 占比**降序**(大的贴基线,小的压在上面) —— 用户 2026-08-09 定稿。
+  //   曾按用户要求反成升序,同日看到实物后又改回:占大头的那家铺满基线、小的作为顶上的带,
+  //   比"85% 悬在半空、15% 被压在轴线上"清楚得多。`per` 已是降序,直接用,别再 reverse。
+  const layers: Layer[] = (view?.per ?? []).map((p) => ({
+    key: p.key, name: p.name, color: platformColor(p.key),
+    values: p.buckets.map((b) => b.total),
+  }));
+
+  const top = view?.per[0];
+  const dTok = prev ? delta(view?.grand ?? 0, prev.tok) : null;
+  const dCost = prev ? delta(view?.grandCost ?? 0, prev.cost) : null;
+  const UP = "#27B26B", DOWN = "#E0524D";
+
+  // ★ 缓存披露独立成一格(用户 2026-08-09 定稿,原来是首格底下的一行小字):`total` 里 96%+ 是
+  //   缓存重读(同一段历史被反复重发),只给一个 561M 会让人以为真烧了 5.6 亿新内容。
+  const cacheShare = view?.grand
+    ? (view.per.reduce((s, p) => s + p.agg.cache_read, 0) / view.grand) * 100
+    : 0;
+
+  const kpis: Kpi[] = [
+    { k: "总 token", v: fmtTok(view?.grand ?? 0),
+      sub: dTok ? `环比 ${dTok.txt}` : "环比 —",
+      subC: dTok ? (dTok.up ? UP : DOWN) : t.faint },
+    isToday
+      ? { k: "较昨日", v: dTok?.txt ?? "—", c: dTok ? (dTok.up ? UP : DOWN) : undefined }
+      : { k: "日均", v: fmtTok((view?.grand ?? 0) / Math.max(1, view?.labels.length ?? 1)) },
+    { k: "总费用", v: fmtUSD(view?.grandCost ?? 0), c: AMBER,
+      sub: view?.grandSaving ? `缓存已省 ${fmtUSD(view.grandSaving)}` : undefined },
+    isToday
+      ? { k: "费用较昨日", v: dCost?.txt ?? "—", c: dCost ? (dCost.up ? UP : DOWN) : undefined }
+      : { k: "日均费用", v: fmtUSD((view?.grandCost ?? 0) / Math.max(1, view?.labels.length ?? 1)), c: AMBER },
+    { k: "最大占比",
+      v: top ? `${top.name} ${((top.total / Math.max(1, view!.grand)) * 100).toFixed(1)}%` : "—",
+      c: top ? platformColor(top.key) : undefined },
+    // 缓存排最后(用户 2026-08-09 定稿):它是对首格「总 token」的**限定**而不是并列指标,
+    // 夹在前面会把「总量 → 环比 → 费用」这条主线打断。
+    { k: "缓存", v: view?.grand ? `${cacheShare.toFixed(1)}%` : "—" },
+  ];
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", minHeight: 0, height: "100%", overflow: "auto" }}>
+      {/* 顶栏 */}
+      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 9 }}>
+        <span style={{ fontSize: 22, fontWeight: 700, whiteSpace: "nowrap" }}>AI用量信息</span>
+        <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 10 }}>
+          {/* ★ 刷新按钮:页面画的是**上次扫描的快照**(所以进来不再白屏几秒),不点就一直是那一份。
+              时间戳本身就是按钮 —— 「这数是几点的」和「重取」本来是同一件事,不必再占一格。 */}
+          {data && (
+            <span onClick={busy ? undefined : onRefresh}
+                  title={busy ? "扫描中…" : "重新扫描本机 CLI 记录(只读本地文件,不消耗额度)"}
+                  style={{ fontSize: 10.5, color: busy ? t.accent : t.faint, whiteSpace: "nowrap",
+                           fontFamily: "'JetBrains Mono'", display: "inline-flex", alignItems: "center",
+                           gap: 5, cursor: busy || !onRefresh ? "default" : "pointer", userSelect: "none",
+                           transition: "color .15s" }}>
+              <IconRefresh spin={busy} />
+              上次刷新 {new Date(data.generated_at * 1000).toTimeString().slice(0, 5)}
+            </span>
+          )}
+          <Seg opts={RANGES} cur={range} on={setRange} label={rangeLabel} t={t} />
+        </div>
+      </div>
+
+      {/* KPI 条 —— `space-evenly` + 每格文字居中:原来是左侧紧排 + 固定 gap,右边空出一大片
+          (用户 2026-08-09 实测截图)。均分而不是 `center`,因为 `center` 只是把空白从右边挪成左右各一半。 */}
+      <div style={{ display: "flex", justifyContent: "space-evenly", alignItems: "flex-start", gap: 18,
+                    padding: "10px 18px", marginBottom: 9, borderRadius: 12,
+                    background: t.isDark ? "#0e1319" : t.cardBg, border: `1px solid ${t.cardBorder}` }}>
+        {kpis.map(({ k, v, c, sub, subC }) => (
+          <div key={k} style={{ minWidth: 0, textAlign: "center" }}>
+            <div style={{ fontSize: 10, color: "#10E0E0", fontFamily: "'JetBrains Mono'",
+                          letterSpacing: ".04em", whiteSpace: "nowrap" }}>{k}</div>
+            <div style={{ fontSize: 20, fontWeight: 700, marginTop: 3, whiteSpace: "nowrap",
+                          fontVariantNumeric: "tabular-nums", color: c ?? t.text }}>{v}</div>
+            {/* 9px + t.faint(#454d57) 在深色底上几乎隐形 —— 用户实测"没看到" —— 提到 10.5px */}
+            {sub && (
+              <div style={{ fontSize: 10.5, color: subC ?? t.text2, fontFamily: "'JetBrains Mono'",
+                            marginTop: 2, whiteSpace: "nowrap" }}>{sub}</div>
+            )}
+          </div>
+        ))}
+      </div>
+
+      {err && <div style={{ fontSize: 11, color: "#E0524D", marginBottom: 8 }}>✗ {err}</div>}
+      {busy && !data && <div style={{ fontSize: 12, color: t.muted }}>首次扫描三家 transcript 中(约 18s,之后走缓存)…</div>}
+
+      {!!view?.labels.length && (
+        // ★ `key={range}` 不是可有可无的:图表的 hover 是"某个数据集里的索引",换档必须让实例作废。
+        //    详见 StackedArea 里 `hv` 上方的注释(靠组件自清试过两次,都被用户实测推翻)。
+        <StackedArea key={String(range)}
+                     labels={view.labels} layers={layers} height={156} fmt={fmtTok} t={t}
+                     dimmed={hoverKey} onPick={onDrill}
+                     tipTitle={(i) => (isToday ? `今日 ${view.labels[i].slice(11)}:00` : view.labels[i])} />
+      )}
+
+      {/* 平台图例行 */}
+      <div style={{ marginTop: 9 }}>
+        {view?.per.map((p) => {
+          const c = platformColor(p.key);
+          return (
+            <div key={p.key} onClick={() => onDrill(p.key)}
+                 onMouseEnter={() => setHoverKey(p.key)} onMouseLeave={() => setHoverKey(null)}
+                 style={{ display: "flex", alignItems: "center", gap: 9, height: 28, cursor: "pointer",
+                          borderTop: `1px solid ${t.divider}`, padding: "0 4px",
+                          background: hoverKey === p.key ? "rgba(255,255,255,.04)" : "transparent",
+                          transition: "background .15s" }}>
+              <span style={{ width: 12, height: 12, borderRadius: 4, background: c, flexShrink: 0 }} />
+              <span style={{ width: 92, fontSize: 12.5, fontWeight: 600 }}>{p.name}</span>
+              <div style={{ flex: 1, height: 8, borderRadius: 4, background: t.barTrack, overflow: "hidden", minWidth: 40 }}>
+                <div style={{ width: `${(p.total / Math.max(1, view.per[0].total)) * 100}%`,
+                              height: "100%", background: c }} />
+              </div>
+              <span style={{ width: 74, textAlign: "right", fontSize: 13, fontWeight: 700,
+                             fontFamily: "'JetBrains Mono'", fontVariantNumeric: "tabular-nums" }}>{fmtTok(p.total)}</span>
+              <span style={{ width: 52, textAlign: "right", fontSize: 11, color: t.muted, fontFamily: "'JetBrains Mono'" }}>
+                {((p.total / Math.max(1, view.grand)) * 100).toFixed(1)}%
+              </span>
+              <span style={{ width: 74, textAlign: "right", fontSize: 11, color: t.faint, fontFamily: "'JetBrains Mono'" }}>
+                {p.rounds.toLocaleString()}轮
+              </span>
+              <span style={{ width: 64, textAlign: "right", fontSize: 11.5, fontWeight: 700, color: AMBER,
+                             fontFamily: "'JetBrains Mono'" }}>{fmtUSD(p.cost)}</span>
+              <span style={{ width: 14, textAlign: "right", color: t.faint, fontSize: 12 }}>→</span>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* 平台卡片 / 今日饼图卡片 */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 11, marginTop: 10,
+                    paddingBottom: 4 }}>
+        {view?.per.map((p) => (
+          <PlatformCard key={p.key} t={t} pk={p.key} name={p.name} buckets={p.buckets}
+                        total={p.total} cost={p.cost} isToday={isToday}
+                        yTotal={isToday ? yesterdayOf(data, p.key) : 0}
+                        onDrill={() => onDrill(p.key)} rangeTxt={rangeLabel(range)} />
+        ))}
+        <div style={{ border: `1px dashed ${t.ghostBorder}`, borderRadius: 13, display: "grid",
+                      placeItems: "center", color: t.faint, fontSize: 11.5, minHeight: 118 }}>
+          Gemini 待接入
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function yesterdayOf(data: TrafficData | null, key: string): number {
+  if (!data) return 0;
+  const days = Object.keys(data.platforms[key]?.days ?? {}).sort();
+  const yd = days[days.length - 2];
+  return yd ? data.platforms[key].days[yd].total : 0;
+}
+
+/** §1 平台卡片 / §4 今日模型饼图卡片 */
+function PlatformCard({ t, pk, name, buckets, total, cost, isToday, yTotal, onDrill, rangeTxt }: {
+  t: Theme; pk: string; name: string; buckets: Bucket[]; total: number; cost: number;
+  isToday: boolean; yTotal: number; onDrill: () => void; rangeTxt: string;
+}): React.ReactElement {
+  const [hov, setHov] = useState(false);
+  const c = platformColor(pk);
+  const cur = buckets.length ? buckets[buckets.length - 1].total : 0;
+  const shown = isToday ? total : cur;
+  const d = yTotal ? ((total - yTotal) / yTotal) * 100 : null;
+  const tops = topModels(buckets, 3);
+
+  const box: React.CSSProperties = {
+    background: t.isDark ? "#10161d" : t.cardBg, borderRadius: 13, padding: "11px 11px",
+    border: `1px solid ${hov ? c : t.cardBorder}`, cursor: "pointer",
+    transform: hov ? "translateY(-2px)" : "none", transition: "transform .15s ease, border-color .15s",
+    minWidth: 0, display: "flex", flexDirection: "column",
+  };
+
+  return (
+    <div style={box} onMouseEnter={() => setHov(true)} onMouseLeave={() => setHov(false)} onClick={onDrill}>
+      <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 7 }}>
+        <span style={{ width: 9, height: 9, borderRadius: "50%", background: c, flexShrink: 0 }} />
+        <span style={{ fontSize: 13.5, fontWeight: 700 }}>{name}</span>
+        <span style={{ marginLeft: "auto", fontSize: 10, color: t.faint, whiteSpace: "nowrap" }}>明细 →</span>
+      </div>
+
+      {/* ★ 今日视图 = 纯左右分区:左环右字,**没有底部横条也没有分隔线**。
+          原来底部那行 `今日 → $197.61` 的标签是冗余的(整张卡就是今日),而 token 数环心已经给过;
+          金额并进右栏,卡片从"上下三段"变成"左右两块",信息密度不变、少一条分隔线和一整行。 */}
+      {isToday ? (
+        <Donut t={t} tops={tops} total={total} delta={d} cost={cost} />
+      ) : (
+        <>
+          <div style={{ fontSize: 9.5, color: t.muted, fontFamily: "'JetBrains Mono'" }}>今日</div>
+          <div style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
+            <span style={{ fontSize: 22, fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>{fmtTok(shown)}</span>
+          </div>
+          <Spark values={buckets.map((b) => b.total)} color={c} />
+          <div style={{ borderTop: `1px solid ${t.divider}`, marginTop: 8, paddingTop: 7,
+                        display: "flex", flexDirection: "column", gap: 3, fontSize: 10 }}>
+            <Row t={t} k="Top" v={tops[0] ? `${short(tops[0].model)} · ${(tops[0].share * 100).toFixed(0)}%` : "—"} />
+            <Row t={t} k={rangeTxt} v={`${fmtTok(total)} · ${fmtUSD(cost)}`} amber />
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+const short = (m: string) => m.replace(/^claude-|^gpt-|^grok-/, "");
+
+function Row({ t, k, v, amber }: { t: Theme; k: string; v: string; amber?: boolean }) {
+  return (
+    <div style={{ display: "flex", justifyContent: "space-between", gap: 6, fontFamily: "'JetBrains Mono'" }}>
+      <span style={{ color: t.faint, whiteSpace: "nowrap" }}>{k} →</span>
+      <span style={{ color: amber ? AMBER : t.text2, fontWeight: amber ? 700 : 400,
+                     overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{v}</span>
+    </div>
+  );
+}
+
+function Spark({ values, color }: { values: number[]; color: string }) {
+  if (!values.length) return null;
+  const peak = Math.max(1, ...values);
+  const W = 200, H = 36;
+  const pts = values.map((v, i) => `${(i / Math.max(1, values.length - 1)) * W},${(1 - v / peak) * H}`);
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none"
+         style={{ width: "100%", height: 30, marginTop: 3, display: "block" }}>
+      <polyline points={pts.join(" ")} fill="none" stroke={color} strokeWidth={2}
+                vectorEffect="non-scaling-stroke" strokeLinejoin="round" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+/** §4 今日模型占比环形图:Top3 模型 + 其他 */
+function Donut({ t, tops, total, delta, cost }: {
+  t: Theme; tops: { model: string; share: number }[]; total: number;
+  delta?: number | null; cost?: number;
+}) {
+  const R = 34, C = 2 * Math.PI * R;
+  let off = 0;
+  const segs = tops.map((m) => {
+    const len = m.share * C;
+    const s = { color: modelColor(m.model), len, off };
+    off += len;
+    return s;
+  });
+  const rest = Math.max(0, C - off);
+  return (
+    // 环放大到 92(原 66),图例整体压到右侧一条窄栏:原来图例 flex:1 会横铺到卡片边缘,
+    // 模型名和 100% 之间拉开一大段空白,视觉上环显得更小(用户 2026-08-09 指出)。
+    <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
+      <svg viewBox="0 0 92 92" style={{ width: 100, height: 100, flexShrink: 0 }}>
+        <g transform="rotate(-90 46 46)">
+          <circle cx={46} cy={46} r={R} fill="none" stroke="#454d57" strokeWidth={13}
+                  strokeDasharray={`${rest} ${C - rest}`} strokeDashoffset={-off} />
+          {segs.map((s, i) => (
+            <circle key={i} cx={46} cy={46} r={R} fill="none" stroke={s.color} strokeWidth={13}
+                    strokeDasharray={`${s.len} ${C - s.len}`} strokeDashoffset={-s.off} />
+          ))}
+        </g>
+        <text x={46} y={45} textAnchor="middle" fontSize={15} fontWeight={700} fill={t.text}
+              fontFamily="'JetBrains Mono'">{fmtTok(total)}</text>
+        <text x={46} y={57} textAnchor="middle" fontSize={8} fill={t.muted}>今日</text>
+      </svg>
+      <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 2 }}>
+        {tops.map((m) => (
+          <div key={m.model} style={{ display: "flex", alignItems: "center", gap: 3, fontSize: 10,
+                                      fontFamily: "'JetBrains Mono'", lineHeight: 1.25 }}>
+            <span style={{ width: 7, height: 7, borderRadius: 2, background: modelColor(m.model), flexShrink: 0 }} />
+            <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                           color: t.text2 }}>{short(m.model)}</span>
+            <span style={{ color: t.muted, flexShrink: 0 }}>{(m.share * 100).toFixed(0)}%</span>
+          </div>
+        ))}
+        {delta != null && (
+          <div style={{ fontSize: 9, marginTop: 4, fontFamily: "'JetBrains Mono'",
+                        color: delta >= 0 ? "#27B26B" : "#E0524D", whiteSpace: "nowrap" }}>
+            {delta >= 0 ? "↑" : "↓"}{Math.abs(delta).toFixed(1)}% <span style={{ color: t.faint }}>vs 昨日</span>
+          </div>
+        )}
+        {cost != null && (
+          <div style={{ fontSize: 13, fontWeight: 700, color: AMBER, marginTop: 6,
+                        fontFamily: "'JetBrains Mono'", fontVariantNumeric: "tabular-nums",
+                        whiteSpace: "nowrap" }}>{fmtUSD(cost)}</div>
+        )}
+      </div>
+    </div>
+  );
+}

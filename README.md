@@ -11,7 +11,7 @@
 | 痛点 | 怎么解的 |
 |---|---|
 | ① token 失效要重登 | keepalive 定期 OAuth 刷新闲置号 + 代理发现过期当场刷新 → **永不手动重登** |
-| ② 会话内切号要重启 | 代理逐请求透明轮换;Codex 每请求发完整上下文(无 `previous_response_id`)→ **中途换号无感、不重启** |
+| ② 会话内切号要重启 | 代理逐请求透明轮换;Codex 每请求发完整上下文 → **中途换号无感、不重启**。同一段对话靠 body 里的 `prompt_cache_key` 粘住同一个号(codex 不发 `previous_response_id`,见 CHANGELOG B26) |
 | ③ 额度不实时 | **事件驱动**:quotad 监测 codex 活动(4 路本地信号)→ 数秒内读**官方 usage API**(零消耗)刷当前号;实测发起调用后 **+8s** 见数、运行中每 20s 续刷。另有 300s 全池扫描兜底 + 代理逐请求记账 |
 | ④ 撞限要手动换 | 代理撞 429 → 标冷却 → 下个请求自动换号 |
 
@@ -51,6 +51,10 @@
 | `proxy/auth-token` | codex `auth.command` 占位 token(代理会覆盖) |
 | `proxy/test-home/config.toml` | 隔离测试用 CODEX_HOME(非日常) |
 | `proxy/README.md` | 代理层细节文档 |
+| `.traffic-cache.json`(gitignored) | `traffic/scan.py` 的**逐文件增量缓存**(~10MB,按 `(mtime,size)` 命中)。冷 ~18s → 热 ~1.4s 靠它。删了只是重扫一次,不丢数据 |
+| `.traffic-latest.json`(gitignored) | 最近一次扫描的**成品快照**(~91KB)。两个 webview 都先读它再后台重扫,所以进页面/点托盘不再等 1~3 秒。由 `run_traffic` 原子写入(`.tmp<pid>` → `rename`) |
+| `traffic/scan.py` | **多 AI 流量总览扫描器**(`[--days N] [--json] [--no-cache]`)。读 Claude `~/.claude/projects/**/*.jsonl` + Codex `~/.codex/sessions/**/rollout-*.jsonl` + Grok `~/.grok/**/updates.jsonl`,**纯本地只读、不联网、不消耗任何额度**,与账号池无关。CodexBar「AI用量信息」页的数据源 |
+| `claude/claude_tokens.py` | ⚠️ 只统计 Claude 的旧扫描器,能力已被 `traffic/scan.py` 完全覆盖(v0.7.0 起 app 不再调用)。保留仅作 CLI |
 | `scripts/install-launchd.sh` | **生成并加载 5 个 launchd 服务**(autosync/keepalive/refreshquota/quotad/proxy)。生成而非提交成文件:plist 内嵌绝对路径,提交的副本换台机器就是错的,且会静默漂移(旧的 `launchd/*.plist` 就漂到了写死 `/usr/bin/python3`)。★脚本会**解析并钉住 OpenSSL 版的 python3**,见「维护约定」 |
 | `auth/`(gitignored) | 每号凭证槽位 `<account_id>.json`(0600) |
 | `state.json`(gitignored) | 池状态(slots/active/last_aid/last_proxy_ts) |
@@ -99,7 +103,18 @@ codex-rotate probe --all             # 全池(必须显式,防手滑)
 codex-rotate probe plus5 --model gpt-5.5 --effort low
 ```
 
-菜单栏(CodexBar)装好后顶部显示当前号周额度余量 + 重置倒计时。**左键右键都打开弹窗**(托盘没有原生菜单——macOS 无法让右键不弹它);弹窗里看每号油表、号间差值、重置卡状态、失效号折叠,**点任意账号会弹出主界面**,切号在主界面卡片上做。退出在主界面「设置」页(本 app 不占 Dock,没有别的退出口)。构建:`bash codexbar/scripts/deploy.sh`。
+菜单栏(CodexBar)装好后顶部显示当前号周额度余量 + 重置倒计时。**左键右键都打开弹窗**(托盘没有原生菜单——macOS 无法让右键不弹它)。弹窗分**账号｜今日**两个 Tab,停留页会记住、重开直达:
+
+- **账号**:每号油表、号间差值、重置卡状态、失效号折叠,**点任意账号会弹出主界面**,切号在主界面卡片上做。底栏 `刷新全池[免费] | 检查 token | 探针[计费]`。
+- **今日**:今日总 token / 等效费用 / 较昨日涨跌 + 小时堆叠图 + 三家平台明细(点一行直接跳主窗该平台详情)。数据来自**上次扫描的快照**(读盘 ~1ms),点摘要行的 `↻` 立刻重扫。底栏中键变成 `打开流量总览 ↗`。
+
+退出在主界面「设置」页。构建:`bash codexbar/scripts/deploy.sh`。
+
+> **Dock 图标默认关**(纯菜单栏形态),可在「设置」页打开——`Info.plist` 的 `LSUIElement` 保持 `true`(决定冷启动瞬间不闪图标),运行期用 `setActivationPolicy` 来回切,不需重启。
+
+主界面侧栏 4 页:**总览** / **AI用量信息** / 日志 / 设置。消耗页汇总 **Claude + Codex + Grok** 三家(v0.7.0 起,取代原来分开的「Token 消耗」与「Claude 消耗」两页):堆叠面积图 + 今日/7/14/30/90d 五档,点任一平台进「详情」看分模型拆解与费率卡。数据源全是**本机 CLI 自己落的盘**、零额度消耗——`~/.claude/projects/**/*.jsonl` · `~/.codex/sessions/**/rollout-*.jsonl` · `~/.grok/**/updates.jsonl`。费用一栏是**按牌价折算的等效 API 成本**(四类 token 分别计价,缓存读按 10%),订阅制下并非实付。
+
+> ⚠️ **消耗页只有 token 量,没有 Claude 的额度油表**,这是刻意的:Claude Code **不把额度写进任何本地文件**(实测 300 文件 / 10,316 条 assistant 记录,`usage` 里只有 token 计数,零 `rate_limit`/`resets_at`/`remaining` 字段;`~/.claude` 下也无额度快照),`/usage` 的额度条是实时从服务端拉的。要拿它就必须用订阅凭证调 Anthropic 端点,而 Anthropic Consumer Terms §3 明文禁止「非 API key 的自动化访问」。codex 那页能有油表,是因为 codex **把额度写进了本地 rollout**——两边没有对等物。
 
 ## 安全边界(红线)
 
