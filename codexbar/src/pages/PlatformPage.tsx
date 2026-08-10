@@ -156,7 +156,8 @@ export default function PlatformPage({ t, data, pk, range, setRange, onBack, bus
               <span style={{ width: 48, textAlign: "right", fontFamily: "'JetBrains Mono'", color: t.muted }}>
                 {((m.total / Math.max(1, v.agg.total)) * 100).toFixed(1)}%
               </span>
-              <span style={{ width: 62, textAlign: "right", fontFamily: "'JetBrains Mono'", color: t.faint }}>
+              {/* 同总览:轮数是要读的数字,`t.faint` 实算 2.21:1 不够 */}
+              <span style={{ width: 62, textAlign: "right", fontFamily: "'JetBrains Mono'", color: t.muted }}>
                 {m.rounds.toLocaleString()}轮
               </span>
               <span style={{ width: 62, textAlign: "right", fontFamily: "'JetBrains Mono'", color: AMBER,

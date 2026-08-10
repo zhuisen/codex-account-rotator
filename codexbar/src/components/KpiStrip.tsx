@@ -32,7 +32,9 @@ export default function KpiStrip({ t, items }: { t: Theme; items: Kpi[] }): Reac
                   background: t.isDark ? "#0e1319" : t.cardBg, border: `1px solid ${t.cardBorder}` }}>
       {items.map(({ k, v, c, sub, subC }) => (
         <div key={k} style={{ minWidth: 0, textAlign: "center" }}>
-          <div style={{ fontSize: 11, color: "#10E0E0", fontFamily: "'JetBrains Mono'",
+          {/* 标签 12.5px:从 11 / 12 / 12.5 / 13.5 四档里选的(用户 2026-08-10)。13.5 开始和 29px 的
+              数值抢主次,11 又偏小。四档在 1000px 默认窗宽下都不溢出(最大需 701px / 可用 886px)。 */}
+          <div style={{ fontSize: 12.5, color: "#10E0E0", fontFamily: "'JetBrains Mono'",
                         letterSpacing: ".04em", whiteSpace: "nowrap" }}>{k}</div>
           {/* ★ hero 数字用 **Space Grotesk**(比例字体),是对「一切数字用等宽」的**知情例外**。
               理由:那条规则的目的是"数字右对齐成列时能对齐",而这一格是**居中的单个数字**,不在列里。

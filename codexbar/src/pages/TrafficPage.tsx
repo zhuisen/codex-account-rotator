@@ -184,7 +184,9 @@ export default function TrafficPage({ t, data, range, setRange, onDrill, busy, e
               <span style={{ width: 52, textAlign: "right", fontSize: 11, color: t.muted, fontFamily: "'JetBrains Mono'" }}>
                 {((p.total / Math.max(1, view.grand)) * 100).toFixed(1)}%
               </span>
-              <span style={{ width: 74, textAlign: "right", fontSize: 11, color: t.faint, fontFamily: "'JetBrains Mono'" }}>
+              {/* ★ 轮数是**要读的数字**,不能用 `t.faint`(#454d57 对深色底实算 2.21:1,远低于 WCAG 4.5)。
+                  `t.faint` 只留给纯装饰(箭头 →、"vs 昨日"这种词缀)。用户 2026-08-10 报"太灰了"。 */}
+              <span style={{ width: 74, textAlign: "right", fontSize: 11, color: t.muted, fontFamily: "'JetBrains Mono'" }}>
                 {p.rounds.toLocaleString()}轮
               </span>
               <span style={{ width: 64, textAlign: "right", fontSize: 11.5, fontWeight: 700, color: AMBER,
