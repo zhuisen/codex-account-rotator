@@ -4,7 +4,8 @@ import { costOf, fmtUSD, priceOf, isPriced } from "../rates";
 import StackedArea, { type Layer } from "../components/StackedArea";
 import Seg from "../components/Seg";
 import type { TrafficData, Range } from "../traffic";
-import { RANGES, rangeLabel, bucketsFor, sumBuckets, costOfBucket, fmtTok } from "../traffic";
+import { RANGES, rangeLabel, bucketsFor, sumBuckets, costOfBucket, savingOfBucket, fmtTok } from "../traffic";
+import KpiStrip, { type Kpi, UP, DOWN } from "../components/KpiStrip";
 
 const AMBER = "#E0A21C";
 const SRC: Record<string, string> = {
@@ -32,7 +33,8 @@ export default function PlatformPage({ t, data, pk, range, setRange, onBack, bus
     // 全池占比
     let grand = 0;
     for (const k of Object.keys(data.platforms)) grand += sumBuckets(bucketsFor(data, k, range).buckets).total;
-    return { labels, buckets, agg, models, cost: costOfBucket(agg, pk), grand };
+    return { labels, buckets, agg, models, cost: costOfBucket(agg, pk),
+             saving: savingOfBucket(agg, pk), grand };
   }, [data, pk, range]);
 
   const shown = (v?.models ?? []).filter((m) => !iso.has(m.m));
@@ -46,14 +48,47 @@ export default function PlatformPage({ t, data, pk, range, setRange, onBack, bus
 
   const isToday = range === "today";
   const days = Math.max(1, v?.labels.length ?? 1);
-  const kpis: [string, string, string?][] = [
-    // 与总览同名(用户 2026-08-09 把总览的「合计 token」改成「总 token」),两页别叫两个名
-    ["总 token", fmtTok(v?.agg.total ?? 0)],
-    ["请求轮数", (v?.agg.rounds ?? 0).toLocaleString()],
-    [isToday ? "小时均" : "日均", fmtTok((v?.agg.total ?? 0) / days)],
-    ["总费用 · 等效API", fmtUSD(v?.cost ?? 0), AMBER],
-    [isToday ? "小时均费用" : "日均费用", fmtUSD((v?.cost ?? 0) / days), AMBER],
-    ["占全池", v?.grand ? `${((v.agg.total / v.grand) * 100).toFixed(1)}%` : "—", c],
+  /**
+   * 环比基准 = **本平台**在等长上一段的量与费用。与总览同一套口径,只是把范围收到单个平台。
+   * App 恒取 `--days 90`,所以 7/14/30 档有完整上期;**90d 档没有上一个 90 天 → null → 显示「—」**,
+   * 不拿不足 90 天的一段冒充。今日档比昨日整天。
+   */
+  const prev = useMemo(() => {
+    if (!data) return null;
+    const p = data.platforms[pk];
+    if (!p) return null;
+    const dayKeys = Object.keys(p.days).sort();
+    let win: string[];
+    if (isToday) {
+      const yd = dayKeys[dayKeys.length - 2];
+      win = yd ? [yd] : [];
+    } else {
+      const n = range as number;
+      win = dayKeys.slice(-2 * n, -n);
+      if (win.length !== n) win = [];
+    }
+    if (!win.length) return null;
+    const agg = sumBuckets(win.map((d) => p.days[d]).filter(Boolean));
+    return { tok: agg.total, cost: costOfBucket(agg, pk) };
+  }, [data, pk, range, isToday]);
+
+  const delta = (now: number, base: number) =>
+    base > 0 ? { up: now >= base, txt: `${now >= base ? "↑" : "↓"}${(Math.abs(now - base) / base * 100).toFixed(1)}%` } : null;
+  const dTok = prev ? delta(v?.agg.total ?? 0, prev.tok) : null;
+  const dCost = prev ? delta(v?.cost ?? 0, prev.cost) : null;
+
+  const kpis: Kpi[] = [
+    { k: "总 token", v: fmtTok(v?.agg.total ?? 0),
+      sub: dTok ? `环比 ${dTok.txt}` : "环比 —",
+      subC: dTok ? (dTok.up ? UP : DOWN) : t.faint },
+    { k: "请求轮数", v: (v?.agg.rounds ?? 0).toLocaleString() },
+    { k: isToday ? "小时均" : "日均", v: fmtTok((v?.agg.total ?? 0) / days) },
+    { k: "总费用 · 等效API", v: fmtUSD(v?.cost ?? 0), c: AMBER,
+      sub: v?.saving ? `缓存已省 ${fmtUSD(v.saving)}` : undefined },
+    { k: isToday ? "小时均费用" : "日均费用", v: fmtUSD((v?.cost ?? 0) / days), c: AMBER,
+      sub: dCost ? `环比 ${dCost.txt}` : undefined,
+      subC: dCost ? (dCost.up ? UP : DOWN) : undefined },
+    { k: "占全池", v: v?.grand ? `${((v.agg.total / v.grand) * 100).toFixed(1)}%` : "—", c },
   ];
 
   // 费率卡的折算说明:该平台四类 token 的真实构成
@@ -85,17 +120,7 @@ export default function PlatformPage({ t, data, pk, range, setRange, onBack, bus
         </div>
       </div>
 
-      <div style={{ display: "flex", gap: 24, padding: "12px 18px", marginBottom: 11, borderRadius: 12,
-                    background: t.isDark ? "#0e1319" : t.cardBg, border: `1px solid ${t.cardBorder}` }}>
-        {kpis.map(([k, val, col]) => (
-          <div key={k} style={{ minWidth: 0 }}>
-            <div style={{ fontSize: 10, color: "#10E0E0", fontFamily: "'JetBrains Mono'",
-                          letterSpacing: ".04em", whiteSpace: "nowrap" }}>{k}</div>
-            <div style={{ fontSize: 20, fontWeight: 700, marginTop: 3, whiteSpace: "nowrap",
-                          fontVariantNumeric: "tabular-nums", color: col ?? t.text }}>{val}</div>
-          </div>
-        ))}
-      </div>
+      <KpiStrip t={t} items={kpis} />
 
       {busy && !data && <div style={{ fontSize: 12, color: t.muted }}>扫描中…</div>}
 

@@ -3,21 +3,11 @@ import { type Theme, modelColor } from "../theme";
 import { fmtUSD } from "../rates";
 import StackedArea, { type Layer } from "../components/StackedArea";
 import Seg from "../components/Seg";
+import KpiStrip, { type Kpi, UP, DOWN } from "../components/KpiStrip";
 import type { TrafficData, Bucket, Range } from "../traffic";
 import { RANGES, rangeLabel, bucketsFor, sumBuckets, costOfBucket, savingOfBucket, fmtTok, topModels, colorOf } from "../traffic";
 
 const AMBER = "#E0A21C";
-
-interface Kpi {
-  k: string;
-  v: string;
-  /** 主数值颜色,缺省用正文色 */
-  c?: string;
-  /** 数值下方的小字 */
-  sub?: string;
-  /** 小字颜色(环比涨绿跌红),缺省 `t.text2` */
-  subC?: string;
-}
 
 /** AI用量信息 · 总览（交接稿 §1–§4）。数据源是各 CLI 自己写在本机的 transcript,零额度消耗。 */
 const IconRefresh = ({ spin }: { spin?: boolean }) => (
@@ -108,7 +98,6 @@ export default function TrafficPage({ t, data, range, setRange, onDrill, busy, e
   const top = view?.per[0];
   const dTok = prev ? delta(view?.grand ?? 0, prev.tok) : null;
   const dCost = prev ? delta(view?.grandCost ?? 0, prev.cost) : null;
-  const UP = "#27B26B", DOWN = "#E0524D";
 
   // ★ 缓存披露独立成一格(用户 2026-08-09 定稿,原来是首格底下的一行小字):`total` 里 96%+ 是
   //   缓存重读(同一段历史被反复重发),只给一个 561M 会让人以为真烧了 5.6 亿新内容。
@@ -159,25 +148,7 @@ export default function TrafficPage({ t, data, range, setRange, onDrill, busy, e
         </div>
       </div>
 
-      {/* KPI 条 —— `space-evenly` + 每格文字居中:原来是左侧紧排 + 固定 gap,右边空出一大片
-          (用户 2026-08-09 实测截图)。均分而不是 `center`,因为 `center` 只是把空白从右边挪成左右各一半。 */}
-      <div style={{ display: "flex", justifyContent: "space-evenly", alignItems: "flex-start", gap: 18,
-                    padding: "10px 18px", marginBottom: 9, borderRadius: 12,
-                    background: t.isDark ? "#0e1319" : t.cardBg, border: `1px solid ${t.cardBorder}` }}>
-        {kpis.map(({ k, v, c, sub, subC }) => (
-          <div key={k} style={{ minWidth: 0, textAlign: "center" }}>
-            <div style={{ fontSize: 10, color: "#10E0E0", fontFamily: "'JetBrains Mono'",
-                          letterSpacing: ".04em", whiteSpace: "nowrap" }}>{k}</div>
-            <div style={{ fontSize: 20, fontWeight: 700, marginTop: 3, whiteSpace: "nowrap",
-                          fontVariantNumeric: "tabular-nums", color: c ?? t.text }}>{v}</div>
-            {/* 9px + t.faint(#454d57) 在深色底上几乎隐形 —— 用户实测"没看到" —— 提到 10.5px */}
-            {sub && (
-              <div style={{ fontSize: 10.5, color: subC ?? t.text2, fontFamily: "'JetBrains Mono'",
-                            marginTop: 2, whiteSpace: "nowrap" }}>{sub}</div>
-            )}
-          </div>
-        ))}
-      </div>
+      <KpiStrip t={t} items={kpis} />
 
       {err && <div style={{ fontSize: 11, color: "#E0524D", marginBottom: 8 }}>✗ {err}</div>}
       {busy && !data && <div style={{ fontSize: 12, color: t.muted }}>首次扫描三家 transcript 中(约 18s,之后走缓存)…</div>}
