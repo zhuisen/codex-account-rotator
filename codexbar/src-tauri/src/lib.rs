@@ -1,6 +1,7 @@
 use serde_json::Value;
 use std::fs;
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
@@ -97,6 +98,47 @@ async fn run_rotate(app: AppHandle, args: Vec<String>) -> Result<String, String>
     }
 }
 
+/// 用户在设置页开没开「在程序坞显示」。**策略要按"开关 AND 主窗可见"两个条件合成**,所以得
+/// 在 Rust 侧记住这个偏好 —— 它存在前端 localStorage 里,Rust 读不到。
+static DOCK_ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// 按当前状态重算激活策略。**唯一改 activation policy 的地方**,别在别处零散调用。
+///
+/// ★ 规则:Dock 图标 = 用户开了开关 **且** 主窗口正显示着。
+/// 关掉主窗只 `hide()` 而不降级策略的话,图标会一直占着程序坞的位置,点它还没反应
+/// (macOS 点 Dock 图标发的是 `RunEvent::Reopen`,不处理就等于死图标)——用户 2026-08-09 实测。
+#[allow(unused_variables)]
+fn apply_activation_policy(app: &AppHandle) {
+    #[cfg(target_os = "macos")]
+    {
+        let main_visible = app
+            .get_webview_window("main")
+            .and_then(|w| w.is_visible().ok())
+            .unwrap_or(false);
+        let regular = DOCK_ENABLED.load(Ordering::Relaxed) && main_visible;
+        let _ = app.set_activation_policy(if regular {
+            tauri::ActivationPolicy::Regular
+        } else {
+            tauri::ActivationPolicy::Accessory
+        });
+    }
+}
+
+/// 显示/隐藏主窗口。**前端一切显示隐藏主窗的地方都要走这里**,不要直接 `win.hide()` ——
+/// 那样绕过了激活策略的同步,程序坞图标就会和窗口状态脱节。
+#[tauri::command]
+fn set_main_visible(app: AppHandle, show: bool) {
+    if let Some(w) = app.get_webview_window("main") {
+        if show {
+            let _ = w.show();
+            let _ = w.set_focus();
+        } else {
+            let _ = w.hide();
+        }
+    }
+    apply_activation_policy(&app);
+}
+
 /// 程序坞(Dock)图标的显示开关。
 ///
 /// ★ `Info.plist` 的 `LSUIElement=true` **保持不变** —— 它决定的是"启动瞬间要不要出现在 Dock",
@@ -105,16 +147,9 @@ async fn run_rotate(app: AppHandle, args: Vec<String>) -> Result<String, String>
 ///
 /// 做成开关而不是直接改成常驻 Dock:纯菜单栏形态是现有行为,砍掉它属于"顺手简化掉已有功能"。
 #[tauri::command]
-#[allow(unused_variables)]
 fn set_dock_visible(app: AppHandle, on: bool) {
-    #[cfg(target_os = "macos")]
-    {
-        let _ = app.set_activation_policy(if on {
-            tauri::ActivationPolicy::Regular
-        } else {
-            tauri::ActivationPolicy::Accessory
-        });
-    }
+    DOCK_ENABLED.store(on, Ordering::Relaxed);
+    apply_activation_policy(&app);
 }
 
 /// 多 AI 流量总览(Claude / Codex / Grok)。
@@ -618,6 +653,8 @@ pub fn run() {
                         if let Some(win) = handle_close.get_webview_window("main") {
                             let _ = win.hide();
                         }
+                        // 关窗必须让出程序坞的位置,否则图标一直占着还点不出窗口
+                        apply_activation_policy(&handle_close);
                     }
                 });
             }
@@ -638,6 +675,7 @@ pub fn run() {
             read_traffic_snapshot,
             check_update,
             set_dock_visible,
+            set_main_visible,
             read_auth_tokens,
             read_logs,
             read_account_detail,
@@ -646,12 +684,24 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app, event| {
+            // ★ macOS 点程序坞图标发的是 `Reopen`,不处理 = 死图标(点了没反应)。
+            //   这里把主窗唤回来 —— 图标存在的时刻正是主窗开着的时刻,所以这条覆盖的是
+            //   "⌘Tab 切走后又点回来"这种场景。
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { .. } = event {
+                if let Some(w) = app.get_webview_window("main") {
+                    let _ = w.show();
+                    let _ = w.set_focus();
+                }
+                apply_activation_policy(app);
+            }
             if let tauri::RunEvent::ExitRequested { code, api, .. } = event {
                 if code.is_none() {
                     api.prevent_exit();
                     if let Some(w) = app.get_webview_window("main") {
                         let _ = w.hide();
                     }
+                    apply_activation_policy(app);
                 }
             }
         });

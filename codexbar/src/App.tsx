@@ -76,10 +76,10 @@ export default function App() {
   // menubar → 主窗口的三个跳转入口。齿轮=设置;今日 Tab 底栏=流量总览;点平台图例行=该平台详情。
   useEffect(() => {
     const uns = [
-      listen("navigate-settings", () => { setPage("settings"); win.show(); win.setFocus(); }),
-      listen("navigate-traffic", () => { setDrill(null); setPage("traffic"); win.show(); win.setFocus(); }),
+      listen("navigate-settings", () => { setPage("settings"); void invoke("set_main_visible", { show: true }); }),
+      listen("navigate-traffic", () => { setDrill(null); setPage("traffic"); void invoke("set_main_visible", { show: true }); }),
       listen<string>("navigate-platform", (e) => {
-        setDrill(e.payload); setPage("traffic"); win.show(); win.setFocus();
+        setDrill(e.payload); setPage("traffic"); void invoke("set_main_visible", { show: true });
       }),
     ];
     return () => { uns.forEach((u) => { void u.then((f) => f()); }); };
@@ -115,7 +115,7 @@ export default function App() {
 
       {/* Title bar */}
       <div data-tauri-drag-region style={{ height: 38, flexShrink: 0, display: "flex", alignItems: "center", padding: "0 14px", gap: 8, borderBottom: `1px solid ${t.chromeBorder}`, background: t.chromeBg, position: "relative", transition: "background-color .35s ease" }}>
-        <span onClick={() => win.hide()} style={{ width: 12, height: 12, borderRadius: "50%", background: "#ff5f57", cursor: "pointer" }} title="隐藏" />
+        <span onClick={() => { invoke("set_main_visible", { show: false }).catch(() => {}); }} style={{ width: 12, height: 12, borderRadius: "50%", background: "#ff5f57", cursor: "pointer" }} title="隐藏" />
         <span onClick={() => win.minimize()} style={{ width: 12, height: 12, borderRadius: "50%", background: "#febc2e", cursor: "pointer" }} title="最小化" />
         <span style={{ width: 12, height: 12, borderRadius: "50%", background: "#28c840" }} />
         <span data-tauri-drag-region style={{ position: "absolute", left: 0, right: 0, textAlign: "center", fontSize: 12.5, fontWeight: 600, letterSpacing: ".02em", color: t.titleText, pointerEvents: "none" }}>CodexBar</span>

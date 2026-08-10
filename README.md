@@ -134,7 +134,7 @@ codex-rotate probe plus5 --model gpt-5.5 --effort low
 
 退出在主界面「设置」页。构建:`bash codexbar/scripts/deploy.sh`。
 
-> **Dock 图标默认关**(纯菜单栏形态),可在「设置」页打开——`Info.plist` 的 `LSUIElement` 保持 `true`(决定冷启动瞬间不闪图标),运行期用 `setActivationPolicy` 来回切,不需重启。
+> **Dock 图标默认关**(纯菜单栏形态),可在「设置」页打开。开启后**只在主界面打开时**占一格,关掉主界面立刻让出位置(所以不能从程序坞唤起 app,要走菜单栏)。`Info.plist` 的 `LSUIElement` 保持 `true`(决定冷启动瞬间不闪图标),运行期用 `setActivationPolicy` 切,不需重启。
 
 主界面侧栏 4 页:**总览** / **AI用量信息** / 日志 / 设置。消耗页汇总 **Claude + Codex + Grok + Kimi** 四家(v0.7.0 起,取代原来分开的「Token 消耗」与「Claude 消耗」两页):堆叠面积图 + 今日/7/14/30/90d 五档,点任一平台进「详情」看分模型拆解与费率卡。数据源全是**本机 CLI 自己落的盘**、零额度消耗——`~/.claude/projects/**/*.jsonl` · `~/.codex/sessions/**/rollout-*.jsonl` · `~/.grok/**/updates.jsonl`。费用一栏是**按牌价折算的等效 API 成本**(四类 token 分别计价,缓存读按 10%),订阅制下并非实付。
 

@@ -87,7 +87,7 @@ export default function SettingsPage({ t }: { t: Theme }) {
         </div>
       </Row>
 
-      <Row label="在程序坞显示" desc="开启后 CodexBar 出现在 Dock,可从那里唤起/⌘Tab 切换;关闭则只留菜单栏图标。即时生效,无需重启">
+      <Row label="在程序坞显示" desc="开启后**主界面打开时**在 Dock 占一格,可 ⌘Tab 切换;关掉主界面立刻让出位置。即时生效,无需重启">
         <div onClick={() => {
           const next = !s.dockVisible;
           update({ dockVisible: next });

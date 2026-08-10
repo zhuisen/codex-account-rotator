@@ -1,3 +1,4 @@
+import { invoke } from "@tauri-apps/api/core";
 import { useEffect } from "react";
 import type { Window as TauriWindow } from "@tauri-apps/api/window";
 
@@ -11,8 +12,8 @@ export function useKeyboard(
     const handler = (e: KeyboardEvent) => {
       if (!e.metaKey) return;
       switch (e.key) {
-        case "w": e.preventDefault(); win.hide(); break;
-        case "q": e.preventDefault(); win.hide(); break;
+        case "w": e.preventDefault(); void invoke("set_main_visible", { show: false }); break;
+        case "q": e.preventDefault(); void invoke("set_main_visible", { show: false }); break;
         case "m": e.preventDefault(); win.minimize(); break;
         case ",": e.preventDefault(); setPage?.("settings"); break;
         case "r": if (!e.shiftKey) { e.preventDefault(); refresh(); } break;
