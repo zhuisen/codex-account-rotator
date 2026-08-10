@@ -1,6 +1,67 @@
 #!/usr/bin/env bash
 export CODEX_HOME="${HOME}/.codex"
 
+# Native resume/fork filters by thread metadata. Codex can leave genuine interactive sessions with
+# has_user_event=0, and cxp sessions are stamped rotateproxy even though this machine intentionally
+# resumes them through plain Codex. Repair only sessions recorded in history.jsonl that already have
+# native first-user-message metadata. One-shot exec, automation, aborted/empty, archived, and subagent
+# threads are excluded by the SQL predicate.
+repair_codex_session_visibility() (
+  local db="${CODEX_HOME}/state_5.sqlite"
+  local history="${CODEX_HOME}/history.jsonl"
+  local jq_bin="/opt/homebrew/bin/jq"
+  local ids_file=""
+  local repair_status
+
+  cleanup_ids_file() {
+    if [ -n "$ids_file" ] && [ -e "$ids_file" ]; then
+      /bin/unlink "$ids_file"
+    fi
+  }
+  trap cleanup_ids_file EXIT
+
+  [ -f "$db" ] && [ -s "$history" ] && [ -x "$jq_bin" ] || return 0
+
+  ids_file="$(/usr/bin/mktemp "${TMPDIR:-/tmp}/codex-human-sessions.XXXXXX")" || return 1
+  if ! "$jq_bin" -Rrs '
+      [split("\n")[]
+        | fromjson?
+        | .session_id? // empty
+        | select(test("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"))]
+      | unique[]
+    ' "$history" > "$ids_file"; then
+    return 1
+  fi
+
+  if [ ! -s "$ids_file" ]; then
+    return 0
+  fi
+
+  /usr/bin/sqlite3 -batch "$db" >/dev/null <<SQL
+.bail on
+PRAGMA busy_timeout=5000;
+CREATE TEMP TABLE history_ids (id TEXT PRIMARY KEY);
+.mode tabs
+.import $ids_file history_ids
+BEGIN IMMEDIATE;
+UPDATE threads
+SET has_user_event = 1,
+    model_provider = CASE
+      WHEN model_provider = 'rotateproxy' THEN 'openai'
+      ELSE model_provider
+    END
+WHERE archived = 0
+  AND (thread_source = 'user' OR thread_source IS NULL)
+  AND source IN ('cli', 'vscode', 'exec')
+  AND first_user_message <> ''
+  AND EXISTS (SELECT 1 FROM history_ids WHERE history_ids.id = threads.id)
+  AND (has_user_event = 0 OR model_provider = 'rotateproxy');
+COMMIT;
+SQL
+  repair_status=$?
+  return "$repair_status"
+)
+
 # ── guard: `codex logout` REVOKES the active account's tokens server-side ──────────────────────────
 # The codex binary logs "failed to revoke auth tokens during logout", i.e. logout is a server-side
 # revocation, not a local sign-out. With codex-account-rotator the ACTIVE account's freshest tokens
@@ -33,5 +94,13 @@ WARN
       ;;
   esac
 fi
+
+case "$1" in
+  resume|fork)
+    if ! repair_codex_session_visibility; then
+      printf '%s\n' 'Warning: Codex session visibility repair failed; continuing with native resume.' >&2
+    fi
+    ;;
+esac
 
 exec "${HOME}/.local/npm-global/bin/codex" "$@"
