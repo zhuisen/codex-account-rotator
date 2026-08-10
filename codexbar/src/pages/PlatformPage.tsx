@@ -83,7 +83,9 @@ export default function PlatformPage({ t, data, pk, range, setRange, onBack, bus
       subC: dTok ? (dTok.up ? UP : DOWN) : t.faint },
     { k: "请求轮数", v: (v?.agg.rounds ?? 0).toLocaleString() },
     { k: isToday ? "小时均" : "日均", v: fmtTok((v?.agg.total ?? 0) / days) },
-    { k: "总费用 · 等效API", v: fmtUSD(v?.cost ?? 0), c: AMBER,
+    // 与总览同名。「等效 API」这个限定词不放在标签里 —— 页面底部费率卡最后一行有完整说明
+    // (「费用 = 四类 token 分别乘单价求和,是等效 API 成本;订阅制下并非实付」),标签只留短名。
+    { k: "总费用", v: fmtUSD(v?.cost ?? 0), c: AMBER,
       sub: v?.saving ? `缓存已省 ${fmtUSD(v.saving)}` : undefined },
     { k: isToday ? "小时均费用" : "日均费用", v: fmtUSD((v?.cost ?? 0) / days), c: AMBER,
       sub: dCost ? `环比 ${dCost.txt}` : undefined,

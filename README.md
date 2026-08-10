@@ -138,7 +138,7 @@ codex-rotate probe plus5 --model gpt-5.5 --effort low
 
 主界面侧栏 4 页:**总览** / **AI用量信息** / 日志 / 设置。消耗页汇总 **Claude + Codex + Grok + Kimi** 四家(v0.7.0 起,取代原来分开的「Token 消耗」与「Claude 消耗」两页):堆叠面积图 + 今日/7/14/30/90d 五档,点任一平台进「详情」看分模型拆解与费率卡。数据源全是**本机 CLI 自己落的盘**、零额度消耗——`~/.claude/projects/**/*.jsonl` · `~/.codex/sessions/**/rollout-*.jsonl` · `~/.grok/**/updates.jsonl`。费用一栏是**按牌价折算的等效 API 成本**(四类 token 分别计价,缓存读按 10%),订阅制下并非实付。
 
-> ⚠️ **消耗页只有 token 量,没有 Claude 的额度油表**,这是刻意的:Claude Code **不把额度写进任何本地文件**(实测 300 文件 / 10,316 条 assistant 记录,`usage` 里只有 token 计数,零 `rate_limit`/`resets_at`/`remaining` 字段;`~/.claude` 下也无额度快照),`/usage` 的额度条是实时从服务端拉的。要拿它就必须用订阅凭证调 Anthropic 端点,而 Anthropic Consumer Terms §3 明文禁止「非 API key 的自动化访问」。codex 那页能有油表,是因为 codex **把额度写进了本地 rollout**——两边没有对等物。
+> ⚠️ **消耗页只有 token 量,没有 Claude 的额度油表**,这是刻意的:Claude Code **不把额度写进任何本地文件**(两次实测,最近一次 2026-08-10 覆盖 Claude Code 2.1.224 / 5648 个 transcript:`usage` 里只有 token 计数;唯一相关的结构化字段 `error.rateLimits` **从未被填过**;`~/.claude` 下也无额度快照。⚠️ 朴素 grep 会因为文件路径和对话正文给出大量假阳性),`/usage` 的额度条是实时从服务端拉的。要拿它就必须用订阅凭证调 Anthropic 端点,而 Anthropic Consumer Terms §3 明文禁止「非 API key 的自动化访问」。codex 那页能有油表,是因为 codex **把额度写进了本地 rollout**——两边没有对等物。
 
 ## 安全边界(红线)
 
