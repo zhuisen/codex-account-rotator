@@ -209,7 +209,7 @@ export default function App() {
                           <span key={w.label}>{i > 0 && <span style={{ color: t.faint, marginRight: 13 }}>·</span>}{w.label} <b style={{ color: sc }}>{w.pct}%</b> <span style={{ color: t.muted }}>↻{w.reset}</span></span>
                         ))}
                         {cur.windows.length > 0 && <span style={{ color: t.faint }}>·</span>}
-                        <span>订阅至 {cur.exp}</span>
+                        <span title={cur.expStale ? "OpenAI 上次复核订阅早于这个日期,所以「已过期」是拿陈旧快照下的结论 —— 续费不在它视野里。刷新 token 也拉不到新状态,要等 OpenAI 自己复核。" : undefined}>订阅至 {cur.exp}{cur.expStale && <span style={{ color: "#E0901C" }}>*</span>}</span>
                         {cur.cards > 0 && (
                           <>
                             <span style={{ color: t.faint }}>·</span>

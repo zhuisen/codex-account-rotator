@@ -35,4 +35,8 @@ app/**/.build_number
 codexbar/src/_*_probe.json
 codexbar/harness.html
 codexbar/src/harness-entry.tsx
+# `codexbar/uishot/make_harness.py` 是工具,入库;`app/` 是它渲染用的 vite 产物(~1MB),不入库。
+# 产物目录刻意不叫 dist:上面第 17 行已忽略 codexbar/dist/,而本机对 dist/ 还另有读取限制,
+# 换个名字才能让静态服务器读到它。生成的 harness*.html 内含脱敏夹具,也一并挡掉。
+codexbar/uishot/app/
 traffic/sources.local.json

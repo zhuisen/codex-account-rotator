@@ -414,6 +414,9 @@ fn read_account_detail(aid: String) -> Result<Value, String> {
     detail.insert("label".into(), Value::from(slot["label"].as_str().unwrap_or("")));
     detail.insert("plan".into(), Value::from(slot["plan"].as_str().unwrap_or("")));
     detail.insert("sub_until".into(), Value::from(slot["sub_until"].as_str().unwrap_or("")));
+    // OpenAI 上次复核订阅的时刻。到期日只是那次复核的快照,续费后不会随新 token 更新 ——
+    // 摆出复核时间,「为什么显示已过期」才有据可查,不必再逐个解 JWT。
+    detail.insert("sub_checked".into(), Value::from(slot["sub_checked"].as_str().unwrap_or("")));
     detail.insert("last_refresh".into(), Value::from(auth["last_refresh"].as_str().unwrap_or("")));
     detail.insert("auth_dead".into(), Value::from(slot["auth_dead"].as_bool().unwrap_or(false)));
     detail.insert("file".into(), Value::from(file));

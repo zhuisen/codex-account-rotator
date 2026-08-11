@@ -232,11 +232,16 @@ export default function MenuBar() {
         </div>
       )}
 
-      {/* Account list — clicking any account reveals the main window */}
+      {/* 点行 = 弹出主界面(既有行为);hover 行尾的「切换」= 直接换号,不开主窗口(用户 2026-08-11) */}
       <div className="mb-list">
         {alive.map(a => (
           <AccountRow key={a.aid} a={a} isCurrent={a.aid === currentNode} isBest={hero?.aid === a.aid}
-            bestPct={bestPct} privacy={privacy} t={t} onSelect={() => openMain()} />
+            bestPct={bestPct} privacy={privacy} t={t} onSelect={() => openMain()}
+            // 当前号不给按钮:切到自己是空操作,画出来只会让人以为点了没反应。
+            // 失效号在下面那个折叠区,本来就不传。
+            onSwitch={a.aid === currentNode ? undefined
+              : () => run(`switch-${a.aid}`, ["switch", a.node], `已切到 ${a.node}`)}
+            switching={loadingAction === `switch-${a.aid}`} />
         ))}
 
         {dead.length > 0 && (

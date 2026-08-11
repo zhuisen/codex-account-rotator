@@ -3,6 +3,8 @@ import { maskId } from "../helpers";
 
 export interface AccountDetail {
   account_id?: string; email?: string; label?: string; plan?: string; sub_until?: string;
+  /** OpenAI 上次向计费系统复核订阅的时刻;到期日只是那次复核的快照 */
+  sub_checked?: string;
   last_refresh?: string; auth_dead?: boolean; file?: string;
   access_token_tail?: string; access_token_len?: number; access_exp?: number; access_iat?: number;
   refresh_token_tail?: string; refresh_token_len?: number; id_token_len?: number;
@@ -21,7 +23,11 @@ export default function DetailModal({ detail, privacy, t, onClose }: { detail: A
     ["refresh_token", `…${privacy ? "••••••••" : detail.refresh_token_tail}  (${detail.refresh_token_len} chars)`],
     ["last_refresh", detail.last_refresh?.slice(0, 19) ?? "—"],
     ["plan", detail.plan || "—"],
-    ["订阅至", detail.sub_until?.slice(0, 10) ?? "—"],
+    ["订阅至", detail.sub_until?.slice(0, 10) ?? "—",
+      // 复核早于到期日 ⇒ 这个「已过期」是拿陈旧快照下的结论,标琥珀而不是当事实
+      detail.sub_until && detail.sub_checked && Date.parse(detail.sub_checked) < Date.parse(detail.sub_until)
+        && Date.parse(detail.sub_until) < Date.now() ? "#E0901C" : undefined],
+    ["订阅复核于", detail.sub_checked?.slice(0, 19) ?? "—"],
     ["quota 来源", String(detail.quota_source ?? "—")],
     ["快照时间", fmtTs(detail.quota_captured_at)],
   ];

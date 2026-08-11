@@ -135,8 +135,35 @@
   border-radius: 12px;
   cursor: pointer;
   user-select: none;
+  /* 尾部「切换」按钮要绝对定位在行内 —— 只有这样它才**完全不占布局**,
+     hover 显示/隐藏时整行排版纹丝不动(定宽输出、开关不跳,是本项目的老规矩)。 */
+  position: relative;
   transition: transform .15s ease, background .2s ease, box-shadow .2s ease;
 }
+/* 尾部悬浮操作区。整条右侧盖一层渐变(透明 → 卡片底色),否则按钮会和底下的
+   「↻重置」「重置卡」叠字。渐变色由 JSX 按主题传入,CSS 只管显隐与几何。 */
+.mb-row-switch-wrap {
+  position: absolute;
+  right: 9px; top: 1px; bottom: 1px;
+  display: flex; align-items: center;
+  padding-left: 30px;
+  border-radius: 0 11px 11px 0;
+  opacity: 0;
+  pointer-events: none;          /* 隐藏时不得吞掉整行的点击 */
+  transition: opacity .15s ease;
+}
+.mb-row:hover .mb-row-switch-wrap { opacity: 1; pointer-events: auto; }
+.mb-row-switch {
+  font: 700 10.5px/1 'JetBrains Mono';
+  letter-spacing: .04em;
+  padding: 6px 11px;
+  border-radius: 8px;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background .15s ease, filter .15s ease;
+}
+.mb-row-switch:hover { filter: brightness(1.18); }
+.mb-row-switch:active { transform: scale(.96); }
 .mb-row:hover { transform: translateY(-1px); box-shadow: 0 6px 18px rgba(0,0,0,.18); }
 .mb-row:active { transform: scale(.985); }
 .mb-row-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; overflow: hidden; }

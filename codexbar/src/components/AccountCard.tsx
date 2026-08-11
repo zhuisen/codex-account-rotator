@@ -94,7 +94,7 @@ export default function AccountCard({ a, isCurrent, isBest, isSelected, shortcut
           {/* wrap + nowrap date: a long amber badge must push itself onto a second line rather than
               break "到期 2026-08-10" mid-date (observed with 重置卡 ×2 · 1张剩1天 on a 3-col grid). */}
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 6, marginTop: 5, paddingTop: 7, borderTop: `1px solid ${t.divider}` }}>
-            <span style={{ fontSize: 9.5, color: t.muted, fontFamily: "'JetBrains Mono'", whiteSpace: "nowrap" }}>到期 {a.exp}</span>
+            <span title={a.expStale ? "OpenAI 上次复核订阅早于这个日期,所以「已过期」是拿陈旧快照下的结论 —— 续费不在它视野里。刷新 token 也拉不到新状态,要等 OpenAI 自己复核。" : undefined} style={{ fontSize: 9.5, color: t.muted, fontFamily: "'JetBrains Mono'", whiteSpace: "nowrap" }}>到期 {a.exp}{a.expStale && <span style={{ color: "#E0901C" }}>*</span>}</span>
             <span style={{ marginLeft: "auto" }}><CardBadge a={a} t={t} /></span>
           </div>
         </div>

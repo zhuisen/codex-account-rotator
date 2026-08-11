@@ -9,6 +9,12 @@ export interface CreditDetail {
 export interface Slot {
   label?: string; email?: string; quota?: Quota; auth_dead?: boolean; auth_dead_at?: number;
   cooling_until?: number; sub_until?: string; file?: string; plan?: string;
+  /**
+   * OpenAI **上次向计费系统复核订阅**的时刻（id_token 的 `chatgpt_subscription_last_checked`）。
+   * 签发新 token 时它不重新查，只把上次复核的快照抄进新 JWT —— 所以续费后无论刷多少次，
+   * `sub_until` 都停在复核那天。有了它才能区分「真的过期」和「快照太旧」。
+   */
+  sub_checked?: string;
   /** Free summary, refreshed on every usage probe. */
   credits?: { available?: number; applicable?: number; at?: number };
   /** Rate-limited detail fetch — the only source of per-credit expiry. */
@@ -34,6 +40,8 @@ export interface Account {
   windows: QuotaWindow[];
   tightest: number;
   exp: string;
+  /** 这个到期日已不可信(已过期,但 OpenAI 上次复核订阅还早于它) —— 见 `expStale` 的计算处 */
+  expStale: boolean;
   cooldownSec: number;
   tok: string;
   /** Unix seconds of the death event; a CHANGED value means a new death (not the same one). */
@@ -208,6 +216,24 @@ export function slotToAccount(aid: string, slot: Slot, tokens: Record<string, To
     aid, node: slot.label ?? "?", email: slot.email ?? "",
     status, windows, tightest, deadAt: slot.auth_dead_at,
     exp: slot.sub_until?.slice(0, 10) ?? "—",
+    /**
+     * 这个到期日**是否已经不可信**。判据:到期日已过 **且** OpenAI 上次复核订阅早于该到期日 ——
+     * 那说明这个「已过期」是拿一份复核时就已陈旧的快照下的结论,续费根本不在它的视野里。
+     *
+     * 用户 2026-08-11 报「续费成功但有效期没更新」。实测:两个号 force 刷出全新 id_token,
+     * `last_checked` 仍是 07-30,`sub_until` 纹丝不动 —— 拉新 token 拉不到新订阅状态。
+     * 此时 app 的健康检查说这号是活的,到期日却说已过期,**两个信号互相矛盾**。
+     * 按仓库既有原则(重置卡 `cards>0 && cardDays==null` 显示「到期未知」而不是假装没有),
+     * 这里也只标不确定,不改写日期本身。
+     */
+    expStale: (() => {
+      if (!slot.sub_until) return false;
+      const until = Date.parse(slot.sub_until);
+      const checked = slot.sub_checked ? Date.parse(slot.sub_checked) : NaN;
+      if (!Number.isFinite(until) || until > Date.now()) return false;   // 没过期,无需怀疑
+      if (!Number.isFinite(checked)) return true;   // 连复核时间都没有 ⇒ 无从判断新鲜度
+      return checked < until;
+    })(),
     cooldownSec: Math.round(coolSec),
     tok: tokH != null ? `${tokH}h` : "—",
     plan,

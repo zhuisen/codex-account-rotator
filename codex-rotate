@@ -42,7 +42,7 @@ OAUTH_TOKEN_URL = "https://auth.openai.com/oauth/token"
 OAUTH_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 REFRESH_LOCK = STORE / ".refresh.lock"   # cross-process: ALL credential movement (refresh + slot↔live copies)
 STATE_LOCK = STORE / ".state.lock"       # cross-process state.json RMW mutex (shared with the proxy)
-IDENT_FIELDS = ("email", "name", "plan", "sub_until")
+IDENT_FIELDS = ("email", "name", "plan", "sub_until", "sub_checked")
 
 
 def _load_json(p):
@@ -163,6 +163,11 @@ def _decode_identity(auth):
         "name": c.get("name"),
         "plan": oa.get("chatgpt_plan_type"),
         "sub_until": oa.get("chatgpt_subscription_active_until"),
+        # ★ OpenAI **上次向计费系统复核订阅的时刻**。签发新 token 时它不会重新查,只把上次复核的
+        #   快照原样抄进新 JWT —— 所以续费后无论刷多少次,`sub_until` 都停在复核那天(2026-08-11
+        #   实测:两个号 force 刷出全新 token,last_checked 仍是 07-30,日期纹丝不动)。
+        #   取它是为了让 UI 能区分「真的过期」和「快照太旧、还没复核」,别把后者说成前者。
+        "sub_checked": oa.get("chatgpt_subscription_last_checked"),
     }
 
 
@@ -173,6 +178,20 @@ def _stamp_identity(slot, auth, expect_aid=None):
     for k in IDENT_FIELDS:
         if ident.get(k):
             slot[k] = ident[k]
+
+
+def _refresh_patch(slot):
+    """刷新成功后要落盘的字段集合。
+
+    ★ **identity 必须和 `last_refresh` 一起写**。两个刷新调用点(手动 `refresh` / keepalive)都
+    刻意只做**定向 RMW** —— 整体保存会覆盖 proxy/插件的并发写入。但它们原来只回写 `last_refresh`,
+    于是 `_stamp_identity` 写进内存 `slot` 的 email/plan/sub_until 全被丢弃:**新 id_token 拿回来了,
+    订阅到期日却永远停在加号那天**(用户 2026-08-11 报「续费成功但有效期没更新」)。
+    做成一个函数是因为那两处形状完全相同 —— 各写一份迟早只改一处。
+    """
+    patch = {"last_refresh": slot["last_refresh"]}
+    patch.update({k: slot[k] for k in IDENT_FIELDS if slot.get(k)})
+    return patch
 
 
 def _autosync_live(s):
@@ -401,6 +420,11 @@ def _refresh_slot(aid, slot, force=False, min_valid_seconds=3600):
         auth["last_refresh"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
         _atomic_write(sf, auth)
         slot["last_refresh"] = auth["last_refresh"]
+        # ★ 刷新会带回**新的 id_token**,而 email/name/plan/sub_until 全都编码在它里面。
+        #   这里原来只存 token、不解码 —— 于是订阅续费、Plus→Pro 升级这类只体现在 JWT 声明里的
+        #   变化,永远刷不进槽位(其余四处写槽位的路径都调了 `_stamp_identity`,唯独刷新这条漏了)。
+        #   `expect_aid` 保证不会把别人的身份盖到本槽位上;`_stamp_identity` 只写非空字段。
+        _stamp_identity(slot, auth, expect_aid=aid)
         return True, "ok"
 
 
@@ -743,7 +767,15 @@ def cmd_rename(args):
 
 def cmd_refresh(args):
     """Refresh one account (label/id) or 'all' via OAuth. Skips the ACTIVE account
-    (codex owns its live token; refreshing it would rotate the token out from under codex)."""
+    (codex owns its live token; refreshing it would rotate the token out from under codex).
+
+    `--force` 跳过「access token 还够用就不刷」这道闸。**订阅续费后需要它** —— 到期日只存在于
+    id_token 的声明里,而 access token 通常还有一周多寿命,不 force 就永远拉不到新 JWT。
+    `skip-active` 守卫在 force 下**依然生效**,活跃号任何情况都不刷。
+    """
+    args = list(args or [])
+    force = "--force" in args
+    args = [a for a in args if a != "--force"]
     target = args[0] if args else "all"
     s = _state()
     active = s.get("active")
@@ -754,10 +786,10 @@ def cmd_refresh(args):
         if aid == active:
             out.append(f"{slot.get('label')}:skip-active")
             continue
-        ok, msg = _refresh_slot(aid, slot)
-        if msg == "ok":  # persist last_refresh via a fresh RMW — a bulk save here would clobber
-            _mutate_state(lambda st, a=aid, v=slot["last_refresh"]:  # concurrent proxy/plugin writes
-                          st["slots"].setdefault(a, {}).update({"last_refresh": v}))
+        ok, msg = _refresh_slot(aid, slot, force=force)
+        if msg == "ok":  # persist via a fresh RMW — a bulk save here would clobber
+            _mutate_state(lambda st, a=aid, v=_refresh_patch(slot):  # concurrent proxy/plugin writes
+                          st["slots"].setdefault(a, {}).update(v))
         out.append(f"{slot.get('label')}:{'ok' if ok else msg}")
     print("refresh " + (" ".join(out) if out else "(no matching slot)"))
 
@@ -886,9 +918,9 @@ def cmd_keepalive(args):
             (refreshed if tgt else skipped).append(f"{label}:{'?' if left is None else round(left)}h-left")
             continue
         ok, msg = _refresh_slot(aid, slot, min_valid_seconds=thresh_h * 3600)
-        if msg == "ok":  # real refresh → persist last_refresh via targeted RMW (bulk save would clobber)
-            _mutate_state(lambda st, a=aid, v=slot["last_refresh"]:
-                          st["slots"].setdefault(a, {}).update({"last_refresh": v}))
+        if msg == "ok":  # real refresh → persist via targeted RMW (bulk save would clobber)
+            _mutate_state(lambda st, a=aid, v=_refresh_patch(slot):
+                          st["slots"].setdefault(a, {}).update(v))
             refreshed.append(f"{label}:ok")
         else:
             skipped.append(f"{label}:{msg}")  # 'still valid' / 'skip-active' are NO-OPS — not refreshes

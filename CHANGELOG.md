@@ -76,6 +76,25 @@
 
 ---
 
+### v0.9.1 — 菜单栏尾部切换 + 订阅到期不再谎报 — 2026-08-11
+
+**新增**
+
+- **菜单栏账号行尾部「切换」按钮**(hover 淡入)。**点击路由**:点按钮 = 只切号;点行上**其他任何位置** = 跳主界面(既有行为不变)。按钮 `stopPropagation`,否则点「切换」会同时弹出主窗口 —— 而它存在的意义正是"不用开主窗口就能换号"。当前号不给按钮(切到自己是空操作),失效号折叠区同样不给。
+  - 绝对定位 + hover 淡入 ⇒ 平时零占位、显隐不改布局。用户从**三方案 demo**里选的 **A 覆盖式**:已知代价是按钮会盖住「到期」日期的尾部;B(每行永久留 59px)动了现有排版,C(hover 时内容左移 52px)鼠标扫过列表会连着几次滑动。demo 留档 `~/Downloads/codexbar_menubar_switch_demo_20260811.html`。
+- **`codex-rotate refresh [label] --force`**:跳过「access token 还够用就不刷」那道闸。access token 通常还剩一周多,不 force 永远拉不到新 id_token。`skip-active` 守卫在 force 下**依然生效**。
+- **UI 验证 harness 固化** `codexbar/uishot/make_harness.py`(此前一直是一次性脚本,memory.md 里挂了很久的债)。同时验主窗与菜单栏,支持缓存口径/页面/宽度/hover 参数。
+
+**修复**
+
+- **B29 订阅续费后到期日不更新**(见下)。真因在 OpenAI,但顺带修掉我们自己的两个缺陷。
+
+**改进**
+
+- 到期日**不再被断言为「已过期」**:已过期 **且** `sub_checked` 早于它 ⇒ 标琥珀 `*` + 悬浮说明。app 自己的健康检查同时说这些号是活的,两个信号本来就矛盾;同重置卡「到期未知」那条原则。
+
+---
+
 ### v0.9.0 — 缓存计入口径 + 单实例闸门 + 两窗共用扫描 — 2026-08-11
 
 **新增**
@@ -449,6 +468,24 @@ plus6 周已用 9.0% → 10.0%,captured_at=00:41:37
 **修**:三层,缺一层还会重复。① 删掉 `revalidate`,两边共用同一条 `FRESH_MS`(挡"对方刚扫完");② 扫完 `emit("traffic-updated")`,对方**读盘**(~1ms)而不是重扫(两个 webview 是独立 JS 上下文,localStorage 都不互通,只能走 Tauri 事件);③ Rust 侧 `SCAN_LOCK` + 新鲜度双检(`SCAN_COALESCE_SECS = 90`),拿到锁后再看一眼快照岁数。**第③层不能省**:前端只能挡住"对方已经扫完",挡不住两边**同时**判定要扫。
 
 **口径修正**:`CLAUDE.md` 里「新鲜度判断故意留在展示层,写进 Rust 会把两种策略焊死成一种」这句随之作废——策略仍在展示层,但**并发合并在 Rust**。
+
+### B29 · 订阅续费成功,到期日永远不更新 — 2026-08-11 ✅修(我方部分)· ★真因在上游
+
+**症状**:三个 plus 号已续费成功,CodexBar 仍显示「到期 2026-08-05 / 08-08 / 08-10」——全是过去时,而同一个界面的健康检查说这三个号**是活的**。
+
+**真因(不在我们这边)**:`sub_until` 唯一来源是 id_token 的 `chatgpt_subscription_active_until`。同一命名空间里还有 **`chatgpt_subscription_last_checked`** —— **OpenAI 签发新 token 时不重新查计费系统,只把上次复核的订阅快照原样抄进新 JWT**。
+
+实测:对两个非活跃号 `refresh --force` 刷出**全新** id_token(`iat` 就是当天 06:2x),里面的 `last_checked` 仍是 **11 天前的 07-30**,`active_until` 纹丝不动。**刷新拉不到新订阅状态,也没有办法强制它复核。** 对照组 pro1 的 `last_checked`(08-08)晚于其订阅起始日,所以它的日期是准的。`GET /codex/usage` 只回 `{rate_limit, plan_type, credits}`,没有订阅期。
+
+**★ 但顺带查出我方两个缺陷,独立成立** —— 不修的话,OpenAI 哪天真复核了,你**照样看不到**:
+
+1. `_refresh_slot` 拿到新 id_token 后写进 `tokens.id_token`、更新 `last_refresh`,却**从不调 `_stamp_identity`**。其余四条写槽位的路径(`_syncback` / add / autosync / 933)都调了,唯独刷新这条漏了。
+2. 就算调了也存不下来:两个刷新调用点(手动 `refresh` / keepalive)为避免覆盖并发写入,**只做定向 RMW 回写 `last_refresh` 一个字段**,`_stamp_identity` 写进内存 `slot` 的 email/plan/sub_until 全被丢弃。抽成 `_refresh_patch(slot)` 一并落盘 —— **两处形状完全相同,各写一份迟早只改一处**。
+
+⇒ 在此之前,**刷新从来没有把任何身份变化写进 `state.json`**;订阅续费、Plus→Pro 升级都一样刷不进来。新增 `sub_checked` 字段(进 `IDENT_FIELDS`)让 UI 能区分「真的过期」和「快照太旧」。
+
+**教训**:同一个字段有五条写入路径时,漏掉的那条不会报错,只会安静地永远不更新。加字段时 `grep` 全部写入点,别只改你正在看的那条。
+
 3. **未定**:额度计量到底算不算缓存命中的 token。方向性证据(n=3,Δ% 只有 2~3,整数量化 ±50%)是「每 1% 对应的 **total**」离散 1.5 倍 vs「对应的**未命中**」离散 6.6 倍 ⇒ 更像按 total 计。已加 `state.json.quota_marks`(跨整数百分点时记 `{aid,t,from,to}`,上界 400)攒每请求级样本。**有结论前别用"省缓存=省额度"做决策。**
 
 ---

@@ -4,8 +4,21 @@ import Ring from "./Ring";
 import PlanBadge from "./PlanBadge";
 import CardBadge, { isCardExpiring, AMBER } from "./CardBadge";
 
-export default function AccountRow({ a, isCurrent, isBest, bestPct, privacy, t, onSelect }: {
-  a: Account; isCurrent: boolean; isBest: boolean; bestPct: number; privacy: boolean; t: Theme; onSelect: () => void;
+export default function AccountRow({ a, isCurrent, isBest, bestPct, privacy, t, onSelect,
+                                     onSwitch, switching }: {
+  a: Account; isCurrent: boolean; isBest: boolean; bestPct: number; privacy: boolean; t: Theme;
+  /** 点行本身 = 弹出主界面(既有行为,不变) */
+  onSelect: () => void;
+  /**
+   * 尾部「切换」按钮(用户 2026-08-11 要求)。**只在传了它时才渲染** —— 调用方负责判断
+   * 当前号/失效号不该给(切到自己没意义,切到死号会立刻 failover 回来)。
+   *
+   * 它与 `onSelect` 是两个动作叠在同一行上,所以按钮**必须 stopPropagation**:
+   * 否则点「切换」会同时把主窗口弹出来,而这个按钮存在的意义正是"不用开主窗口就能换号"。
+   */
+  onSwitch?: () => void;
+  /** 该号正在切换中。切号要跑一次 CLI,没有这个状态按钮会看起来没反应、诱发连点。 */
+  switching?: boolean;
 }) {
   const isDead = a.status === "dead";
   const isCool = a.status === "cool";
@@ -51,7 +64,7 @@ export default function AccountRow({ a, isCurrent, isBest, bestPct, privacy, t, 
 
         <div className="mb-row-sub">
           <span className="mb-row-email" style={{ color: t.email }}>{maskId(a.email, privacy)}</span>
-          <span className="mb-row-exp-text" style={{ color: t.muted }}>到期 {a.exp}</span>
+          <span className="mb-row-exp-text" title={a.expStale ? "OpenAI 上次复核订阅早于这个日期,所以「已过期」是拿陈旧快照下的结论 —— 续费不在它视野里。刷新 token 也拉不到新状态,要等 OpenAI 自己复核。" : undefined} style={{ color: t.muted }}>到期 {a.exp}{a.expStale && <span style={{ color: "#E0901C" }}>*</span>}</span>
         </div>
 
         <div className="mb-row-meta">
@@ -70,6 +83,24 @@ export default function AccountRow({ a, isCurrent, isBest, bestPct, privacy, t, 
           <CardBadge a={a} t={t} compact />
         </div>
       </div>
+
+      {/* 尾部悬浮「切换」。绝对定位 ⇒ 不占布局,显隐时整行不跳;渐变遮罩避免与「↻重置」叠字。 */}
+      {onSwitch && (
+        <div className="mb-row-switch-wrap"
+             style={{ background: `linear-gradient(to right, transparent, ${t.cardBg} 30px)` }}>
+          <span className="mb-row-switch"
+                title={`切到 ${a.node}(不打开主界面)`}
+                onClick={(e) => { e.stopPropagation(); if (!switching) onSwitch(); }}
+                style={{
+                  color: switching ? t.muted : t.accent,
+                  border: `1px solid ${switching ? t.ghostBorder : t.accentBorder}`,
+                  background: switching ? t.ghostBg : t.accentSoft,
+                  cursor: switching ? "default" : "pointer",
+                }}>
+            {switching ? "切换中…" : "切换"}
+          </span>
+        </div>
+      )}
     </div>
   );
 }
