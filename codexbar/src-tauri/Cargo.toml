@@ -1,6 +1,6 @@
 [package]
 name = "codexbar"
-version = "0.8.4"
+version = "0.9.0"
 description = "Codex account rotator — Clash-Verge-style menu bar + dashboard"
 authors = ["doushutangmu"]
 edition = "2021"
@@ -24,3 +24,4 @@ tauri-plugin-notification = "2"
 tauri-plugin-autostart = "2"
 tokio = { version = "1", features = ["time"] }
 tauri-plugin-window-state = "2"
+libc = "0.2.189"

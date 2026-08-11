@@ -2,7 +2,7 @@ import { useState } from "react";
 import type { Theme } from "../theme";
 
 import { fmtUSD } from "../rates";
-import { fmtTok, type TodayView } from "../traffic";
+import { fmtTok, cacheModeLabel, type TodayView, type CacheMode } from "../traffic";
 
 const AMBER = "#E0A21C";
 const UP = "#27B26B", DOWN = "#E0524D";
@@ -52,10 +52,16 @@ const IconRefresh = ({ spin }: { spin?: boolean }) => (
 );
 
 /** 菜单栏「今日」Tab · 交接稿 `菜单栏v3-交接说明.md` §2(1b 迷你仪表盘)。 */
-export default function MenuBarToday({ t, view, colors, refreshedAt, busy,
+export default function MenuBarToday({ t, view, colors, cacheMode, refreshedAt, busy,
                                       onRefresh, onOpenPlatform, onOpenOverview }: {
   t: Theme;
   view: TodayView | null;
+  /**
+   * 缓存计入口径。数字已经在 `useTraffic` 出口按它重塑过,这里**只负责把口径标出来** ——
+   * 不标的话,弹窗会把 34.2B 静默显示成 0.46B。
+   * 标在「峰值」那一行而不是摘要行:摘要行实测只剩 ~44px 余量,徽标要 ~68px,会挤到溢出。
+   */
+  cacheMode: CacheMode;
   /** 平台色,由 scan.py 的注册表下发(见 traffic.ts 的 colorOf) */
   colors: Record<string, string>;
   /** 数据的生成时刻(快照时间),不是"现在" */
@@ -152,6 +158,9 @@ export default function MenuBarToday({ t, view, colors, refreshedAt, busy,
            onMouseLeave={() => setHv(null)}
            title="打开主窗口的 AI用量信息">
         <div className="mb-today-peak" style={{ color: t.faint }}>
+          {cacheMode !== "full" && (
+            <span style={{ color: AMBER, fontWeight: 700 }}>{cacheModeLabel(cacheMode)} · </span>
+          )}
           {view.peak ? `峰值 ${fmtTok(view.peak.v)} · ${hourLabel(view.peak.hour)}` : "今日暂无用量"}
         </div>
         <svg viewBox={`0 0 ${VW} ${VH}`} style={{ width: "100%", height: "auto", display: "block" }}>

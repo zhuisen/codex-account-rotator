@@ -2,6 +2,7 @@ use serde_json::Value;
 use std::fs;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 use std::time::Duration;
 use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
@@ -160,6 +161,16 @@ fn set_dock_visible(app: AppHandle, on: bool) {
 ///
 /// 脚本只读本机 CLI 落盘记录,**不碰凭证、不动 state.json、不联网**,所以既不广播 `state-changed`
 /// 也不刷托盘标题 —— 那两件事是账号池状态变更的信号,在这里发就是噪音。
+/// 扫描互斥锁 + 新鲜度双检。
+///
+/// ★ 主窗口和菜单栏是**两个独立 webview**,各跑一份 `useTraffic`,谁也不知道对方在干什么。
+/// 前端的新鲜度判断只能挡住"对方**已经扫完**"的情况;两边**同时**判定该扫时,会各起一个
+/// python 各跑 1.4s(用户 2026-08-11 报的「菜单栏刚刷新,进主界面又刷一次」就是这类)。
+/// 这里做经典的双检:拿到锁后**再看一眼快照岁数**,已经新鲜就直接把它返回,不起 python。
+static SCAN_LOCK: Mutex<()> = Mutex::new(());
+/// 拿到锁后若快照比这个还新,就认为刚有人扫过,直接复用。比前端的窗口略紧一点。
+const SCAN_COALESCE_SECS: u64 = 90;
+
 #[tauri::command]
 async fn run_traffic(args: Vec<String>) -> Result<String, String> {
     const ALLOWED_FLAGS: &[&str] = &["--days", "--json", "--no-cache"];
@@ -170,12 +181,28 @@ async fn run_traffic(args: Vec<String>) -> Result<String, String> {
         return Err(format!("disallowed arg: {:?}", bad));
     }
     let script = format!("{}/traffic/scan.py", store_dir());
+    let forced = args.iter().any(|a| a == "--no-cache");
     let out = tauri::async_runtime::spawn_blocking(move || {
-        Command::new(python_bin()).arg(&script).args(&args).output()
+        // 串行化:第二个调用者在这里等第一个扫完
+        let _guard = SCAN_LOCK.lock();
+        if !forced {
+            if let Some(fresh) = fresh_snapshot(SCAN_COALESCE_SECS) {
+                return Ok(Err(fresh)); // Err 分支借用来表示"复用快照",不是错误
+            }
+        }
+        Command::new(python_bin())
+            .arg(&script)
+            .args(&args)
+            .output()
+            .map(Ok)
     })
     .await
     .map_err(|e| format!("join: {}", e))?
-    .map_err(|e| format!("exec: {}", e))?;
+    .map_err(|e: std::io::Error| format!("exec: {}", e))?;
+    let out = match out {
+        Ok(o) => o,
+        Err(cached) => return Ok(cached),
+    };
     if out.status.success() {
         let body = String::from_utf8_lossy(&out.stdout).to_string();
         write_traffic_snapshot(&body);
@@ -196,6 +223,22 @@ async fn run_traffic(args: Vec<String>) -> Result<String, String> {
 /// 立刻出来"的东西 —— 交接稿 §5 明写「弹窗只读缓存,不重复解析」。所以在扫描之外再落一份**成品**,
 /// 读它就是一次 100KB 的文件读。
 const SNAPSHOT: &str = ".traffic-latest.json";
+
+/// 快照若比 `max_age_secs` 还新就返回它,否则 None。用于扫描前的合并判断。
+fn fresh_snapshot(max_age_secs: u64) -> Option<String> {
+    let body = fs::read_to_string(snapshot_path()).ok()?;
+    let v: Value = serde_json::from_str(&body).ok()?;
+    let gen = v.get("generated_at")?.as_u64()?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    if now.saturating_sub(gen) <= max_age_secs {
+        Some(body)
+    } else {
+        None
+    }
+}
 
 fn snapshot_path() -> String {
     format!("{}/{}", store_dir(), SNAPSHOT)
@@ -494,10 +537,91 @@ fn toggle_menubar(app: &AppHandle, tray_rect: Option<tauri::Rect>) {
     }
 }
 
+// ---- 单实例闸门 ----
+
+/// 抢占单实例锁。**拿不到就说明已经有一个 CodexBar 在跑,本进程必须立刻退出。**
+///
+/// 用户 2026-08-11 报「死机重启后会打开两个 CodexBar」。根因是**两条启动路径在开机时并发**:
+/// ① `~/Library/LaunchAgents/CodexBar.plist`(autostart 插件建的,`RunAtLoad` + 直接 exec
+///    `…/Contents/MacOS/codexbar` **裸二进制**);② macOS 脏关机后由 LaunchServices 恢复。
+/// 平时手点复现不出来:实测 app 已在跑时 `open -a CodexBar` 会正确去重、只发 `Reopen`。
+/// 但**那个去重要求第一个进程已在 LaunchServices 注册完毕**;开机时两条路并发,裸二进制还没注册完,
+/// 恢复那条 `open` 就已经发出去了 —— 去重不是原子的,于是漏过。修法只能落在 app 自己身上。
+///
+/// ★★ **为什么是 `flock` 而不是 `tauri-plugin-single-instance`**(2026-08-11 换掉,别换回去):
+/// 那个插件的闸门**本身就有竞态**,而竞态恰恰是本 bug 的触发条件 —— 它的逻辑是
+/// `connect 失败 → socket_cleanup() 删文件 → spawn 异步任务里再 bind`。两个进程同时启动时,
+/// B 的 connect 会早于 A 的 bind,于是 B 也走进这个分支,**B 的 cleanup 把 A 刚建的 socket 删掉**,
+/// 两边各自 bind、各自存活。用它 GUI 压测「通过」只是没撞进那个窗口,不是没有窗口。
+///
+/// `flock(LOCK_EX | LOCK_NB)` 是内核级原子操作:两个进程同时抢,**保证恰好一个拿到**,
+/// 不存在检查与获取之间的窗口。崩溃安全也更好 —— 锁随 fd 关闭由内核释放,进程被 `kill -9`、
+/// panic、断电重启后都不会留下陈旧锁,**不可能出现"一个都起不来"**(那会比原 bug 更糟)。
+///
+/// 锁文件放在 app 数据目录而不是 `/tmp`:`/tmp` 会被系统清理,文件一旦在持锁期间被删,
+/// 新进程会在**另一个 inode** 上建文件并成功加锁,两个又都活了。
+///
+/// `Acquired` 里的 `File` 必须由调用方持有到进程结束 —— 一旦 drop,fd 关闭,锁就没了。
+#[cfg(unix)]
+enum InstanceLock {
+    /// 拿到锁,本进程是唯一实例。
+    Acquired(std::fs::File),
+    /// **确定**另一个实例正持锁(`flock` 返回 `EWOULDBLOCK`)—— 本进程必须退出。
+    HeldByOther,
+    /// ★ **判定不了**:锁文件打不开(HOME 缺失/目录建不了/磁盘满/权限异常),或该文件系统
+    /// 不支持 `flock`(部分网络卷会返回 `ENOTSUP`/`EINVAL`/`ENOLCK`)。
+    ///
+    /// 这一档**必须按"正常启动"处理(fail-open)**,不能和 `HeldByOther` 合并成一个值 ——
+    /// 合并的话,一次打不开锁文件就会让 app **一个都起不来**,比"多开一个"糟得多,
+    /// 而且症状是静默的(没有窗口、没有托盘、没有报错),几乎无法诊断。
+    /// 这是仓库那条铁律的同一形态:「这一枪没打中」绝不能和「确实没有」返回同一个值。
+    Undetermined,
+}
+
+#[cfg(unix)]
+fn acquire_single_instance_lock() -> InstanceLock {
+    use std::os::unix::io::AsRawFd;
+    let Ok(home) = std::env::var("HOME") else {
+        return InstanceLock::Undetermined;
+    };
+    let dir = format!("{}/Library/Application Support/com.doushutangmu.codexbar", home);
+    let _ = fs::create_dir_all(&dir);
+    let Ok(f) = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(format!("{}/single-instance.lock", dir))
+    else {
+        return InstanceLock::Undetermined;
+    };
+    // SAFETY: fd 来自上面刚打开、仍然存活的 File,flock 对它只做加锁不做别的。
+    if unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+        return InstanceLock::Acquired(f);
+    }
+    // ★ **只有 `EWOULDBLOCK` 才代表"另一个实例拿着锁"**。别的 errno 是"这个文件系统上
+    //   flock 用不了",按判定不了处理 —— 否则在不支持 flock 的卷上每次启动都会被自己挡死。
+    match std::io::Error::last_os_error().raw_os_error() {
+        Some(e) if e == libc::EWOULDBLOCK => InstanceLock::HeldByOther,
+        _ => InstanceLock::Undetermined,
+    }
+}
+
 // ---- app entry ----
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // ★ 必须在 `tauri::Builder` **之前**:晚一步就会先把托盘和两个 webview 建出来再退出,
+    //   开机瞬间照样闪两个图标。`_lock` 要一直活到进程结束,所以绑在这里而不是 `let _ =`。
+    #[cfg(unix)]
+    let _lock = match acquire_single_instance_lock() {
+        // 已经有一个在跑。**静默退出,不弹主窗口** —— 能走到这里的现实路径只有上面那个开机竞态,
+        // 在那个时刻弹窗会破坏「主窗关着就不占程序坞」这条已定稿的行为。用户想要主窗口时的入口
+        // 已经有两个:菜单栏,以及点程序坞图标发的 `RunEvent::Reopen`(见文件末尾)。
+        InstanceLock::HeldByOther => return,
+        // `Acquired` 要持有到进程结束;`Undetermined` 一律照常启动(fail-open,理由见枚举注释)。
+        held => held,
+    };
+
     tauri::Builder::default()
         // ★ 主窗口的尺寸/位置持久化。用户 2026-08-09:"我调整了高度适配内容,每次更新都要再调一遍"。
         //   根因是尺寸写死在 tauri.conf.json + `center: true`,每次启动都回到 1000×660。

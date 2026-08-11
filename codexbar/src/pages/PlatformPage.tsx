@@ -3,9 +3,11 @@ import { type Theme, platformColor, modelColor } from "../theme";
 import { costOf, fmtUSD, priceOf, isPriced } from "../rates";
 import StackedArea, { type Layer } from "../components/StackedArea";
 import Seg from "../components/Seg";
-import type { TrafficData, Range } from "../traffic";
-import { RANGES, rangeLabel, bucketsFor, sumBuckets, costOfBucket, savingOfBucket, fmtTok } from "../traffic";
+import type { TrafficData, Range, CacheMode } from "../traffic";
+import { RANGES, rangeLabel, bucketsFor, sumBuckets, costOfBucket, savingOfBucket, fmtTok,
+         countsCacheRead, countsCacheWrite, countedClasses, mixParts } from "../traffic";
 import KpiStrip, { type Kpi, UP, DOWN } from "../components/KpiStrip";
+import CacheChip from "../components/CacheChip";
 
 const AMBER = "#E0A21C";
 const SRC: Record<string, string> = {
@@ -15,8 +17,14 @@ const SRC: Record<string, string> = {
 };
 
 /** 平台详情(交接稿 §5–§8)。 */
-export default function PlatformPage({ t, data, pk, range, setRange, onBack, busy }: {
-  t: Theme; data: TrafficData | null; pk: string;
+export default function PlatformPage({ t, data, raw, cacheMode, pk, range, setRange, onBack, busy }: {
+  t: Theme;
+  /** 已按缓存口径重塑 —— 合计/图表/费用都用它 */
+  data: TrafficData | null;
+  /** 未重塑。**只给费率卡的「构成」行用**(它描述数据本身由什么组成),别拿它算展示合计 */
+  raw: TrafficData | null;
+  cacheMode: CacheMode;
+  pk: string;
   range: Range; setRange: (r: Range) => void; onBack: () => void; busy: boolean;
 }): React.ReactElement {
   const [mode, setMode] = useState<"models" | "total">("models");
@@ -93,13 +101,17 @@ export default function PlatformPage({ t, data, pk, range, setRange, onBack, bus
     { k: "占全池", v: v?.grand ? `${((v.agg.total / v.grand) * 100).toFixed(1)}%` : "—", c },
   ];
 
-  // 费率卡的折算说明:该平台四类 token 的真实构成
+  // 费率卡的折算说明:该平台各类 token 的**真实**构成。
+  //
+  // ★ 走 `raw`:它的职责是说明"这份数据由什么组成",而 `data` 已按口径把缓存清零,拿它算会输出
+  //   「缓存读 0.0%」—— 那是在描述筛掉之后的残骸,不是数据的构成。
+  // ★ 但**只列当前口径计入的类**(用户 2026-08-11 定稿),而且**分母也要换成这几类之和** ——
+  //   否则百分比加起来不到 100(不含缓存时只有 4%),比不显示更糟。
   const mix = useMemo(() => {
-    const a = v?.agg;
-    if (!a || !a.total) return null;
-    const p = (x: number) => `${((x / a.total) * 100).toFixed(1)}%`;
-    return `缓存读 ${p(a.cache_read)} · 输入 ${p(a.uncached_in)} · 缓存写 ${p(a.cache_write)} · 输出 ${p(a.output)}`;
-  }, [v]);
+    if (!raw?.platforms[pk]) return null;
+    const parts = mixParts(sumBuckets(bucketsFor(raw, pk, range).buckets), cacheMode);
+    return parts.length ? parts.map((p) => `${p.name} ${p.pct.toFixed(1)}%`).join(" · ") : null;
+  }, [raw, pk, range, cacheMode]);
 
 
   return (
@@ -113,6 +125,7 @@ export default function PlatformPage({ t, data, pk, range, setRange, onBack, bus
         <span style={{ fontSize: 22, fontWeight: 700, whiteSpace: "nowrap" }}>
           {data?.platforms[pk]?.name ?? pk} 消耗
         </span>
+        <CacheChip mode={cacheMode} />
         <span style={{ fontSize: 11, color: t.faint, fontFamily: "'JetBrains Mono'", overflow: "hidden",
                        textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{SRC[pk] ?? ""}</span>
         <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
@@ -177,30 +190,47 @@ export default function PlatformPage({ t, data, pk, range, setRange, onBack, bus
             <span style={{ fontSize: 12.5, fontWeight: 700 }}>费率卡 · API 牌价</span>
             <span style={{ fontSize: 10, color: t.muted, fontFamily: "'JetBrains Mono'" }}>{mix}</span>
           </div>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 74px 74px 74px 84px", gap: "3px 8px",
-                        fontSize: 10, fontFamily: "'JetBrains Mono'" }}>
-            {["模型", "输入", "缓存读", "输出", "折算费用"].map((h, i) => (
+          {/* ★ 不计入缓存读时**整列删掉**(用户 2026-08-11 定稿):那一列的单价在当前口径下
+              一次都不会被乘到,留着只会让人以为费用里含了它。列宽也跟着收,不留空槽。 */}
+          <div style={{ display: "grid",
+                        gridTemplateColumns: countsCacheRead(cacheMode)
+                          ? "1fr 74px 74px 74px 84px" : "1fr 74px 74px 84px",
+                        gap: "3px 8px", fontSize: 10, fontFamily: "'JetBrains Mono'" }}>
+            {(countsCacheRead(cacheMode)
+              ? ["模型", "输入", "缓存读", "输出", "折算费用"]
+              : ["模型", "输入", "输出", "折算费用"]).map((h, i) => (
               <span key={h} style={{ fontSize: 9.5, color: t.muted, letterSpacing: ".08em",
                                      textAlign: i ? "right" : "left" }}>{h.toUpperCase()}</span>
             ))}
             {v.models.map((m) => {
               const p = priceOf(m.m, pk);
-              const known = isPriced(m.m);
               return (
-                <FragRow key={m.m} t={t} name={m.m} known={known}
-                         cells={[`$${p.in.toFixed(2)}`, `$${p.cacheRead.toFixed(3)}`,
-                                 `$${p.out.toFixed(2)}`, fmtUSD(m.cost)]} />
+                <FragRow key={m.m} t={t} name={m.m} known={isPriced(m.m)}
+                         cells={[
+                           { v: `$${p.in.toFixed(2)}` },
+                           ...(countsCacheRead(cacheMode)
+                             ? [{ v: `$${p.cacheRead.toFixed(3)}`, c: "#10E0E0" }] : []),
+                           { v: `$${p.out.toFixed(2)}` },
+                           { v: fmtUSD(m.cost), c: AMBER, bold: true },
+                         ]} />
               );
             })}
           </div>
           <div style={{ fontSize: 9.5, color: t.faint, marginTop: 8, lineHeight: 1.5 }}>
-            缓存读 = 输入价 10%(Grok 为 85 折上下) · Anthropic 缓存写 1.25x · 数据源 2026-08 牌价。
+            {/* 脚注只解释当前口径真正用到的价:讲一个没参与计算的折扣率,读者会以为费用里含了它 */}
+            {countsCacheRead(cacheMode)
+              ? "缓存读 = 输入价 10%(Grok 为 85 折上下) · "
+              : "当前口径不计入缓存读,该列已隐去 · "}
+            {countsCacheWrite(cacheMode)
+              ? "Anthropic 缓存写 1.25x · "
+              : "缓存写同样不计入 · "}
+            数据源 2026-08 牌价。
             <br />
             <span style={{ color: "#E0901C" }}>⚠️ 标 * 的型号不在交接稿费率表里</span>
             （稿子列的是 gpt-5.3-codex / grok-4.5-code，本机实际在跑 gpt-5.6-sol / gpt-5.5 / grok-4.5-build），
             按同平台最接近档位估算，**不是准数**。费率表在 <code>src/rates.ts</code>，价签变了改那里。
             <br />
-            费用 = 四类 token 分别乘单价求和，是<b>等效 API 成本</b>；订阅制下并非实付。
+            费用 = {countedClasses(cacheMode)} 类 token 分别乘单价求和，是<b>等效 API 成本</b>；订阅制下并非实付。
           </div>
         </div>
       )}
@@ -208,7 +238,15 @@ export default function PlatformPage({ t, data, pk, range, setRange, onBack, bus
   );
 }
 
-function FragRow({ t, name, known, cells }: { t: Theme; name: string; known: boolean; cells: string[] }) {
+/**
+ * ★ 单元格自带颜色,**不再按下标判断**(`i === 1 ? 青 : i === 3 ? 琥珀`)。
+ * 缓存读那一列会随口径整列消失,下标一移位,原来的"青色=缓存读、琥珀=费用"就会染到「输出」头上 ——
+ * 这种位置耦合正是删掉一列时会静默出错的地方。
+ */
+function FragRow({ t, name, known, cells }: {
+  t: Theme; name: string; known: boolean;
+  cells: { v: string; c?: string; bold?: boolean }[];
+}) {
   return (
     <>
       <span style={{ color: t.text2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
@@ -216,8 +254,7 @@ function FragRow({ t, name, known, cells }: { t: Theme; name: string; known: boo
       </span>
       {cells.map((c, i) => (
         <span key={i} style={{ textAlign: "right", fontVariantNumeric: "tabular-nums",
-                               color: i === 1 ? "#10E0E0" : i === 3 ? AMBER : t.text2,
-                               fontWeight: i === 3 ? 700 : 400 }}>{c}</span>
+                               color: c.c ?? t.text2, fontWeight: c.bold ? 700 : 400 }}>{c.v}</span>
       ))}
     </>
   );

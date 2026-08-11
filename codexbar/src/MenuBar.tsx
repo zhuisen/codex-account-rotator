@@ -49,11 +49,10 @@ export default function MenuBar() {
   const { privacy, toggle: togglePrivacy } = usePrivacy();
   const t = THEMES[theme];
 
-  // ★ `revalidate: false` —— 交接稿 §5「弹窗只读缓存,不重复解析」。弹窗是"点一下就要出来"的东西,
-  //   每次打开都跑一遍 scan.py(热路径也要 0.6~1.5s)会让它每次都空一拍。只有**快照不存在或已过期**
-  //   时 `useTraffic` 才会在后台补扫,前台照样先画快照。要立刻要准数就点摘要行那个 ↻。
-  const { data: traffic, busy: trafficBusy, refresh: refreshTraffic, refreshIfStale } =
-    useTraffic({ revalidate: false });
+  // 交接稿 §5「弹窗只读缓存,不重复解析」。数据与主窗口共用同一份快照和同一条新鲜度规则,
+  // 谁扫完都会广播给对方 —— 所以这里不会和主窗口各扫一遍。要立刻要准数就点摘要行那个 ↻。
+  const { data: traffic, cacheMode, busy: trafficBusy, refresh: refreshTraffic, refreshIfStale } =
+    useTraffic();
   const today = useMemo(() => todayView(traffic), [traffic]);
   // 平台色从 scan.py 下发的注册表取,前端不再各写一份色表(加平台只改 scan.py)
   const platColors = useMemo(
@@ -194,7 +193,7 @@ export default function MenuBar() {
 
       {tab === "today" ? (
         <div className="mb-pane">
-          <MenuBarToday t={t} view={today} colors={platColors}
+          <MenuBarToday t={t} view={today} colors={platColors} cacheMode={cacheMode}
                         refreshedAt={traffic?.generated_at ?? null}
                         busy={trafficBusy} onRefresh={refreshTraffic}
                         onOpenPlatform={(k) => void openMain("navigate-platform", k)}

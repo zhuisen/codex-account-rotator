@@ -32,6 +32,98 @@ export const RANGES = ["today", 7, 14, 30, 90] as const;
 export type Range = (typeof RANGES)[number];
 export const rangeLabel = (r: Range): string => (r === "today" ? "今日" : `${r}d`);
 
+/**
+ * 缓存计入口径(用户 2026-08-11 加,三档一次到位)。**token 数与费用同时跟着变** ——
+ * 两者都由那四个互不相交的类算出来,只改一个会让"总费用"和"总 token"说的不是同一批数据。
+ *
+ * 本机 90 天实测的量级(说明为什么这三档不是细微差别):
+ *   full   34.20B / $24,712   cache_read 96.01% · cache_write 2.64% · uncached_in 0.93% · output 0.42%
+ *   noRead  1.36B / $ 9,169
+ *   none    0.46B / $ 3,250
+ *
+ * ★ `noRead` 与 `none` 差 3 倍,分界全在 `cache_write`:它是**首次发送并写入缓存的新内容**,
+ *   没有缓存机制时这些 token 照样要发(只是按普通输入价计费)。所以
+ *   - `noRead` 回答「不靠缓存的话我实际消耗多少」—— 保留 cache_write 才不低估真实工作量;
+ *   - `none` 回答「完全不沾缓存的那部分有多少」—— 代价是丢掉 0.9B 真实新内容
+ *     (它是 uncached_in + output 加起来的两倍)。
+ */
+export const CACHE_MODES = ["full", "noRead", "none"] as const;
+export type CacheMode = (typeof CACHE_MODES)[number];
+
+export const cacheModeLabel = (m: CacheMode): string =>
+  m === "full" ? "含缓存" : m === "noRead" ? "不含缓存读" : "不含缓存";
+
+export const cacheModeDesc = (m: CacheMode): string =>
+  m === "full"
+    ? "四类 token 全计入(uncached_in + 缓存读 + 缓存写 + output)。这是原始口径。"
+    : m === "noRead"
+    ? "排除缓存读,保留缓存写 —— 缓存写是首次发送的新内容,没有缓存也要发。"
+    : "缓存读和缓存写都排除,只留 uncached_in + output。";
+
+const shapeBucket = (b: Bucket, mode: CacheMode): Bucket => {
+  const cache_write = mode === "none" ? 0 : b.cache_write;
+  const models: Record<string, ModelBucket> = {};
+  for (const [k, v] of Object.entries(b.models ?? {})) {
+    const cw = mode === "none" ? 0 : v.cache_write;
+    models[k] = { ...v, cache_read: 0, cache_write: cw,
+                  total: v.uncached_in + cw + v.output };
+  }
+  return { ...b, cache_read: 0, cache_write,
+           total: b.uncached_in + cache_write + b.output, models };
+};
+
+/**
+ * 按口径重塑数据。**只在 `useTraffic` 的出口调用一次**,下游 30 多处读 `b.total` / `costOfBucket`
+ * 的地方全部自动跟上 —— 逐处去改必然漏,而漏掉的那处会显示另一个口径的数字。
+ * 费用也一起对了:`costOf` 就是拿这四个类分别乘单价的,类被清零费用自然不含它。
+ *
+ * `full` 直接返回原对象(引用不变),所以默认口径下这层是零开销、零行为变化。
+ */
+export function applyCacheMode(data: TrafficData | null, mode: CacheMode): TrafficData | null {
+  if (!data || mode === "full") return data;
+  const platforms: Record<string, Platform> = {};
+  for (const [k, p] of Object.entries(data.platforms)) {
+    const days: Record<string, Bucket> = {};
+    const hours: Record<string, Bucket> = {};
+    for (const [d, b] of Object.entries(p.days)) days[d] = shapeBucket(b, mode);
+    for (const [h, b] of Object.entries(p.hours)) hours[h] = shapeBucket(b, mode);
+    platforms[k] = { ...p, days, hours };
+  }
+  return { ...data, platforms };
+}
+
+/**
+ * 该口径**计入**哪些类。UI 靠这两个函数决定**展示哪些指标** —— 用户 2026-08-11 定稿:
+ * 不计入缓存时,缓存相关指标要**从页面上消失**,而不是显示成 0%/「已排除 X」。
+ * 理由:一个恒为 0 的缓存占比会被读成「没用到缓存」,与事实相反;而一个当前口径根本不参与
+ * 计算的指标继续占着版面,只会让人怀疑这两个数是不是同一批数据。
+ *
+ * 判定只写这一份 —— 页面各写一份 `mode === "full"` 迟早在某个边界上互相矛盾。
+ */
+export const countsCacheRead = (m: CacheMode): boolean => m === "full";
+export const countsCacheWrite = (m: CacheMode): boolean => m !== "none";
+/** 当前口径下参与合计的 token 类数量(费率卡脚注要说"几类分别乘单价")。 */
+export const countedClasses = (m: CacheMode): number =>
+  2 + (countsCacheRead(m) ? 1 : 0) + (countsCacheWrite(m) ? 1 : 0);
+
+/**
+ * 平台详情页「构成」行要列的项。**只列当前口径计入的类,且分母就是这几类之和** ——
+ * 所以百分比恒加到 100。若沿用 `a.total` 当分母,不含缓存时四项加起来只有 4%,
+ * 比不显示更糟(看的人会以为剩下 96% 去向不明)。
+ *
+ * 做成纯函数放在这里,是为了让这条展示规则**能被断言**(scratch/verify_cache_mode_*.ts),
+ * 而不是埋在 JSX 里只能靠眼睛看。传入的 `a` 必须是**未重塑**的聚合,重塑后缓存类已归零。
+ */
+export function mixParts(a: Bucket, mode: CacheMode): { name: string; pct: number }[] {
+  const parts: [string, number][] = [];
+  if (countsCacheRead(mode)) parts.push(["缓存读", a.cache_read]);
+  parts.push(["输入", a.uncached_in]);
+  if (countsCacheWrite(mode)) parts.push(["缓存写", a.cache_write]);
+  parts.push(["输出", a.output]);
+  const tot = parts.reduce((s, [, x]) => s + x, 0);
+  return tot ? parts.map(([name, x]) => ({ name, pct: (x / tot) * 100 })) : [];
+}
+
 const EMPTY: Bucket = {
   uncached_in: 0, cache_read: 0, cache_write: 0, output: 0, total: 0, rounds: 0, models: {},
 };

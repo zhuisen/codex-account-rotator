@@ -4,8 +4,9 @@ import { fmtUSD } from "../rates";
 import StackedArea, { type Layer } from "../components/StackedArea";
 import Seg from "../components/Seg";
 import KpiStrip, { type Kpi, UP, DOWN } from "../components/KpiStrip";
-import type { TrafficData, Bucket, Range } from "../traffic";
-import { RANGES, rangeLabel, bucketsFor, sumBuckets, costOfBucket, savingOfBucket, fmtTok, topModels, colorOf } from "../traffic";
+import CacheChip from "../components/CacheChip";
+import type { TrafficData, Bucket, Range, CacheMode } from "../traffic";
+import { RANGES, rangeLabel, bucketsFor, sumBuckets, costOfBucket, savingOfBucket, fmtTok, topModels, colorOf, countsCacheRead } from "../traffic";
 
 const AMBER = "#E0A21C";
 
@@ -17,9 +18,13 @@ const IconRefresh = ({ spin }: { spin?: boolean }) => (
   </svg>
 );
 
-export default function TrafficPage({ t, data, range, setRange, onDrill, busy, err, onRefresh }: {
+export default function TrafficPage({ t, data, raw, cacheMode, range, setRange, onDrill, busy, err, onRefresh }: {
   t: Theme;
+  /** 已按缓存口径重塑 —— 一切合计/图表/费用都用它 */
   data: TrafficData | null;
+  /** 未重塑。**只给缓存占比那一格用**(它要的正是重塑时被清零的那个数),别拿它算展示合计 */
+  raw: TrafficData | null;
+  cacheMode: CacheMode;
   range: Range;
   setRange: (r: Range) => void;
   onDrill: (platform: string) => void;
@@ -101,9 +106,19 @@ export default function TrafficPage({ t, data, range, setRange, onDrill, busy, e
 
   // ★ 缓存披露独立成一格(用户 2026-08-09 定稿,原来是首格底下的一行小字):`total` 里 96%+ 是
   //   缓存重读(同一段历史被反复重发),只给一个 561M 会让人以为真烧了 5.6 亿新内容。
-  const cacheShare = view?.grand
-    ? (view.per.reduce((s, p) => s + p.agg.cache_read, 0) / view.grand) * 100
-    : 0;
+  //
+  // ★★ 必须从 `raw` 算:`data` 已按口径重塑,里面 cache_read 恒为 0,拿它算缓存占比会永远得到
+  //     0.0% —— 那不是"没有缓存",是"我把它减掉了",两回事。
+  //     (只在计入缓存读时才会用到这个数,其余口径下这一格根本不渲染。)
+  const rawCacheShare = useMemo(() => {
+    if (!raw) return 0;
+    let cache = 0, tot = 0;
+    for (const k of Object.keys(raw.platforms)) {
+      const agg = sumBuckets(bucketsFor(raw, k, range).buckets);
+      cache += agg.cache_read; tot += agg.total;
+    }
+    return tot ? (cache / tot) * 100 : 0;
+  }, [raw, range]);
 
   const kpis: Kpi[] = [
     { k: "总 token", v: fmtTok(view?.grand ?? 0),
@@ -120,16 +135,23 @@ export default function TrafficPage({ t, data, range, setRange, onDrill, busy, e
     { k: "最大占比",
       v: top ? `${top.name} ${((top.total / Math.max(1, view!.grand)) * 100).toFixed(1)}%` : "—",
       c: top ? colorOf(data, top.key) : undefined },
-    // 缓存排最后(用户 2026-08-09 定稿):它是对首格「总 token」的**限定**而不是并列指标,
-    // 夹在前面会把「总量 → 环比 → 费用」这条主线打断。
-    { k: "缓存", v: view?.grand ? `${cacheShare.toFixed(1)}%` : "—" },
   ];
+  // 缓存排最后(用户 2026-08-09 定稿):它是对首格「总 token」的**限定**而不是并列指标,
+  // 夹在前面会把「总量 → 环比 → 费用」这条主线打断。
+  // ★ 不计入缓存读时**整格删除**(用户 2026-08-11 定稿),不是显示 0.0%、也不是改说「已排除 X」——
+  //   前者会被读成"没用到缓存"(与事实相反),后者等于换个说法把这个指标请回来。
+  //   KpiStrip 是 space-evenly,少一格自动重新均分,不会留空位。
+  if (countsCacheRead(cacheMode)) {
+    kpis.push({ k: "缓存", v: raw ? `${rawCacheShare.toFixed(1)}%` : "—" });
+  }
 
   return (
     <div style={{ display: "flex", flexDirection: "column", minHeight: 0, height: "100%", overflow: "auto" }}>
       {/* 顶栏 */}
       <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 9 }}>
         <span style={{ fontSize: 22, fontWeight: 700, whiteSpace: "nowrap" }}>AI用量信息</span>
+        {/* 开关在设置页,被它改变的数字在这里 —— 不挂个牌子,页面就会静默地把 34.2B 显示成 0.46B */}
+        <CacheChip mode={cacheMode} />
         <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 10 }}>
           {/* ★ 刷新按钮:页面画的是**上次扫描的快照**(所以进来不再白屏几秒),不点就一直是那一份。
               时间戳本身就是按钮 —— 「这数是几点的」和「重取」本来是同一件事,不必再占一格。 */}

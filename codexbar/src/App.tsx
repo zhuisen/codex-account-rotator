@@ -100,8 +100,8 @@ export default function App() {
   //   底层数据本就一样;每换一档重调一次 IPC 等于白付一次全量扫描。
   //   进页面才取,不在启动时取 —— 账号池才是启动要的东西。
   //   取数走 `useTraffic`:先画上次的快照(一次文件读),再后台重扫,所以进页面不再有那 1~4 秒白屏。
-  const { data: traffic, busy: trafficBusy, err: trafficErr, refresh: refreshTraffic } =
-    useTraffic({ enabled: page === "traffic", revalidate: true });
+  const { data: traffic, raw: trafficRaw, cacheMode, busy: trafficBusy, err: trafficErr,
+          refresh: refreshTraffic } = useTraffic({ enabled: page === "traffic" });
 
   const sidebarItems: { id: Page; Icon: React.FC; tip: string }[] = [
     { id: "overview", Icon: IconChart, tip: "总览" },
@@ -286,9 +286,11 @@ export default function App() {
           )}
 
           {page === "traffic" && (drill
-            ? <PlatformPage t={t} data={traffic} pk={drill} range={trafficRange}
+            ? <PlatformPage t={t} data={traffic} raw={trafficRaw} cacheMode={cacheMode}
+                            pk={drill} range={trafficRange}
                             setRange={setTrafficRange} onBack={() => setDrill(null)} busy={trafficBusy} />
-            : <TrafficPage t={t} data={traffic} range={trafficRange} setRange={setTrafficRange}
+            : <TrafficPage t={t} data={traffic} raw={trafficRaw} cacheMode={cacheMode}
+                           range={trafficRange} setRange={setTrafficRange}
                            onDrill={setDrill} busy={trafficBusy} err={trafficErr}
                            onRefresh={refreshTraffic} />)}
           {page === "logs" && <LogsPage t={t} />}

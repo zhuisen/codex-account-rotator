@@ -7,6 +7,9 @@ import { open as openExternal } from "@tauri-apps/plugin-shell";
 import logo from "../../src-tauri/icons/128x128@2x.png";
 import { enable as enableAutostart, disable as disableAutostart, isEnabled as isAutostartEnabled } from "@tauri-apps/plugin-autostart";
 import type { Theme } from "../theme";
+import Seg from "../components/Seg";
+import { useCacheMode } from "../hooks/useCacheMode";
+import { CACHE_MODES, cacheModeLabel, cacheModeDesc } from "../traffic";
 
 interface Settings {
   autoSwitchEnabled: boolean;
@@ -39,6 +42,7 @@ export default function SettingsPage({ t }: { t: Theme }) {
     const next = { ...s, ...patch }; setS(next); save(next);
   };
 
+  const { mode: cacheMode, setMode: setCacheMode } = useCacheMode();
   const [confirmQuit, setConfirmQuit] = useState(false);
   const [autostart, setAutostart] = useState(false);
   const [autostartBusy, setAutostartBusy] = useState(false);
@@ -97,6 +101,17 @@ export default function SettingsPage({ t }: { t: Theme }) {
           background: s.dockVisible ? t.accent : t.barTrack, transition: "background .2s",
         }}>
           <div style={{ width: 18, height: 18, borderRadius: 9, background: "#fff", transform: s.dockVisible ? "translateX(16px)" : "translateX(0)", transition: "transform .2s" }} />
+        </div>
+      </Row>
+
+      {/* ★ 缓存计入口径。**token 数与费用同时跟着变** —— 两者都由那四个互不相交的类算出来,
+          只改一个会让「总费用」和「总 token」说的不是同一批数据。改动即时同步到菜单栏「今日」
+          (走 Tauri 事件广播;两个 webview 的 localStorage 不互通)。 */}
+      <Row label="缓存计入口径" desc={cacheModeDesc(cacheMode)}>
+        {/* `Row` 是 space-between,右侧控件默认可被压缩。这一格是三档中文标签(比其余行的开关宽得多),
+            窗口拉窄时会被左边那段说明文字挤到变形 —— 固定住它,让说明文字去换行。 */}
+        <div style={{ flexShrink: 0, marginLeft: 12 }}>
+          <Seg opts={CACHE_MODES} cur={cacheMode} on={setCacheMode} label={cacheModeLabel} t={t} />
         </div>
       </Row>
 
