@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""多 AI 流量总览的统一扫描器 —— Claude / Codex / Grok 三平台,读本机 CLI 落盘记录。
+"""多 AI 流量总览的统一扫描器 —— Claude / Codex / Grok / Kimi 四家 + OpenClaw **宿主源**
+(宿主自己不是平台:按模型名把每条记录回流到真正的平台,可再分出 DeepSeek / MiMo),读本机 CLI 落盘记录。
 
     scan.py [--days N] [--json] [--no-cache] [--only k1,k2] [--exclude k1]
 
-**全部本地只读、不联网、不消耗任何额度。**三家的 transcript 都是各自 CLI 自己写在硬盘上的。
+**全部本地只读、不联网、不消耗任何额度。**各家的 transcript 都是它们自己写在硬盘上的。
 
 ★★ 三家的 token 语义**不一样**,不归一就是整块数字错位(实测 2026-08-09):
 
@@ -21,7 +22,9 @@
 
 ★ Claude **必须全局按 `message.id` 去重**,朴素求和虚高 2.23x:一次响应按 content block 拆成多行、
   每行带同一份 usage(文件内);会话 resume/fork 复制历史(跨文件 1.6%,per-file 去重挡不住)。
-  codex 按 `token_count` 事件、Grok 按 `prompt_id`,实测均无重复(Grok 64/64 唯一),不需要去重。
+  ★ 「codex 无重复」**已作废**(2026-08-12):codex 把同一个 `token_count` 事件写两遍,现按累计值
+  `total_token_usage.total_tokens` 去重,详见 `_scan_codex_file`。Grok 按 `prompt_id` 实测无重复
+  (64/64 唯一);OpenClaw 按 `responseId`(虚高 4.08x)。
 
 ★ 缓存只存**原始 epoch**,日期/小时一律在聚合层现算。缓存键是 (mtime,size) 不含时区 —— 存派生日期
   的话,换一次 TZ(launchd 默认环境 / CI / export TZ)就会让不再变动的文件永久保留旧时区的桶,
@@ -49,7 +52,7 @@ CACHE = Path(__file__).resolve().parent.parent / ".traffic-cache.json"
 CACHE_V = 1
 # ★ 改任何 _scan_* 的解析逻辑(改变 rows 里存什么/怎么算)必须 +1,否则那些此生不再变 mtime 的文件
 #   会永远沿用旧结果,产出一份新旧混血、无法察觉的数据集。
-PARSER_V = 1
+PARSER_V = 3          # +1 于 2026-08-12:codex 累计值去重;接入 OpenClaw 并按 AI 平台路由(row 多一位)
 
 _DATED = re.compile(r"-\d{8}$")          # claude-haiku-4-5-20251001 -> claude-haiku-4-5
 
@@ -148,11 +151,27 @@ def _scan_claude_file(path):
 
 
 def _scan_codex_file(path):
-    """-> [row]。codex 无重复,用 list 即可。
+    """-> [row]。
+
+    ★ **同一个 `token_count` 事件会被写两遍**(2026-08-12 实测):形态是 `(last, total)` 成对重复,
+    而累计值单调不降 —— 所以是重复写入,不是会话续接。旧注释"codex 无重复"据此作废,
+    `SOURCES` 的 `dedup: False` 也仅指**跨文件**(3618 个文件 ↔ 3618 个会话 uuid,一文件一会话)。
+
+    ⚠️ **别引用单一的"虚高 N 倍" —— 重复是重尾的,倍数完全取决于窗口**。测法必须是拿 git 里的
+    旧解析器与新解析器**各跑一遍真代码**(自己另写一个"朴素求和"来对比会得到 2.73x,是错的):
+      · 全量 3619 个 rollout(含历史)  旧/新 = **1.421**,下调 29.6% —— 单个文件贡献了 38% 的重复量
+      · **90 天窗口(app 实际显示的档)  旧/新 = 1.069,下调 6.5%** ← 用户看到的变化是这个
+      · 早先按 300 个抽样报过 12.4%,那只是第三个窗口,不是"真值"
+
+    去重键是 **`total_token_usage.total_tokens`**(单调递增的累计值,每个值只该出现一次),
+    不是内容哈希 —— 两轮恰好用掉一样多 token 是常事,按内容去重会误删真实记录。
+    验证:300 个 rollout 抽样,去重后「Σ增量 == 最终累计」**181/181 零例外**。
+    拿不到累计值时**保留该条**(fail-open):宁可偏高,不可静默丢数据。
 
     模型按 **ordinal 顺序**归属到最近一次 `turn_context` —— 实测 310 个文件里有 5 个中途换过模型,
     按会话整体归会错。"""
     rows, cur = [], None
+    seen_cum = set()          # 本文件内已记过的累计值 —— 见 docstring
     try:
         fh = open(path, encoding="utf-8", errors="replace")
     except OSError:
@@ -187,6 +206,13 @@ def _scan_codex_file(path):
             ep = _iso_epoch(d.get("timestamp") or "")
             if ep is None:
                 continue
+            # ★ 按累计值去重。`None` 时不去重(fail-open),见 docstring。
+            tt = info.get("total_token_usage") if isinstance(info, dict) else None
+            cum = tt.get("total_tokens") if isinstance(tt, dict) else None
+            if cum is not None:
+                if cum in seen_cum:
+                    continue
+                seen_cum.add(cum)
             raw_in = _num(lt, "input_tokens")
             cr = _num(lt, "cached_input_tokens")           # ⊆ input(OpenAI 语义)
             cw = _num(lt, "cache_write_input_tokens")      # 实测该端点恒 0
@@ -302,6 +328,91 @@ def _scan_kimi_file(path):
 #
 # 停用某家:`--exclude grok`,或在 `traffic/sources.local.json` 写 {"disabled": ["grok"]}
 # (该文件 gitignored,是本机偏好不是仓库配置)。停用后它不出现在输出里,UI 上自然消失。
+OPENCLAW_ROOT = Path(os.environ.get("OPENCLAW_HOME") or (HOME / ".openclaw")) / "agents"
+
+# 宿主内**路由出来**的平台。OpenClaw 自己不是平台(用户 2026-08-12 定稿:「openclaw 不算平台,
+# 但是涉及的对应 ai 平台也要纳入计算」)—— 它是宿主,里面跑的 AI 各归各家。
+ROUTED = {
+    "deepseek": {"name": "DeepSeek", "color": "#4d6bfe"},
+    "mimo":     {"name": "MiMo",     "color": "#ff6a00"},
+}
+
+
+def _openclaw_platform(provider, model):
+    """把一条 OpenClaw 记录归到它真正的 AI 平台。
+
+    ★ **按模型名判,不按 provider 判**。本机的 provider 是 `xiaomi` / `huohuo` / `deepseek` ——
+    `huohuo` 跑的是 gpt-5.4/5.5(那是账号昵称,不是厂商),按 provider 归会造出一个叫 huohuo 的
+    假平台。模型名才带厂商信息。
+    认不出时回落到 provider 名:**宁可多一个名字奇怪的平台,也不静默丢数据**。
+    """
+    m = (model or "").lower()
+    if "deepseek" in m:                          return "deepseek"
+    if "mimo" in m:                              return "mimo"
+    if m.startswith(("gpt", "o1", "o3", "o4")):  return "codex"     # 并入 Codex 平台
+    if "claude" in m:                            return "claude"
+    if "grok" in m:                              return "grok"
+    if "kimi" in m:                              return "kimi"
+    return (provider or "unknown").lower()
+
+
+def _scan_openclaw_file(path):
+    """-> {responseId: row}。row 末尾多带一个**平台键**,聚合层据此路由。
+
+    ★ **去重键是 `responseId`**(2026-08-12 全量实测):29506 条 usage 记录只有 4203 个不同的
+    responseId,朴素求和虚高 **4.08x** —— trajectory/checkpoint 存的是 `messagesSnapshot`,
+    每一步把之前所有消息连同 usage 重发一遍,一条最多重复 306 次。零缺失,同 id 的 total
+    100% 一致,所以合并无歧义。故本源 `dedup: True`(跨文件全局按 id 合并)。
+
+    ★ 口径:`totalTokens == input + output + cacheRead + cacheWrite`,**4203/4203 零反例**
+    ⇒ 四类互不相交,**不做减法**(与 Claude/Kimi 同族,与 codex/Grok 相反)。
+
+    ⚠️ **必须排除 `*.jsonl.bak-*`**:本机 2663 个滚动备份共 14.4GB。抽样 60 个/350MB 实测
+    「备份里独有的 responseId = 0」⇒ 跳过不丢数据,但**加进来会把同一笔账算上百遍**。
+    glob 用 `*/sessions/*.jsonl`,备份名以 `.bak-<num>` 结尾,天然不匹配。
+    """
+    rows = {}
+    try:
+        fh = open(path, encoding="utf-8", errors="replace")
+    except OSError:
+        return rows
+
+    def walk(o, model=None, provider=None, ts=None):
+        if isinstance(o, dict):
+            m = o.get("model") or model
+            pv = o.get("provider") or provider
+            t = o.get("timestamp") or ts
+            u = o.get("usage")
+            rid = o.get("responseId")
+            if isinstance(u, dict) and u.get("totalTokens") and rid:
+                ep = None
+                if isinstance(t, str):
+                    ep = _iso_epoch(t)
+                elif isinstance(t, (int, float)):
+                    ep = t / 1000.0 if t > 1e11 else float(t)     # 毫秒 → 秒
+                if ep is not None:
+                    rows[rid] = [ep, str(m or "unknown"),
+                                 u.get("input") or 0, u.get("cacheRead") or 0,
+                                 u.get("cacheWrite") or 0, u.get("output") or 0,
+                                 _openclaw_platform(pv, m)]
+            for v in o.values():
+                walk(v, m, pv, t)
+        elif isinstance(o, list):
+            for v in o:
+                walk(v, model, provider, ts)
+
+    with fh:
+        for line in fh:
+            line = line.strip()
+            if not line or '"usage"' not in line:
+                continue
+            try:
+                walk(json.loads(line))
+            except ValueError:
+                continue
+    return rows
+
+
 SOURCES = (
     {"key": "claude", "name": "Claude", "root": CLAUDE_ROOT, "color": "#E0784F",
      "glob": "**/*.jsonl",         "parse": _scan_claude_file, "dedup": True},
@@ -311,7 +422,13 @@ SOURCES = (
      "glob": "*/*/updates.jsonl",  "parse": _scan_grok_file,   "dedup": False},
     {"key": "kimi",   "name": "Kimi",   "root": KIMI_ROOT,   "color": "#f472b6",
      "glob": "**/wire.jsonl",      "parse": _scan_kimi_file,   "dedup": False},
+    # ★ OpenClaw 是**宿主**,不是平台:它 parse 出来的每条 row 末尾自带平台键,聚合层据此路由。
+    #   `key` 只用于 enabled/registered 列表,不会作为平台出现在输出里。
+    {"key": "openclaw", "name": "OpenClaw", "root": OPENCLAW_ROOT, "color": "#8b8b8b",
+     "glob": "*/sessions/*.jsonl", "parse": _scan_openclaw_file, "dedup": True, "host": True},
 )
+
+SRC_META = {s["key"]: {"name": s["name"], "color": s["color"]} for s in SOURCES}
 
 LOCAL_CFG = Path(__file__).resolve().parent / "sources.local.json"
 
@@ -356,6 +473,8 @@ def scan(days=90, use_cache=True, only=None, exclude=None):
     fresh = {}
     scanned = reused = 0
     out = {}
+    acc = {}            # 平台键 -> (days_b, hours_b);跨源累积
+    seen_roots = {}
     now_ts = time.time()
     localtime, strftime = time.localtime, time.strftime
     # 用 date 做日期回退,不是 now-off*86400 —— 跨 DST 的地区一天不等于 86400 秒,
@@ -366,7 +485,6 @@ def scan(days=90, use_cache=True, only=None, exclude=None):
     for src in _enabled_sources(only, exclude):
         key, name, root = src["key"], src["name"], src["root"]
         pattern, parse, dedup = src["glob"], src["parse"], src["dedup"]
-        days_b, hours_b = {}, {}
         merged, seq = {}, []
         if root.is_dir():
             for f in sorted(root.rglob(pattern) if "**" in pattern else root.glob(pattern)):
@@ -391,13 +509,17 @@ def scan(days=90, use_cache=True, only=None, exclude=None):
                         # 赌一个会随遍历顺序变。
                         for mid, row in data.items():
                             prev = merged.get(mid)
-                            if prev is None or sum(row[IDX_IN:]) > sum(prev[IDX_IN:]):
+                            if prev is None or sum(row[IDX_IN:IDX_OUT + 1]) > sum(prev[IDX_IN:IDX_OUT + 1]):
                                 merged[mid] = row
                 elif isinstance(data, list):
                     seq.extend(data)
 
         for row in (merged.values() if dedup else seq):
-            ep, model, i, cr, cw, o = row
+            ep, model, i, cr, cw, o = row[:6]
+            # ★ row 可带第 7 位 = **平台键**。宿主型源(OpenClaw)靠它把每条记录路由到真正的
+            #   AI 平台 —— 宿主自己不作为平台出现。普通源没这一位,就归自己。
+            pk = row[6] if len(row) > 6 else key
+            days_b, hours_b = acc.setdefault(pk, ({}, {}))
             lt = localtime(ep)
             d = strftime("%Y-%m-%d", lt)
             b = days_b.get(d)
@@ -417,16 +539,22 @@ def scan(days=90, use_cache=True, only=None, exclude=None):
         # 切掉的天数就不同 —— 同一批数据的总量会随时区变(实测差 3.2%)。
         # 缺数据的日期**补零**:面积图按下标等距布点,不补零会把 3 天空档画成相邻两点,
         # 把"那几天没跑"抹成一段平滑上升,同时让"日均"的分母偏小。
+        seen_roots[key] = root.is_dir()
+
+    # 出表放在**所有源之后**:一个平台可能由多个源汇入(OpenClaw 里的 gpt 并进 Codex),
+    # 边扫边写 `out[key]` 会让后写的覆盖先写的。
+    cur_h = int(strftime("%H", localtime(now_ts)))
+    for pk, (days_b, hours_b) in acc.items():
         picked = {}
         for off in range(days - 1, -1, -1):
             d = (end_date - _timedelta(days=off)).isoformat()
             picked[d] = days_b.get(d) or _blank()
-        # 今日视图:从 00 点补到当前小时,同理
-        cur_h = int(strftime("%H", localtime(now_ts)))
         hours = {f"{today}T{h:02d}": (hours_b.get(f"{today}T{h:02d}") or _blank())
                  for h in range(cur_h + 1)}
-        out[key] = {"name": name, "color": src["color"], "days": picked, "hours": hours,
-                    "available": root.is_dir()}
+        meta = SRC_META.get(pk) or ROUTED.get(pk) or {"name": pk, "color": None}
+        out[pk] = {"name": meta["name"], "color": meta.get("color"),
+                   "days": picked, "hours": hours,
+                   "available": seen_roots.get(pk, True)}
 
     if use_cache and not (scanned == 0 and len(fresh) == len(cached)):
         _save_cache(fresh)

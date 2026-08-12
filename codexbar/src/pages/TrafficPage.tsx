@@ -5,8 +5,8 @@ import StackedArea, { type Layer } from "../components/StackedArea";
 import Seg from "../components/Seg";
 import KpiStrip, { type Kpi, UP, DOWN } from "../components/KpiStrip";
 import CacheChip from "../components/CacheChip";
-import type { TrafficData, Bucket, Range, CacheMode } from "../traffic";
-import { RANGES, rangeLabel, bucketsFor, sumBuckets, costOfBucket, savingOfBucket, fmtTok, topModels, colorOf, countsCacheRead } from "../traffic";
+import type { TrafficData, Bucket, Range, CacheMode, PlatformPrefs } from "../traffic";
+import { RANGES, rangeLabel, bucketsFor, sumBuckets, costOfBucket, savingOfBucket, fmtTok, topModels, colorOf, countsCacheRead, orderedKeys } from "../traffic";
 
 const AMBER = "#E0A21C";
 
@@ -18,13 +18,16 @@ const IconRefresh = ({ spin }: { spin?: boolean }) => (
   </svg>
 );
 
-export default function TrafficPage({ t, data, raw, cacheMode, range, setRange, onDrill, busy, err, onRefresh }: {
+export default function TrafficPage({ t, data, raw, cacheMode, prefs, range, setRange, onDrill, busy, err, onRefresh }: {
   t: Theme;
   /** 已按缓存口径重塑 —— 一切合计/图表/费用都用它 */
   data: TrafficData | null;
-  /** 未重塑。**只给缓存占比那一格用**(它要的正是重塑时被清零的那个数),别拿它算展示合计 */
+  /** **只未套「缓存口径」这一层,平台偏好已经套过**(否则停用的平台会混进缓存占比的分母)。
+   *  只给缓存占比那一格用(它要的正是缓存重塑时被清零的那个数),别拿它算展示合计 */
   raw: TrafficData | null;
   cacheMode: CacheMode;
+  /** 平台呈现偏好。**这里只用它的 `order` 排列表** —— 停用/改名/改色已在 `useTraffic` 出口生效。 */
+  prefs: PlatformPrefs;
   range: Range;
   setRange: (r: Range) => void;
   onDrill: (platform: string) => void;
@@ -48,15 +51,20 @@ export default function TrafficPage({ t, data, raw, cacheMode, range, setRange, 
       return { ...s, agg, total: agg.total, rounds: agg.rounds, cost: costOfBucket(agg, s.key),
              saving: savingOfBucket(agg, s.key) };
     });
-    // per 按占比降序 —— 图例行/卡片用这个顺序(大的在上,好读)。
-    // 图层顺序是**反过来**的,见下面 layers。
+    // ★ per 恒按占比降序。**图层顺序、`最大占比` KPI 都靠它**,不能被用户的排列顺序影响
+    //    (「占大头的铺满基线」是 2026-08-09 看了两版实物定的)。
     per.sort((a, b) => b.total - a.total);
+    // 用户排的顺序**只用于列表与图例**(2026-08-12 定稿)。没排过的跟在后面按占比降序。
+    const byKey = new Map(per.map((x) => [x.key, x]));
+    const list = orderedKeys(per.map((x) => x.key), prefs, (k) => byKey.get(k)?.total ?? 0)
+                   .map((k) => byKey.get(k)!)
+                   .filter(Boolean);
     const grand = per.reduce((s, p) => s + p.total, 0);
     const grandRounds = per.reduce((s, p) => s + p.rounds, 0);
     const grandCost = per.reduce((s, p) => s + p.cost, 0);
     const grandSaving = per.reduce((s, p) => s + p.saving, 0);
-    return { labels, per, grand, grandRounds, grandCost, grandSaving };
-  }, [data, range]);
+    return { labels, per, list, grand, grandRounds, grandCost, grandSaving };
+  }, [data, range, prefs]);
 
   /**
    * 环比基准 = **与当前窗口等长的上一段**(今日 → 昨日整天;7d → 再往前 7 天;以此类推)。
@@ -222,7 +230,7 @@ export default function TrafficPage({ t, data, raw, cacheMode, range, setRange, 
       {/* 平台卡片 / 今日饼图卡片 */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 11, marginTop: 10,
                     paddingBottom: 4 }}>
-        {view?.per.map((p) => (
+        {view?.list.map((p) => (
           <PlatformCard key={p.key} t={t} name={p.name} color={colorOf(data, p.key)} buckets={p.buckets}
                         total={p.total} cost={p.cost} isToday={isToday}
                         yTotal={isToday ? yesterdayOf(data, p.key) : 0}

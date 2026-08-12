@@ -93,6 +93,59 @@ export function applyCacheMode(data: TrafficData | null, mode: CacheMode): Traff
 }
 
 /**
+ * 平台的**本机呈现偏好**(用户 2026-08-12)。`scan.py` 的注册表仍是唯一决定"有没有数据"的地方;
+ * 这一层只管"怎么显示"——改名、改色、停用、排序。**新增一家平台不在这里**,那等于写一个解析器
+ * (`scan.py` 顶部那条:四家四种形状,猜字段名会静默算错数)。
+ */
+export interface PlatformPrefs {
+  /** 用户排的列表顺序。不在里面的键排在后面(按占比降序)。**只影响列表/图例,不影响堆叠图层**。 */
+  order: string[];
+  by: Record<string, { name?: string; color?: string; off?: boolean }>;
+}
+
+export const EMPTY_PREFS: PlatformPrefs = { order: [], by: {} };
+
+/**
+ * 应用平台偏好。**停用 = 整家从数据里移除**(用户 2026-08-12 定稿:总 token / 总费用跟着扣),
+ * 所以必须和 `applyCacheMode` 一样放在 `useTraffic` 出口做一次 —— 下游读 `data.platforms` 的
+ * 30+ 处(总计、环比、最大占比、图表、菜单栏)全部自动跟上。逐处过滤必然漏，
+ * 而漏掉的那处会把已停用的平台算回总数里。
+ *
+ * 改名/改色是就地覆盖:`scan.py` 下发的值仍是默认,用户没设就用它。
+ */
+export function applyPlatformPrefs(data: TrafficData | null, prefs: PlatformPrefs): TrafficData | null {
+  if (!data) return null;
+  const entries = Object.entries(data.platforms).filter(([k]) => !prefs.by[k]?.off);
+  if (entries.length === Object.keys(data.platforms).length
+      && !entries.some(([k]) => prefs.by[k]?.name || prefs.by[k]?.color)) {
+    return data;                     // 无任何覆盖 ⇒ 原引用,零开销
+  }
+  const platforms: Record<string, Platform> = {};
+  for (const [k, p] of entries) {
+    const o = prefs.by[k];
+    platforms[k] = { ...p, name: o?.name || p.name, color: o?.color || p.color };
+  }
+  return { ...data, platforms };
+}
+
+/**
+ * 按用户顺序排列平台键。**只给列表/图例用** —— 堆叠图层仍按占比降序
+ * (「占大头的铺满基线比悬在半空清楚」是 2026-08-09 看了两版实物定下的，这次没动它)。
+ * 没排过的键跟在后面，按传入的 `volume` 降序，保证新出现的一家不会莫名跑到最前。
+ */
+export function orderedKeys(keys: string[], prefs: PlatformPrefs,
+                            volume: (k: string) => number): string[] {
+  const rank = new Map(prefs.order.map((k, i) => [k, i]));
+  return [...keys].sort((a, b) => {
+    const ra = rank.get(a), rb = rank.get(b);
+    if (ra != null && rb != null) return ra - rb;
+    if (ra != null) return -1;
+    if (rb != null) return 1;
+    return volume(b) - volume(a);
+  });
+}
+
+/**
  * 该口径**计入**哪些类。UI 靠这两个函数决定**展示哪些指标** —— 用户 2026-08-11 定稿:
  * 不计入缓存时,缓存相关指标要**从页面上消失**,而不是显示成 0%/「已排除 X」。
  * 理由:一个恒为 0 的缓存占比会被读成「没用到缓存」,与事实相反;而一个当前口径根本不参与

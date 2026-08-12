@@ -76,6 +76,37 @@
 
 ---
 
+### v0.10.0 — AI 平台管理 + OpenClaw 汇入 + 菜单栏四风格 — 2026-08-12
+
+**新增**
+
+- **AI 平台管理面板**(「设置」页):每个平台可**改名 / 改色 / 停用 / ▲▼ 排序**,偏好存 localStorage `codexbar_platform_prefs` + Tauri 事件广播给菜单栏(`usePlatformPrefs`,同 `usePrivacy` 范式)。**停用 = 整家从 `data.platforms` 移除,总 token 与总费用跟着扣**。它只管「怎么显示」,与 `traffic/sources.local.json` 那层「要不要解析」是两回事 —— 停在展示层意味着数据仍在缓存里,开回来不用重扫。设置页那份平台清单是**唯一直读未过滤快照**的地方(否则停用后就再也开不回来)。
+- **「扫描新数据源」`traffic/discover.py`**(「设置」页,~40s):体检本机还有哪些 AI 把用量落了盘,并**现场验算口径** —— 只解方程不猜字段:只有 `{input,output}` 恒等于 `total` 才判「缓存要减」,四类都成立判「不减」,多组成立如实报**歧义**。**只出报告不自动启用**(接一家的实质是写解析器)。走独立命令 `run_discover`,**刻意不并进 `run_traffic`** —— 那是带互斥锁的热路径,40s 的体检挂上去会拖慢图表刷新。SQLite 一律 `mode=ro`。
+- **OpenClaw 接成第 5 个数据源(宿主型)**:`~/.openclaw/agents/*/sessions/*.jsonl`,按 `responseId` 去重(朴素求和虚高 **4.08x**),`totalTokens == input+output+cacheRead+cacheWrite` 4203/4203 零反例,`*.jsonl.bak-*` 排除在 glob 之外。★ **它自己不是平台**:`_openclaw_platform()` 按**模型名**判归属 —— **不按 provider 名**,本机 provider 是 `xiaomi`/`huohuo` 这类账号昵称,按它归会造出假平台。因此平台列表多出 **MiMo** 与 **DeepSeek**,而 OpenClaw 里的 `gpt-*`/`o1`/`o3`/`o4` 并入 **Codex**——「OpenClaw 不是平台」不等于它的量凭空消失。
+- **菜单栏标题四风格**(「设置」页):完整 `pro1 周 67% ↻5d21h` / 简 `pro1 67%` / 极简 `67%` / 今日 `67% 🔹 1.29B`。百分比那一段按余量**染色并加粗**:`0` 红 `#E0524D` · `<50` 琥珀 `#E0901C` · 否则绿 `#27B26B`;额度未知退成 `—` 且不上色。Tauri 没透出富文本(`set_title` 只收 `&str`),走 objc2 在本进程 `NSApp.windows` 里找 `NSStatusBarButton` 改 `attributedTitle`,**找不到按钮就什么都不做**(纯文本标题仍在,只是没颜色 —— fail-open)。前端 `TRAY_STYLES` 与 Rust `TRAY_STYLE` 索引一一对应,后者是进程内 atomic、重启回默认,靠 `App.tsx` 启动重放一次。
+- **账号改名**:卡片动作条「重命名」就地变输入框。`codex-rotate rename` 补三条校验(空名 / 含空格 / 与他号重名)。**调用方传 `a.aid` 不是旧 label**(label 可重名,aid 唯一);校验**只写在 CLI**,前端不复制 —— `switch`/`probe`/`rename` 全按 label 首个匹配查找,重名会**静默操作到错的号上**。⚠️ 已知缺口:**`codex-rotate add <label>` 仍不校验,重名依旧造得出来**,这次只堵了 rename。
+- **UI harness 加交互驱动**:`?click=文本~序号` 按文本点最内层匹配节点,探针新增 `clicks`(命中总数)与 `inputs`(值/宽高/聚焦)——**命中数必须核到唯一,点错位置和没点中长得一模一样**。另加 `?plat=demo` 与 `nav=home`。
+
+**修复**
+
+- **B30 Codex token 统计虚高**(见下)。
+- 合并分支的 `sum(row[IDX_IN:])` 收窄成 `sum(row[IDX_IN:IDX_OUT + 1])`:OpenClaw 源是 `dedup: True` 且 row 带第 7 位平台键(str),不收窄会在第一次跨文件合并时 TypeError。**不立 B 号** —— 同批引入同批堵住,BUG 日志记的是**发出去过**的缺陷。
+
+**改进**
+
+- 设置页删掉「AI 模型」区块;菜单栏「余量色点」开关一并删除(阈值染色上线后它已被取代,而它的说明文字「macOS 不允许给菜单栏文字上色」本身也已被同批推翻)。
+- 「在程序坞显示」的说明里 `**主界面打开时**` 会原样渲染成星号 —— `desc` 是纯文本字段不过 markdown,已改掉(截图里抓到的)。
+- **SwiftBar 联动从 CLI 彻底断链**:删 `_refresh_menu()` / `REFRESH_AFTER` 及三处调用。新增 `tests/test_retired_swiftbar.py`(AST 断言源码不得含 `swiftbar://`、不得有 `_refresh_menu`)守着不回潮。文档侧同批清掉 RUNBOOK / SETUP 里的死指令 —— 其中 **SETUP 的卸载循环写的是不存在的 `swiftbar`、反而漏了 KeepAlive 常驻的 `quotad`**,照着卸会卸不干净。
+- **代价(留档)**:菜单栏「死号 ✗N」角标已去掉,失效号不再有持续可见信号,只剩 `useDeadWatch` 弹一次通知。所有刷托盘一律走 `refresh_tray()`,直接 `tray.set_title` 会让颜色停在上一次的阈值。
+- **`raw` 的语义变了**:它现在**只未套「缓存口径」重塑,平台偏好已经套过** —— 否则已停用的平台会混进缓存占比的分母。v0.9.0 里「缓存占比走未重塑的 raw」这句要按此理解。
+
+**★ 口径变更(用户会看到数字变化,不是 bug)**
+
+1. `PARSER_V` **1 → 3**,`pv` 不匹配即**整份缓存作废**,下次打开会全量重解析一次(冷 ~18s)。
+2. Codex 的数字受**两个反向力**:去重下调、OpenClaw 里的 `gpt-*` 又按模型名并入 Codex。**是变准了不是丢数据。**
+3. 平台列表多出 **MiMo** 与 **DeepSeek**(后者 90 天窗口内为 0,只有更早的记录,所以会看到一家 0 值平台)。
+4. OpenClaw 自身不作为平台出现,但仍在 `scan.registered` / `scan.enabled` 里 —— 这两个集合列的是**源**不是平台,别拿它和 `platforms` 直接作差当诊断。
+
 ### v0.9.1 — 菜单栏尾部切换 + 订阅到期不再谎报 — 2026-08-11
 
 **新增**
@@ -490,11 +521,29 @@ plus6 周已用 9.0% → 10.0%,captured_at=00:41:37
 
 ---
 
+### B30 · Codex token 统计虚高,自 v0.7.0 起一直显示在界面上 — 2026-08-12 ✅修
+
+**症状**:消耗页的 Codex 数字系统性偏高,且**少量抽查看不出来** —— 重复呈重尾,单个文件就贡献了全部重复量的 38%。
+
+**根因**:`_scan_codex_file` 原来直接把每条 `token_count` 事件的增量求和,而 codex 会把**同一个 `token_count` 事件成对重复写入** rollout。旧注释「codex 实测均无重复,不需要去重」正是据此写下的,**该结论作废**。
+
+**修法**:按累计值 `total_token_usage.total_tokens` 去重 —— **不按内容哈希**(两轮恰好用掉一样多 token 是常事);取不到累计值时**保留该条**(fail-open)。旁证:去重后「Σ增量 == 最终累计」181/181 零例外。
+
+**★ 倍数离开窗口就没有意义**(重尾所致,别引用单一数字)。测法是拿 git 里的**旧解析器与新解析器各跑一遍真代码**,不是另写一个「朴素求和」来对比 —— 后者测出来是 2.73x,错的:
+
+| 窗口 | 旧/新 | Codex 下调 |
+|---|---|---|
+| 全量 3619 个 rollout(含历史) | 1.421 | −29.6% |
+| **90 天(app 实际显示的档)** | **1.069** | **−6.5%** |
+| 早先 300 个抽样 | 1.124 | −11% |
+
+**教训**:`SOURCES` 里 codex 的 `dedup: False` 只是说**跨文件**不合并,不代表文件内没有重复 —— 两个概念用了同一个词,旧注释就是这么写偏的。
+
 ## 已知待办 / cleanup
 - ~~`_run_codex_ping`/`_codex_running`/`CODEX_BIN`/`LOCK` dead code~~ → B21 已删。
 - ~~代理刷新与 keepalive 并发刷同一号~~ → B9 已加 `.refresh.lock` 跨进程串行解决。
 - ~~`auth_dead` 被 autosync 竞争清掉~~ → B17 指纹门控 + B15 state 锁双重解决。
-- SwiftBar 额度归因:plain 模式靠 rollout 时间窗、代理模式靠 `x-codex-*` 头——两套已对齐,但跨模式快速切换的边界(±10s)可能短暂不准。
+- **额度归因**:plain 模式靠 rollout 时间窗、cxp(代理)模式靠 `x-codex-*` 头——两套已对齐,但跨模式快速切换的边界可能短暂不准(原文的 ±10s 是 SwiftBar 10s tick 时代的数,载体已退役;现由 `last_proxy_ts + 12` 与 quotad 的 `TICK_SECS` 决定)。CLI 侧的 SwiftBar 联动已于 2026-08-12 删除,`tests/test_retired_swiftbar.py` 用 AST 守着不回来;`swiftbar/` 目录本身仍在仓库,清理登记在 memory.md。
 
 ## 插件版本史
 - `v0.6.0` 加版本号显示

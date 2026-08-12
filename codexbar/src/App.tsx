@@ -13,7 +13,7 @@ import LogsPage from "./pages/LogsPage";
 import TrafficPage from "./pages/TrafficPage";
 import PlatformPage from "./pages/PlatformPage";
 import type { Range } from "./traffic";
-import SettingsPage, { getSettings } from "./pages/SettingsPage";
+import SettingsPage, { getSettings, TRAY_STYLES } from "./pages/SettingsPage";
 import { useStore } from "./hooks/useStore";
 import { useExpiryWatch } from "./hooks/useExpiryWatch";
 import { useDeadWatch } from "./hooks/useDeadWatch";
@@ -70,7 +70,11 @@ export default function App() {
   // ★ Dock 显示开关在 localStorage,Rust 侧读不到 —— 每次启动由主窗口 webview 应用一次,
   //   否则重启后 Dock 图标会消失(设置还开着,行为却回到纯菜单栏)。
   useEffect(() => {
-    invoke("set_dock_visible", { on: getSettings().dockVisible }).catch(() => {});
+    const st = getSettings();
+    invoke("set_dock_visible", { on: st.dockVisible }).catch(() => {});
+    // 菜单栏标题样式同理:Rust 侧的 TRAY_STYLE 是进程内 atomic,重启就回默认,
+    // 得由主窗口 webview 每次启动重新告诉它一次。
+    invoke("set_tray_style", { style: TRAY_STYLES.indexOf(st.trayStyle) }).catch(() => {});
   }, []);
 
   // menubar → 主窗口的三个跳转入口。齿轮=设置;今日 Tab 底栏=流量总览;点平台图例行=该平台详情。
@@ -100,8 +104,8 @@ export default function App() {
   //   底层数据本就一样;每换一档重调一次 IPC 等于白付一次全量扫描。
   //   进页面才取,不在启动时取 —— 账号池才是启动要的东西。
   //   取数走 `useTraffic`:先画上次的快照(一次文件读),再后台重扫,所以进页面不再有那 1~4 秒白屏。
-  const { data: traffic, raw: trafficRaw, cacheMode, busy: trafficBusy, err: trafficErr,
-          refresh: refreshTraffic } = useTraffic({ enabled: page === "traffic" });
+  const { data: traffic, raw: trafficRaw, cacheMode, prefs: platPrefs, busy: trafficBusy,
+          err: trafficErr, refresh: refreshTraffic } = useTraffic({ enabled: page === "traffic" });
 
   const sidebarItems: { id: Page; Icon: React.FC; tip: string }[] = [
     { id: "overview", Icon: IconChart, tip: "总览" },
@@ -249,13 +253,15 @@ export default function App() {
                     <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12, alignContent: "start" }}>
                       {alive.map((a) => {
                         const shortcutIdx = aliveByLabel.findIndex(x => x.aid === a.aid);
+                        // 改名按 aid 不按 label:cmd_rename 两者都认,而 aid 唯一 —— 重名时不会改到别的号上
                         return (
                         <AccountCard key={a.aid} a={a} isCurrent={a.aid === currentNode} isBest={hero?.aid === a.aid} isSelected={selectedCard === a.aid} shortcut={shortcutIdx >= 0 && shortcutIdx < 9 ? shortcutIdx + 1 : undefined} bestPct={bestPct} probing={loadingAction === `probe-${a.aid}`} privacy={privacy} t={t}
                           onSelect={() => setSelectedCard(selectedCard === a.aid ? null : a.aid)}
                           onSwitch={() => run(`switch-${a.aid}`, ["switch", a.node], `当前号 → ${a.node}`)}
                           onShowDetail={(aid) => { invoke<AccountDetail>("read_account_detail", { aid }).then(d => setDetailModal(d)).catch(() => {}); }}
                           onRemove={(label) => run(`remove-${label}`, ["remove", label], `已删除 ${label}`)}
-                          onProbe={(label) => run(`probe-${a.aid}`, ["probe", label], `探针 ${label}`)} />
+                          onProbe={(label) => run(`probe-${a.aid}`, ["probe", label], `探针 ${label}`)}
+                          onRename={(next) => run(`rename-${a.aid}`, ["rename", a.aid, next], `${a.node} → ${next}`)} />
                       );})}
                     </div>
                     {dead.length > 0 && (
@@ -289,7 +295,7 @@ export default function App() {
             ? <PlatformPage t={t} data={traffic} raw={trafficRaw} cacheMode={cacheMode}
                             pk={drill} range={trafficRange}
                             setRange={setTrafficRange} onBack={() => setDrill(null)} busy={trafficBusy} />
-            : <TrafficPage t={t} data={traffic} raw={trafficRaw} cacheMode={cacheMode}
+            : <TrafficPage t={t} data={traffic} raw={trafficRaw} cacheMode={cacheMode} prefs={platPrefs}
                            range={trafficRange} setRange={setTrafficRange}
                            onDrill={setDrill} busy={trafficBusy} err={trafficErr}
                            onRefresh={refreshTraffic} />)}

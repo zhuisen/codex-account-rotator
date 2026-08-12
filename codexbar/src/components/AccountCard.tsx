@@ -21,14 +21,19 @@ function DeltaChip({ delta, t }: { delta: number; t: Theme }) {
   );
 }
 
-export default function AccountCard({ a, isCurrent, isBest, isSelected, shortcut, bestPct, probing, privacy, t, onSelect, onSwitch, onShowDetail, onRemove, onProbe }: {
+export default function AccountCard({ a, isCurrent, isBest, isSelected, shortcut, bestPct, probing, privacy, t, onSelect, onSwitch, onShowDetail, onRemove, onProbe, onRename }: {
   a: Account; isCurrent: boolean; isBest: boolean; isSelected: boolean; shortcut?: number;
   /** Highest remaining quota in the pool — the baseline the delta chip compares against. */
   bestPct: number; /** 该号正在探测中 */ probing: boolean; /** 打码模式 */ privacy: boolean; t: Theme;
   onSelect: () => void; onSwitch: () => void; onShowDetail: (aid: string) => void; onRemove: (label: string) => void; onProbe: (label: string) => void;
+  /** 改名。空名/含空格/重名的校验在 `codex-rotate rename`(唯一真源)——那三种都会让按 label
+   *  查找的 switch/probe 静默操作到错的号上。这里只挡「没改」。 */
+  onRename: (next: string) => void;
 }) {
   const [confirmDelete, setConfirmDelete] = useState(false);
-  useEffect(() => { if (!isSelected) setConfirmDelete(false); }, [isSelected]);
+  const [editing, setEditing] = useState<string | null>(null);   // null = 不在改名
+  // 卡片一取消选中就退出改名:否则输入框会留在收起的卡片上,看不见却仍持有焦点
+  useEffect(() => { if (!isSelected) { setConfirmDelete(false); setEditing(null); } }, [isSelected]);
 
   const isDead = a.status === "dead";
   const isCool = a.status === "cool";
@@ -66,7 +71,28 @@ export default function AccountCard({ a, isCurrent, isBest, isSelected, shortcut
 
         <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 4 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
-            <span style={{ fontSize: 13.5, fontWeight: 700, color: t.text }}>{a.node}</span>
+            {editing === null ? (
+              <span style={{ fontSize: 13.5, fontWeight: 700, color: t.text }}>{a.node}</span>
+            ) : (
+              <input
+                autoFocus value={editing}
+                onClick={(e) => e.stopPropagation()}
+                onChange={(e) => setEditing(e.target.value)}
+                onKeyDown={(e) => {
+                  // ★ 必须拦:全局 ⌘1~⌘9 是切号快捷键,不拦的话在输入框里打数字会切号
+                  e.stopPropagation();
+                  if (e.key === "Enter") {
+                    const v = editing.trim();
+                    if (v && v !== a.node) onRename(v);
+                    setEditing(null);
+                  } else if (e.key === "Escape") setEditing(null);
+                }}
+                onBlur={() => setEditing(null)}
+                style={{ fontSize: 13.5, fontWeight: 700, color: t.text, width: 96,
+                         background: "transparent", border: `1px solid ${t.accentBorder}`,
+                         borderRadius: 5, padding: "1px 5px", outline: "none",
+                         fontFamily: "'JetBrains Mono'" }} />
+            )}
             <PlanBadge plan={a.plan} t={t} />
             <span style={{ fontSize: 10, fontWeight: 600, color: sc }}>{STATUS_TEXT[a.status]}</span>
             {isBest && <span style={{ fontSize: 8, fontWeight: 700, color: t.accentText, background: t.accent, padding: "1px 5px", borderRadius: 4, flexShrink: 0 }}>USE</span>}
@@ -113,6 +139,9 @@ export default function AccountCard({ a, isCurrent, isBest, isSelected, shortcut
               hint={`对 ${a.node} 发一次真实补全,验它是否真能干活。⚠️ 消耗周额度(实测单次 <1%)`}
               loading={probing} onConfirm={() => onProbe(a.node)} loadingText="探测…" />
           )}
+          <span onClick={() => setEditing(a.node)}
+                title="改这个号的显示名。菜单栏标题、弹窗、卡片会一起变（label 只是昵称，不影响套餐判定）"
+                style={{ fontSize: 11, color: t.muted, padding: "5px 10px", borderRadius: 6, cursor: "pointer", border: `1px solid ${t.ghostBorder}` }}>重命名</span>
           <span onClick={() => onShowDetail(a.aid)} style={{ fontSize: 11, color: t.muted, padding: "5px 10px", borderRadius: 6, cursor: "pointer", border: `1px solid ${t.ghostBorder}` }}>详情</span>
           {!confirmDelete ? (
             <span onClick={() => setConfirmDelete(true)} style={{ fontSize: 11, color: "#E0524D", padding: "5px 10px", borderRadius: 6, cursor: "pointer", border: "1px solid #E0524D40" }}>删除</span>

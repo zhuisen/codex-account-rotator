@@ -32,6 +32,15 @@ STUB = """
     localStorage.setItem('codexbar_cache_mode', p.get('mode') || 'full');
     localStorage.setItem('codexbar_settings', JSON.stringify({ dockVisible: false }));
     localStorage.setItem('codexbar_privacy', '0');
+    // 平台偏好:`?plat=demo` 套一组示范偏好(停用一家 + 改名改色 + 换顺序),用来验设置面板与总览
+    if (p.get('plat') === 'demo') {
+      localStorage.setItem('codexbar_platform_prefs', JSON.stringify({
+        order: ['grok', 'claude', 'codex', 'kimi'],
+        by: { kimi: { off: true }, grok: { name: 'DeepSeek', color: '#7fd1ff' } },
+      }));
+    } else {
+      localStorage.removeItem('codexbar_platform_prefs');
+    }
   } catch (e) { /* 无痕模式:本次渲染仍走默认值 */ }
 
   var SNAPSHOT = __SNAPSHOT__;
@@ -52,7 +61,7 @@ STUB = """
     sh.textContent = '.mb-row-switch-wrap{opacity:1 !important;pointer-events:auto !important}';
     document.head.appendChild(sh);
   }
-  var cbid = 0, cbs = {}, listeners = {}, unknown = [], errors = [];
+  var cbid = 0, cbs = {}, listeners = {}, unknown = [], errors = [], clicks = [];
 
   // ★ 没有这个,渲染失败会表现为"一张空白页 + 零溢出",而零溢出看起来像通过 ——
   //   那是假阴性,比没测更糟(2026-08-11 已经中过一次)。
@@ -101,7 +110,7 @@ STUB = """
       case 'quit_app':
         return Promise.resolve(null);
       case 'plugin:app|version':
-        return Promise.resolve('0.9.0');
+        return Promise.resolve(__VERSION__);
       case 'plugin:autostart|is_enabled':
         return Promise.resolve(false);
       default:
@@ -133,8 +142,30 @@ STUB = """
       var nav = p.get('nav') || 'traffic';
       if (nav.indexOf('platform:') === 0) fire('navigate-platform', nav.slice(9));
       else if (nav === 'settings') fire('navigate-settings');
+      else if (nav === 'home') { /* 账号池是默认页,不发导航事件 */ }
       else fire('navigate-traffic');
     }, 500);
+
+    // `?click=a,b` —— 按**文本**依次点击(全站 45 处是 div/span+onClick,没有 button 可选)。
+    // 用于验证需要交互才出现的形态(选中卡片 → 改名输入框)。取最内层匹配节点,
+    // 否则会点到包住它的容器上 —— 那个容器往往挂着**另一个** onClick。
+    // 写法 `文本` 或 `文本~2`(第 2 个匹配)。**分隔符不能用 `#`** —— 浏览器会把它之后的
+    // 整段当 URL 片段截掉,序号永远传不进来(看起来像"选择器不生效")。★ 同一段文字常出现多次(卡片名在 Hero 里也有一份),
+    // 不带序号时默认第 1 个,**并把匹配总数报进探针** —— 否则点错位置和没点中长得一模一样。
+    (p.get('click') ? p.get('click').split(',') : []).forEach(function (spec, i) {
+      setTimeout(function () {
+        var parts = spec.split('~'), want = parts[0].trim(), nth = parseInt(parts[1] || '1', 10);
+        var all = [];
+        document.querySelectorAll('div,span').forEach(function (e) {
+          if ((e.textContent || '').trim() !== want) return;
+          all = all.filter(function (h) { return !h.contains(e); });   // 只留最内层
+          all.push(e);
+        });
+        clicks.push(spec + ' →命中' + all.length + '个,点第' + nth);
+        if (all[nth - 1]) all[nth - 1].dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        else errors.push('click miss: ' + spec + ' (共' + all.length + '个)');
+      }, 700 + i * 300);
+    });
 
     // 探针:横向溢出是本项目 UI 的主要失败模式(外层 overflow:hidden,溢出被静默裁掉)。
     setTimeout(function () {
@@ -154,6 +185,11 @@ STUB = """
         overflow: over,
         errors: errors.slice(0, 4),
         unknownCmds: unknown.filter(function (v, i, a) { return a.indexOf(v) === i; }),
+        clicks: clicks,
+        inputs: Array.prototype.map.call(document.querySelectorAll('input'), function (e) {
+          var r = e.getBoundingClientRect();
+          return { v: e.value, w: Math.round(r.width), h: Math.round(r.height), focus: e === document.activeElement };
+        }),
         text: (document.body.innerText || '').replace(/\\s+/g, ' ').slice(0, 700),
       });
     }, 2200);
@@ -183,7 +219,10 @@ def redacted_state():
             "last_proxy_ts": raw.get("last_proxy_ts")}
 
 
+# 版本号从 tauri.conf.json 现取 —— 写死过 0.9.0,发到 0.9.1 后截图上的版本号就在说假话
+VERSION = json.loads((HERE.parent / "src-tauri/tauri.conf.json").read_text())["version"]
 stub = (STUB.replace("__SNAPSHOT__", json.dumps(snapshot))
+            .replace("__VERSION__", json.dumps(VERSION))
             .replace("__STATE__", json.dumps(redacted_state())))
 ANCHOR = "<script type=\"module\""
 for src, dst in (("index.html", "harness.html"), ("menubar.html", "harness-menubar.html")):

@@ -1,9 +1,10 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { emit, listen } from "@tauri-apps/api/event";
-import type { TrafficData, CacheMode } from "../traffic";
-import { applyCacheMode } from "../traffic";
+import type { TrafficData, CacheMode, PlatformPrefs } from "../traffic";
+import { applyCacheMode, applyPlatformPrefs } from "../traffic";
 import { useCacheMode } from "./useCacheMode";
+import { usePlatformPrefs } from "./usePlatformPrefs";
 
 /**
  * 数据在这个岁数内算新鲜。**挂载、心跳、托盘弹出共用同一个概念**,只是托盘弹出用更紧的阈值
@@ -47,6 +48,9 @@ export function useTraffic(opts: { enabled?: boolean } = {}): {
    */
   raw: TrafficData | null;
   cacheMode: CacheMode;
+  /** 平台呈现偏好(改名/改色/停用/顺序)。`data` 与 `raw` 都**已经**套过它,这里返回它只是给
+   *  设置页和"按用户顺序排列表"用 —— 别拿它再过滤一次数据。 */
+  prefs: PlatformPrefs;
   /** 正在后台扫描。**有快照时不该拿它挡 UI** —— 那样就白做快照了。 */
   busy: boolean;
   err: string | null;
@@ -167,7 +171,14 @@ export function useTraffic(opts: { enabled?: boolean } = {}): {
   // ★ 口径重塑放在**出口**,不进 state:扫描/快照/广播那套逻辑完全不知道有这回事,
   //   切口径也就不会触发任何重扫(它只是换个算法看同一份数据)。`full` 时返回原引用,零开销。
   const { mode: cacheMode } = useCacheMode();
-  const shaped = useMemo(() => applyCacheMode(data, cacheMode), [data, cacheMode]);
+  const { prefs } = usePlatformPrefs();
+  // ★ 顺序:先按缓存口径重塑,再套平台偏好。两者独立,但**都必须在这一个出口做**——
+  //   停用一家要让总计跟着扣(用户 2026-08-12 定稿),逐处过滤必漏,漏的那处会把它算回总数。
+  //   `raw` 同样要过滤(它给缓存占比/构成行用),否则"已停用"的平台仍会混进缓存占比的分母。
+  const shaped = useMemo(
+    () => applyPlatformPrefs(applyCacheMode(data, cacheMode), prefs), [data, cacheMode, prefs]);
+  const shapedRaw = useMemo(() => applyPlatformPrefs(data, prefs), [data, prefs]);
 
-  return { data: shaped, raw: data, cacheMode, busy, err, refresh: () => void scan(true), refreshIfStale };
+  return { data: shaped, raw: shapedRaw, cacheMode, prefs, busy, err,
+           refresh: () => void scan(true), refreshIfStale };
 }

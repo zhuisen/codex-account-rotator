@@ -760,6 +760,18 @@ def cmd_rename(args):
                    if aid == old or sl.get("label") == old), None)
     if not target:
         sys.exit(f"no slot matching '{old}'")
+    # ★ 校验必须有:`switch` / `rename` / `probe` 全都按 label 查找(`sl.get("label") == old`),
+    #   **重名会静默操作到错的号上** —— 切号切错、探针探错,而且没有任何报错。
+    #   空名同理:UI 上会变成一个点不中的空槽,CLI 里也没法再指到它。
+    new = (new or "").strip()
+    if not new:
+        sys.exit("new label must not be empty")
+    if any(c.isspace() for c in new):
+        sys.exit("new label must not contain whitespace (labels are used as CLI arguments)")
+    dup = next((aid for aid, sl in s["slots"].items()
+                if aid != target and sl.get("label") == new), None)
+    if dup:
+        sys.exit(f"label '{new}' is already used by another account")
     s["slots"][target]["label"] = new
     _save_state(s)
     print(f"renamed → {new}")
@@ -1187,8 +1199,7 @@ def _probe_quota(aid, slot, is_active):
 
 def cmd_refresh_all(args):
     """Refresh EVERY account's quota snapshot to now — one minimal request per account from its own
-    token (read-only: never refreshes a refresh_token, never switches the live account). Fixes the
-    stale-snapshot problem: SwiftBar otherwise shows a non-active account's quota as of its last switch."""
+    token (read-only: never refreshes a refresh_token, never switches the live account)."""
     s = _state()
     active = s.get("active")
     out, notif, ok_n = [], [], 0
@@ -1210,8 +1221,7 @@ def cmd_refresh_all(args):
         else:
             out.append(f"{label}:{msg}")
         time.sleep(1.5)  # pacing — the usage endpoint rate-limits bursts (403/429)
-    _refresh_menu()
-    if "--notify" in args:  # SwiftBar closes the dropdown on tap → a notification is the visible ACK
+    if "--notify" in args:
         total = len(s["slots"])
         body = "  ".join(notif) or "无可刷新账号"
         try:
@@ -1426,7 +1436,6 @@ def cmd_probe(args):
         print(f"  [{label:<8}] ✓ 答「{answer[:40]}」{odd} · "
               f"周已用 {before if before is not None else '?'}% → {after:.0f}%{delta}")
     print(f"probe {ok_n}/{len(targets)} 可用")
-    _refresh_menu()
 
 
 def _credit_days_left(c, now=None):
@@ -1765,23 +1774,10 @@ CMDS = {"add": cmd_add, "login": cmd_login, "list": cmd_list, "switch": cmd_swit
         "tokens": cmd_tokens}
 
 
-# Commands that change what the menu bar shows → nudge SwiftBar to re-render immediately (so terminal
-# commands update the menu instantly, not on its 10s tick). Excludes quota/sync/keepalive: the plugin
-# runs `quota --save` every 10s, so refreshing there would loop; sync fires from the auth.json watcher.
-REFRESH_AFTER = {"add", "login", "switch", "cool", "uncool", "rename", "refresh", "remove"}
-
 # Disk-only commands run their whole load→mutate→save under the cross-process state mutex (lost-update
 # guard). refresh/keepalive do network and write back via _mutate_state instead; health/current are
 # read-only. Lock order is always state → cred, never the reverse (no deadlock).
 STATE_LOCKED = {"add", "list", "switch", "cool", "uncool", "quota", "sync", "rename", "ensure", "remove"}
-
-
-def _refresh_menu():
-    """Best-effort, silent: ask the SwiftBar plugin to re-render now."""
-    try:
-        subprocess.run(["open", "-g", "swiftbar://refreshallplugins"], capture_output=True, timeout=3)
-    except Exception:
-        pass
 
 
 def main():
@@ -1798,8 +1794,6 @@ def main():
             CMDS[cmd](sys.argv[2:])
     else:
         CMDS[cmd](sys.argv[2:])
-    if cmd in REFRESH_AFTER:
-        _refresh_menu()
 
 
 if __name__ == "__main__":

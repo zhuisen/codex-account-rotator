@@ -1,7 +1,7 @@
 use serde_json::Value;
 use std::fs;
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 use tauri::{
@@ -34,7 +34,10 @@ fn store_dir() -> String {
     format!("{}/Projects/tools/codex-account-rotator", home)
 }
 
-const ALLOWED_CMDS: &[&str] = &["switch", "cool", "uncool", "refresh-all", "health", "list", "quota", "remove", "credits", "probe", "tokens"];
+// ★ 白名单守的是**账号池命令**。加 `rename`:改名后托盘标题和两个 webview 都要跟着变,而
+//   `run_rotate` 成功后已经 `emit("state-changed")` + `refresh_tray()`,所以走这条通道自动同步。
+//   (流量相关的走独立的 `run_traffic`/`run_discover`,两套语义不混一个白名单。)
+const ALLOWED_CMDS: &[&str] = &["switch", "cool", "uncool", "refresh-all", "health", "list", "quota", "remove", "credits", "probe", "tokens", "rename"];
 
 /// Interpreter for codex-rotate. NOT a bare `python3`: Cloudflare fingerprints the TLS ClientHello,
 /// and macOS's `/usr/bin/python3` (LibreSSL 2.8.3) gets a hard 403 from /backend-api/codex/usage while
@@ -89,9 +92,7 @@ async fn run_rotate(app: AppHandle, args: Vec<String>) -> Result<String, String>
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
     let stderr = String::from_utf8_lossy(&out.stderr).to_string();
     let _ = app.emit("state-changed", ());
-    if let Some(tray) = app.tray_by_id("main") {
-        let _ = tray.set_title(Some(&format_tray_title()));
-    }
+    refresh_tray(&app);
     if out.status.success() {
         Ok(stdout)
     } else {
@@ -171,8 +172,31 @@ static SCAN_LOCK: Mutex<()> = Mutex::new(());
 /// 拿到锁后若快照比这个还新,就认为刚有人扫过,直接复用。比前端的窗口略紧一点。
 const SCAN_COALESCE_SECS: u64 = 90;
 
+/// 扫描本机还有哪些地方存着 AI 用量(设置页「扫描新数据源」按钮)。
+///
+/// **刻意与 `run_traffic` 分开**:那条是日常热路径、有互斥锁和新鲜度双检;这条是用户点一次才跑的
+/// 全盘体检(实测 ~40s,要走遍 60 多个候选目录)。混进同一个命令会让体检的耗时挂在图表刷新上。
+/// 它只读本机文件、不联网、不碰凭证 —— 和 `traffic/scan.py` 同一条安全线。
+///
+/// ★ 它**只产出报告,不改任何配置**。要不要把新发现接进来,得人去写解析器(见 discover.py 头部)。
 #[tauri::command]
-async fn run_traffic(args: Vec<String>) -> Result<String, String> {
+async fn run_discover() -> Result<String, String> {
+    let script = format!("{}/traffic/discover.py", store_dir());
+    let out = tauri::async_runtime::spawn_blocking(move || {
+        Command::new(python_bin()).arg(&script).arg("--json").output()
+    })
+    .await
+    .map_err(|e| format!("join: {}", e))?
+    .map_err(|e| format!("exec: {}", e))?;
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).to_string())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).to_string())
+    }
+}
+
+#[tauri::command]
+async fn run_traffic(app: AppHandle, args: Vec<String>) -> Result<String, String> {
     const ALLOWED_FLAGS: &[&str] = &["--days", "--json", "--no-cache"];
     if let Some(bad) = args
         .iter()
@@ -204,6 +228,9 @@ async fn run_traffic(args: Vec<String>) -> Result<String, String> {
         Err(cached) => return Ok(cached),
     };
     if out.status.success() {
+        // ★ 样式 2(今日消耗)的数字来自这次扫描的结果 —— 扫完不刷托盘,标题会一直停在上一次的值。
+        //   其余样式刷一次也无害(只读 state.json)。
+        refresh_tray(&app);
         let body = String::from_utf8_lossy(&out.stdout).to_string();
         write_traffic_snapshot(&body);
         Ok(body)
@@ -457,6 +484,162 @@ fn read_account_detail(aid: String) -> Result<Value, String> {
 
 // ---- tray title from state.json ----
 
+/// 菜单栏标题样式(用户 2026-08-12 从 demo 里选)。**索引与前端 `TRAY_STYLES` 数组一一对应**。
+/// 0 完整 `pro1 周 67% ↻5d21h` · 1 简 `pro1 67%` · 2 极简 `67%` · 3 今日 `67% 🔹 1.29B`
+static TRAY_STYLE: AtomicU8 = AtomicU8::new(0);
+
+/// ★★ 给菜单栏标题的**百分比那一段**上色。
+///
+/// macOS 本身完全支持(`NSStatusItem.button.attributedTitle` + `NSForegroundColorAttributeName`),
+/// 是 **Tauri 没把接口透出来**:`TrayIcon::set_title` 只收 `AsRef<str>`,而 `TrayIcon.inner`
+/// (真正的 `tray_icon::TrayIcon`,它有 public 的 `ns_status_item()`)是私有字段、无 Deref、
+/// 无访问器 —— 已核 tauri 2.11.3 的 `src/tray/mod.rs:398`。
+///
+/// 所以绕道:状态栏按钮就在**本进程**的 `NSApp.windows` 里(NSStatusBarWindow 的 contentView),
+/// 遍历找到那个 `NSStatusBarButton` 直接设 attributedTitle。只在自己进程里找,不碰别的 app。
+///
+/// ★ **fail-open**:找不到按钮就什么都不做,Tauri 那句纯文本标题仍然在,只是没颜色。
+/// 宁可掉色,不可让菜单栏空掉 —— 这是 macOS 版本升级时最可能坏的一块。
+/// 必须在主线程调用(AppKit 硬性要求),调用方用 `run_on_main_thread` 包一层。
+#[cfg(target_os = "macos")]
+fn paint_tray_title(title: &str, hi: Option<(std::ops::Range<usize>, (f64, f64, f64))>) {
+    use objc2::rc::{Allocated, Retained};
+    use objc2::{AnyThread, Message};
+    use objc2_app_kit::{NSApplication, NSButton, NSColor, NSFont};
+    use objc2_foundation::{NSMutableAttributedString, NSRange, NSString};
+    let _ = std::marker::PhantomData::<Allocated<NSMutableAttributedString>>;
+    let Some(mtm) = objc2_foundation::MainThreadMarker::new() else { return };
+    let app = NSApplication::sharedApplication(mtm);
+
+    // 找本进程的状态栏按钮。NSStatusBarWindow 是私有类,所以按**类名**认而不是 downcast。
+    fn find_button(v: &objc2_app_kit::NSView) -> Option<Retained<NSButton>> {
+        if let Some(b) = v.downcast_ref::<NSButton>() {
+            return Some(b.retain());
+        }
+        for sub in v.subviews().iter() {
+            if let Some(b) = find_button(&sub) {
+                return Some(b);
+            }
+        }
+        None
+    }
+    let mut btn: Option<Retained<NSButton>> = None;
+    for w in app.windows().iter() {
+        let cls = w.class().name().to_string_lossy().to_string();
+        if !cls.contains("StatusBar") {
+            continue;
+        }
+        if let Some(v) = unsafe { w.contentView() } {
+            if let Some(b) = find_button(&v) {
+                btn = Some(b);
+                break;
+            }
+        }
+    }
+    let Some(btn) = btn else { return };            // fail-open
+
+    let ns = NSString::from_str(title);
+    let attr = unsafe { NSMutableAttributedString::initWithString(NSMutableAttributedString::alloc(), &ns) };
+    // 字号跟随菜单栏:不写死,否则系统调整菜单栏字号时会和别的项对不齐
+    let font = unsafe { NSFont::menuBarFontOfSize(0.0) };
+    let full = NSRange::new(0, ns.length());
+    unsafe {
+        attr.addAttribute_value_range(objc2_app_kit::NSFontAttributeName, &*font, full);
+        // 基线色:用 labelColor,它**自动跟随菜单栏明暗**(深色栏白、浅色栏黑)。
+        // 写死白色会让浅色模式下整条标题看不见 —— 这正是模板图那套机制要解决的问题。
+        attr.addAttribute_value_range(
+            objc2_app_kit::NSForegroundColorAttributeName,
+            &*NSColor::labelColor(),
+            full,
+        );
+        if let Some((r, (cr, cg, cb))) = hi {
+            // NSRange 用的是 UTF-16 单位,而 Rust 的 range 是字节。标题里可能有中文和 emoji,
+            // 直接拿字节偏移当 UTF-16 偏移会**染错位置**,所以现算。
+            let pre_u16 = title[..r.start].encode_utf16().count();
+            let len_u16 = title[r.clone()].encode_utf16().count();
+            if pre_u16 + len_u16 <= ns.length() {
+                let r = NSRange::new(pre_u16, len_u16);
+                let color = NSColor::colorWithSRGBRed_green_blue_alpha(cr, cg, cb, 1.0);
+                attr.addAttribute_value_range(
+                    objc2_app_kit::NSForegroundColorAttributeName, &*color, r);
+                // ★ 只给百分比加粗(用户 2026-08-12)。字号取**菜单栏字体的实际 pointSize**,
+                //   不写死 —— 系统调整菜单栏字号时,粗体那段才不会和周围文字错位。
+                let bold = NSFont::boldSystemFontOfSize(font.pointSize());
+                attr.addAttribute_value_range(
+                    objc2_app_kit::NSFontAttributeName, &*bold, r);
+            }
+        }
+        // NSMutableAttributedString Deref 到 NSAttributedString,直接传引用即可
+        btn.setAttributedTitle(&attr);
+    }
+}
+
+#[tauri::command]
+fn set_tray_style(app: AppHandle, style: u8) {
+    TRAY_STYLE.store(style.min(3), Ordering::Relaxed);
+    refresh_tray(&app);
+}
+
+/// 今日全平台 token 合计,给样式 2 用。
+///
+/// ★ 读快照的 `hours` 而不是 `days[今天]`:`hours` **按定义只覆盖今天**(scan.py 从 00 点补到当前
+/// 小时),所以求和即今日总量 —— 省掉在 Rust 里做本地日期算术。本 crate 没有 chrono,手算
+/// localtime 在 DST / 半小时时区上很容易错,而那种错会静默算到别的日子上去。
+fn today_tokens() -> Option<u64> {
+    let path = format!("{}/.traffic-latest.json", store_dir());
+    let data = fs::read_to_string(&path).ok()?;
+    let v: Value = serde_json::from_str(&data).ok()?;
+    let mut sum = 0u64;
+    for p in v["platforms"].as_object()?.values() {
+        if let Some(hours) = p["hours"].as_object() {
+            for b in hours.values() {
+                sum += b["total"].as_u64().unwrap_or(0);
+            }
+        }
+    }
+    Some(sum)
+}
+
+fn fmt_tok(n: u64) -> String {
+    let f = n as f64;
+    if f >= 1e9 { format!("{:.2}B", f / 1e9) }
+    else if f >= 1e6 { format!("{:.0}M", f / 1e6) }
+    else if f >= 1e3 { format!("{:.1}K", f / 1e3) }
+    else { n.to_string() }
+}
+
+/// 阈值 → RGB。沿用仓库既有那条(handoff §5.1.5:剩余 <50% 琥珀、否则绿),
+/// 只把「耗尽」单独标红 —— 0 是天然边界,不是新发明的阈值。
+fn rem_rgb(rem: u32) -> (f64, f64, f64) {
+    if rem == 0 { (0.878, 0.322, 0.302) }        // #E0524D 红
+    else if rem < 50 { (0.878, 0.565, 0.110) }   // #E0901C 琥珀
+    else { (0.153, 0.698, 0.420) }               // #27B26B 绿
+}
+
+/// 设标题 + 给百分比那段上色。**所有刷托盘的地方都走这里**,别再直接 `tray.set_title` ——
+/// 只设纯文本的话颜色不会更新,标题变了色还停在上一次的阈值上。
+fn refresh_tray(app: &AppHandle) {
+    let title = format_tray_title();
+    if let Some(tray) = app.tray_by_id("main") {
+        let _ = tray.set_title(Some(&title));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // 百分比那一段:直接在标题里找 `NN%`。四档样式里它的位置都不同,find 比各档各算一遍稳。
+        let hi = ACTIVE_REM.load(Ordering::Relaxed);
+        let hi = if hi <= 100 {
+            let pat = format!("{}%", hi);
+            title.find(&pat).map(|i| (i..i + pat.len(), rem_rgb(hi)))
+        } else { None };
+        let t2 = title.clone();
+        // AppKit 只能在主线程碰
+        let _ = app.run_on_main_thread(move || paint_tray_title(&t2, hi));
+    }
+}
+
+/// 当前号余量,给上色用。`u32::MAX` = 未知(不上色)。
+static ACTIVE_REM: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(u32::MAX);
+
 fn format_tray_title() -> String {
     let path = format!("{}/state.json", store_dir());
     let Ok(data) = fs::read_to_string(&path) else {
@@ -471,14 +654,17 @@ fn format_tray_title() -> String {
         // Dead accounts other than the active one used to be invisible here: the title only showed ✗ when
         // the ACTIVE account died, so a node could quietly go dead and nothing on screen said so. Surface
         // the count so a revoked token is noticeable without opening the app.
+        // ★ `✗N` 失效角标已按用户 2026-08-12 的要求去掉(三种样式都不带)。
+        //   代价明说:非当前号悄悄失效时,菜单栏**不再有持续可见的信号**,只剩 `useDeadWatch`
+        //   的系统通知(弹一次就过去)。当初加它正是为了解决"死号在界面上完全不出现"。
         let dead_n = slots.values().filter(|s| s["auth_dead"].as_bool().unwrap_or(false)).count();
-        let dead_tag = if dead_n > 0 { format!(" ✗{}", dead_n) } else { String::new() };
+        let dead_tag = String::new();
+        let _ = dead_n;
         if let Some(slot) = slots.get(active) {
             let label = slot["label"].as_str().unwrap_or("?");
             let dead = slot["auth_dead"].as_bool().unwrap_or(false);
             if dead {
-                // dead_n includes the active account here, so it is the true total (≥1).
-                return format!("✗ {} 失效{}", label, if dead_n > 1 { format!(" ✗{}", dead_n) } else { String::new() });
+                return format!("✗ {} 失效", label);
             }
             if let Some(q) = slot.get("quota") {
                 // Codex retired 5h; only weekly(10080)/monthly(43200) are real. Pick the first
@@ -488,7 +674,17 @@ fn format_tray_title() -> String {
                     let wm = w["window_minutes"].as_f64().unwrap_or(0.0);
                     if wm >= 5000.0 && w["used_percent"].is_number() { Some(w) } else { None }
                 });
-                let Some(w) = win else { return format!("{}{}", label, dead_tag); };
+                let Some(w) = win else {
+                    // 额度未知:**不编数字**,也不上色(那是对余量的判断,没余量就没得判),
+                    // 按档位退成 "—"(与仓库那条老规矩一致)
+                    ACTIVE_REM.store(u32::MAX, Ordering::Relaxed);
+                    return match TRAY_STYLE.load(Ordering::Relaxed) {
+                        1 => format!("{} —", label),
+                        2 => "—".into(),
+                        3 => format!("— 🔹 {}", today_tokens().map(fmt_tok).unwrap_or_else(|| "—".into())),
+                        _ => format!("{} —", label),
+                    };
+                };
                 let used = w["used_percent"].as_f64().unwrap_or(0.0);
                 let wm = w["window_minutes"].as_f64().unwrap_or(0.0);
                 let win_tag = if wm >= 40000.0 { "月" } else { "周" };
@@ -501,7 +697,19 @@ fn format_tray_title() -> String {
                     let m = (secs % 3600) / 60;
                     if h >= 24 { format!(" ↻{}d{}h", h / 24, h % 24) } else if h > 0 { format!(" ↻{}h{:02}m", h, m) } else { format!(" ↻{}m", m) }
                 } else { String::new() };
-                return format!("{} {} {}%{}{}", label, win_tag, rem, eta, dead_tag);
+                // ★ 三档样式(用户从 demo 里选的)。分隔符 🔹 也是选的 —— 已知它是彩色位图、
+                //   不跟随菜单栏明暗(左边的 tray.png 是模板图会跟随),浅色模式下会显出差异。
+                let today = today_tokens().map(fmt_tok);
+                //   ★ 三档都带 `%`(用户 2026-08-12 定):裸数字在极简档下语义全压在颜色上,
+                //     色觉障碍时「67 是好是坏」看不出来;加个 % 只多 ~12px 就补上了。
+                ACTIVE_REM.store(rem, Ordering::Relaxed);
+                return match TRAY_STYLE.load(Ordering::Relaxed) {
+                    1 => format!("{} {}%{}", label, rem, dead_tag),
+                    2 => format!("{}%{}", rem, dead_tag),
+                    3 => format!("{}% 🔹 {}{}", rem,
+                                 today.unwrap_or_else(|| "—".into()), dead_tag),
+                    _ => format!("{} {} {}%{}{}", label, win_tag, rem, eta, dead_tag),
+                };
             }
             return format!("{}{}", label, dead_tag);
         }
@@ -725,9 +933,7 @@ pub fn run() {
                     c
                 }).await;
                 let _ = handle_startup.emit("state-changed", ());
-                if let Some(tray) = handle_startup.tray_by_id("main") {
-                    let _ = tray.set_title(Some(&format_tray_title()));
-                }
+                refresh_tray(&handle_startup);
             });
 
             // ---- state.json watcher: push, don't poll ----
@@ -762,9 +968,7 @@ pub fn run() {
                         if changed {
                             let _ = handle_timer.emit("state-changed", ());
                         }
-                        if let Some(tray) = handle_timer.tray_by_id("main") {
-                            let _ = tray.set_title(Some(&format_tray_title()));
-                        }
+                        refresh_tray(&handle_timer);
                     }
                 }
             });
@@ -799,6 +1003,8 @@ pub fn run() {
             read_state,
             run_rotate,
             run_traffic,
+            run_discover,
+            set_tray_style,
             read_traffic_snapshot,
             check_update,
             set_dock_visible,

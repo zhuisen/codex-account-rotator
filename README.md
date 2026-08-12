@@ -12,7 +12,7 @@
 |---|---|---|
 | 干什么 | 汇总本机各 AI CLI **已经落盘**的 token 消耗 | 多个 ChatGPT 订阅做成池子,给 Codex CLI 逐请求透明轮换 |
 | 要凭证吗 | **不要**。只读本机文件、不联网、不碰 token | 要,每号 OAuth |
-| 谁能用 | **任何 macOS 用户**,装了下面四家 CLI 中任意一家就有数据 | 需要自备多个 ChatGPT Plus/Pro |
+| 谁能用 | **任何 macOS 用户**,装了下面任意一家 AI CLI 就有数据 | 需要自备多个 ChatGPT Plus/Pro |
 | 风险 | 无 | ⚠️ 自负,多账号轮换受 OpenAI 条款约束(本仓库 CHANGELOG 的 B7/B8/B14/B21 记过实测掉号) |
 
 **只想看自己电脑烧了多少 token,只装 A 就行**,三步:
@@ -25,7 +25,7 @@ bash codexbar/scripts/setup-signing.sh && bash codexbar/scripts/deploy.sh
 
 clone 到哪个目录都行 —— `deploy.sh` 会把仓库路径烧进二进制。完整说明见 [SETUP.md §6](SETUP.md)。
 
-覆盖的 CLI:**Claude Code · Codex · Grok · Kimi**(Antigravity/agy **不支持**,它把会话存成 protobuf blob,本地没有可读用量)。加一家 = 在 `traffic/scan.py` 写个解析器 + 注册表加一行,前端自动跟上。
+覆盖的 CLI:**Claude Code · Codex · Grok · Kimi · OpenClaw**(Antigravity/agy **不支持**,它把会话存成 protobuf blob,本地没有可读用量)。加一家 = 在 `traffic/scan.py` 写个解析器 + 注册表加一行,前端自动跟上。
 
 ---
 
@@ -77,7 +77,8 @@ clone 到哪个目录都行 —— `deploy.sh` 会把仓库路径烧进二进制
 | `.traffic-cache.json`(gitignored) | `traffic/scan.py` 的**逐文件增量缓存**(~10MB,按 `(mtime,size)` 命中)。冷 ~18s → 热 ~1.4s 靠它。删了只是重扫一次,不丢数据 |
 | `.traffic-latest.json`(gitignored) | 最近一次扫描的**成品快照**(~91KB)。两个 webview 都先读它再后台重扫,所以进页面/点托盘不再等 1~3 秒。由 `run_traffic` 原子写入(`.tmp<pid>` → `rename`) |
 | `traffic/sources.local.json`(gitignored) | 本机停用哪些平台:`{"disabled": ["grok"]}`。等价 CLI:`--exclude grok` / `--only kimi` |
-| `traffic/scan.py` | **多 AI 流量总览扫描器**(`[--days N] [--json] [--no-cache]`)。读 Claude / Codex / Grok / Kimi 四家 transcript（平台注册表在文件里，**加一家 = 写个解析器 + 加一行**，前端自动跟上）,**纯本地只读、不联网、不消耗任何额度**,与账号池无关。CodexBar「AI用量信息」页的数据源 |
+| `traffic/scan.py` | **多 AI 流量总览扫描器**(`[--days N] [--json] [--no-cache]`)。读 Claude / Codex / Grok / Kimi 四家 transcript + OpenClaw 宿主源(按模型名回流各家)（平台注册表在文件里，**加一家 = 写个解析器 + 加一行**，前端自动跟上）,**纯本地只读、不联网、不消耗任何额度**,与账号池无关。CodexBar「AI用量信息」页的数据源 |
+| `traffic/discover.py` | **数据源体检**(`--json`):找本机还有哪些 AI 把用量落了盘,并现场验算它的 token 口径。纯本地只读、不联网、不碰凭证,SQLite 一律 `mode=ro`,**只出报告不自动启用**(接一家的实质是写解析器) |
 | `claude/claude_tokens.py` | ⚠️ 只统计 Claude 的旧扫描器,能力已被 `traffic/scan.py` 完全覆盖(v0.7.0 起 app 不再调用)。保留仅作 CLI |
 | `scripts/install-launchd.sh` | **生成并加载 5 个 launchd 服务**(autosync/keepalive/refreshquota/quotad/proxy)。生成而非提交成文件:plist 内嵌绝对路径,提交的副本换台机器就是错的,且会静默漂移(旧的 `launchd/*.plist` 就漂到了写死 `/usr/bin/python3`)。★脚本会**解析并钉住 OpenSSL 版的 python3**,见「维护约定」 |
 | `auth/`(gitignored) | 每号凭证槽位 `<account_id>.json`(0600) |
@@ -127,7 +128,7 @@ codex-rotate probe --all             # 全池(必须显式,防手滑)
 codex-rotate probe plus5 --model gpt-5.5 --effort low
 ```
 
-菜单栏(CodexBar)装好后顶部显示当前号周额度余量 + 重置倒计时。**左键右键都打开弹窗**(托盘没有原生菜单——macOS 无法让右键不弹它)。弹窗分**账号｜今日**两个 Tab,停留页会记住、重开直达:
+菜单栏(CodexBar)装好后顶部显示当前号周额度余量。标题有**四种风格**可在「设置」页切换 —— 完整 `pro1 周 67% ↻5d21h` / 简 `pro1 67%` / 极简 `67%` / 今日 `67% 🔹 1.29B`(最后一档把账号池余量与今日全平台 token 并成一行);百分比那一段按余量阈值**染色并加粗**(≥50% 绿 · <50% 琥珀 · 耗尽红),额度未知时退成 `—` 且不上色。**左键右键都打开弹窗**(托盘没有原生菜单——macOS 无法让右键不弹它)。弹窗分**账号｜今日**两个 Tab,停留页会记住、重开直达:
 
 - **账号**:每号油表、号间差值、重置卡状态、失效号折叠。**点任意账号会弹出主界面**;鼠标停在某一行上,行尾会淡入一个**「切换」按钮 —— 点它直接换号,不打开主界面**(当前号不显示这个按钮)。底栏 `刷新全池[免费] | 检查 token | 探针[计费]`。
 - **今日**:今日总 token / 等效费用 / 较昨日涨跌 + 小时堆叠图 + 各平台明细(点一行直接跳主窗该平台详情)。数据来自**上次扫描的快照**(读盘 ~1ms),点摘要行的 `↻` 立刻重扫。底栏中键变成 `打开流量总览 ↗`。两个窗口共用同一份快照与同一条新鲜度规则,谁扫完都会广播给对方,所以**不会各扫一遍**。
@@ -136,7 +137,11 @@ codex-rotate probe plus5 --model gpt-5.5 --effort low
 
 > **Dock 图标默认关**(纯菜单栏形态),可在「设置」页打开。开启后**只在主界面打开时**占一格,关掉主界面立刻让出位置(所以不能从程序坞唤起 app,要走菜单栏)。`Info.plist` 的 `LSUIElement` 保持 `true`(决定冷启动瞬间不闪图标),运行期用 `setActivationPolicy` 切,不需重启。
 
-主界面侧栏 4 页:**总览** / **AI用量信息** / 日志 / 设置。消耗页汇总 **Claude + Codex + Grok + Kimi** 四家(v0.7.0 起,取代原来分开的「Token 消耗」与「Claude 消耗」两页):堆叠面积图 + 今日/7/14/30/90d 五档,点任一平台进「详情」看分模型拆解与费率卡。数据源全是**本机 CLI 自己落的盘**、零额度消耗——`~/.claude/projects/**/*.jsonl` · `~/.codex/sessions/**/rollout-*.jsonl` · `~/.grok/**/updates.jsonl` · `~/.kimi-code/sessions/**/wire.jsonl`。费用一栏是**按牌价折算的等效 API 成本**(按 token 分类分别计价,缓存读按 10%),订阅制下并非实付。
+主界面侧栏 4 页:**总览** / **AI用量信息** / 日志 / 设置。消耗页按平台汇总本机各 AI CLI 的落盘用量(v0.7.0 起,取代原来分开的「Token 消耗」与「Claude 消耗」两页)。★ **OpenClaw 是宿主不是平台**:它每条记录按**模型名**归到真正的平台(`gpt/o1/o3/o4`→Codex、`claude`→Claude、`deepseek`→DeepSeek、`mimo`→MiMo…,认不出才回落 provider 名),所以**页面上的平台数不固定**,取决于你在 OpenClaw 里用过哪些模型:堆叠面积图 + 今日/7/14/30/90d 五档,点任一平台进「详情」看分模型拆解与费率卡。数据源全是**本机 CLI 自己落的盘**、零额度消耗——`~/.claude/projects/**/*.jsonl` · `~/.codex/sessions/**/rollout-*.jsonl` · `~/.grok/**/updates.jsonl` · `~/.kimi-code/sessions/**/wire.jsonl`。费用一栏是**按牌价折算的等效 API 成本**(按 token 分类分别计价,缓存读按 10%),订阅制下并非实付。
+
+> **AI 平台管理**(「设置」页):每个平台可**改名 / 改色 / 停用 / ▲▼ 排序**,偏好存 localStorage 并经 Tauri 事件广播给菜单栏。**停用 = 整家从图表与汇总里移除,总 token 与总费用跟着扣**;排序只影响列表与图例,堆叠图仍按占比大的贴基线。⚠️ 它只管「怎么显示」,不管「有没有数据」—— 后者由 `traffic/scan.py` 的注册表决定,与 `traffic/sources.local.json` 的 `{"disabled":[…]}`(那层压根不解析)是两回事。
+
+> **「扫描新数据源」**(「设置」页,实测 ~40s):找本机还有哪些 AI 把用量落了盘,并现场验算它的 token 口径(哪些字段加起来等于 total ⇒ 缓存要不要减)。**只出报告、不自动启用** —— 接一家的实质是写一个解析器。
 
 > **缓存计入口径**(「设置」页,三档):`含缓存` / `不含缓存读` / `不含缓存`。**token 量与费用一起变**,并且**页面构成也跟着变**——不计入的类,它的指标(总览的「缓存」KPI、详情页费率卡的「缓存读」列、构成行里对应项)会从页面上消失,而不是显示成 0%。本机 90 天量级:34.24B/$26,379 · 1.36B/$10,049 · 0.46B/$4,125。
 > 三档相差如此之大,是因为 `cache_read`(每轮重发完整历史)占 **96%**;而中间那档保留 `cache_write`,因为它是**首次发送并写入缓存的新内容**——没有缓存机制这些 token 照样要发。改动即时同步到菜单栏。
