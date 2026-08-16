@@ -5,7 +5,7 @@ import StackedArea, { type Layer } from "../components/StackedArea";
 import Seg from "../components/Seg";
 import KpiStrip, { type Kpi, UP, DOWN } from "../components/KpiStrip";
 import CacheChip from "../components/CacheChip";
-import { useIntro } from "../hooks/useIntro";
+import { useIntro, introEnabled } from "../hooks/useIntro";
 import type { TrafficData, Bucket, Range, CacheMode, PlatformPrefs } from "../traffic";
 import { RANGES, rangeLabel, bucketsFor, sumBuckets, costOfBucket, savingOfBucket, fmtTok, topModels, colorOf, countsCacheRead, orderedKeys } from "../traffic";
 
@@ -191,7 +191,7 @@ export default function TrafficPage({ t, data, raw, cacheMode, prefs, range, set
       {!!view?.labels.length && (
         // ★ `key={range}` 不是可有可无的:图表的 hover 是"某个数据集里的索引",换档必须让实例作废。
         //    详见 StackedArea 里 `hv` 上方的注释(靠组件自清试过两次,都被用户实测推翻)。
-        <div className="cb-wipe" key={`w:${range}:${view.labels[0]}`}>
+        <div className={introEnabled() ? "cb-wipe" : undefined} key={`w:${range}:${view.labels[0]}`}>
         <StackedArea key={`${range}:${view.labels[0]}`}
                      labels={view.labels} layers={layers} height={156} fmt={fmtTok} t={t}
                      dimmed={hoverKey} onPick={onDrill}

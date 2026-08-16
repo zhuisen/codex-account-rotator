@@ -39,6 +39,7 @@ interface Settings {
   tokenExpiryWarnHours: number;
   dockVisible: boolean;
   trayStyle: TrayStyle;
+  intro: boolean;
 }
 
 const DEFAULTS: Settings = {
@@ -48,6 +49,7 @@ const DEFAULTS: Settings = {
   tokenExpiryWarnHours: 48,
   dockVisible: false,        // 默认保持纯菜单栏形态(现有行为)
   trayStyle: "full",         // 默认沿用现状,不动老用户的菜单栏
+  intro: true,               // 入场动效默认开。关掉是**完全不播**,不是播快一点
 };
 
 const KEY = "codexbar_settings";
@@ -142,6 +144,20 @@ export default function SettingsPage({ t }: { t: Theme }) {
                  update({ trayStyle: v });
                  invoke("set_tray_style", { style: TRAY_STYLES.indexOf(v) }).catch(() => {});
                }} />
+        </div>
+      </Row>
+
+      {/* ★ 动效开关（用户 2026-08-16）。关掉＝**完全不播**，不是播快一点 —— 与
+          `prefers-reduced-motion` 同语义，两者任一为「关」就不动画。
+          只影响主窗那两张图与 KPI；菜单栏没有入场动效，所以不需要跨 webview 广播。 */}
+      <Row label="入场动效"
+           desc="打开「AI 用量信息」或切时间档时，图表从左往右揭开、KPI 数字从 0 滚上来。关掉后数据直接到位（系统里开了「减弱动态效果」时本来就不播）。">
+        <div onClick={() => update({ intro: !s.intro })} style={{
+          width: 38, height: 22, borderRadius: 11, padding: 2, cursor: "pointer", flexShrink: 0,
+          background: s.intro ? t.accent : t.barTrack, transition: "background .2s",
+        }}>
+          <div style={{ width: 18, height: 18, borderRadius: 9, background: "#fff",
+                        transform: s.intro ? "translateX(16px)" : "translateX(0)", transition: "transform .2s" }} />
         </div>
       </Row>
 

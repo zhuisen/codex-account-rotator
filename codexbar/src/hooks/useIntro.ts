@@ -1,7 +1,22 @@
 import { useEffect, useRef, useState } from "react";
+import { getSettings } from "../pages/SettingsPage";
 
 /** 入场时长。C 档（左到右擦除）用户 2026-08-16 从四方案里选的，配 KPI 数字同步滚动。 */
 export const INTRO_MS = 700;
+
+/**
+ * 要不要播入场动效。**两个门任一为「关」就不播**：
+ * ① 设置页的「入场动效」开关（用户 2026-08-16 加的 —— 不是所有人都想看）；
+ * ② 系统的 `prefers-reduced-motion`。
+ *
+ * ★ 这两者都是「不播」而不是「播快一点」。把它做成缩短时长，等于没听懂人家为什么关掉。
+ * ★ 单一真源：`.cb-wipe` 这个 class 该不该加也读它，不许在页面里各写一份 `getSettings().intro`。
+ */
+export function introEnabled(): boolean {
+  if (typeof window === "undefined") return false;
+  if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return false;
+  try { return getSettings().intro !== false; } catch { return true; }
+}
 
 /** easeOutCubic —— 起步快、收尾稳。**不要回弹**：仪表类 UI 里弹跳显得轻浮。 */
 const ease = (t: number): number => 1 - Math.pow(1 - t, 3);
@@ -22,9 +37,7 @@ export function useIntro(dep: string): number {
   const raf = useRef(0);
 
   useEffect(() => {
-    if (typeof window === "undefined") return;
-    const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
-    if (reduce) { setP(1); return; }
+    if (!introEnabled()) { setP(1); return; }
 
     const t0 = performance.now();
     setP(0);

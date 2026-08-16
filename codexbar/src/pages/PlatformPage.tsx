@@ -7,7 +7,7 @@ import type { TrafficData, Range, CacheMode, Bucket } from "../traffic";
 import { RANGES, rangeLabel, bucketsFor, sumBuckets, costOfBucket, savingOfBucket, fmtTok,
          countsCacheRead, countsCacheWrite, countedClasses, mixParts, colorOf } from "../traffic";
 import KpiStrip, { type Kpi, UP, DOWN } from "../components/KpiStrip";
-import { useIntro } from "../hooks/useIntro";
+import { useIntro, introEnabled } from "../hooks/useIntro";
 import CacheChip from "../components/CacheChip";
 
 const AMBER = "#E0A21C";
@@ -250,7 +250,7 @@ export default function PlatformPage({ t, data, raw, cacheMode, pk, range, setRa
       {!!v?.labels.length && (
         // ★ key 同时带 `mode`:切「分模型 ↔ 总量」也是换了一整个数据集。不带 `iso` —— 隔离模型只改
         //    图层不改日期,hover 索引仍然指同一天,重建反而会把用户停着的浮层弄没。
-        <div className="cb-wipe" key={`w:${range}:${mode}:${v.labels[0]}`}>
+        <div className={introEnabled() ? "cb-wipe" : undefined} key={`w:${range}:${mode}:${v.labels[0]}`}>
         <StackedArea key={`${range}:${mode}:${v.labels[0]}`}
                      labels={v.labels} layers={layers} height={190} fmt={fmtTok} t={t}
                      tipTitle={(i) => (isToday ? `今日 ${v.labels[i].slice(11)}:00 · ${modeWord}`
