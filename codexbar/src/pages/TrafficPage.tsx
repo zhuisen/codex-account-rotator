@@ -5,6 +5,7 @@ import StackedArea, { type Layer } from "../components/StackedArea";
 import Seg from "../components/Seg";
 import KpiStrip, { type Kpi, UP, DOWN } from "../components/KpiStrip";
 import CacheChip from "../components/CacheChip";
+import { useIntro } from "../hooks/useIntro";
 import type { TrafficData, Bucket, Range, CacheMode, PlatformPrefs } from "../traffic";
 import { RANGES, rangeLabel, bucketsFor, sumBuckets, costOfBucket, savingOfBucket, fmtTok, topModels, colorOf, countsCacheRead, orderedKeys } from "../traffic";
 
@@ -37,6 +38,8 @@ export default function TrafficPage({ t, data, raw, cacheMode, prefs, range, set
 }): React.ReactElement {
   const [hoverKey, setHoverKey] = useState<string | null>(null);
   const isToday = range === "today";
+  // ★ 依赖是**数据集身份**不是数据 —— 拿 data 当依赖会让页面每 2 分钟自动刷新时重播一次动画。
+  const intro = useIntro(String(range));
 
   const view = useMemo(() => {
     if (!data) return null;
@@ -129,17 +132,19 @@ export default function TrafficPage({ t, data, raw, cacheMode, prefs, range, set
   }, [raw, range]);
 
   const kpis: Kpi[] = [
-    { k: "总 token", v: fmtTok(view?.grand ?? 0),
+    { k: "总 token", v: fmtTok(view?.grand ?? 0), n: view?.grand ?? 0, fmt: fmtTok,
       sub: dTok ? `环比 ${dTok.txt}` : "环比 —",
       subC: dTok ? (dTok.up ? UP : DOWN) : t.faint },
     isToday
       ? { k: "较昨日", v: dTok?.txt ?? "—", c: dTok ? (dTok.up ? UP : DOWN) : undefined }
-      : { k: "日均", v: fmtTok((view?.grand ?? 0) / Math.max(1, view?.labels.length ?? 1)) },
-    { k: "总费用", v: fmtUSD(view?.grandCost ?? 0), c: AMBER,
+      : { k: "日均", v: fmtTok((view?.grand ?? 0) / Math.max(1, view?.labels.length ?? 1)),
+          n: (view?.grand ?? 0) / Math.max(1, view?.labels.length ?? 1), fmt: fmtTok },
+    { k: "总费用", v: fmtUSD(view?.grandCost ?? 0), n: view?.grandCost ?? 0, fmt: fmtUSD, c: AMBER,
       sub: view?.grandSaving ? `缓存已省 ${fmtUSD(view.grandSaving)}` : undefined },
     isToday
       ? { k: "费用较昨日", v: dCost?.txt ?? "—", c: dCost ? (dCost.up ? UP : DOWN) : undefined }
-      : { k: "日均费用", v: fmtUSD((view?.grandCost ?? 0) / Math.max(1, view?.labels.length ?? 1)), c: AMBER },
+      : { k: "日均费用", v: fmtUSD((view?.grandCost ?? 0) / Math.max(1, view?.labels.length ?? 1)),
+          n: (view?.grandCost ?? 0) / Math.max(1, view?.labels.length ?? 1), fmt: fmtUSD, c: AMBER },
     { k: "最大占比",
       v: top ? `${top.name} ${((top.total / Math.max(1, view!.grand)) * 100).toFixed(1)}%` : "—",
       c: top ? colorOf(data, top.key) : undefined },
@@ -178,7 +183,7 @@ export default function TrafficPage({ t, data, raw, cacheMode, prefs, range, set
         </div>
       </div>
 
-      <KpiStrip t={t} items={kpis} />
+      <KpiStrip t={t} items={kpis} intro={intro} />
 
       {err && <div style={{ fontSize: 11, color: "#E0524D", marginBottom: 8 }}>✗ {err}</div>}
       {busy && !data && <div style={{ fontSize: 12, color: t.muted }}>首次扫描三家 transcript 中(约 18s,之后走缓存)…</div>}
@@ -186,10 +191,12 @@ export default function TrafficPage({ t, data, raw, cacheMode, prefs, range, set
       {!!view?.labels.length && (
         // ★ `key={range}` 不是可有可无的:图表的 hover 是"某个数据集里的索引",换档必须让实例作废。
         //    详见 StackedArea 里 `hv` 上方的注释(靠组件自清试过两次,都被用户实测推翻)。
-        <StackedArea key={String(range)}
+        <div className="cb-wipe" key={`w:${range}:${view.labels[0]}`}>
+        <StackedArea key={`${range}:${view.labels[0]}`}
                      labels={view.labels} layers={layers} height={156} fmt={fmtTok} t={t}
                      dimmed={hoverKey} onPick={onDrill}
                      tipTitle={(i) => (isToday ? `今日 ${view.labels[i].slice(11)}:00` : view.labels[i])} />
+        </div>
       )}
 
       {/* 平台图例行 */}

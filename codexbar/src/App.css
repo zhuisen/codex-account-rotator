@@ -22,3 +22,14 @@ body { background: #0e1117; font-family: 'Space Grotesk', system-ui, sans-serif;
 .ring-glow svg { animation: cbPulseGlow 2s ease-in-out infinite; }
 @keyframes cbDotPulse { 0%,100% { opacity:1; } 50% { opacity:.35; } }
 .shimmer { background: linear-gradient(90deg, transparent 0px, rgba(45,212,191,.08) 40px, transparent 80px); background-size: 200px 100%; animation: cbShimmer 1.4s ease-in-out infinite; }
+
+
+/* 图表入场：左到右擦除（用户 2026-08-16 从四方案里选的 C 档）。
+   ★ 形状一开始就画好，只是被 clip 挡住 —— 不是逐帧重算 path，所以不吃 CPU。
+     与横轴是时间轴呼应：像「时间在走」。
+   ★ 触发靠调用方给 wrapper 传 `key={数据集身份}`（同图表 key 的判据）。**不能用数据当身份** ——
+     `useTraffic` 每 2 分钟自动刷新，那样会让你正在读的时候突然重播一次。
+   ★ 关掉动效的人要的是「没有」，不是「快一点」。 */
+@keyframes cbWipe { from { clip-path: inset(0 100% 0 0); } to { clip-path: inset(0 0 0 0); } }
+.cb-wipe { animation: cbWipe .7s cubic-bezier(.22,.61,.36,1) both; }
+@media (prefers-reduced-motion: reduce) { .cb-wipe { animation: none; } }

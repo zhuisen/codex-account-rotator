@@ -33,8 +33,24 @@ function smooth(pts: [number, number][]): string {
   return d;
 }
 
+/** 只有一个采样点时柱子的宽度(viewBox 单位)。 */
+const COL_W = VW * 0.12;
+
+/**
+ * ★ **一个小时桶要画成柱,不是面积**(2026-08-13 修)。
+ *
+ * 一条带至少要两个采样点,原来 `vals.length < 2` 直接 `return ""` —— 于是每天 **00:00–00:59**
+ * 整块图必然空白(实测:6 层 path 的 `d` 全是空串,而 svg 仍占满 104 高,就是那块空档)。
+ * 补柱子而不是补一条横跨全宽的面积:后者会把"这一个小时"画成横跨整条时间轴的一段,
+ * 那是在画一个没发生的事实。一次离散测量本来就该是柱。
+ */
 function area(vals: number[], yMax: number): string {
-  if (vals.length < 2) return "";
+  if (!vals.length) return "";
+  if (vals.length === 1) {
+    const y = (VH - (vals[0] / yMax) * VH).toFixed(1);
+    const x0 = ((VW - COL_W) / 2).toFixed(1), x1 = ((VW + COL_W) / 2).toFixed(1);
+    return `M${x0} ${VH} L${x0} ${y} L${x1} ${y} L${x1} ${VH} Z`;
+  }
   const pts = vals.map((v, i) => [
     (i / (vals.length - 1)) * VW,
     VH - (v / yMax) * VH,

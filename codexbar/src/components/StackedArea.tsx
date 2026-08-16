@@ -60,7 +60,20 @@ function monotonePath(pts: [number, number][]): string {
  * 倒序那半段复用同一个单调插值:Fritsch–Carlson 在点序反转下对称(dx、dy 同时变号 ⇒ 斜率 d 不变),
  * 所以相邻两条带的公共边界逐点重合,不会出现缝隙或重叠。
  */
+/**
+ * ★ 单采样点走**柱**,不走带(2026-08-13 修,与 `MenuBarToday` 同一处缺陷)。
+ * `monotonePath` 在 n===1 时返回 `M x y`,接成带就是 `M x y L x y Z` —— 零面积,什么都画不出来。
+ * 「今日」档在 00:00–00:59 只有一个小时桶,整张图会空白。柱宽取绘图区的 6%(封顶 72),
+ * 免得在近千像素宽的主图里变成一块色板。
+ */
+const COL_W = Math.min(PW * 0.06, 72);
+
 function bandPath(top: [number, number][], base: [number, number][]): string {
+  if (top.length === 1 && base.length === 1) {
+    const x0 = (top[0][0] - COL_W / 2).toFixed(1), x1 = (top[0][0] + COL_W / 2).toFixed(1);
+    const yT = top[0][1].toFixed(1), yB = base[0][1].toFixed(1);
+    return `M${x0} ${yB} L${x0} ${yT} L${x1} ${yT} L${x1} ${yB} Z`;
+  }
   const up = monotonePath(top);
   const down = monotonePath([...base].reverse());
   return `${up} L ${down.slice(2)} Z`;   // 去掉下半段开头的 "M ",接成一条闭合路径
@@ -121,6 +134,13 @@ export default function StackedArea({
    *      连点还会跳过中间长度;而且 effect 在 commit 之后才跑,新数据至少先用旧 `hover` 画一帧,
    *      排队中的旧 `mousemove` 也会写回同一个 state。
    * `key` 一换就卸载重建,上面三条同时消失。这条 clamp 只留作纯防御(调用方漏传 key 时兜底)。
+   */
+  /**
+   * ★ 调用方的 `key` 里**必须带数据身份**(用 `labels[0]`),不能只有档位。
+   * 自动刷新(`useTraffic` 每 2 分钟)是**原地换 labels/layers**、不换组件实例的 —— 而日线档的窗口
+   * 是「截止今天的连续 N 天」,**一过午夜整个窗口滑一格**,同一个索引指向的日期就变了。
+   * 下面这行钳位只防越界:滑动后索引**仍在范围内**,它一个字都拦不住,浮层会悄悄描述另一天。
+   * 用 `labels[0]` 而不是 `labels.length`:今日档按小时追加(长度会变但索引不移位),不该因此丢 hover。
    */
   const hv = hover != null && hover >= 0 && hover < n ? hover : null;
 

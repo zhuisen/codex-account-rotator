@@ -14,12 +14,16 @@
       然后 ?mode=full|noRead|none&nav=traffic|settings|platform:claude
 """
 import json
+import os
 import pathlib
 import re
 
 HERE = pathlib.Path(__file__).resolve().parent
 APP = HERE / "app"
-SNAP = HERE.parent.parent / ".traffic-latest.json"
+# 快照可覆盖:`CODEXBAR_SNAPSHOT=<path>` 用来渲染**退化态**(只有 1 个小时桶、空数据…)。
+# 真实快照是 app 在写的活文件,**只读不改** —— 要造夹具就另写一份再用这个变量指过去。
+REPO = HERE.parent.parent                       # 仓库根:state.json 夹具的来源,**与快照路径解耦**
+SNAP = pathlib.Path(os.environ.get("CODEXBAR_SNAPSHOT") or (REPO / ".traffic-latest.json"))
 
 index = (APP / "index.html").read_text()
 snapshot = SNAP.read_text()          # 只传递,不打印
@@ -32,6 +36,8 @@ STUB = """
     localStorage.setItem('codexbar_cache_mode', p.get('mode') || 'full');
     localStorage.setItem('codexbar_settings', JSON.stringify({ dockVisible: false }));
     localStorage.setItem('codexbar_privacy', '0');
+    // 菜单栏停留页:`?tab=today` 直接渲染今日 Tab(默认账号页)
+    localStorage.setItem('codexbar_mb_tab', p.get('tab') === 'today' ? 'today' : 'acc');
     // 平台偏好:`?plat=demo` 套一组示范偏好(停用一家 + 改名改色 + 换顺序),用来验设置面板与总览
     if (p.get('plat') === 'demo') {
       localStorage.setItem('codexbar_platform_prefs', JSON.stringify({
@@ -155,9 +161,14 @@ STUB = """
     (p.get('click') ? p.get('click').split(',') : []).forEach(function (spec, i) {
       setTimeout(function () {
         var parts = spec.split('~'), want = parts[0].trim(), nth = parseInt(parts[1] || '1', 10);
+        // `*前缀` = **包含**匹配。图例这类元素的 textContent 是「名字+数字」连在一起
+        // (`缓存读7.51B · 97.24%`),全等匹配永远命不中,而数字是活的没法写死。
+        var loose = want.charAt(0) === '*';
+        if (loose) want = want.slice(1);
         var all = [];
         document.querySelectorAll('div,span').forEach(function (e) {
-          if ((e.textContent || '').trim() !== want) return;
+          var txt = (e.textContent || '').trim();
+          if (loose ? txt.indexOf(want) < 0 : txt !== want) return;
           all = all.filter(function (h) { return !h.contains(e); });   // 只留最内层
           all.push(e);
         });
@@ -166,6 +177,23 @@ STUB = """
         else errors.push('click miss: ' + spec + ' (共' + all.length + '个)');
       }, 700 + i * 300);
     });
+
+    // `?mm=<0..100>` 在图表命中带上派发 mousemove,把 hover 浮层逼出来。
+    // headless 里鼠标事件不会自己发生,而"悬浮才出现的读数"恰恰只能这样验。
+    if (p.get('mm')) {
+      setTimeout(function () {
+        var rects = document.querySelectorAll('svg rect[fill="transparent"]');
+        var hit = rects[rects.length - 1];
+        if (!hit) { errors.push('mm: 没找到命中带'); return; }
+        var r = hit.getBoundingClientRect();
+        var x = r.left + r.width * (parseFloat(p.get('mm')) / 100);
+        ['mouseenter', 'mousemove'].forEach(function (type) {
+          hit.dispatchEvent(new MouseEvent(type, {
+            bubbles: true, clientX: x, clientY: r.top + r.height / 2,
+          }));
+        });
+      }, 1400);
+    }
 
     // 探针:横向溢出是本项目 UI 的主要失败模式(外层 overflow:hidden,溢出被静默裁掉)。
     setTimeout(function () {
@@ -186,6 +214,20 @@ STUB = """
         errors: errors.slice(0, 4),
         unknownCmds: unknown.filter(function (v, i, a) { return a.indexOf(v) === i; }),
         clicks: clicks,
+        // 字体探针:app 的字体是本地 woff2,没加载上会静默回落到系统 sans —— 截图上看不出来
+        fonts: {
+          mono: document.fonts.check('12px "JetBrains Mono"'),
+          disp: document.fonts.check('12px "Space Grotesk"'),
+          loaded: Array.from(document.fonts).map(function (f) { return f.family; })
+            .filter(function (v, i, a) { return a.indexOf(v) === i; }),
+        },
+        computed: (function () {
+          var pick = function (sel) {
+            var e = document.querySelector(sel);
+            return e ? getComputedStyle(e).fontFamily.split(',')[0].replace(/["']/g, '') : null;
+          };
+          return { h1: pick('h1'), body: getComputedStyle(document.body).fontFamily.split(',')[0].replace(/["']/g, '') };
+        })(),
         inputs: Array.prototype.map.call(document.querySelectorAll('input'), function (e) {
           var r = e.getBoundingClientRect();
           return { v: e.value, w: Math.round(r.width), h: Math.round(r.height), focus: e === document.activeElement };
@@ -205,7 +247,7 @@ def redacted_state():
     (上次正是真数据才暴露出徽章变长把日期挤断行)。**只替换能认人的三样**:邮箱、姓名、
     account_id。account_id 同时是槽位的键和 `active` 的值,必须整体重映射,否则「当前号」判错。
     """
-    raw = json.loads((SNAP.parent / "state.json").read_text())
+    raw = json.loads((REPO / "state.json").read_text())
     idmap, out_slots = {}, {}
     for i, (aid, sl) in enumerate(raw.get("slots", {}).items(), 1):
         fake = f"user-demo{i:02d}0000000000000000000000"

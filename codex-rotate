@@ -1700,6 +1700,69 @@ def cmd_current(args):
     print(_mask(s.get("active")))
 
 
+LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
+
+
+def proxy_env_gate():
+    """★ 系统代理会不会黑洞掉发往本机代理的请求。-> {level, detail, lines}
+
+    2026-08-16 花一整轮定位的一类 bug:macOS 系统代理开着时(Clash Verge `HTTPEnable=1` → :7890),
+    **codex 的 reqwest 会把发往 `http://127.0.0.1:8011` 的请求也送进 Clash**,而 Clash 对 loopback
+    目标连接受理、永不响应 ⇒ codex 永久挂死、零输出,而代理这边一条日志都没有。
+
+    ⚠️ **系统代理的 ExceptionsList 本来就含 127.0.0.1,reqwest 无视它** —— 在 Clash 里配 bypass
+    没用,只有进程级 NO_PROXY 管用。所以这道闸查的是**启动器有没有导出 NO_PROXY**,不是系统设置。
+
+    ★ 三态不是二值:`scutil` 拿不到就报 unknown。把"判定不了"说成"没问题",正是让人以为已经查过的写法。
+    """
+    import subprocess as _sp
+
+    def _exempt(env):
+        v = env.get("NO_PROXY") or env.get("no_proxy") or ""
+        low = {x.strip().lower() for x in v.split(",") if x.strip()}
+        return any(h in low for h in LOOPBACK_HOSTS)
+
+    try:
+        out = _sp.run(["scutil", "--proxy"], capture_output=True, text=True, timeout=5).stdout
+    except Exception as e:
+        return {"level": "unknown", "detail": f"scutil 不可用: {e}",
+                "lines": [f"  ⚠️ 代理环境闸:判定不了(scutil 不可用: {e})"]}
+
+    # 逐行解析而不是正则:`re` 在本文件不是模块级导入,而这道闸不值得为它加一个 import。
+    kv = {}
+    for ln in out.splitlines():
+        if ":" in ln:
+            k, _, v = ln.partition(":")
+            kv[k.strip()] = v.strip()
+    on = kv.get("HTTPEnable") == "1" or kv.get("HTTPSEnable") == "1"
+    port = kv.get("HTTPPort") or kv.get("HTTPSPort") or "?"
+    if not on:
+        return {"level": "ok", "detail": "系统代理未开启",
+                "lines": ["  ✅ 代理环境闸:系统代理未开启,loopback 请求不会被劫持"]}
+
+    cxp = STORE / "proxy" / "cxp"
+    try:
+        guarded = "NO_PROXY" in cxp.read_text()
+    except OSError:
+        guarded = None
+    cur = _exempt(os.environ)
+
+    if guarded:
+        tail = "" if cur else "；⚠️ 当前 shell 自身没豁免，直接敲 `codex --profile rotateproxy` 仍会挂，走 `cxp`"
+        return {"level": "ok", "detail": f"系统代理开着(:{port})，cxp 已导出 NO_PROXY",
+                "lines": [f"  ✅ 代理环境闸:系统代理开着(:{port})，cxp 已导出 NO_PROXY 豁免 loopback{tail}"]}
+    if guarded is None:
+        return {"level": "unknown", "detail": f"读不到 {cxp}",
+                "lines": [f"  ⚠️ 代理环境闸:系统代理开着(:{port})，但读不到 {cxp}，判定不了"]}
+    return {"level": "warn", "detail": f"系统代理开着(:{port}) 且 cxp 未导出 NO_PROXY",
+            "lines": [
+                f"  ⚠️ 代理环境闸:系统代理开着(:{port})，而 cxp **没有**导出 NO_PROXY。",
+                "     后果:`cxp` / `omc ask codex` 会**永久挂死、零输出**，代理日志里一条记录都没有。",
+                "     修法:proxy/cxp 顶部加 export NO_PROXY=\"127.0.0.1,localhost,::1\"（no_proxy 同样导出）。",
+                "     别去 Clash 里配 bypass —— ExceptionsList 已含 127.0.0.1，reqwest 无视它。",
+            ]}
+
+
 def cmd_health(args):
     """Token health: never rotates a token and costs no quota, but DOES record newly-found deaths.
 
@@ -1707,9 +1770,21 @@ def cmd_health(args):
     local JWT `exp`. A revoked token keeps a perfectly valid-looking exp — plus7 had 201h left while the
     server had already invalidated it — so an exp-only check reports a dead account as healthy (B21).
     `--local` keeps the old offline behaviour."""
+    # ★ 环境闸先跑，且**不受"有没有账号"影响** —— 它查的是本机网络环境；放在
+    #   `if not slots: return` 之后会让空池时静默跳过，而那正是最需要它的场景之一。
+    #   告警印在**最前面**（眼睛先落的地方）；正常时只在最后印一行，不挤占账号列表。
+    gate = proxy_env_gate()
+    if gate["level"] != "ok":
+        for _l in gate["lines"]:
+            print(_l)
+        print()
+
     s = _state()
     if not s["slots"]:
         print("no accounts")
+        if gate["level"] == "ok":
+            for _l in gate["lines"]:
+                print(_l)
         return
     online = "--local" not in args
     now = time.time()
@@ -1743,6 +1818,10 @@ def cmd_health(args):
         dead = "  ⚠️ DEAD 需 codex-rotate login 重登" if slot.get("auth_dead") else ""
         print(f"  [{slot.get('label', '?'):<8}] {who:<26} {st:<13} "
               f"last_refresh:{(auth.get('last_refresh') or '?')[:19]}{dead}")
+
+    if gate["level"] == "ok":
+        for _l in gate["lines"]:
+            print(_l)
 
 
 def cmd_ensure(args):

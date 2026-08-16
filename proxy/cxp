@@ -10,6 +10,24 @@
 # (provider=openai) — the "会话都不见了" symptom. Plain codex here lists & continues that full history,
 # identical to typing `\codex resume`. Trade-off: a resumed session runs on the single live account,
 # not the rotating pool — same as the `\codex resume` you're already using by hand.
+# ★★ NO_PROXY 是必需的，不是优化（2026-08-16 定位，Fable 复核，我实测确认）。
+# macOS 系统代理开着时（Clash Verge：HTTPEnable=1 → 127.0.0.1:7890），codex 的 reqwest 会把
+# 发往 `http://127.0.0.1:8011` 的请求也送进 Clash，而 Clash 对 loopback 目标是**黑洞**
+# （连接受理、永不响应）⇒ codex 永久挂死、零输出，代理这边一条日志都看不到。
+#
+# ⚠️ 系统代理的 ExceptionsList 里**本来就有 127.0.0.1，reqwest 无视它** —— 所以在 Clash 里
+#    配 bypass 没用，只有进程级的 NO_PROXY 管用。
+#
+# 误导性症状（别再顺着它查）：stderr 会报
+#   `codex_models_manager: failed to refresh available models: timeout waiting for child process to exit`
+# 那是 auth 的 5s 超时被包装后冒出来的次生文案，与子进程无关。
+#
+# 判别实验（都跑过）：base_url 换成 https://chatgpt.com/... 能成 —— 但那不是因为 https，
+# 是因为 Clash 代理公网目标正常；指向没人听的 http://127.0.0.1:9999 症状完全相同，
+# 因为两者第一跳都是 7890。给代理套 TLS 解决不了（CONNECT 到 loopback 同样黑洞，已实测）。
+export NO_PROXY="127.0.0.1,localhost,::1${NO_PROXY:+,$NO_PROXY}"
+export no_proxy="$NO_PROXY"
+
 case "$1" in
     resume|fork)
         exec command codex "$@" ;;

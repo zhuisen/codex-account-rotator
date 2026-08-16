@@ -35,11 +35,13 @@
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
 import tempfile
 import time
 from calendar import timegm
-from datetime import date as _date, timedelta as _timedelta
+from datetime import date as _date, datetime as _datetime, timedelta as _timedelta
 from pathlib import Path
 
 HOME = Path.home()
@@ -52,7 +54,8 @@ CACHE = Path(__file__).resolve().parent.parent / ".traffic-cache.json"
 CACHE_V = 1
 # ★ 改任何 _scan_* 的解析逻辑(改变 rows 里存什么/怎么算)必须 +1,否则那些此生不再变 mtime 的文件
 #   会永远沿用旧结果,产出一份新旧混血、无法察觉的数据集。
-PARSER_V = 3          # +1 于 2026-08-12:codex 累计值去重;接入 OpenClaw 并按 AI 平台路由(row 多一位)
+PARSER_V = 5          # +1 于 2026-08-12:codex 累计值去重;接入 OpenClaw 并按 AI 平台路由(row 多一位)
+                      # +2 于 2026-08-15:接入 Reasonix 与 DeepSeek Harness 两个宿主源
 
 _DATED = re.compile(r"-\d{8}$")          # claude-haiku-4-5-20251001 -> claude-haiku-4-5
 
@@ -329,6 +332,8 @@ def _scan_kimi_file(path):
 # 停用某家:`--exclude grok`,或在 `traffic/sources.local.json` 写 {"disabled": ["grok"]}
 # (该文件 gitignored,是本机偏好不是仓库配置)。停用后它不出现在输出里,UI 上自然消失。
 OPENCLAW_ROOT = Path(os.environ.get("OPENCLAW_HOME") or (HOME / ".openclaw")) / "agents"
+REASONIX_ROOT = Path(os.environ.get("REASONIX_HOME") or (HOME / ".reasonix")) / "stats"
+DSH_ROOT = Path(os.environ.get("DSH_HOME") or (HOME / ".dsh")) / "sessions"
 
 # 宿主内**路由出来**的平台。OpenClaw 自己不是平台(用户 2026-08-12 定稿:「openclaw 不算平台,
 # 但是涉及的对应 ai 平台也要纳入计算」)—— 它是宿主,里面跑的 AI 各归各家。
@@ -413,6 +418,94 @@ def _scan_openclaw_file(path):
     return rows
 
 
+def _scan_reasonix_file(path):
+    """~/.reasonix/stats/YYYY-MM-DD.jsonl,一行一请求。-> rows(row 带第 7 位平台键)。
+    〔来源:外部贡献者补丁 deepseek-support.patch,2026-08-15 全量采纳。下述实测数字是他机器上的,
+      本机 `2026-08-13.jsonl` 只有 6 行 / 1 条 usage,复现不了 158 行那次。〕
+
+    口径(2026-08-13 全量 158 行实测,零反例):`prompt == cache_hit + cache_miss` —— 缓存读
+    **含在** prompt 里(codex/Grok 族,要拆);`reasoning ⊆ completion`,不另计;行尾无累计记录,
+    `{"turn":true}` 标记行没有 usage,天然跳过。一行 `requests:1`,实测无跨行重复,不去重。
+    """
+    rows = []
+    try:
+        fh = open(path, encoding="utf-8", errors="replace")
+    except OSError:
+        return rows
+    with fh:
+        for line in fh:
+            if '"prompt"' not in line:
+                continue
+            try:
+                o = json.loads(line)
+            except ValueError:
+                continue
+            p = o.get("prompt")
+            ts = o.get("ts")
+            if not isinstance(p, (int, float)) or not p or not isinstance(ts, str):
+                continue
+            try:
+                ep = _datetime.fromisoformat(ts).timestamp()
+            except ValueError:
+                continue
+            cr = _num(o, "cache_hit")
+            out = _num(o, "completion")
+            model = o.get("model") if isinstance(o.get("model"), str) else "unknown"
+            m = model.lower()
+            pk = "deepseek" if "deepseek" in m else (m.split("/", 1)[0] or "unknown")
+            rows.append([ep, model, max(0, int(p - cr)), cr, 0, out, pk])
+    return rows
+
+
+_ZSTD = shutil.which("zstd") or "/opt/homebrew/bin/zstd"
+
+
+def _scan_dsh_file(path):
+    """~/.dsh/sessions/*/session-*/session.jsonl.zstd(zstd 压缩的 append-only jsonl)。-> rows(带平台键)。
+    〔来源:外部贡献者补丁,2026-08-15 全量采纳。**本机一条都没验过** —— `~/.dsh` 不存在、
+      dsh CLI 未装,全盘搜不到 session.jsonl.zstd。下面是他的实测,对本机是转述;
+      第一次真扫到数据时,照 `_scan_openclaw_file` 的做法先做一次交叉核对再信。〕
+
+    口径(2026-08-15 全量 5 会话实测):
+    ★ usage 只认 `assistant/message` —— 同一笔 usage 在 `assistant/chunk`(chunk.type=="usage")和
+      `assistant/message` 里**各出现一次,数值完全相同**,两个都收就翻倍。chunk 里没有模型名,
+      message 有,所以只收 message。
+    ★ `inputTokens` 与 `cacheReadTokens` **互不相交**(Claude/Kimi 族,不减):实测 input=1048 时
+      cacheRead=10496,若缓存含在 input 里此式不成立。
+    ★ `reasoningTokens ⊆ outputTokens`(实测 2969≤3154 等,零反例),不另计。
+    ★ `session/title-llm-request` 的标题生成调用不落 usage,本来就漏,量极小(64 maxTokens)。
+    """
+    rows = []
+    try:
+        out = subprocess.run([_ZSTD, "-dc", str(path)],
+                             capture_output=True, text=True, timeout=60).stdout
+    except (OSError, subprocess.SubprocessError):
+        return rows
+    for line in out.splitlines():
+        if '"usage"' not in line or '"assistant/message"' not in line:
+            continue
+        try:
+            o = json.loads(line)
+        except ValueError:
+            continue
+        if o.get("type") != "assistant/message":
+            continue
+        d = o.get("data") or {}
+        u = d.get("usage")
+        ms = o.get("time")
+        if not isinstance(u, dict) or not isinstance(ms, (int, float)):
+            continue
+        i, cr, out_ = _num(u, "inputTokens"), _num(u, "cacheReadTokens"), _num(u, "outputTokens")
+        if not (i or cr or out_):
+            continue
+        src = (d.get("message") or {}).get("source") or {}
+        model = src.get("model") if isinstance(src.get("model"), str) else "unknown"
+        m = model.lower()
+        pk = "deepseek" if "deepseek" in m else (m.split("/", 1)[0] or "unknown")
+        rows.append([ms / 1000, model, i, cr, _num(u, "cacheWriteTokens"), out_, pk])
+    return rows
+
+
 SOURCES = (
     {"key": "claude", "name": "Claude", "root": CLAUDE_ROOT, "color": "#E0784F",
      "glob": "**/*.jsonl",         "parse": _scan_claude_file, "dedup": True},
@@ -426,6 +519,13 @@ SOURCES = (
     #   `key` 只用于 enabled/registered 列表,不会作为平台出现在输出里。
     {"key": "openclaw", "name": "OpenClaw", "root": OPENCLAW_ROOT, "color": "#8b8b8b",
      "glob": "*/sessions/*.jsonl", "parse": _scan_openclaw_file, "dedup": True, "host": True},
+    # Reasonix(DeepSeek 桌面客户端)与 DeepSeek Harness(dsh)同样是**宿主**:自己不是平台,
+    # 里面跑的模型按名字各归各家。两者都 `dedup: False` —— 一行/一条 message 即一次请求,
+    # 实测(reasonix)与作者称的实测(dsh)都没有跨行重复。
+    {"key": "reasonix", "name": "Reasonix", "root": REASONIX_ROOT, "color": "#8b8b8b",
+     "glob": "*.jsonl",               "parse": _scan_reasonix_file, "dedup": False, "host": True},
+    {"key": "dsh", "name": "DeepSeek Harness", "root": DSH_ROOT, "color": "#8b8b8b",
+     "glob": "**/session.jsonl.zstd", "parse": _scan_dsh_file, "dedup": False, "host": True},
 )
 
 SRC_META = {s["key"]: {"name": s["name"], "color": s["color"]} for s in SOURCES}
