@@ -25,7 +25,9 @@ bash codexbar/scripts/setup-signing.sh && bash codexbar/scripts/deploy.sh
 
 clone 到哪个目录都行 —— `deploy.sh` 会把仓库路径烧进二进制。完整说明见 [SETUP.md §6](SETUP.md)。
 
-覆盖的 CLI:**Claude Code · Codex · Grok · Kimi · OpenClaw · Reasonix · DeepSeek Harness**(Antigravity/agy **不支持**,它把会话存成 protobuf blob,本地没有可读用量)。加一家 = 在 `traffic/scan.py` 写个解析器 + 注册表加一行,前端自动跟上。
+覆盖的 CLI:**Claude Code · Codex · Grok · Kimi · Antigravity(agy) · OpenClaw · Reasonix · DeepSeek Harness**。加一家 = 在 `traffic/scan.py` 写个解析器 + 注册表加一行,前端自动跟上。
+
+⚠️ **agy 只覆盖 print 模式**(`agy -p`,即 `omc ask` / `omc team` 走的那条)。它自己**不落用量**,数据是 `bin/agy` wrapper 从 `--output-format json` 抄下来的;**交互式会话拿不到**,页面上有覆盖率徽章标注。装这一家需要一步额外配置,见 `SETUP.md` §2.1。
 
 ---
 
@@ -77,7 +79,7 @@ clone 到哪个目录都行 —— `deploy.sh` 会把仓库路径烧进二进制
 | `.traffic-cache.json`(gitignored) | `traffic/scan.py` 的**逐文件增量缓存**(~10MB,按 `(mtime,size)` 命中)。冷 ~18s → 热 ~1.4s 靠它。删了只是重扫一次,不丢数据 |
 | `.traffic-latest.json`(gitignored) | 最近一次扫描的**成品快照**(~91KB)。两个 webview 都先读它再后台重扫,所以进页面/点托盘不再等 1~3 秒。由 `run_traffic` 原子写入(`.tmp<pid>` → `rename`) |
 | `traffic/sources.local.json`(gitignored) | 本机停用哪些平台:`{"disabled": ["grok"]}`。等价 CLI:`--exclude grok` / `--only kimi` |
-| `traffic/scan.py` | **多 AI 流量总览扫描器**(`[--days N] [--json] [--no-cache]`)。读 Claude / Codex / Grok / Kimi 四家 transcript + OpenClaw 宿主源(按模型名回流各家)（平台注册表在文件里，**加一家 = 写个解析器 + 加一行**，前端自动跟上）,**纯本地只读、不联网、不消耗任何额度**,与账号池无关。CodexBar「AI用量信息」页的数据源 |
+| `traffic/scan.py` | **多 AI 流量总览扫描器**(`[--days N] [--json] [--no-cache]`)。读 Claude / Codex / Grok / Kimi / Antigravity 五家 + OpenClaw / Reasonix / DeepSeek Harness 三个宿主源(按模型名回流各家)（平台注册表在文件里，**加一家 = 写个解析器 + 加一行**，前端自动跟上）,**纯本地只读、不联网、不消耗任何额度**,与账号池无关。CodexBar「AI用量信息」页的数据源 |
 | `traffic/discover.py` | **数据源体检**(`--json`):找本机还有哪些 AI 把用量落了盘,并现场验算它的 token 口径。纯本地只读、不联网、不碰凭证,SQLite 一律 `mode=ro`,**只出报告不自动启用**(接一家的实质是写解析器) |
 | `claude/claude_tokens.py` | ⚠️ 只统计 Claude 的旧扫描器,能力已被 `traffic/scan.py` 完全覆盖(v0.7.0 起 app 不再调用)。保留仅作 CLI |
 | `scripts/install-launchd.sh` | **生成并加载 5 个 launchd 服务**(autosync/keepalive/refreshquota/quotad/proxy)。生成而非提交成文件:plist 内嵌绝对路径,提交的副本换台机器就是错的,且会静默漂移(旧的 `launchd/*.plist` 就漂到了写死 `/usr/bin/python3`)。★脚本会**解析并钉住 OpenSSL 版的 python3**,见「维护约定」 |

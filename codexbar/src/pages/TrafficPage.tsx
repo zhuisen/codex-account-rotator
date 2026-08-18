@@ -7,7 +7,8 @@ import KpiStrip, { type Kpi, UP, DOWN } from "../components/KpiStrip";
 import CacheChip from "../components/CacheChip";
 import { useIntro, introEnabled } from "../hooks/useIntro";
 import type { TrafficData, Bucket, Range, CacheMode, PlatformPrefs } from "../traffic";
-import { RANGES, rangeLabel, bucketsFor, sumBuckets, costOfBucket, savingOfBucket, fmtTok, topModels, colorOf, countsCacheRead, orderedKeys } from "../traffic";
+import { RANGES, rangeLabel, bucketsFor, sumBuckets, costOfBucket, savingOfBucket, fmtTok, topModels, colorOf, countsCacheRead, orderedKeys, coveragePct, coverageNote } from "../traffic";
+import type { Coverage } from "../traffic";
 
 const AMBER = "#E0A21C";
 
@@ -241,6 +242,7 @@ export default function TrafficPage({ t, data, raw, cacheMode, prefs, range, set
           <PlatformCard key={p.key} t={t} name={p.name} color={colorOf(data, p.key)} buckets={p.buckets}
                         total={p.total} cost={p.cost} isToday={isToday}
                         yTotal={isToday ? yesterdayOf(data, p.key) : 0}
+                        coverage={data?.platforms[p.key]?.coverage}
                         onDrill={() => onDrill(p.key)} rangeTxt={rangeLabel(range)} />
         ))}
         {/* ★ 占位卡只在**没坐满一行**时出现,而且文案是通用的:平台由 `traffic/scan.py` 的注册表
@@ -267,9 +269,9 @@ function yesterdayOf(data: TrafficData | null, key: string): number {
 }
 
 /** §1 平台卡片 / §4 今日模型饼图卡片 */
-function PlatformCard({ t, name, color, buckets, total, cost, isToday, yTotal, onDrill, rangeTxt }: {
+function PlatformCard({ t, name, color, buckets, total, cost, isToday, yTotal, onDrill, rangeTxt, coverage }: {
   t: Theme; name: string; color: string; buckets: Bucket[]; total: number; cost: number;
-  isToday: boolean; yTotal: number; onDrill: () => void; rangeTxt: string;
+  isToday: boolean; yTotal: number; onDrill: () => void; rangeTxt: string; coverage?: Coverage;
 }): React.ReactElement {
   const [hov, setHov] = useState(false);
   const c = color;
@@ -290,6 +292,10 @@ function PlatformCard({ t, name, color, buckets, total, cost, isToday, yTotal, o
       <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 7 }}>
         <span style={{ width: 9, height: 9, borderRadius: "50%", background: c, flexShrink: 0 }} />
         <span style={{ fontSize: 13.5, fontWeight: 700 }}>{name}</span>
+        {/* ★ 采集不完整的平台必须当场标出来。没有这枚徽章,一个偏小的数字会被读成
+            「这家用得少」而不是「只统计了一部分」—— 本项目已经因为这类静默降级栽过多次。
+            用琥珀(警告语义)而不是红:数据本身没错,只是不全。 */}
+        <CoverageBadge t={t} coverage={coverage} />
         <span style={{ marginLeft: "auto", fontSize: 10, color: t.faint, whiteSpace: "nowrap" }}>明细 →</span>
       </div>
 
@@ -313,6 +319,23 @@ function PlatformCard({ t, name, color, buckets, total, cost, isToday, yTotal, o
         </>
       )}
     </div>
+  );
+}
+
+/** 采集完整度徽章。`coverage` 缺席 = 该平台本就是全量,**什么都不渲染**。 */
+function CoverageBadge({ t, coverage }: {
+  t: Theme; coverage?: Coverage;
+}): React.ReactElement | null {
+  const pct = coveragePct(coverage);
+  if (pct == null) return null;
+  return (
+    <span title={coverageNote(coverage)}
+          style={{ fontSize: 8.5, fontWeight: 700, fontFamily: "'JetBrains Mono'",
+                   letterSpacing: ".02em", padding: "1.5px 4px", borderRadius: 4,
+                   color: AMBER, background: t.isDark ? "rgba(224,144,28,.14)" : "rgba(224,144,28,.12)",
+                   whiteSpace: "nowrap", flexShrink: 0 }}>
+      覆盖 {pct < 1 ? "<1" : pct.toFixed(0)}%
+    </span>
   );
 }
 

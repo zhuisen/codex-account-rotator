@@ -40,6 +40,7 @@ interface Settings {
   dockVisible: boolean;
   trayStyle: TrayStyle;
   intro: boolean;
+  navOpen: boolean;
 }
 
 const DEFAULTS: Settings = {
@@ -50,6 +51,7 @@ const DEFAULTS: Settings = {
   dockVisible: false,        // 默认保持纯菜单栏形态(现有行为)
   trayStyle: "full",         // 默认沿用现状,不动老用户的菜单栏
   intro: true,               // 入场动效默认开。关掉是**完全不播**,不是播快一点
+  navOpen: false,            // 侧栏默认**折叠**(用户 2026-08-16 指定),展开后带中文名
 };
 
 const KEY = "codexbar_settings";
@@ -60,6 +62,16 @@ function load(): Settings {
 function save(s: Settings) { localStorage.setItem(KEY, JSON.stringify(s)); }
 
 export function getSettings(): Settings { return load(); }
+
+/**
+ * 从设置页之外改一两项。**别在别处再写一遍 `localStorage.setItem("codexbar_settings", …)`** ——
+ * 那个 key 字面量此前已经在 `App.tsx` 里重复了一次，多一处就多一个改了这边忘那边的地方。
+ */
+export function patchSettings(patch: Partial<Settings>): Settings {
+  const next = { ...load(), ...patch };
+  save(next);
+  return next;
+}
 
 export default function SettingsPage({ t }: { t: Theme }) {
   const [s, setS] = useState(load);

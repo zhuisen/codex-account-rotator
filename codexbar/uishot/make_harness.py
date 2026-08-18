@@ -37,6 +37,8 @@ STUB = """
     // `?intro=off` 关掉入场动效(设置页那个开关)。默认开 —— 与真实默认值一致。
     localStorage.setItem('codexbar_settings', JSON.stringify({
       dockVisible: false, intro: p.get('intro') !== 'off',
+      // `?nav=open` 展开侧栏。默认折叠 —— 与真实默认值一致。
+      navOpen: p.get('rail') === 'open',
     }));
     localStorage.setItem('codexbar_privacy', '0');
     // 菜单栏停留页:`?tab=today` 直接渲染今日 Tab(默认账号页)

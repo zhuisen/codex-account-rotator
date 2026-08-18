@@ -13,7 +13,7 @@ import LogsPage from "./pages/LogsPage";
 import TrafficPage from "./pages/TrafficPage";
 import PlatformPage from "./pages/PlatformPage";
 import type { Range } from "./traffic";
-import SettingsPage, { getSettings, TRAY_STYLES } from "./pages/SettingsPage";
+import SettingsPage, { getSettings, patchSettings, TRAY_STYLES } from "./pages/SettingsPage";
 import { useStore } from "./hooks/useStore";
 import { useExpiryWatch } from "./hooks/useExpiryWatch";
 import { useDeadWatch } from "./hooks/useDeadWatch";
@@ -36,6 +36,15 @@ const IconGrid = () => <svg width="18" height="18" viewBox="0 0 24 24" fill="cur
 const IconClip = () => <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7"><rect x="5" y="4" width="14" height="17" rx="2"/><path d="M9 3.5h6v3H9z" fill="currentColor" stroke="none"/></svg>;
 // ★ 真齿轮(带齿廓),不是 circle+8 条直射线 —— 那个画出来和标题栏的 `IconSun` 几乎同一个图形,
 //   侧栏第 4 格看着像"亮度"而不是"设置"(用户 2026-08-09 实测截图)。
+/** 侧栏折叠/展开。双人字形指向「往哪边收」——比单箭头更明确它是个开关而不是"下一页"。 */
+const IconChevrons = ({ open }: { open: boolean }) => (
+  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
+       strokeLinecap="round" strokeLinejoin="round"
+       style={{ transform: open ? "rotate(180deg)" : "none", transition: "transform .18s ease" }}>
+    <path d="M13 17l5-5-5-5M6 17l5-5-5-5" />
+  </svg>
+);
+
 const IconGear = () => (
   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
        strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
@@ -61,6 +70,8 @@ export default function App() {
   const [detailModal, setDetailModal] = useState<AccountDetail | null>(null);
   const [selectedCard, setSelectedCard] = useState<string | null>(null);
   const [autoSwitch, setAutoSwitch] = useState(() => getSettings().autoSwitchEnabled);
+  // 侧栏折叠态。**默认折叠**（DEFAULTS.navOpen = false），选择会记住 —— 每次启动都弹回默认的开关很烦人。
+  const [navOpen, setNavOpen] = useState(() => getSettings().navOpen);
   const { privacy, toggle: togglePrivacy } = usePrivacy();
 
   const t = THEMES[theme];
@@ -107,11 +118,14 @@ export default function App() {
   const { data: traffic, raw: trafficRaw, cacheMode, prefs: platPrefs, busy: trafficBusy,
           err: trafficErr, refresh: refreshTraffic } = useTraffic({ enabled: page === "traffic" });
 
-  const sidebarItems: { id: Page; Icon: React.FC; tip: string }[] = [
-    { id: "overview", Icon: IconChart, tip: "总览" },
-    { id: "traffic", Icon: IconGrid, tip: "AI用量信息(Claude / Codex / Grok)" },
-    { id: "logs", Icon: IconClip, tip: "日志" },
-    { id: "settings", Icon: IconGear, tip: "设置" },
+  // ★ `name` 是展开态显示的中文名，`tip` 只在**折叠态**当悬浮提示 —— 展开后标签已经在那儿，
+  //   再挂一个 title 是重复。原来 traffic 的 tip 写死「Claude / Codex / Grok」三家，
+  //   而现在有 6 个平台，顺手改掉。
+  const sidebarItems: { id: Page; Icon: React.FC; name: string; tip: string }[] = [
+    { id: "overview", Icon: IconChart, name: "总览", tip: "总览" },
+    { id: "traffic", Icon: IconGrid, name: "AI用量信息", tip: "AI用量信息（各 AI CLI 的本机用量）" },
+    { id: "logs", Icon: IconClip, name: "日志", tip: "日志" },
+    { id: "settings", Icon: IconGear, name: "设置", tip: "设置" },
   ];
 
   return (
@@ -139,11 +153,44 @@ export default function App() {
 
       <div style={{ flex: 1, display: "flex", minHeight: 0 }}>
         {/* Sidebar */}
-        <div style={{ width: 52, flexShrink: 0, borderRight: `1px solid ${t.railBorder}`, background: t.railBg, display: "flex", flexDirection: "column", alignItems: "center", padding: "14px 0", gap: 4, transition: "background-color .35s ease" }}>
+        {/* ★ 侧栏可折叠（用户 2026-08-16）。**默认折叠**，展开后每项带中文名。
+            宽度过渡 .18s；`prefers-reduced-motion` 下不过渡（媒体查询在 App.css 的 .cb-rail）。
+            展开态用 `alignItems: stretch` 让每项占满宽度 —— 图标居中、文字左对齐的行
+            如果宽度只包住内容，点击热区会缩到文字上，"点空白没反应"就是这么来的。 */}
+        <div className="cb-rail" style={{ width: navOpen ? 176 : 52, flexShrink: 0, borderRight: `1px solid ${t.railBorder}`, background: t.railBg, display: "flex", flexDirection: "column", alignItems: navOpen ? "stretch" : "center", padding: navOpen ? "14px 8px" : "14px 0", gap: 4, overflow: "hidden", transition: "width .18s ease, background-color .35s ease" }}>
           {sidebarItems.map((it) => (
-            <div key={it.id} onClick={() => setPage(it.id)} style={{ width: 34, height: 34, borderRadius: 9, display: "grid", placeItems: "center", cursor: "pointer", color: page === it.id ? t.accentText : t.muted, background: page === it.id ? t.accent : "transparent", transition: "background .2s, color .2s" }} title={it.tip}><it.Icon /></div>
+            <div key={it.id} onClick={() => setPage(it.id)}
+                 title={navOpen ? undefined : it.tip}
+                 style={{ height: 34, width: navOpen ? "100%" : 34, borderRadius: 9,
+                          display: "flex", alignItems: "center",
+                          justifyContent: navOpen ? "flex-start" : "center",
+                          gap: 10, padding: navOpen ? "0 10px" : 0, flexShrink: 0,
+                          cursor: "pointer", color: page === it.id ? t.accentText : t.muted,
+                          background: page === it.id ? t.accent : "transparent",
+                          transition: "background .2s, color .2s" }}>
+              <span style={{ display: "grid", placeItems: "center", flexShrink: 0 }}><it.Icon /></span>
+              {navOpen && (
+                <span style={{ fontSize: 12.5, fontWeight: 600, whiteSpace: "nowrap" }}>{it.name}</span>
+              )}
+            </div>
           ))}
-          <span style={{ marginTop: "auto", fontSize: 9, color: t.faint, fontFamily: "'JetBrains Mono'" }}>{ver ? ver.split(".").slice(0, 2).join(".") : ""}</span>
+            {/* 折叠开关钉在底部：它是外壳控件，不该混进上面那组「去哪一页」里。
+                折叠态下和导航项一样是 34×34 居中，避免出现第二种尺寸。 */}
+            <div onClick={() => { const n = !navOpen; setNavOpen(n); patchSettings({ navOpen: n }); }}
+                 title={navOpen ? "折叠侧栏" : "展开侧栏"}
+                 style={{ marginTop: "auto", height: 34, width: navOpen ? "100%" : 34,
+                          borderRadius: 9, display: "flex", alignItems: "center",
+                          justifyContent: navOpen ? "flex-start" : "center",
+                          gap: 10, padding: navOpen ? "0 10px" : 0, flexShrink: 0,
+                          cursor: "pointer", color: t.faint, transition: "color .2s" }}>
+              <span style={{ display: "grid", placeItems: "center", flexShrink: 0 }}>
+                <IconChevrons open={navOpen} />
+              </span>
+              {navOpen && <span style={{ fontSize: 11.5, whiteSpace: "nowrap" }}>折叠</span>}
+            </div>
+            <span style={{ fontSize: 9, color: t.faint, fontFamily: "'JetBrains Mono'",
+                           textAlign: navOpen ? "left" : "center", paddingLeft: navOpen ? 10 : 0,
+                           marginTop: 6, flexShrink: 0 }}>{ver ? ver.split(".").slice(0, 2).join(".") : ""}</span>
         </div>
 
         {/* Content */}

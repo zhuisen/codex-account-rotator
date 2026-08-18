@@ -3,9 +3,9 @@ import { type Theme, modelColor } from "../theme";
 import { costOf, fmtUSD, priceOf, isPriced } from "../rates";
 import StackedArea, { type Layer } from "../components/StackedArea";
 import Seg from "../components/Seg";
-import type { TrafficData, Range, CacheMode, Bucket } from "../traffic";
+import type { TrafficData, Range, CacheMode, Bucket, Coverage } from "../traffic";
 import { RANGES, rangeLabel, bucketsFor, sumBuckets, costOfBucket, savingOfBucket, fmtTok,
-         countsCacheRead, countsCacheWrite, countedClasses, mixParts, colorOf } from "../traffic";
+         countsCacheRead, countsCacheWrite, countedClasses, mixParts, colorOf, coveragePct, coverageNote } from "../traffic";
 import KpiStrip, { type Kpi, UP, DOWN } from "../components/KpiStrip";
 import { useIntro, introEnabled } from "../hooks/useIntro";
 import CacheChip from "../components/CacheChip";
@@ -15,7 +15,32 @@ const SRC: Record<string, string> = {
   claude: "~/.claude/projects/**/*.jsonl",
   codex: "~/.codex/sessions/**/rollout-*.jsonl",
   grok: "~/.grok/sessions/*/*/updates.jsonl",
+  // ★ 唯一一个**不是**该 CLI 自己落的盘的源:agy 什么都不记,这份账本是 `bin/agy` wrapper
+  //   从 `--output-format json` 抄下来的。所以它旁边永远有一枚覆盖率徽章。
+  agy: "traffic/agy-ledger/usage.jsonl（wrapper 记账）",
 };
+
+/** 采集不完整的平台的横幅。`coverage` 缺席 = 全量采集,**不渲染任何东西**。 */
+function CoverageBanner({ t, coverage }: {
+  t: Theme; coverage?: Coverage;
+}): React.ReactElement | null {
+  const pct = coveragePct(coverage);
+  if (pct == null || !coverage) return null;
+  return (
+    <div style={{ display: "flex", gap: 8, alignItems: "flex-start",
+                  border: `1px solid rgba(224,144,28,.35)`,
+                  background: t.isDark ? "rgba(224,144,28,.09)" : "rgba(224,144,28,.10)",
+                  borderRadius: 9, padding: "7px 10px", marginBottom: 10 }}>
+      <span style={{ fontFamily: "'JetBrains Mono'", fontSize: 9.5, fontWeight: 700, color: AMBER,
+                     whiteSpace: "nowrap", paddingTop: 1, letterSpacing: ".03em" }}>
+        覆盖 {coverage.covered}/{coverage.total}
+      </span>
+      <span style={{ fontSize: 10.5, lineHeight: 1.55, color: t.text2 }}>
+        {coverageNote(coverage)}
+      </span>
+    </div>
+  );
+}
 
 /** 平台详情(交接稿 §5–§8)。 */
 /**
@@ -242,6 +267,11 @@ export default function PlatformPage({ t, data, raw, cacheMode, pk, range, setRa
           <Seg opts={RANGES} cur={range} on={setRange} label={rangeLabel} t={t} />
         </div>
       </div>
+
+      {/* ★ 覆盖率提示放在 KPI **之前** —— 读者先看数字再看脚注，把「这个数不全」写进脚注
+          等于没写（前车之鉴：两条「利润被高估」的警告在 tooltip 里躺了几个月没人看见）。
+          只有带 coverage 字段的平台才渲染，其余平台一个像素都不多。 */}
+      <CoverageBanner t={t} coverage={data?.platforms[pk]?.coverage} />
 
       <KpiStrip t={t} items={kpis} intro={intro} />
 

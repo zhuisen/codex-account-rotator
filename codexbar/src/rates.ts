@@ -49,6 +49,34 @@ export const RATES: Record<string, Price> = {
   "gpt-5.5-pro":   { in: 30.0, cacheRead: 3.0,  out: 180.0, est: true,
                      note: "官方未列缓存价,按输入 10% 估" },
 
+  // ── Google Gemini（Antigravity/agy 跑的就是这些）· ai.google.dev/gemini-api/docs/pricing（2026-08-19 取）
+  //    ★ 官方明确「thinking tokens 计入 output」——与我们实测的 `thinking ⊆ output` 一致，
+  //      所以 output 直接用官方 out 价，**不要**再为 thinking 单列一档。
+  //    ★ High/Medium/Low 是推理档位不是不同模型，**同价**。
+  //    ⚠️ 两个会让这张表悄悄过期的地方：
+  //      ① 3.7/3.6 Flash 现在是**促销价**，2026-12-31 到期后翻倍（0.75→1.50 / 3.75→7.50）。
+  //      ② 全部 Gemini 价按 **≤200k 提示词**档。超过 200k，3.1 Pro 的输入 2→4、输出 12→18。
+  //         本机实测单次提示词约 17k，远未触线；长会话逼近 200k 时这里会低估一倍。
+  "gemini-3.1-pro-high":     { in: 2.0,  cacheRead: 0.20,  out: 12.0 },
+  "gemini-3.1-pro-low":      { in: 2.0,  cacheRead: 0.20,  out: 12.0 },
+  "gemini-3.7-flash-high":   { in: 0.75, cacheRead: 0.075, out: 3.75, note: "促销价,2026-12-31 后翻倍" },
+  "gemini-3.7-flash-medium": { in: 0.75, cacheRead: 0.075, out: 3.75, note: "促销价,2026-12-31 后翻倍" },
+  "gemini-3.7-flash-low":    { in: 0.75, cacheRead: 0.075, out: 3.75, note: "促销价,2026-12-31 后翻倍" },
+  "gemini-3.6-flash-high":   { in: 0.75, cacheRead: 0.075, out: 3.75, note: "促销价,2026-12-31 后翻倍" },
+  "gemini-3.6-flash-medium": { in: 0.75, cacheRead: 0.075, out: 3.75, note: "促销价,2026-12-31 后翻倍" },
+  "gemini-3.6-flash-low":    { in: 0.75, cacheRead: 0.075, out: 3.75, note: "促销价,2026-12-31 后翻倍" },
+  "gemini-3.5-flash-high":   { in: 1.5,  cacheRead: 0.15,  out: 9.0 },
+  "gemini-3.5-flash-medium": { in: 1.5,  cacheRead: 0.15,  out: 9.0 },
+  "gemini-3.5-flash-low":    { in: 1.5,  cacheRead: 0.15,  out: 9.0 },
+  "gemini-3.1-flash-lite":   { in: 0.25, cacheRead: 0.025, out: 1.5 },
+  // agy 还能跑别家的模型（`agy models` 里有 claude-*/gpt-oss-*）。token 全计在 Google 订阅上，
+  // 所以平台仍是 Antigravity；这里给的是「等效 API 成本」，按该模型在其**原厂**的牌价算。
+  // claude-sonnet-4-6 / claude-opus-4-6 上面 Claude 段已登记，此处只补缺的两个。
+  "claude-opus-4-6-thinking": { in: 5.0, cacheRead: 0.5, out: 25.0, cacheWrite: 6.25,
+                                est: true, note: "按 claude-opus-4-6 计" },
+  "gpt-oss-120b-medium":      { in: 0.1, cacheRead: 0.01, out: 0.5, est: true,
+                                note: "开源权重,无官方托管牌价;按同级开源模型粗估" },
+
   // ── Grok / xAI · docs.x.ai/docs/models（2026-08-15 取,<200k 档）
   //    ⚠️ 官方只列 Grok 4.5 / 4.6 / Build 0.1,**没有 `-build` 后缀的条目**。本机跑的
   //      `grok-4.5-build` / `grok-4.6-build` 究竟是「Grok 4.x 走 Build 界面」还是独立的
@@ -95,6 +123,17 @@ const FALLBACK: Record<string, Price> = {
   //   「真的没花钱」和「我不知道多少钱」显示成同一个值,是本项目明令禁止的那类静默降级。
   mimo:     { in: 0.435, cacheRead: 0.0036, out: 0.87, cacheWrite: 0, est: true },
   deepseek: { in: 1.32,  cacheRead: 0.044,  out: 3.96, est: true, note: "高峰价上界" },
+  // ★ agy 的兜底会被**大量**命中,不是边缘情况:`omc ask antigravity` 不传 `--model`
+  //   (实测 runtime-cli.cjs 只在 OMC_ANTIGRAVITY_DEFAULT_MODEL 有值时才传),而 agy 的响应
+  //   与本地文件里都查不到模型名 ⇒ 这类记录的 model 恒为 `unknown`。
+  //   取 **Gemini 3.1 Pro** 档:它既是 omc 的内置默认(`antigravityModel`),又是候选里最贵的,
+  //   所以是**上界**而非点估计 —— 同 deepseek「高峰价上界」的处理。
+  // ★ 取 **Gemini 3.7 Flash**,不是 3.1 Pro。2026-08-19 从 agy 自己的日志实测:未传 `--model` 时
+  //   `model_config_manager` 打的是 `label="Gemini 3.7 Flash (High)"` —— 这台机器的默认是 Flash。
+  //   我最初按「3.1 Pro 是 omc 的内置默认、且最贵，取上界」来兜底,那会让费用**高估 2.7 倍**;
+  //   「取上界」在这里是错的直觉:兜底要贴近**真实默认**,而不是贴近最坏情况。
+  //   wrapper 现在已能从日志回填真实模型,这个兜底只在日志被轮转/读不到时才生效。
+  agy:      { in: 0.75,  cacheRead: 0.075,  out: 3.75, est: true, note: "按 Gemini 3.7 Flash（本机默认）" },
 };
 
 export function priceOf(model: string, platform: string): Price {

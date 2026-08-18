@@ -25,6 +25,7 @@ import json
 import os
 import ssl
 import subprocess
+import shutil
 import sys
 import tempfile
 import time
@@ -1703,6 +1704,52 @@ def cmd_current(args):
 LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
 
 
+def agy_wrap_gate():
+    """★ agy 用量采集的 wrapper 还在不在 PATH 前面。-> {level, detail, lines}
+
+    agy 的 token 用量**只**出现在 `--print --output-format json` 的 stdout 里,本地零落盘
+    (2026-08-18 实测:123 个会话的 SQLite + transcript.jsonl + cli.log,结构化 token 字段零命中)。
+    `bin/agy` 靠排在 `~/.local/bin` 之前来截获它。
+
+    ⚠️ **这道闸的存在理由**:agy 自带 24h 自动更新(实测会话期间自己从 1.1.13 升到 1.1.14),
+    而 `.zshrc` 里那行 PATH 前置一旦被别的工具的安装脚本挤到后面,采集就**静默停止** ——
+    页面上 agy 的数字会停止增长,看起来像"最近没用 agy",而不是"采集断了"。
+    这类静默降级是本项目明令禁止的,所以给它一个会变红的检查。
+
+    只在**用户的 shell** 里跑才有意义:CodexBar 是 GUI 进程,拿不到 `.zshrc` 的 PATH,
+    在那边查 `which agy` 必然误报,所以这道闸挂在 CLI 而不是 scan.py。
+    """
+    try:
+        return _agy_wrap_gate_inner()
+    except Exception as e:
+        # ★ 一道体检闸绝不能打死它所在的命令。我在写这个函数时就漏了 `import shutil`,
+        #   结果 `health` 整条直接 traceback —— 一个用来发现问题的检查反而制造了更大的问题。
+        #   判定不了就说判定不了(unknown),不冒充 ok、也不冒充 warn。
+        return {"level": "unknown", "detail": f"{type(e).__name__}: {e}",
+                "lines": [f"?  agy 用量采集：检查本身失败（{type(e).__name__}），状态未知"]}
+
+
+def _agy_wrap_gate_inner():
+    want = (Path(__file__).resolve().parent / "bin" / "agy")
+    if not want.exists():
+        return {"level": "ok", "detail": "未启用 agy 采集",
+                "lines": []}          # 没装就是没装,不是故障
+    found = shutil.which("agy")
+    if not found:
+        return {"level": "warn", "detail": "PATH 里找不到 agy",
+                "lines": ["⚠️  agy 用量采集：PATH 里没有 agy，wrapper 形同虚设"]}
+    if Path(found).resolve() == want.resolve():
+        return {"level": "ok", "detail": f"agy 采集正常 ({found})",
+                "lines": [f"✓ agy 用量采集：wrapper 生效 ({found})"]}
+    return {"level": "warn", "detail": f"被绕过 -> {found}",
+            "lines": ["⚠️  agy 用量采集：**已失效** —— `which agy` 指向",
+                      f"      {found}",
+                      f"    而不是 {want}",
+                      "    ⇒ 从现在起 agy 的用量不再被记录（页面上会表现为「最近没用 agy」）。",
+                      "    修：确认 ~/.zshrc 里这行仍在最后、未被别的安装脚本挤到后面：",
+                      '      export PATH="$HOME/Projects/tools/codex-account-rotator/bin:$PATH"']}
+
+
 def proxy_env_gate():
     """★ 系统代理会不会黑洞掉发往本机代理的请求。-> {level, detail, lines}
 
@@ -1774,8 +1821,13 @@ def cmd_health(args):
     #   `if not slots: return` 之后会让空池时静默跳过，而那正是最需要它的场景之一。
     #   告警印在**最前面**（眼睛先落的地方）；正常时只在最后印一行，不挤占账号列表。
     gate = proxy_env_gate()
+    agate = agy_wrap_gate()
     if gate["level"] != "ok":
         for _l in gate["lines"]:
+            print(_l)
+        print()
+    if agate["level"] != "ok":
+        for _l in agate["lines"]:
             print(_l)
         print()
 
@@ -1784,6 +1836,9 @@ def cmd_health(args):
         print("no accounts")
         if gate["level"] == "ok":
             for _l in gate["lines"]:
+                print(_l)
+        if agate["level"] == "ok":
+            for _l in agate["lines"]:
                 print(_l)
         return
     online = "--local" not in args
@@ -1821,6 +1876,9 @@ def cmd_health(args):
 
     if gate["level"] == "ok":
         for _l in gate["lines"]:
+            print(_l)
+    if agate["level"] == "ok":
+        for _l in agate["lines"]:
             print(_l)
 
 

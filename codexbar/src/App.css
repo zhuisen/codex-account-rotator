@@ -33,3 +33,6 @@ body { background: #0e1117; font-family: 'Space Grotesk', system-ui, sans-serif;
 @keyframes cbWipe { from { clip-path: inset(0 100% 0 0); } to { clip-path: inset(0 0 0 0); } }
 .cb-wipe { animation: cbWipe .7s cubic-bezier(.22,.61,.36,1) both; }
 @media (prefers-reduced-motion: reduce) { .cb-wipe { animation: none; } }
+
+/* 侧栏折叠/展开的宽度过渡。系统里开了「减弱动态效果」就不过渡 —— 直接到位。 */
+@media (prefers-reduced-motion: reduce) { .cb-rail { transition: none !important; } }

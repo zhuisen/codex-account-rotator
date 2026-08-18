@@ -9,6 +9,20 @@ export interface ModelBucket {
 export interface Bucket extends ModelBucket {
   models: Record<string, ModelBucket>;
 }
+/**
+ * 采集完整度。**只有采集不完整的平台才有这个字段** —— 其余平台的数据是各家 CLI
+ * 自己落的盘,本来就是全量,平白挂一句免责声明只会稀释真正需要注意的那一条。
+ *
+ * 目前只有 Antigravity(agy):它自己不落用量,只有经 `bin/agy` wrapper 的 print 模式
+ * 会被记账,交互式会话一个字都进不来。
+ */
+export interface Coverage {
+  covered: number;
+  total: number;
+  unit: string;           // 目前恒为 "turn"
+  days: number;           // 算这个覆盖率用的窗口天数(= scan 的 --days，app 恒 90)
+  since: number | null;   // 账本最早一条的 epoch 秒
+}
 export interface Platform {
   name: string;
   /** 由 scan.py 的注册表下发。加平台只改 scan.py,前端自动跟上 */
@@ -16,6 +30,32 @@ export interface Platform {
   days: Record<string, Bucket>;   // 已按自然日窗口补零
   hours: Record<string, Bucket>;  // 今日 00 点到当前小时,已补零
   available: boolean;
+  coverage?: Coverage;
+}
+
+/** 覆盖率百分比(0~100)。分母为 0 时返回 null 而不是 0 —— 「没有分母」不是「覆盖 0%」。 */
+export function coveragePct(c: Coverage | undefined): number | null {
+  if (!c || !c.total) return null;
+  return (c.covered / c.total) * 100;
+}
+
+/**
+ * 覆盖率的完整说明。**单一真源** —— 卡片徽章与详情页都读它,不许各写一份:
+ * 这段话要解释的是「数字为什么偏小」,两处说法不一致比不说更糟。
+ */
+export function coverageNote(c: Coverage | undefined): string {
+  const pct = coveragePct(c);
+  if (pct == null || !c) return "";
+  const since = c.since
+    ? new Date(c.since * 1000).toLocaleDateString("zh-CN", { month: "2-digit", day: "2-digit" })
+    : null;
+  // ★ 窗口用 `c.days`（后端算这个比值时用的那个），**不是**用户当前选的日期档。
+  //   两者不是一回事：档位只改图表窗口，分母始终是扫描窗口。
+  // ★ 这里是纯文本，不经 Markdown 渲染 —— 写 `**下界**` 会原样显示出星号（实测截到过）。
+  return `Antigravity 自己不记录用量，只有经 wrapper 的 print 模式（omc ask / omc team）会被记账，`
+    + `交互式会话拿不到。近 ${c.days} 天覆盖 ${c.covered}/${c.total} 轮（${pct.toFixed(1)}%）`
+    + (since ? `，采集自 ${since} 起。` : "。")
+    + `所以这个数字是下界，不是 Antigravity 的全部消耗。`;
 }
 export interface TrafficData {
   platforms: Record<string, Platform>;

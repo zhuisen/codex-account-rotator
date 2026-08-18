@@ -1,0 +1,197 @@
+#!/usr/bin/env python3
+"""agy wrapper —— 只为把 token 用量落盘，其余一概不干预。
+
+★ 为什么需要它：agy 把用量**只**放在 `--output-format json` 的 stdout 里，本地零落盘
+  （2026-08-18 实测：123 个会话的 SQLite + transcript.jsonl + cli.log，结构化 token 字段全 0）。
+  云端也拿不到 —— `cloudcode-pa` 的 retrieveUserQuota 只回「剩余请求数」，不回 token。
+
+★ 为什么放在 PATH 更前面而不是替换 `~/.local/bin/agy`：
+  agy **自带自动更新**（`auto_check: true` / 24h；实测 2026-08-18 会话期间自己从 1.1.13 升到 1.1.14，
+  直接改写 `~/.local/bin/agy`）。wrapper 放那儿会被静默抹掉，而"静默停止采集"正是最坏的失败形态。
+  放在前面 + exec 真身，等于自动更新照常工作，wrapper 永远调到最新的二进制。
+
+★ 失败一律 fail-open：任何解析/落盘异常都不能影响 agy 的输出与退出码。
+  采集不到是小事，把用户的 agy 弄坏是大事。
+"""
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+REAL = Path(os.environ.get("AGY_REAL", str(Path.home() / ".local" / "bin" / "agy")))
+LEDGER_DIR = Path(os.environ.get(
+    "AGY_LEDGER_DIR",
+    str(Path(__file__).resolve().parent.parent / "traffic" / "agy-ledger")))
+# ★ 单文件,**不按月/按日分片**。用量是会话内累计值,解析器要按会话做差分;一旦分片,
+#   跨片的会话在新片里的第一条会被当成新链起点,整段累计被记到那一天。单文件从构造上消除这个问题。
+LEDGER = "usage.jsonl"
+
+# `--prompt` 是 `--print` 的别名；`-i` / `--prompt-interactive` **不是**（它进交互态，没有 JSON 输出）。
+PRINT_FLAGS = {"-p", "--print", "--prompt"}
+
+AGY_LOG_DIR = Path(os.environ.get("AGY_LOG_DIR")
+                   or (Path.home() / ".gemini" / "antigravity-cli" / "log"))
+_MODEL_FLAG = re.compile(r'Print mode: starting \([^)]*model="([^"]*)"')
+_MODEL_LABEL = re.compile(r'label="([^"]+)"')
+
+
+def effective_model(conv, started):
+    """本次运行**实际生效**的模型 -> 原始字符串,取不到返回 None。
+
+    ★ 为什么不能只看 `--model`：`omc ask antigravity` 根本不传它（`runtime-cli.cjs` 只在
+      `OMC_ANTIGRAVITY_DEFAULT_MODEL` 有值时才传），而 agy 的 JSON 输出、会话 SQLite、
+      transcript 里**都没有模型名**。只剩日志这一处：
+        printmode.go]  Print mode: starting (..., model="", ...)        ← 只回显命令行参数
+        model_config_manager.go] Propagating selected model override to backend: label="Gemini 3.7 Flash (High)"
+      后者才是真正生效的那个。**这台机器的默认是 3.7 Flash 不是 3.1 Pro**（2026-08-19 实测），
+      两者单价差 2.7 倍 —— 猜错会让费用整体高估。
+
+    ★ 按**会话 id** 定位日志文件，不是"取最新那份"：`omc team N:antigravity` 会并行起 N 个
+      agy 进程、各写各的日志，按 mtime 取最新必然张冠李戴。
+    ★ 同时用 `started` 卡住 mtime：`-c` 续接时旧日志里也有同一个 conv id。
+
+    返回**原始字符串**（可能是 id 也可能是显示名），归一交给 `scan.py` 的 `_agy_model` ——
+    两处各写一份归一规则，迟早在某个新型号上分叉。
+    """
+    try:
+        if not AGY_LOG_DIR.is_dir():
+            return None
+        for f in sorted(AGY_LOG_DIR.glob("cli-*.log"),
+                        key=lambda x: x.stat().st_mtime, reverse=True)[:12]:
+            try:
+                if f.stat().st_mtime < started - 2:
+                    continue
+                txt = f.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            if conv not in txt:
+                continue
+            m = _MODEL_FLAG.search(txt)
+            if m and m.group(1).strip():
+                return m.group(1).strip()          # 调用方显式指定的，优先
+            m = _MODEL_LABEL.search(txt)
+            if m:
+                return m.group(1).strip()          # agy 自己选的
+            return None
+    except Exception:
+        return None                                # 采集不到模型名 ≠ 让这次调用失败
+    return None
+
+
+def passthrough() -> None:
+    """原样交给真身。用 execv 而不是 subprocess —— 交互态要保住 TTY、信号和退出码。"""
+    os.execv(str(REAL), [str(REAL)] + sys.argv[1:])
+
+
+def arg_value(argv: list, name: str):
+    """取 `--name value` / `--name=value` 的值，取不到返回 None。"""
+    for i, a in enumerate(argv):
+        if a == name and i + 1 < len(argv):
+            return argv[i + 1]
+        if a.startswith(name + "="):
+            return a.split("=", 1)[1]
+    return None
+
+
+def record(payload: dict, model, started: float) -> None:
+    """把**累计**用量原样落一条。差分留给解析器算 —— 见下方口径说明。
+
+    ★★ agy 的 usage 是**会话内累计**，不是本轮增量（2026-08-18 三轮实测：
+       out 113 → 190 → 245 单调递增）。所以这里绝不能自作聪明地相减：
+       wrapper 只看得见自己这一次调用，减不出正确的增量（`--conversation` 可以跳回任意旧会话）。
+       差分必须在解析器里按 conv 分组、按 ts 排序后做。
+    """
+    u = payload.get("usage") or {}
+    if not isinstance(u, dict) or not u:
+        return
+    conv0 = payload.get("conversation_id") or ""
+    if not model and conv0:
+        model = effective_model(conv0, started)
+    rec = {
+        "ts": round(time.time(), 3),
+        "conv": payload.get("conversation_id") or "",
+        "status": payload.get("status") or "",
+        "model": model,
+        # 累计值，原样存。字段名沿用 agy 自己的，避免多一层易错的改名。
+        "input_tokens": int(u.get("input_tokens") or 0),
+        "output_tokens": int(u.get("output_tokens") or 0),
+        "thinking_tokens": int(u.get("thinking_tokens") or 0),
+        "cache_read_tokens": int(u.get("cache_read_tokens") or 0),
+        "total_tokens": int(u.get("total_tokens") or 0),
+        "num_turns": payload.get("num_turns"),
+        "dur": payload.get("duration_seconds"),
+        "wrap": 1,
+    }
+    if not rec["conv"]:
+        # 没有会话 id 就没法做差分，收下去只会污染。丢弃比记错好。
+        return
+    LEDGER_DIR.mkdir(parents=True, exist_ok=True)
+    line = (json.dumps(rec, ensure_ascii=False) + "\n").encode("utf-8")
+    # ★ 一次 os.write 的 O_APPEND 追加。`omc team N:antigravity` 会并行起 N 个 pane
+    #   同时写这一个文件;文本模式的 write 可能分多次系统调用,并发下会交错成半行。
+    #   单次 write 且长度远小于 PIPE_BUF(4096) 时,POSIX 保证追加原子。
+    fd = os.open(str(LEDGER_DIR / LEDGER), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    try:
+        os.write(fd, line)
+    finally:
+        os.close(fd)
+
+
+def main() -> None:
+    argv = sys.argv[1:]
+    if not REAL.exists():
+        sys.stderr.write(f"agy-wrap: 真身不存在: {REAL}\n")
+        sys.exit(127)
+
+    is_print = any(a in PRINT_FLAGS or a.startswith("--print=") or a.startswith("--prompt=")
+                   for a in argv)
+    fmt = arg_value(argv, "--output-format")
+
+    # 三种处置，界线是「会不会改变调用方看到的东西」：
+    #   交互态 / stream-json  → execv 放行。接管流式会把它变成缓冲，那是可见的行为改变。
+    #   print + json          → 截获、记账、把原始 JSON 原样回吐（一次性输出，零差异）。
+    #   print + text/缺省      → 截获、记账、把 response 还原成文本（调用方看到的与原来一致）。
+    if not is_print or fmt == "stream-json":
+        passthrough()
+    emit_raw = fmt == "json"
+
+    run_argv, i = [str(REAL)], 0
+    while i < len(argv):
+        a = argv[i]
+        if a == "--output-format":          # 换掉它的值
+            run_argv += ["--output-format", "json"]; i += 2; continue
+        if a.startswith("--output-format="):
+            run_argv.append("--output-format=json"); i += 1; continue
+        run_argv.append(a); i += 1
+    if fmt is None:
+        run_argv += ["--output-format", "json"]
+
+    # stderr 直通（进度、报错要实时可见）；只截 stdout。
+    started = time.time()
+    p = subprocess.run(run_argv, stdout=subprocess.PIPE)
+    out = p.stdout.decode("utf-8", errors="replace")
+
+    try:
+        payload = json.loads(out)
+    except Exception:
+        # 解析不了就原样吐出去 —— 绝不因为采集失败而吞掉 agy 的输出。
+        sys.stdout.write(out)
+        sys.exit(p.returncode)
+
+    try:
+        record(payload, arg_value(argv, "--model"), started)
+    except Exception as e:
+        sys.stderr.write(f"agy-wrap: 用量落盘失败（不影响本次调用）: {type(e).__name__}: {e}\n")
+
+    # 还原成调用方期待的形态。`response` 自带结尾换行，不要再补。
+    sys.stdout.write(out if emit_raw else (payload.get("response") or ""))
+    if payload.get("status") != "SUCCESS" and payload.get("error"):
+        sys.stderr.write(str(payload["error"]) + "\n")
+    sys.exit(p.returncode)
+
+
+if __name__ == "__main__":
+    main()

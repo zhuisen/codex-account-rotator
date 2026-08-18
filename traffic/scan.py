@@ -49,13 +49,21 @@ CLAUDE_ROOT = Path(os.environ.get("CLAUDE_CONFIG_DIR") or (HOME / ".claude")) / 
 CODEX_ROOT = Path(os.environ.get("CODEX_HOME") or (HOME / ".codex")) / "sessions"
 GROK_ROOT = Path(os.environ.get("GROK_HOME") or (HOME / ".grok")) / "sessions"
 KIMI_ROOT = Path(os.environ.get("KIMI_HOME") or (HOME / ".kimi-code")) / "sessions"
+# ★ agy 自己**什么都不落盘**(2026-08-18 实测:123 个会话的 SQLite + transcript.jsonl + cli.log,
+#   结构化 token 字段零命中;云端 cloudcode-pa 的 retrieveUserQuota 只回剩余请求数、不回 token)。
+#   这个目录里的账本是 `bin/agy` wrapper 从 `--output-format json` 的 stdout 抄下来的,
+#   **不是 agy 的原生产物** —— 所以只覆盖 print 模式,交互式会话永远不在里面。
+AGY_ROOT = Path(os.environ.get("AGY_LEDGER_DIR")
+                or (Path(__file__).resolve().parent / "agy-ledger"))
 CACHE = Path(__file__).resolve().parent.parent / ".traffic-cache.json"
 
 CACHE_V = 1
 # ★ 改任何 _scan_* 的解析逻辑(改变 rows 里存什么/怎么算)必须 +1,否则那些此生不再变 mtime 的文件
 #   会永远沿用旧结果,产出一份新旧混血、无法察觉的数据集。
-PARSER_V = 5          # +1 于 2026-08-12:codex 累计值去重;接入 OpenClaw 并按 AI 平台路由(row 多一位)
+PARSER_V = 7          # +1 于 2026-08-12:codex 累计值去重;接入 OpenClaw 并按 AI 平台路由(row 多一位)
                       # +2 于 2026-08-15:接入 Reasonix 与 DeepSeek Harness 两个宿主源
+                      # +3 于 2026-08-19:接入 Antigravity(agy);新增 `post` 钩子做跨文件会话差分
+                      # +4 于 2026-08-19:agy 模型名归一改了(各家 id 点/横线惯例 + Sonnet 例外)
 
 _DATED = re.compile(r"-\d{8}$")          # claude-haiku-4-5-20251001 -> claude-haiku-4-5
 
@@ -506,6 +514,168 @@ def _scan_dsh_file(path):
     return rows
 
 
+
+# ---------------------------------------------------------------- Antigravity (agy)
+
+_AGY_PAREN = re.compile(r"\s*\(([^)]+)\)\s*$")
+
+# agy **自己的命名不一致**,规则套不出来,只能列例外(判据是 `agy models` 的两列):
+#   Claude Opus 4.6 (Thinking) -> claude-opus-4-6-thinking   ← 档位进了 id
+#   Claude Sonnet 4.6 (Thinking) -> claude-sonnet-4-6        ← 档位没进 id
+# 不列的话 Sonnet 会归成 `claude-sonnet-4-6-thinking`,与 rates.ts 的键对不上 ⇒ 掉进
+# agy 兜底价(Flash),把 Sonnet 按 Flash 计。回归夹具在 tests/test_agy_model_names.py。
+_AGY_ALIAS = {"claude-sonnet-4-6-thinking": "claude-sonnet-4-6"}
+
+
+def _agy_model(raw):
+    """把 `--model` 的值归一成 `agy models` 左列那种 id。
+
+    omc 传的是**显示名**(`"Gemini 3.1 Pro (High)"`,见 runtime-cli.cjs 的
+    `antigravityModel`),而 `agy models` 左列是 `gemini-3.1-pro-high`。两种写法混进同一张图,
+    同一个模型会裂成两条。规则:括号里的档位并进尾巴,其余小写连字符化。
+    已经是 id 形态的(全小写无空格)原样返回。
+    """
+    if not isinstance(raw, str) or not raw.strip():
+        return "unknown"
+    v = raw.strip()
+    if v == v.lower() and " " not in v:
+        return v
+    m = _AGY_PAREN.search(v)
+    suffix = ""
+    if m:
+        suffix = "-" + m.group(1).strip().lower().replace(" ", "-")
+        v = _AGY_PAREN.sub("", v)
+    out = re.sub(r"[^a-z0-9.]+", "-", v.lower()).strip("-") + suffix
+    # ★ 各家 id 惯例不同,一条规则套不住(用 `agy models` 的两列做过全表校验):
+    #   Google 的版本号带**点** `gemini-3.7-flash-high`;Anthropic/OpenAI 一律**横线**
+    #   `claude-opus-4-6-thinking` / `gpt-oss-120b-medium`。
+    #   不区分的话 `Claude Opus 4.6 (Thinking)` 会归成 `claude-opus-4.6-thinking`,
+    #   与 `rates.ts` 的键对不上 ⇒ 掉进 agy 兜底价(Flash),把 Opus 按 Flash 计,差 6.7 倍。
+    out = out if out.startswith("gemini-") else out.replace(".", "-")
+    return _AGY_ALIAS.get(out, out)
+
+
+def _scan_agy_file(path):
+    """-> [(ts, conv, model, input_cum, cache_read_cum, output_cum)] —— **累计值,不是增量**。
+
+    ⚠️ 这个返回形状与其它 `_scan_*` **不同**,只给 `_agy_deltas` 消费(SOURCES 里 `post` 指着它)。
+    故意不返回标准 row:accounting 是会话内累计,单看一条算不出增量,提前折成标准形状必然记错。
+
+    口径(2026-08-18 实测,与线上 wire 逐项精确吻合,误差 0):
+        input_tokens      = Σ(promptTokenCount - cachedContentTokenCount)   ← 已扣掉缓存
+        cache_read_tokens = Σ cachedContentTokenCount
+        output_tokens     = Σ(candidatesTokenCount + thoughtsTokenCount)    ← thinking 已含在内
+        total_tokens      = input + output   ← ★**不含 cache_read**,别拿它当四类之和
+    ★ 所以 agy 属 **Claude/Kimi 族(各项互不相交)**,不是 codex/Grok 族 ——
+      **绝不能做 `input - cache_read` 的减法**,那会把已经扣过的再扣一次。
+    """
+    rows = []
+    try:
+        fh = open(path, encoding="utf-8", errors="replace")
+    except OSError:
+        return rows
+    with fh:
+        for line in fh:
+            if '"conv"' not in line:
+                continue
+            try:
+                o = json.loads(line)
+            except ValueError:
+                continue                      # 半行/破损:跳过这一条,不放弃整个文件
+            if not isinstance(o, dict):
+                continue
+            ts, conv = o.get("ts"), o.get("conv")
+            if not isinstance(ts, (int, float)) or not isinstance(conv, str) or not conv:
+                continue                      # 没有会话 id 就没法归链,收下去只会污染
+            rows.append((float(ts), conv, _agy_model(o.get("model")),
+                         _num(o, "input_tokens"), _num(o, "cache_read_tokens"),
+                         _num(o, "output_tokens")))
+    return rows
+
+
+def _agy_deltas(rows):
+    """累计值 -> 标准 row。按会话分组、按时间排序后相邻求差。
+
+    ★ 必须在**汇总完所有文件之后**做,不能在 `_scan_agy_file` 里做:`--conversation <id>`
+      可以跳回任意旧会话,一条记录的前一条不一定在同一个文件、也不一定挨着。
+    ★ 增量归到**本条的时间戳**,不是会话首条 —— 否则一个横跨三天的会话会把三天的量全堆到第一天。
+    """
+    by_conv = {}
+    for r in rows:
+        by_conv.setdefault(r[1], []).append(r)
+    out = []
+    for rs in by_conv.values():
+        rs.sort(key=lambda r: r[0])
+        p_in = p_cr = p_out = 0
+        for ts, _conv, model, c_in, c_cr, c_out in rs:
+            d_in, d_cr, d_out = c_in - p_in, c_cr - p_cr, c_out - p_out
+            if d_in < 0 or d_cr < 0 or d_out < 0:
+                # 累计值倒退 ⇒ 这不是同一条累计链(会话被重置、账本被截断、或换了机器)。
+                # 当作新链起点取绝对值。**绝不产出负 token** —— 负数会在堆叠图上画出不存在的事实。
+                d_in, d_cr, d_out = c_in, c_cr, c_out
+            p_in, p_cr, p_out = c_in, c_cr, c_out
+            if d_in or d_cr or d_out:
+                # 重复记录(增量全 0)在这里自然被丢掉,不需要另做去重。
+                out.append([int(ts), model, d_in, d_cr, 0, d_out])
+    return out
+
+
+# agy 的会话记录目录。**只用来算覆盖率**,不含任何 token —— agy 自己不落用量(见 AGY_ROOT)。
+AGY_BRAIN = Path(os.environ.get("AGY_BRAIN")
+                 or (HOME / ".gemini" / "antigravity-cli" / "brain"))
+
+
+def _agy_coverage(days, ledger_rows):
+    """-> {"covered", "total", "unit"} 或 None。
+
+    ★★ **这个函数是接入 agy 的前提条件,不是装饰。**
+    账本只覆盖 print 模式(`agy -p`),交互式会话一个字都进不来 —— 而页面上一个偏小的数字
+    会被读成「agy 用得少」,不会被读成「只统计了一部分」。本项目已经因为这类静默降级栽过多次,
+    所以宁可把覆盖率算出来摆在旁边,也不给一个看起来完整的数。
+
+    分母 = agy 自己 transcript 里的 `USER_INPUT` 条数(每条 = 用户发起的一轮)。
+    分子 = 账本记录条数(一次 print 调用 = 一轮)。
+    ⚠️ 两个已知偏差,都往「高估覆盖」方向,报告时别当精确值:
+      ① agy 若清理过旧会话,分母会偏小;
+      ② 交互式一轮里模型可能自己多跑几次请求,分母按「用户轮次」算不按请求算。
+    因此结果**钳在 100% 以内**,并且这是上界。
+    """
+    if not AGY_BRAIN.is_dir():
+        return None
+    cut = time.time() - days * 86400
+    total = 0
+    for f in AGY_BRAIN.glob("*/.system_generated/logs/transcript.jsonl"):
+        try:
+            fh = open(f, encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        with fh:
+            for line in fh:
+                if '"USER_INPUT"' not in line:
+                    continue
+                try:
+                    o = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(o, dict) or o.get("type") != "USER_INPUT":
+                    continue
+                ep = _iso_epoch(o.get("created_at") or "")
+                if ep is not None and ep >= cut:
+                    total += 1
+    covered = sum(1 for r in ledger_rows if r[0] >= cut)
+    if not total:
+        return None
+    # ★ `since` 必须一并给出去。wrapper 是 2026-08-19 才装的,而窗口是 90 天 ——
+    #   头几个月覆盖率必然很低(实测装好当天 1.4%),不给起始时间的话,这个数会被读成
+    #   「采集坏了」而不是「采集还没覆盖到那么早」。两者要能一眼分开。
+    since = min((r[0] for r in ledger_rows), default=None)
+    # ★ `days` 必须一起下发。覆盖率是按**扫描窗口**算的(app 恒取 90 天),而 UI 上还有一个
+    #   用户自选的日期档 —— 拿档位标签去描述这个数就是让标签说谎(实测截到:选 14d 时
+    #   横幅写「14d 内覆盖 2/146」,而 146 是 90 天的分母)。
+    return {"covered": min(covered, total), "total": total, "unit": "turn", "days": days,
+            "since": int(since) if since is not None else None}
+
+
 SOURCES = (
     {"key": "claude", "name": "Claude", "root": CLAUDE_ROOT, "color": "#E0784F",
      "glob": "**/*.jsonl",         "parse": _scan_claude_file, "dedup": True},
@@ -526,6 +696,12 @@ SOURCES = (
      "glob": "*.jsonl",               "parse": _scan_reasonix_file, "dedup": False, "host": True},
     {"key": "dsh", "name": "DeepSeek Harness", "root": DSH_ROOT, "color": "#8b8b8b",
      "glob": "**/session.jsonl.zstd", "parse": _scan_dsh_file, "dedup": False, "host": True},
+    # ★ agy 不是宿主源:它能跑 claude-*/gpt-oss-* 等别家模型,但**全部计在 Google 订阅上**,
+    #   所以平台恒为 Antigravity、模型名照实记。按模型名往 Claude 路由会把账记到错的平台。
+    # ★ `post` 是本源独有的钩子:累计值必须在汇总完所有文件之后才能差分(见 _agy_deltas)。
+    {"key": "agy", "name": "Antigravity", "root": AGY_ROOT, "color": "#4d9fff",
+     "glob": "usage.jsonl", "parse": _scan_agy_file, "dedup": False, "post": _agy_deltas,
+     "coverage": _agy_coverage},
 )
 
 SRC_META = {s["key"]: {"name": s["name"], "color": s["color"]} for s in SOURCES}
@@ -574,6 +750,7 @@ def scan(days=90, use_cache=True, only=None, exclude=None):
     scanned = reused = 0
     out = {}
     acc = {}            # 平台键 -> (days_b, hours_b);跨源累积
+    coverage = {}       # 源键 -> {covered,total,unit,since};只有采集不完整的源才有
     seen_roots = {}
     now_ts = time.time()
     localtime, strftime = time.localtime, time.strftime
@@ -614,7 +791,21 @@ def scan(days=90, use_cache=True, only=None, exclude=None):
                 elif isinstance(data, list):
                     seq.extend(data)
 
-        for row in (merged.values() if dedup else seq):
+        # ★ `post` 钩子:给「一条记录单看算不出结果、必须汇总完所有文件才能定」的源用。
+        #   目前只有 agy —— 它的 usage 是会话内累计值,差分要按会话跨文件做(见 _agy_deltas)。
+        #   放在这里而不是 parse 里,是因为 parse 的粒度是**单文件**,而缓存也按单文件存:
+        #   把差分做进 parse,换一个文件集合就会得到另一套增量,且缓存还会把错的固化下来。
+        rows_iter = merged.values() if dedup else seq
+        cov_fn = src.get("coverage")
+        if cov_fn is not None:
+            # 覆盖率用**差分前**的原始记录数:一次调用 = 一轮。差分后重复记录会被抹掉,
+            # 拿差分结果当分子会低估覆盖(把「记过但增量为 0」误判成「没记到」)。
+            coverage[key] = cov_fn(days, list(rows_iter))
+        post = src.get("post")
+        if post is not None:
+            rows_iter = post(list(rows_iter))
+
+        for row in rows_iter:
             ep, model, i, cr, cw, o = row[:6]
             # ★ row 可带第 7 位 = **平台键**。宿主型源(OpenClaw)靠它把每条记录路由到真正的
             #   AI 平台 —— 宿主自己不作为平台出现。普通源没这一位,就归自己。
@@ -652,9 +843,15 @@ def scan(days=90, use_cache=True, only=None, exclude=None):
         hours = {f"{today}T{h:02d}": (hours_b.get(f"{today}T{h:02d}") or _blank())
                  for h in range(cur_h + 1)}
         meta = SRC_META.get(pk) or ROUTED.get(pk) or {"name": pk, "color": None}
-        out[pk] = {"name": meta["name"], "color": meta.get("color"),
-                   "days": picked, "hours": hours,
-                   "available": seen_roots.get(pk, True)}
+        entry = {"name": meta["name"], "color": meta.get("color"),
+                 "days": picked, "hours": hours,
+                 "available": seen_roots.get(pk, True)}
+        # ★ 只有采集**不完整**的源才带 `coverage`。有它 = 这个平台的数字是部分的,UI 必须标出来;
+        #   没有它 = 数据是各家 CLI 自己落的盘,本来就是全量,不该平白多一句免责声明。
+        cov = coverage.get(pk)
+        if cov:
+            entry["coverage"] = cov
+        out[pk] = entry
 
     if use_cache and not (scanned == 0 and len(fresh) == len(cached)):
         _save_cache(fresh)

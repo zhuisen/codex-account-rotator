@@ -76,6 +76,74 @@
 
 ---
 
+### v0.11.2 — 接入 Antigravity(agy) + 侧栏可折叠 — 2026-08-19
+
+**新增**
+
+- **第 8 个数据源:Antigravity(agy)** —— 也是全库**唯一不是 CLI 自己落的盘**的源。
+  - **推翻 v0.8.0 时代的负面结论(见下)**:agy 本地确实零落盘,但 `agy -p --output-format json` 的
+    stdout **直接返回五类用量**。故加 `bin/agy` wrapper:截获 print 模式记账 → 把 `response` 原样吐回,
+    调用方零感知(实测 `omc ask antigravity` 的 artifact 仍是散文、零 JSON 泄漏)。
+    `omc ask` 与 `omc team N:antigravity` **都走 `-p`**,两条路径都覆盖;**交互式会话永远拿不到**。
+  - ★★ **口径与 codex/Grok 族相反,是本条最容易改错的地方**:usage 是**会话内累计**
+    (三轮实测 out 113→190→245 单调递增),且 `input_tokens` **已扣掉 cache_read**(Claude/Kimi 族)
+    ——**绝不能再做 `input - cache_read`**。与线上 wire 逐项精确吻合(误差 0):
+    `input=Σ(prompt−cached)` · `output=Σ(cand+thoughts)` · `total=input+output`。
+    **agy 自报的 `total_tokens` 不含 cache_read,少算 36%**,别拿它当四类之和。
+  - 差分在新的 `post` 钩子里做(`_agy_deltas`),**不在 parse 里**:parse 的粒度是单文件、缓存也按单文件存,
+    把差分做进 parse,换一个文件集合就得到另一套增量,且缓存会把错的固化下来。累计值倒退时取绝对值,
+    **绝不产出负 token**。账本单文件 + `O_APPEND` 单次 `os.write`(16 进程 ×40 条实测 640/640 无交错
+    —— `omc team` 会并行起 N 个 pane 写同一个文件)。
+  - **模型名从 agy 自己的日志回填**:`--model` 常常不传,而 JSON 输出/会话 SQLite/transcript 里都没有模型名;
+    只有 `cli-*.log` 的 `model_config_manager] Propagating selected model override to backend: label="…"`
+    是真正生效的那个。按**会话 id** 定位(不是 mtime —— `omc team` 并行写多份日志,按时间取必然张冠李戴)。
+  - **覆盖率显式显示**:平台卡片琥珀徽章 + 详情页横幅(放在 KPI **之前**,不是脚注 —— 读者先看数字)。
+    只有采集不完整的源才有 `coverage` 字段,其余平台一个像素都不多。窗口用后端下发的 `days`,
+    **不是**用户当前选的日期档(实测截到过「14d 内覆盖 2/146」而分母其实是 90 天的)。
+- **侧栏可展开/折叠**,默认折叠,展开带中文名(总览 / AI用量信息 / 日志 / 设置)。
+  选择记进 `codexbar_settings.navOpen` —— 每次启动都弹回默认的开关很烦人。
+  展开态用 `alignItems: stretch` 让每项占满宽度(只包内容的话点击热区会缩到文字上);
+  `title` 只在折叠态挂。
+- `codex-rotate health` 加 **`agy_wrap_gate`**:wrapper 被挤出 PATH 前列时**告警而不是静默停止采集**。
+  三态 ok/warn/unknown,变异测试过会变红;闸自身包了 try —— 我写它时漏了 `import shutil`,
+  直接把整个 `health` 打死了,一个用来发现问题的检查反而制造了更大的问题。
+- `rates.ts` 补 Gemini 官方牌价(ai.google.dev,2026-08-19 取)+ agy 兜底。
+  ⚠️ 3.7/3.6 Flash 现在是**促销价**,2026-12-31 后翻倍;全部按 **≤200k 提示词**档。
+- 回归闸 `tests/test_agy_model_names.py`:14 条真值来自 `agy models` 两列。
+  归一错**不报错**,只是悄悄换一档价 —— 各家 id 惯例不同(Google 带点、Anthropic/OpenAI 横线),
+  且 agy **自己命名不一致**(Opus 的 id 保留 `-thinking`、Sonnet 却丢掉),只能列例外。
+
+**修复**
+
+- **agy 兜底价原本高估 2.7 倍**:我按「3.1 Pro 是 omc 内置默认且最贵,取上界」兜底,
+  而日志实测本机默认是 **Gemini 3.7 Flash**($0.75/$3.75 vs $2.00/$12.00)。
+  ★ 教训:**兜底价要贴真实默认,不是贴最坏情况** ——「取上界」在阈值判断里对,在单价里是纯粹的错数。
+- 侧栏 `traffic` 那条 tip 写死「Claude / Codex / Grok」三家(实际 8 家);
+  `App.tsx` 里重复的 `localStorage.setItem("codexbar_settings", …)` 收敛进 `patchSettings()`。
+
+**调查结论(推翻 v0.8.0 的负面结论)**
+
+- v0.8.0 记的「Antigravity 本机拿不到用量」**只有前半对**。本次用更大样本复验:123 个会话 SQLite +
+  `transcript.jsonl` + `transcript_full.jsonl` + `cli.log`,结构化 token 字段**零命中** —— 这半仍然成立。
+  ⚠️ **朴素 grep `usageMetadata` 会假阳性**:唯一命中的是「问 agy 这个问题、它自己答案里那段 JSON 示例」,
+  自指。与查 Claude 额度那次同款,**别被 grep 的命中数骗到**。
+- **云端只有额度、没有 token**:`POST cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota` 实测 200,
+  回的是每模型**剩余请求数**(`tokenType` 恒 `REQUESTS`)+ 重置时间;`retrieveUserQuotaSummary` 裸调 403。
+  按 token 查历史,Google 没有这种 API。`countTokens` 是**重新推导不是记录**(分不出 cache_read),一并否掉。
+- **弃案:常驻 MITM 全覆盖。** 技术上可行且不难 —— 协议是 **HTTP/1.1 + JSON 不是 gRPC**
+  (全部 `POST /v1internal:*`,`streamGenerateContent?alt=sse` 响应里带 `usageMetadata`),
+  agy 认 `HTTPS_PROXY`/`SSL_CERT_FILE`、**无证书固定**。不做的理由:要解密 Google OAuth 凭证,
+  与「流量扫描器不碰凭证」的定位冲突,且补不回历史。
+  ⚠️ `SSL_CERT_FILE` 是**替换**根池不是追加,只指自签 CA 会让没被劫持的主机验不过。
+- **wrapper 不能替换 `~/.local/bin/agy`**:agy 自带 24h 自动更新(实测本次会话期间自己从 1.1.13 升到 1.1.14),
+  会把 wrapper 静默抹掉。放 PATH 更前面则两不相干 —— 自动更新照常,wrapper 永远 exec 最新二进制。
+
+**破坏性 / 需要手动一步**
+
+- 装 agy 采集需要在 `~/.zshrc` 末尾加一行 PATH 前置,见 `SETUP.md` §2.1。**不加则 Antigravity 那一家没有数据**,
+  其余七家不受影响。
+- `PARSER_V` 5 → 7,流量缓存作废,发版后第一次扫描走冷路径(~24s)。
+
 ### v0.11.1 — 入场动效做成开关 — 2026-08-16
 
 **新增**

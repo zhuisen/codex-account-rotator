@@ -40,3 +40,5 @@ codexbar/src/harness-entry.tsx
 # 换个名字才能让静态服务器读到它。生成的 harness*.html 内含脱敏夹具,也一并挡掉。
 codexbar/uishot/app/
 traffic/sources.local.json
+# agy 用量账本:运行期产物,含会话 id
+traffic/agy-ledger/
