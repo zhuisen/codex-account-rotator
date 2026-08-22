@@ -5,6 +5,7 @@ import type { TrafficData, CacheMode, PlatformPrefs } from "../traffic";
 import { applyCacheMode, applyPlatformPrefs } from "../traffic";
 import { useCacheMode } from "./useCacheMode";
 import { usePlatformPrefs } from "./usePlatformPrefs";
+import { getSettings } from "../pages/SettingsPage";
 
 /**
  * 数据在这个岁数内算新鲜。**挂载、心跳、托盘弹出共用同一个概念**,只是托盘弹出用更紧的阈值
@@ -14,6 +15,18 @@ import { usePlatformPrefs } from "./usePlatformPrefs";
  * 判定要重扫」—— 同一个"新鲜"两套标准,实测就是这么多扫了一次(2026-08-09)。
  */
 const FRESH_MS = 2 * 60 * 1000;
+
+/**
+ * 后台自动保鲜的总开关（设置页「后台自动刷新」，用户 2026-08-19）。
+ *
+ * ★ **每次 tick 现读,不在 effect 建立时读一次**。两个 webview 的 localStorage 不互通,
+ *   在 effect 里读就得再搭一套 Tauri 广播(同 `usePrivacy` 那套);现读则改完最多 30 秒生效,
+ *   零plumbing。这是本项目少数「轮询比广播更简单」的地方 —— 因为这里本来就有一个 30s 的节拍。
+ * ★ 它**只管心跳**。"进用量页"和"托盘弹出"两条触发点不受影响,否则关掉之后页面就再也不更新了。
+ */
+function autoRefreshEnabled(): boolean {
+  try { return getSettings().autoRefresh !== false; } catch { return true; }
+}
 /** 新鲜度检查的节拍。只是"到点看一眼岁数",不到期不扫,所以 30s 并不等于 30s 扫一次。 */
 const TICK_MS = 30 * 1000;
 
@@ -149,6 +162,26 @@ export function useTraffic(opts: { enabled?: boolean } = {}): {
   }, [scan]);
 
   /**
+   * ★ **重新进入用量页时补一次保鲜检查。**
+   *
+   * 不是冗余 —— 上面那个初始化 effect 被 `primed` **永久**锁住，而 `App.tsx` 用的是
+   * `useTraffic({ enabled: page === "traffic" })`：离开再回来时 `enabled` 重新为真，
+   * 但 `primed.current` 已经是 true，effect 直接 return。**所以第二次以后进这个页面根本不刷新。**
+   *
+   * 在"心跳永远开着"的年代这个洞被心跳兜住了，看不出来。一旦允许关掉心跳（用户 2026-08-19 的开关），
+   * 它就会变成「打开页面也不更新」——而那恰恰是用户明确要保留的行为。所以开关和这个补丁必须同批上。
+   *
+   * 只在**再次进入**时跑（`primed.current` 已为真）：首次进入由初始化 effect 负责，
+   * 两个都跑会在冷启动时多一次判断。`refreshIfStale` 本身只看岁数，不到期不扫。
+   */
+  const wasEnabled = useRef(false);
+  useEffect(() => {
+    const entering = enabled && !wasEnabled.current;
+    wasEnabled.current = enabled;
+    if (entering && primed.current) refreshIfStale();
+  }, [enabled, refreshIfStale]);
+
+  /**
    * ★ 界面开着时的自动保鲜。
    *
    * 没有它就会出现用户 2026-08-09 报的「过了几十分钟还没刷新」:菜单栏 webview **只在 app 启动时
@@ -163,6 +196,7 @@ export function useTraffic(opts: { enabled?: boolean } = {}): {
   useEffect(() => {
     if (!enabled) return;
     const id = setInterval(() => {
+      if (!autoRefreshEnabled()) return;
       if (document.visibilityState === "visible") refreshIfStale();
     }, TICK_MS);
     return () => { clearInterval(id); };

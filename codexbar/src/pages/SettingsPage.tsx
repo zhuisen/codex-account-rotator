@@ -41,6 +41,7 @@ interface Settings {
   trayStyle: TrayStyle;
   intro: boolean;
   navOpen: boolean;
+  autoRefresh: boolean;
 }
 
 const DEFAULTS: Settings = {
@@ -52,6 +53,8 @@ const DEFAULTS: Settings = {
   trayStyle: "full",         // 默认沿用现状,不动老用户的菜单栏
   intro: true,               // 入场动效默认开。关掉是**完全不播**,不是播快一点
   navOpen: false,            // 侧栏默认**折叠**(用户 2026-08-16 指定),展开后带中文名
+  autoRefresh: true,         // 后台自动保鲜默认**开**(现有行为)。关掉只停后台心跳,
+                             // 「打开页面/弹出托盘就刷新」照旧 —— 见 useTraffic 的 autoRefreshEnabled()
 };
 
 const KEY = "codexbar_settings";
@@ -170,6 +173,23 @@ export default function SettingsPage({ t }: { t: Theme }) {
         }}>
           <div style={{ width: 18, height: 18, borderRadius: 9, background: "#fff",
                         transform: s.intro ? "translateX(16px)" : "translateX(0)", transition: "transform .2s" }} />
+        </div>
+      </Row>
+
+      {/* ★ 后台自动刷新开关（用户 2026-08-19）。**只管后台心跳这一个触发点** ——
+          「进入用量页」与「弹出托盘」两条照常刷新，所以关掉不会得到一个再也不更新的页面。
+          关掉的价值是「别在我读数的时候把地板抽走」：每 2 分钟数据静默换一批，正在看的数字会跳，
+          跨午夜时整张图还会因为数据集身份变了而重挂。
+          ⚠️ 与它配套的是「上次刷新」旁边的分级陈旧提示 —— 没有那个，这就成了一个
+          能静默显示旧数字的开关，正是本项目一直在防的那类东西。 */}
+      <Row label="后台自动刷新"
+           desc="界面开着时每 2 分钟在后台重扫一次本机 transcript。关掉后只在「进入用量页 / 弹出菜单栏 / 点 ↻」时更新——数据变旧时「上次刷新」旁会显示已过去多久，超过 30 分钟转琥珀。">
+        <div onClick={() => update({ autoRefresh: !s.autoRefresh })} style={{
+          width: 38, height: 22, borderRadius: 11, padding: 2, cursor: "pointer", flexShrink: 0,
+          background: s.autoRefresh ? t.accent : t.barTrack, transition: "background .2s",
+        }}>
+          <div style={{ width: 18, height: 18, borderRadius: 9, background: "#fff",
+                        transform: s.autoRefresh ? "translateX(16px)" : "translateX(0)", transition: "transform .2s" }} />
         </div>
       </Row>
 

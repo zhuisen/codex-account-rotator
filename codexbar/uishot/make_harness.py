@@ -37,6 +37,8 @@ STUB = """
     // `?intro=off` 关掉入场动效(设置页那个开关)。默认开 —— 与真实默认值一致。
     localStorage.setItem('codexbar_settings', JSON.stringify({
       dockVisible: false, intro: p.get('intro') !== 'off',
+      // `?autorefresh=off` 关掉后台心跳(设置页那个开关)。默认开 —— 与真实默认值一致。
+      autoRefresh: p.get('autorefresh') !== 'off',
       // `?nav=open` 展开侧栏。默认折叠 —— 与真实默认值一致。
       navOpen: p.get('rail') === 'open',
     }));
@@ -89,7 +91,12 @@ STUB = """
     });
   }
 
+  // ★ IPC 调用计数。用来回答「这个操作到底有没有触发扫描」——`run_traffic` 是唯一会真起
+  //   python 的那条,页面上完全看不出来,只能数。配 `--virtual-time-budget` 拉长虚拟时间,
+  //   可以把 30s 的心跳压缩到秒级验证。
+  var ipc = {};
   function invoke(cmd, args) {
+    ipc[cmd] = (ipc[cmd] || 0) + 1;
     args = args || {};
     switch (cmd) {
       case 'plugin:event|listen':
@@ -219,6 +226,9 @@ STUB = """
         errors: errors.slice(0, 4),
         unknownCmds: unknown.filter(function (v, i, a) { return a.indexOf(v) === i; }),
         clicks: clicks,
+        // 只报关心的两个,别把 plugin:event|* 的噪音带进来
+        ipc: { run_traffic: ipc['run_traffic'] || 0,
+               read_traffic_snapshot: ipc['read_traffic_snapshot'] || 0 },
         // 字体探针:app 的字体是本地 woff2,没加载上会静默回落到系统 sans —— 截图上看不出来
         fonts: {
           mono: document.fonts.check('12px "JetBrains Mono"'),
@@ -239,7 +249,11 @@ STUB = """
         }),
         text: (document.body.innerText || '').replace(/\\s+/g, ' ').slice(0, 700),
       });
-    }, 2200);
+    // ★ 探针是**一次性**的:到点写一次 title 就不再更新。默认 2200ms 足够等首屏+入场动效,
+    //   但验**定时器驱动**的东西(30s 心跳)时必须调大,否则观测窗口根本没到 —— 我就因此
+    //   量出「开关开/关都是 1 次扫描」,差点把"没测到"当成"闸没生效"。
+    //   配 `--virtual-time-budget` 一起用,虚拟时间下 150s 只要几秒真实时间。
+    }, parseInt(p.get('probe_ms') || '2200', 10));
   });
 })();
 </script>

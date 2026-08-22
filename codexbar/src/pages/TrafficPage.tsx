@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { type Theme, modelColor } from "../theme";
 import { fmtUSD } from "../rates";
 import StackedArea, { type Layer } from "../components/StackedArea";
@@ -178,6 +178,7 @@ export default function TrafficPage({ t, data, raw, cacheMode, prefs, range, set
                            transition: "color .15s" }}>
               <IconRefresh spin={busy} />
               上次刷新 {new Date(data.generated_at * 1000).toTimeString().slice(0, 5)}
+              <StaleHint t={t} generatedAt={data.generated_at} />
             </span>
           )}
           <Seg opts={RANGES} cur={range} on={setRange} label={rangeLabel} t={t} />
@@ -335,6 +336,33 @@ function CoverageBadge({ t, coverage }: {
                    color: AMBER, background: t.isDark ? "rgba(224,144,28,.14)" : "rgba(224,144,28,.12)",
                    whiteSpace: "nowrap", flexShrink: 0 }}>
       覆盖 {pct < 1 ? "<1" : pct.toFixed(0)}%
+    </span>
+  );
+}
+
+/**
+ * 数据有多旧。**关掉「后台自动刷新」后这是唯一能看出数据陈旧的地方** ——
+ * 没有它，这个开关就成了「一个能静默显示旧数字的开关」，正是本项目反复在防的那类东西。
+ *
+ * 分级而不是一见旧就报警（长亮的灯会被训练成看不见）：
+ *   < 4 分钟   什么都不显示（自动刷新开着时的常态，别加噪音）
+ *   4~30 分钟  灰字补一句「N 分钟前」——是信息不是警告
+ *   > 30 分钟  转琥珀（这时候你多半已经忘了自己关过自动刷新）
+ * 用**分钟数**而不是只染色：颜色只说「有问题」，数字才说「多旧」。
+ */
+function StaleHint({ t, generatedAt }: { t: Theme; generatedAt: number }): React.ReactElement | null {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    // 30s 一跳，与 useTraffic 的节拍同频；只更新这一个小标签，不触发任何扫描。
+    const id = setInterval(() => setNow(Date.now()), 30_000);
+    return () => { clearInterval(id); };
+  }, []);
+  const mins = Math.floor((now - generatedAt * 1000) / 60_000);
+  if (mins < 4) return null;
+  const hrs = Math.floor(mins / 60);
+  return (
+    <span style={{ color: mins > 30 ? AMBER : t.faint, fontWeight: mins > 30 ? 700 : 400 }}>
+      · {hrs >= 1 ? `${hrs} 小时前` : `${mins} 分钟前`}
     </span>
   );
 }

@@ -32,6 +32,7 @@
   本地午夜落在整点小时中间,会把两天折叠成一天。
 """
 
+import hashlib
 import json
 import os
 import re
@@ -60,10 +61,11 @@ CACHE = Path(__file__).resolve().parent.parent / ".traffic-cache.json"
 CACHE_V = 1
 # ★ 改任何 _scan_* 的解析逻辑(改变 rows 里存什么/怎么算)必须 +1,否则那些此生不再变 mtime 的文件
 #   会永远沿用旧结果,产出一份新旧混血、无法察觉的数据集。
-PARSER_V = 7          # +1 于 2026-08-12:codex 累计值去重;接入 OpenClaw 并按 AI 平台路由(row 多一位)
+PARSER_V = 8          # +1 于 2026-08-12:codex 累计值去重;接入 OpenClaw 并按 AI 平台路由(row 多一位)
                       # +2 于 2026-08-15:接入 Reasonix 与 DeepSeek Harness 两个宿主源
                       # +3 于 2026-08-19:接入 Antigravity(agy);新增 `post` 钩子做跨文件会话差分
                       # +4 于 2026-08-19:agy 模型名归一改了(各家 id 点/横线惯例 + Sonnet 例外)
+                      # +5 于 2026-08-22:Claude 走增量解析(缓存多存 off/anchors 两个字段)
 
 _DATED = re.compile(r"-\d{8}$")          # claude-haiku-4-5-20251001 -> claude-haiku-4-5
 
@@ -121,44 +123,55 @@ def _num(d, key):
 
 # ---------------------------------------------------------------- 各平台解析
 
-def _scan_claude_file(path):
-    """-> {message_id: row}。用 dict 是因为 Claude **必须**全局按 message.id 去重。"""
+def _scan_claude_lines(lines):
+    """-> {message_id: row}。**逐行无状态** —— 这是它能做增量解析的前提。
+
+    ★ 拆出这一层是为了让增量路径能只喂「新追加的那几行」进来。
+      任何带跨行状态的解析器都不能这么用:`_scan_codex_file` 有 `cur`(当前模型,来自更早的
+      `turn_context` 行)和 `seen_cum`(文件内去重集),只喂尾部会把模型归错、把重复放行。
+      所以 `SOURCES` 里的 `lines` 是**逐个源显式登记**的,不是默认能力。
+    """
     rows = {}
+    for line in lines:
+        if '"usage"' not in line:          # 预过滤:绝大多数行是 user/attachment/system
+            continue
+        try:
+            o = json.loads(line)
+        except ValueError:
+            continue
+        # 逐层 isinstance,不能用 `or {}` —— 那只挡 None/假值,挡不住非 dict 的真值,
+        # 一行 {"message":"unexpected"} 就能 AttributeError 打死整次扫描。
+        if not isinstance(o, dict) or o.get("type") != "assistant":
+            continue
+        m = o.get("message")
+        if not isinstance(m, dict):
+            continue
+        u, mid, ts = m.get("usage"), m.get("id"), o.get("timestamp")
+        if not isinstance(u, dict) or not isinstance(mid, str) or not isinstance(ts, str):
+            continue
+        i = _num(u, "input_tokens")                    # Anthropic:本就只是未命中部分
+        cr = _num(u, "cache_read_input_tokens")
+        cw = _num(u, "cache_creation_input_tokens")
+        out = _num(u, "output_tokens")
+        if not (i or cr or cw or out):
+            continue                                   # `<synthetic>` 等本地占位,四项全 0
+        ep = _iso_epoch(ts)
+        if ep is None:
+            continue
+        model = m.get("model")
+        rows[mid] = [ep, _DATED.sub("", model if isinstance(model, str) else "unknown"),
+                     i, cr, cw, out]
+    return rows
+
+
+def _scan_claude_file(path):
+    """-> {message_id: row}。整文件解析(冷路径/守卫失败时的回退)。"""
     try:
         fh = open(path, encoding="utf-8", errors="replace")
     except OSError:
-        return rows
+        return {}
     with fh:
-        for line in fh:
-            if '"usage"' not in line:          # 预过滤:绝大多数行是 user/attachment/system
-                continue
-            try:
-                o = json.loads(line)
-            except ValueError:
-                continue
-            # 逐层 isinstance,不能用 `or {}` —— 那只挡 None/假值,挡不住非 dict 的真值,
-            # 一行 {"message":"unexpected"} 就能 AttributeError 打死整次扫描。
-            if not isinstance(o, dict) or o.get("type") != "assistant":
-                continue
-            m = o.get("message")
-            if not isinstance(m, dict):
-                continue
-            u, mid, ts = m.get("usage"), m.get("id"), o.get("timestamp")
-            if not isinstance(u, dict) or not isinstance(mid, str) or not isinstance(ts, str):
-                continue
-            i = _num(u, "input_tokens")                    # Anthropic:本就只是未命中部分
-            cr = _num(u, "cache_read_input_tokens")
-            cw = _num(u, "cache_creation_input_tokens")
-            out = _num(u, "output_tokens")
-            if not (i or cr or cw or out):
-                continue                                   # `<synthetic>` 等本地占位,四项全 0
-            ep = _iso_epoch(ts)
-            if ep is None:
-                continue
-            model = m.get("model")
-            rows[mid] = [ep, _DATED.sub("", model if isinstance(model, str) else "unknown"),
-                         i, cr, cw, out]
-    return rows
+        return _scan_claude_lines(fh)
 
 
 def _scan_codex_file(path):
@@ -676,9 +689,125 @@ def _agy_coverage(days, ledger_rows):
             "since": int(since) if since is not None else None}
 
 
+# ---------------------------------------------------------------- 增量解析
+
+_INCR_WIN = 1 << 16          # 守卫窗口 64 KiB:够抓住改写,又不至于把"省下的读盘"再花回去
+
+
+def _sha(b):
+    return hashlib.sha256(b).hexdigest()[:24]
+
+
+def _incr_anchors(fh, off):
+    """守卫锚点 -> [头部哈希, off 之前那段的哈希]。
+
+    **两个都要**,各抓一种改写形态:
+      · 头 64KB —— 整个文件被换成另一个(新会话复用同名文件、compact 重写)
+      · off 前 64KB —— 我们**已经消费过**的区间被原地改动(fork/resume 回写历史)
+    只抓头部会漏掉第二种,而第二种恰恰是最危险的:它不改变文件长度,增量路径会若无其事地
+    接着往后读,把改过的历史永久留在缓存里,且**没有任何症状**。
+
+    ★★ **两个锚点都必须限制在 `[0, off)` 之内**,即只覆盖我们**已经消费过**的区间。
+    那一段按定义是稳定的,追加改不到它。若头部读成固定 64KB,当文件本身还不到 64KB 时
+    就会把**新追加的内容也读进"头部"** ⇒ 哈希必变 ⇒ 每次都退回全量,增量永远不生效。
+    真机上看不出来(活跃 transcript 都是 100MB+,头 64KB 远在已消费区间内),
+    是小夹具的单元测试把它逼出来的 —— 用真数据测这个改动会一路绿灯。
+    """
+    fh.seek(0)
+    head = fh.read(min(_INCR_WIN, off))
+    lo = max(0, off - _INCR_WIN)
+    fh.seek(lo)
+    return [_sha(head), _sha(fh.read(off - lo))]
+
+
+def _last_nl_end(fh, size):
+    """最后一个**完整**行的结束偏移(最后一个 `\n` 之后)。没有换行返回 0。
+
+    ★ JSONL 是边写边读的,随时可能读到写了一半的行。把半行算进已消费偏移,
+      下次就从它后面开始读 —— **那条记录永久丢失**,而总量只是小一点点,看不出来。
+    """
+    pos = size
+    while pos > 0:
+        lo = max(0, pos - _INCR_WIN)
+        fh.seek(lo)
+        buf = fh.read(pos - lo)
+        i = buf.rfind(b"\n")
+        if i >= 0:
+            return lo + i + 1
+        pos = lo
+    return 0
+
+
+def _incr_try(path, size, hit, lines_fn):
+    """只解析追加的那一段。-> (data, off, anchors);拿不准一律返回 None = 退回全量重解析。
+
+    ★★ **拿不准一律退回全量 —— 最坏等于改动前,不会更差。**
+    这条性质是整个改动敢上线的唯一理由:增量是纯优化,不承担正确性。
+
+    真正起作用的守卫**只有锚点比对那一道**(见 `_incr_anchors`)。
+    ⚠️ 我原本写的是「三道独立守卫」,**变异测试推翻了这个说法**:把「文件变短」那道拆掉,
+      截断用例照样红 —— 因为文件变短时,`[off-64KB, off)` 那段读不满,哈希必然对不上。
+      所以「文件变短」是**快速路径 + 防负数读**(`size-off` 为负时 `read(-1)` 会一路读到 EOF),
+      不是一道独立的安全性质。留着它有价值,但别把它当成第二重保险。
+    """
+    off = hit.get("off")
+    prev = hit.get("r")
+    anc = hit.get("a")
+    if not isinstance(off, int) or off < 0 or not isinstance(anc, list) or len(anc) != 2:
+        return None                       # 老缓存没有这些字段
+    if size < off:
+        return None                       # 快速路径:文件变短。真正拦住它的是下面的锚点
+    try:
+        with open(path, "rb") as fh:
+            if _incr_anchors(fh, off) != anc:
+                return None               # ★ 唯一真正的守卫:头部或已消费区间被改写
+            fh.seek(off)
+            chunk = fh.read(size - off)
+            if not chunk:
+                # 长度没变(或只多了空字节)。**直接沿用旧结果**,连解析都省掉 ——
+                # mtime 变了但内容没变是常态(编辑器 touch、rsync)。
+                return prev, off, anc
+            cut = chunk.rfind(b"\n")
+            if cut < 0:
+                return prev, off, anc     # 追加的还不足一整行,等下次
+            consumed = cut + 1
+            text = chunk[:consumed].decode("utf-8", errors="replace")
+            new_off = off + consumed
+            fresh_rows = lines_fn(text.splitlines())
+            fh.seek(0)
+            new_anc = _incr_anchors(fh, new_off)
+    except OSError:
+        return None
+    # 合并。dict 形状(按 id 去重的源)用 update;list 形状直接拼接。
+    if isinstance(prev, dict):
+        merged = dict(prev)
+        merged.update(fresh_rows if isinstance(fresh_rows, dict) else {})
+    elif isinstance(prev, list):
+        merged = prev + (fresh_rows if isinstance(fresh_rows, list) else [])
+    else:
+        return None
+    return merged, new_off, new_anc
+
+
+def _full_off_anchors(path, size):
+    """整文件解析之后记下 (off, anchors)。off 取**最后一个完整行**之后,不是文件尾。"""
+    try:
+        with open(path, "rb") as fh:
+            off = _last_nl_end(fh, size)
+            return off, _incr_anchors(fh, off)
+    except OSError:
+        return None, None
+
+
 SOURCES = (
+    # ★ `lines` = 该源可做**增量解析**(只解析追加的部分)。**逐个源显式登记,不是默认能力**:
+    #   codex 的解析器带跨行状态(`cur` 模型来自更早的 turn_context 行、`seen_cum` 是文件内去重集),
+    #   reasonix/dsh 要整文件解压 —— 这三个喂尾部会算错。
+    #   grok/kimi/openclaw/agy 逐行无状态、技术上可加,但它们近 24h 的变动量合计只占 3%,
+    #   为 3% 再改四个解析器是拿风险换不了什么。Claude 一家占 94%(实测 744MB/795MB)。
     {"key": "claude", "name": "Claude", "root": CLAUDE_ROOT, "color": "#E0784F",
-     "glob": "**/*.jsonl",         "parse": _scan_claude_file, "dedup": True},
+     "glob": "**/*.jsonl",         "parse": _scan_claude_file, "dedup": True,
+     "lines": _scan_claude_lines},
     {"key": "codex",  "name": "Codex",  "root": CODEX_ROOT,  "color": "#2dd4bf",
      "glob": "**/rollout-*.jsonl", "parse": _scan_codex_file,  "dedup": False},
     {"key": "grok",   "name": "Grok",   "root": GROK_ROOT,   "color": "#8b7cf6",
@@ -747,7 +876,7 @@ def scan(days=90, use_cache=True, only=None, exclude=None):
     cached = _load_cache() if use_cache else {}
     cut = time.time() - max(days, 90) * 86400
     fresh = {}
-    scanned = reused = 0
+    scanned = reused = incr = 0
     out = {}
     acc = {}            # 平台键 -> (days_b, hours_b);跨源累积
     coverage = {}       # 源键 -> {covered,total,unit,since};只有采集不完整的源才有
@@ -762,6 +891,7 @@ def scan(days=90, use_cache=True, only=None, exclude=None):
     for src in _enabled_sources(only, exclude):
         key, name, root = src["key"], src["name"], src["root"]
         pattern, parse, dedup = src["glob"], src["parse"], src["dedup"]
+        lines_fn = src.get("lines")      # 非 None = 该源可增量解析(见 SOURCES 注释)
         merged, seq = {}, []
         if root.is_dir():
             for f in sorted(root.rglob(pattern) if "**" in pattern else root.glob(pattern)):
@@ -775,10 +905,25 @@ def scan(days=90, use_cache=True, only=None, exclude=None):
                 sig = [int(st.st_mtime), st.st_size]
                 hit = cached.get(ck)
                 if hit and hit.get("sig") == sig:
+                    # 文件一个字节都没变:连守卫都不用查,直接沿用。`off`/`a` 原样带走,
+                    # 否则下次它就退化成"没有增量信息"而被整文件重解析。
                     data = hit.get("r"); reused += 1
+                    fresh[ck] = {"sig": sig, "r": data,
+                                 "off": hit.get("off"), "a": hit.get("a")}
                 else:
-                    data = parse(f); scanned += 1
-                fresh[ck] = {"sig": sig, "r": data}
+                    # ★ 增量优先,拿不准就退回全量。**增量是纯优化,不承担正确性** ——
+                    #   守卫任何一道不过 `_incr_try` 就返回 None,行为与改动前完全一致。
+                    got = None
+                    if lines_fn is not None and hit is not None:
+                        got = _incr_try(f, st.st_size, hit, lines_fn)
+                    if got is not None:
+                        data, off, anc = got
+                        incr += 1
+                    else:
+                        data = parse(f); scanned += 1
+                        off, anc = (_full_off_anchors(f, st.st_size)
+                                    if lines_fn is not None else (None, None))
+                    fresh[ck] = {"sig": sig, "r": data, "off": off, "a": anc}
                 if dedup:
                     if isinstance(data, dict):
                         # 全局按 id 合并。冲突取 token 总量大者而非后来者覆盖 —— 实测跨文件重复里
@@ -853,12 +998,15 @@ def scan(days=90, use_cache=True, only=None, exclude=None):
             entry["coverage"] = cov
         out[pk] = entry
 
-    if use_cache and not (scanned == 0 and len(fresh) == len(cached)):
+    # ★ 增量也算「有变更」—— 它推进了 `off`/`a`,不落盘的话下次又从旧偏移开始,
+    #   等于每次都白算一遍(症状:incr 一直是 1,永远省不下来)。
+    if use_cache and not (scanned == 0 and incr == 0 and len(fresh) == len(cached)):
         _save_cache(fresh)
     # ★ 把"这一次实际启用了哪些源"记进结果。快照是会被落盘复用的成品,不记这个的话,
     #   一旦某次扫描少了一家(临时 --exclude、sources.local.json 没删干净、根目录暂时不可读),
     #   事后完全无法判断是"当时被停用了"还是"解析器坏了"—— 2026-08-09 就吃过一次这个哑巴亏。
-    return out, {"scanned": scanned, "reused": reused, "files": scanned + reused,
+    return out, {"scanned": scanned, "reused": reused, "incr": incr,
+                 "files": scanned + reused + incr,
                  "enabled": [s["key"] for s in _enabled_sources(only, exclude)],
                  "registered": [s["key"] for s in SOURCES]}
 
