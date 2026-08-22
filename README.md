@@ -76,7 +76,7 @@ clone 到哪个目录都行 —— `deploy.sh` 会把仓库路径烧进二进制
 | `proxy/auth-token` | codex `auth.command` 占位 token(代理会覆盖) |
 | `proxy/test-home/config.toml` | 隔离测试用 CODEX_HOME(非日常) |
 | `proxy/README.md` | 代理层细节文档 |
-| `.traffic-cache.json`(gitignored) | `traffic/scan.py` 的**逐文件增量缓存**(~10MB,按 `(mtime,size)` 命中)。冷 ~23s → 热 ~0.8s 靠它。额外存 `off`+锚点哈希，Claude 据此**只解析追加的部分**。删了只是重扫一次,不丢数据 |
+| `.traffic-cache.json`(gitignored) | `traffic/scan.py` 的**逐文件增量缓存**(~14MB,按 `(mtime,size)` 命中)。冷 ~23s → 热 ~0.8s 靠它。额外存 `off`+锚点哈希，Claude 据此**只解析追加的部分**。删了只是重扫一次,不丢数据 |
 | `.traffic-latest.json`(gitignored) | 最近一次扫描的**成品快照**(~91KB)。两个 webview 都先读它再后台重扫,所以进页面/点托盘不再等 1~3 秒。由 `run_traffic` 原子写入(`.tmp<pid>` → `rename`) |
 | `traffic/sources.local.json`(gitignored) | 本机停用哪些平台:`{"disabled": ["grok"]}`。等价 CLI:`--exclude grok` / `--only kimi` |
 | `traffic/scan.py` | **多 AI 流量总览扫描器**(`[--days N] [--json] [--no-cache]`)。读 Claude / Codex / Grok / Kimi / Antigravity 五家 + OpenClaw / Reasonix / DeepSeek Harness 三个宿主源(按模型名回流各家)（平台注册表在文件里，**加一家 = 写个解析器 + 加一行**，前端自动跟上）,**纯本地只读、不联网、不消耗任何额度**,与账号池无关。CodexBar「AI用量信息」页的数据源 |
