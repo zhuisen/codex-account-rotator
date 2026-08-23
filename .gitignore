@@ -42,3 +42,6 @@ codexbar/uishot/app/
 traffic/sources.local.json
 # agy 用量账本:运行期产物,含会话 id
 traffic/agy-ledger/
+# SLM 适配器落的本机工具产物,不属于本仓库
+.agent/
+.cursor/

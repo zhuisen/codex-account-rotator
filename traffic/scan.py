@@ -41,6 +41,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from bisect import bisect_right
 from calendar import timegm
 from datetime import date as _date, datetime as _datetime, timedelta as _timedelta
 from pathlib import Path
@@ -93,10 +94,19 @@ def _save_cache(files):
     tmp = None
     try:
         CACHE.parent.mkdir(parents=True, exist_ok=True)
+        # ★★ **先 `dumps` 成整串,再一次 `write`** —— 不要 `json.dump(obj, fh)`。
+        #   实测这份 16MB 缓存:`json.dump` 到文件 **474ms**,`dumps` + 单次 write **91ms**(5.2×),
+        #   含真落盘 + rename 也只有 95ms ⇒ **磁盘只占 ~4ms,那 474ms 几乎全是
+        #   `json.dump` 逐块 `iterencode`/`write` 的调用开销**。
+        #   ⚠️ 这一条极其反直觉,我先入为主地以为是磁盘 I/O,还据此提过"把缓存分成 16 片"的方案 ——
+        #   codex 实测指出真因、grok 又用体积分布证明分片对热路径无效(脏的恰是最肥的会话文件,
+        #   top3 就占 19%,分片反而要写 40%)。**别再往分片/SQLite 那边走。**
+        #   代价:峰值多占约 15~60MB 内存,换 383ms。
+        payload = json.dumps({"v": CACHE_V, "pv": PARSER_V, "files": files},
+                             ensure_ascii=False, separators=(",", ":"))
         fd, tmp = tempfile.mkstemp(dir=str(CACHE.parent), prefix=f".{CACHE.name}.", suffix=".tmp")
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump({"v": CACHE_V, "pv": PARSER_V, "files": files}, fh,
-                      ensure_ascii=False, separators=(",", ":"))
+            fh.write(payload)
         os.replace(tmp, CACHE)
     except Exception:
         if tmp and os.path.exists(tmp):
@@ -119,6 +129,45 @@ def _iso_epoch(ts):
 def _num(d, key):
     v = d.get(key)
     return v if isinstance(v, int) and not isinstance(v, bool) and v >= 0 else 0
+
+
+def _sig(st):
+    """缓存的「这个文件变了没」签名。
+
+    ★★ **必须用 `st_mtime_ns`,不能用 `int(st_mtime)`**(2026-08-24 修,codex 复核发现)。
+      秒级精度下,**同一秒内、长度不变的改写会被判成未变动** —— 缓存原样沿用旧解析结果,
+      而且**没有任何症状**:数字只是悄悄停在旧值上。
+      实测:两次写入相隔 0.09ms、长度都是 227、内容 `output 111 → 222`,
+      `[int(mtime), size]` 两次完全相同,`[mtime_ns, size]` 能区分(APFS 有纳秒精度)。
+      这不是理论风险:活跃 transcript 每秒可能被追加多次,而截断重写(compact/fork)恰好等长
+      也不是不可能。
+
+    ⚠️ 换格式**不需要** +`CACHE_V`:老条目的 sig 与新格式必然不等 ⇒ 逐条自然失效。
+      claude 走增量路径(`off`/锚点与 sig 无关,仍然有效),其余源整文件重解析一次。
+      比整份作废(一次 23s 冷扫)便宜,且结果一样正确。
+    """
+    return [st.st_mtime_ns, st.st_size]
+
+
+def _day_bounds(end_date, days):
+    """窗口内每一天的**本地午夜** epoch + 标签，末尾多补一条「明天零点」。
+
+    ★ 抽成函数是为了让测试**调到生产实现**。原先这段内联在 `scan()` 里，测试只能自己复制一份 ——
+      于是改坏 `scan.py` 而不改测试副本,测试照样绿(codex 复核指出,已实测确认)。
+      **断言必须锚在被测代码上,不是它的副本。**
+
+    ★ 逐日 `mktime`,**不是 `midnight + k*86400`**:DST 切换日的本地日长度不是 86400 秒,
+      用等差推算会整体错位(变异测试已覆盖)。
+    ★ 末尾那条「明天零点」不是冗余:没有它,任何**未来时间戳**(时钟偏移/坏数据/别的机器写来的)
+      都会落到最后一格 = 被静默算进今天。
+    """
+    bounds, labels = [], []
+    for off in range(days - 1, -1, -1):
+        d = end_date - _timedelta(days=off)
+        bounds.append(time.mktime(d.timetuple()))
+        labels.append(d.isoformat())
+    bounds.append(time.mktime((end_date + _timedelta(days=1)).timetuple()))
+    return bounds, labels
 
 
 # ---------------------------------------------------------------- 各平台解析
@@ -888,6 +937,21 @@ def scan(days=90, use_cache=True, only=None, exclude=None):
     end_date = _date.fromtimestamp(now_ts)
     today = end_date.isoformat()
 
+    # ★★ **把「epoch → 本地日期」从逐行 strftime 换成「预算边界 + bisect」**(2026-08-24)。
+    #   实测 182,527 条:`localtime+strftime` 148ms → `bisect` 63ms(2.3×,省 85ms)。
+    #
+    #   ⚠️ 这**不是**那条禁令说的「记忆化日期」。禁的是**按 UTC 整小时记忆化**(+05:30 这类
+    #   半小时偏移的本地午夜落在整点小时中间,会把两天折叠成一天),以及**把派生日期写进缓存**
+    #   (换时区就不自愈)。这里两样都不沾:边界是用真日历逐日 `mktime` 算的、只活在本次进程内,
+    #   DST 与半小时偏移天然正确 —— 春季跳过的那小时 `mktime` 归一到下一个存在的时刻,
+    #   秋季重复的那小时落在同一个区间,两者与 `strftime(localtime(ep))` 逐条比对零差异。
+    day_bounds, day_labels = _day_bounds(end_date, days)
+    n_days = len(day_labels)
+    last_di = n_days - 1                       # 今天在数组里的下标
+    # ⚠️ **小时桶不能用同样的边界法**。整点边界表达不了非整点 DST:`Pacific/Chatham` 在
+    #   02:45 切换,实测 02:45–02:59 这 15 分钟会被判进 `T03`(codex 复核指出,已复现)。
+    #   小时桶只对**今天**的行算,量很小,继续用 `strftime` —— 日桶那 85ms 的收益仍然拿得到。
+
     for src in _enabled_sources(only, exclude):
         key, name, root = src["key"], src["name"], src["root"]
         pattern, parse, dedup = src["glob"], src["parse"], src["dedup"]
@@ -902,7 +966,7 @@ def scan(days=90, use_cache=True, only=None, exclude=None):
                 if st.st_mtime < cut:
                     continue
                 ck = str(f)
-                sig = [int(st.st_mtime), st.st_size]
+                sig = _sig(st)
                 hit = cached.get(ck)
                 if hit and hit.get("sig") == sig:
                     # 文件一个字节都没变:连守卫都不用查,直接沿用。`off`/`a` 原样带走,
@@ -955,15 +1019,21 @@ def scan(days=90, use_cache=True, only=None, exclude=None):
             # ★ row 可带第 7 位 = **平台键**。宿主型源(OpenClaw)靠它把每条记录路由到真正的
             #   AI 平台 —— 宿主自己不作为平台出现。普通源没这一位,就归自己。
             pk = row[6] if len(row) > 6 else key
+            # ★ `setdefault` **必须在窗口判断之前**。我一度把 `continue` 提前,以为"窗口外的行
+            #   反正出表时会被丢弃、跳过等价" —— 错了:只有窗口外数据的平台会因此**整家从输出里
+            #   消失**(旧行为是输出一列全零桶)。实测 `platform_keys` 由 `['agy']` 变成 `[]`。
+            #   设置页的平台清单读的就是这份输出,平台消失后**再也开不回来**。
             days_b, hours_b = acc.setdefault(pk, ({}, {}))
-            lt = localtime(ep)
-            d = strftime("%Y-%m-%d", lt)
+            di = bisect_right(day_bounds, ep) - 1
+            if di < 0 or di >= n_days:
+                continue
+            d = day_labels[di]
             b = days_b.get(d)
             if b is None:
                 b = days_b[d] = _blank()
             _add(b, model, i, cr, cw, o)
-            if d == today:                                  # 今日视图按小时,只需当天
-                h = strftime("%Y-%m-%dT%H", lt)
+            if di == last_di:                               # 今日视图按小时,只需当天
+                h = strftime("%Y-%m-%dT%H", localtime(ep))
                 hb = hours_b.get(h)
                 if hb is None:
                     hb = hours_b[h] = _blank()
