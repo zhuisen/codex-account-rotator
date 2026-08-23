@@ -312,7 +312,7 @@ function PlatformSection({ t }: { t: Theme }) {
 
       <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 6 }}>
         {keys.length === 0 && (
-          <div style={{ fontSize: 11, color: t.faint }}>还没有扫描过，去「AI用量信息」页跑一次就会出现。</div>
+          <div style={{ fontSize: 11, color: t.muted }}>还没有扫描过，去「AI用量信息」页跑一次就会出现。</div>
         )}
         {keys.map((k, i) => {
           const p = snap?.platforms[k];
@@ -335,7 +335,7 @@ function PlatformSection({ t }: { t: Theme }) {
                           title={dead ? "" : d < 0 ? "上移" : "下移"}
                           style={{ fontSize: 10, lineHeight: 1, padding: "2px 5px", borderRadius: 4,
                                    cursor: dead ? "default" : "pointer", userSelect: "none",
-                                   color: dead ? t.faint : t.muted,
+                                   color: dead ? t.muted : t.muted,
                                    background: "transparent", transition: "background .12s" }}
                           onMouseEnter={(e) => { if (!dead) e.currentTarget.style.background = "rgba(255,255,255,.07)"; }}
                           onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}>
@@ -357,7 +357,7 @@ function PlatformSection({ t }: { t: Theme }) {
                               background: "transparent", border: `1px solid ${t.ghostBorder}`,
                               borderRadius: 6, padding: "3px 7px", outline: "none" }} />
 
-              <span style={{ fontSize: 9.5, color: t.faint, fontFamily: "'JetBrains Mono'" }}>{k}</span>
+              <span style={{ fontSize: 9.5, color: t.muted, fontFamily: "'JetBrains Mono'" }}>{k}</span>
 
               {missing && (
                 <span title="偏好里还留着它，但当前扫描结果里没有这一家（scan.py 未注册或该 CLI 未安装）"
@@ -383,7 +383,7 @@ function PlatformSection({ t }: { t: Theme }) {
 
       <DiscoverPanel t={t} />
 
-      <div style={{ fontSize: 10, color: t.faint, marginTop: 9, lineHeight: 1.6 }}>
+      <div style={{ fontSize: 10, color: t.muted, marginTop: 9, lineHeight: 1.6 }}>
         ⚠️ <b>新增一家平台不在这里</b>。能扫出哪几家由 <code>traffic/scan.py</code> 的注册表决定——
         加一家等于写一个解析器（实测四家四种 token 形状，DeepSeek 还是第五种），
         做成填路径的表单就只能去猜字段名，那正是会静默算错数的做法。
@@ -441,7 +441,7 @@ function DiscoverPanel({ t }: { t: Theme }) {
                        cursor: busy ? "default" : "pointer", userSelect: "none" }}>
           {busy ? "扫描中…（约 40 秒）" : "扫描新数据源"}
         </span>
-        <span style={{ fontSize: 10, color: t.faint, lineHeight: 1.5 }}>
+        <span style={{ fontSize: 10, color: t.muted, lineHeight: 1.5 }}>
           找本机还有哪些 AI 把用量落了盘，并<b>实测</b>它的口径（哪些字段加起来等于 total ⇒ 缓存要不要减）。
           只出报告，不会自动启用。
         </span>
@@ -452,7 +452,7 @@ function DiscoverPanel({ t }: { t: Theme }) {
 
       {res && (
         <div style={{ marginTop: 9, display: "flex", flexDirection: "column", gap: 5 }}>
-          <div style={{ fontSize: 10, color: t.faint }}>
+          <div style={{ fontSize: 10, color: t.muted }}>
             扫了 {res.roots} 个候选目录，{res.candidates.length} 个含 token 用量记录
           </div>
           {res.candidates.map((c) => (
@@ -466,7 +466,7 @@ function DiscoverPanel({ t }: { t: Theme }) {
                   {c.known ? "已注册" : "新发现"}
                 </span>
                 <span style={{ fontSize: 11.5, fontFamily: "'JetBrains Mono'", color: t.text }}>{c.root}</span>
-                <span style={{ marginLeft: "auto", fontSize: 9.5, color: t.faint,
+                <span style={{ marginLeft: "auto", fontSize: 9.5, color: t.muted,
                                fontFamily: "'JetBrains Mono'" }}>
                   {c.files} 文件 · {c.records} 条
                 </span>
@@ -482,7 +482,7 @@ function DiscoverPanel({ t }: { t: Theme }) {
               )}
             </div>
           ))}
-          <div style={{ fontSize: 9.5, color: t.faint, lineHeight: 1.6, marginTop: 2 }}>
+          <div style={{ fontSize: 9.5, color: t.muted, lineHeight: 1.6, marginTop: 2 }}>
             判定干净（青色）只说明<b>值得接</b>，不等于能直接用：这个扫描测得出口径，
             <b>测不出去重规则</b>。OpenClaw 那次朴素求和虚高 4.08x，是靠找到 <code>responseId</code> 才消掉的。
           </div>
@@ -543,7 +543,7 @@ function About({ t }: { t: Theme }) {
             <span style={{ fontSize: 12.5, fontWeight: 700, color: t.accent,
                            fontFamily: "'JetBrains Mono'" }}>{ver ? `v${ver}` : "…"}</span>
           </div>
-          <div style={{ fontSize: 11, color: t.faint, marginTop: 3,
+          <div style={{ fontSize: 11, color: t.muted, marginTop: 3,
                         fontFamily: "'JetBrains Mono'" }}>
             Tauri 2 + React · macOS
           </div>
@@ -576,7 +576,7 @@ function About({ t }: { t: Theme }) {
                 <span style={link} onClick={() => { void openExternal(`${REPO_URL}/releases`); }}>
                   查看更新说明 ↗
                 </span>
-                <span style={{ color: t.faint }}>　·　更新：<code>git pull && bash codexbar/scripts/deploy.sh</code></span>
+                <span style={{ color: t.muted }}>　·　更新：<code>git pull && bash codexbar/scripts/deploy.sh</code></span>
               </span>
             )}
             {up.k === "err" && (

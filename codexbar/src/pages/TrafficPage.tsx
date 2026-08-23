@@ -135,7 +135,7 @@ export default function TrafficPage({ t, data, raw, cacheMode, prefs, range, set
   const kpis: Kpi[] = [
     { k: "总 token", v: fmtTok(view?.grand ?? 0), n: view?.grand ?? 0, fmt: fmtTok,
       sub: dTok ? `环比 ${dTok.txt}` : "环比 —",
-      subC: dTok ? (dTok.up ? UP : DOWN) : t.faint },
+      subC: dTok ? (dTok.up ? UP : DOWN) : t.muted },
     isToday
       ? { k: "较昨日", v: dTok?.txt ?? "—", c: dTok ? (dTok.up ? UP : DOWN) : undefined }
       : { k: "日均", v: fmtTok((view?.grand ?? 0) / Math.max(1, view?.labels.length ?? 1)),
@@ -172,7 +172,7 @@ export default function TrafficPage({ t, data, raw, cacheMode, prefs, range, set
           {data && (
             <span onClick={busy ? undefined : onRefresh}
                   title={busy ? "扫描中…" : "重新扫描本机 CLI 记录(只读本地文件,不消耗额度)"}
-                  style={{ fontSize: 10.5, color: busy ? t.accent : t.faint, whiteSpace: "nowrap",
+                  style={{ fontSize: 10.5, color: busy ? t.accent : t.muted, whiteSpace: "nowrap",
                            fontFamily: "'JetBrains Mono'", display: "inline-flex", alignItems: "center",
                            gap: 5, cursor: busy || !onRefresh ? "default" : "pointer", userSelect: "none",
                            transition: "color .15s" }}>
@@ -223,14 +223,15 @@ export default function TrafficPage({ t, data, raw, cacheMode, prefs, range, set
               <span style={{ width: 52, textAlign: "right", fontSize: 11, color: t.muted, fontFamily: "'JetBrains Mono'" }}>
                 {((p.total / Math.max(1, view.grand)) * 100).toFixed(1)}%
               </span>
-              {/* ★ 轮数是**要读的数字**,不能用 `t.faint`(#454d57 对深色底实算 2.21:1,远低于 WCAG 4.5)。
-                  `t.faint` 只留给纯装饰(箭头 →、"vs 昨日"这种词缀)。用户 2026-08-10 报"太灰了"。 */}
+              {/* ★ 轮数是**要读的数字**。此处曾用 `t.faint`(#454d57,深色底实算 **2.21:1**,远低于 WCAG 4.5)
+              被就地换掉 —— 那个 token 已于 2026-08-23 删除,中性文字统一成三级且每级都过 4.5,
+                  `t.muted` 只留给纯装饰(箭头 →、"vs 昨日"这种词缀)。用户 2026-08-10 报"太灰了"。 */}
               <span style={{ width: 74, textAlign: "right", fontSize: 11, color: t.muted, fontFamily: "'JetBrains Mono'" }}>
                 {p.rounds.toLocaleString()}轮
               </span>
               <span style={{ width: 64, textAlign: "right", fontSize: 11.5, fontWeight: 700, color: AMBER,
                              fontFamily: "'JetBrains Mono'" }}>{fmtUSD(p.cost)}</span>
-              <span style={{ width: 14, textAlign: "right", color: t.faint, fontSize: 12 }}>→</span>
+              <span style={{ width: 14, textAlign: "right", color: t.muted, fontSize: 12 }}>→</span>
             </div>
           );
         })}
@@ -251,7 +252,7 @@ export default function TrafficPage({ t, data, raw, cacheMode, prefs, range, set
             而实测 Antigravity 根本不落用量、官方 gemini CLI 又是另一个东西)。 */}
         {(view?.per.length ?? 0) < 4 && (
           <div style={{ border: `1px dashed ${t.ghostBorder}`, borderRadius: 13, display: "grid",
-                        placeItems: "center", color: t.faint, fontSize: 11.5, minHeight: 118,
+                        placeItems: "center", color: t.muted, fontSize: 11.5, minHeight: 118,
                         textAlign: "center", lineHeight: 1.6, padding: "0 10px" }}>
             更多平台<br />
             <span style={{ fontSize: 10 }}>在 traffic/scan.py 的注册表加一行</span>
@@ -297,7 +298,7 @@ function PlatformCard({ t, name, color, buckets, total, cost, isToday, yTotal, o
             「这家用得少」而不是「只统计了一部分」—— 本项目已经因为这类静默降级栽过多次。
             用琥珀(警告语义)而不是红:数据本身没错,只是不全。 */}
         <CoverageBadge t={t} coverage={coverage} />
-        <span style={{ marginLeft: "auto", fontSize: 10, color: t.faint, whiteSpace: "nowrap" }}>明细 →</span>
+        <span style={{ marginLeft: "auto", fontSize: 10, color: t.muted, whiteSpace: "nowrap" }}>明细 →</span>
       </div>
 
       {/* ★ 今日视图 = 纯左右分区:左环右字,**没有底部横条也没有分隔线**。
@@ -361,7 +362,7 @@ function StaleHint({ t, generatedAt }: { t: Theme; generatedAt: number }): React
   if (mins < 4) return null;
   const hrs = Math.floor(mins / 60);
   return (
-    <span style={{ color: mins > 30 ? AMBER : t.faint, fontWeight: mins > 30 ? 700 : 400 }}>
+    <span style={{ color: mins > 30 ? AMBER : t.muted, fontWeight: mins > 30 ? 700 : 400 }}>
       · {hrs >= 1 ? `${hrs} 小时前` : `${mins} 分钟前`}
     </span>
   );
@@ -372,7 +373,7 @@ const short = (m: string) => m.replace(/^claude-|^gpt-|^grok-/, "");
 function Row({ t, k, v, amber }: { t: Theme; k: string; v: string; amber?: boolean }) {
   return (
     <div style={{ display: "flex", justifyContent: "space-between", gap: 6, fontFamily: "'JetBrains Mono'" }}>
-      <span style={{ color: t.faint, whiteSpace: "nowrap" }}>{k} →</span>
+      <span style={{ color: t.muted, whiteSpace: "nowrap" }}>{k} →</span>
       <span style={{ color: amber ? AMBER : t.text2, fontWeight: amber ? 700 : 400,
                      overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{v}</span>
     </div>
@@ -437,7 +438,7 @@ function Donut({ t, tops, total, delta, cost }: {
         {delta != null && (
           <div style={{ fontSize: 9, marginTop: 4, fontFamily: "'JetBrains Mono'",
                         color: delta >= 0 ? "#27B26B" : "#E0524D", whiteSpace: "nowrap" }}>
-            {delta >= 0 ? "↑" : "↓"}{Math.abs(delta).toFixed(1)}% <span style={{ color: t.faint }}>vs 昨日</span>
+            {delta >= 0 ? "↑" : "↓"}{Math.abs(delta).toFixed(1)}% <span style={{ color: t.muted }}>vs 昨日</span>
           </div>
         )}
         {cost != null && (

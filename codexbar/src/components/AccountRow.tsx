@@ -56,14 +56,14 @@ export default function AccountRow({ a, isCurrent, isBest, bestPct, privacy, t, 
             <span className="mb-row-delta" style={{ color: t.accent, background: t.accentSoft }}>✓ 当前</span>
           ) : delta != null && (
             <span className="mb-row-delta" style={{
-              color: delta === 0 ? t.accent : delta <= -50 ? AMBER : t.email,
+              color: delta === 0 ? t.accent : delta <= -50 ? AMBER : t.text2,
               background: delta === 0 ? t.accentSoft : delta <= -50 ? "rgba(224,144,28,.12)" : t.ghostBg,
             }}>{delta === 0 ? "最优" : `${delta}%`}</span>
           )}
         </div>
 
         <div className="mb-row-sub">
-          <span className="mb-row-email" style={{ color: t.email }}>{maskId(a.email, privacy)}</span>
+          <span className="mb-row-email" style={{ color: t.text2 }}>{maskId(a.email, privacy)}</span>
           <span className="mb-row-exp-text" title={a.expStale ? "OpenAI 上次复核订阅早于这个日期,所以「已过期」是拿陈旧快照下的结论 —— 续费不在它视野里。刷新 token 也拉不到新状态,要等 OpenAI 自己复核。" : undefined} style={{ color: t.muted }}>到期 {a.exp}{a.expStale && <span style={{ color: "#E0901C" }}>*</span>}</span>
         </div>
 

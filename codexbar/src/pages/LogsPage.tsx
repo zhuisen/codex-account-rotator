@@ -57,10 +57,10 @@ export default function LogsPage({ t }: { t: Theme }) {
         </div>
       </div>
       <div style={{ flex: 1, overflowY: "auto", fontSize: 11, fontFamily: "'JetBrains Mono'", lineHeight: 1.7 }}>
-        {filtered.length === 0 && <div style={{ color: t.faint, textAlign: "center", marginTop: 40 }}>暂无日志</div>}
+        {filtered.length === 0 && <div style={{ color: t.muted, textAlign: "center", marginTop: 40 }}>暂无日志</div>}
         {filtered.map((l, i) => (
           <div key={i} style={{ display: "flex", gap: 8, padding: "2px 0", borderBottom: `1px solid ${t.divider}` }}>
-            {l.time && <span style={{ color: t.faint, flexShrink: 0, width: 90 }}>{l.time}</span>}
+            {l.time && <span style={{ color: t.muted, flexShrink: 0, width: 90 }}>{l.time}</span>}
             <span style={{ color: typeColor(l.type), fontWeight: 600, flexShrink: 0, width: 60 }}>{l.type}</span>
             <span style={{ color: t.text2, flex: 1, wordBreak: "break-all" }}>{l.msg}</span>
           </div>

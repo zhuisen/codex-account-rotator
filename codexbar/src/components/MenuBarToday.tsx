@@ -159,7 +159,7 @@ export default function MenuBarToday({ t, view, colors, cacheMode, refreshedAt, 
         ) : (
           <span className="mb-today-when" onClick={busy ? undefined : onRefresh}
                 title={busy ? "扫描中…" : "重新扫描本机 CLI 记录(只读本地文件,不消耗额度)"}
-                style={{ color: busy ? t.accent : t.faint, cursor: busy ? "default" : "pointer" }}>
+                style={{ color: busy ? t.accent : t.muted, cursor: busy ? "default" : "pointer" }}>
             <IconRefresh spin={busy} />
             {hours[0].slice(5, 10)}
             {refreshedAt ? ` · 刷新 ${new Date(refreshedAt * 1000).toTimeString().slice(0, 5)}` : ""}
@@ -173,7 +173,7 @@ export default function MenuBarToday({ t, view, colors, cacheMode, refreshedAt, 
       <div className="mb-today-chart mb-today-chart-click" onClick={onOpenOverview}
            onMouseLeave={() => setHv(null)}
            title="打开主窗口的 AI用量信息">
-        <div className="mb-today-peak" style={{ color: t.faint }}>
+        <div className="mb-today-peak" style={{ color: t.muted }}>
           {cacheMode !== "full" && (
             <span style={{ color: AMBER, fontWeight: 700 }}>{cacheModeLabel(cacheMode)} · </span>
           )}
@@ -199,7 +199,7 @@ export default function MenuBarToday({ t, view, colors, cacheMode, refreshedAt, 
                   setHv(Math.max(0, Math.min(n - 1, i)));
                 }} />
         </svg>
-        <div className="mb-today-xaxis" style={{ color: t.faint }}>
+        <div className="mb-today-xaxis" style={{ color: t.muted }}>
           {tickIdx.map((i) => (
             // 首个左对齐、末个右对齐,其余居中 —— 否则两端各有一半标签溢出被裁(主图同款处理)
             <span key={i} style={{
@@ -217,11 +217,11 @@ export default function MenuBarToday({ t, view, colors, cacheMode, refreshedAt, 
           <div key={p.key} className="mb-today-row" onClick={() => onOpenPlatform(p.key)}>
             <span className="mb-today-swatch" style={{ background: colors[p.key] }} />
             <span className="mb-today-name">{p.name}</span>
-            <span className="mb-today-pct" style={{ color: t.faint }}>{p.pct.toFixed(1)}%</span>
+            <span className="mb-today-pct" style={{ color: t.muted }}>{p.pct.toFixed(1)}%</span>
             <span className="mb-today-tok">{fmtTok(p.tok)}</span>
             <span className="mb-today-cost-cell" style={{ color: AMBER }}>{fmtUSD(p.cost)}</span>
             <span className="mb-today-delta-cell" style={{
-              color: p.deltaPct == null ? t.faint : p.deltaPct >= 0 ? UP : DOWN,
+              color: p.deltaPct == null ? t.muted : p.deltaPct >= 0 ? UP : DOWN,
             }}>
               {p.deltaPct == null ? "—"
                 : `${p.deltaPct >= 0 ? "↑" : "↓"}${Math.abs(p.deltaPct).toFixed(1)}%`}

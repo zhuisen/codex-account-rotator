@@ -1,10 +1,34 @@
+/**
+ * ★★ 中性文字只有**三级**，每一级都有实测对比度下限（用户 2026-08-23 定的 B 档）。
+ *
+ *   text   主数值            深 16.8 / 浅 6.6
+ *   text2  次级、标签、邮箱   深  8.9 / 浅 6.6
+ *   muted  三级:轴刻度/脚注/占比/上次刷新   深 4.55 / 浅 4.54（**最差底色**，不是最好的那个）
+ *
+ * ★ 阈值按**最差底色**定,不是按 appBg。用户选的 B 档原值 `#78828f`/`#6b7682` 在 appBg 上是
+ *   4.85/4.08 看着达标,但在 cardBg/railBg 上只有 4.49/3.86 —— 只看一个底色就会漏掉。
+ *   深色为此只亮了 1 级 RGB(肉眼无差),浅色压暗 11 级(它原本 2.74,本来就要修)。
+ *
+ * **原本是五级**（多出 `email` 和 `faint`），而那两个正是问题所在：
+ *   · `faint` 深色底实算 **2.21:1**、浅色 **1.89:1** —— 连 WCAG 给图形的 3.0 都够不着，
+ *     用户直接反馈「太灰了，快看不到了」。它被用在 41 处**要读的**内容上（轴刻度、占比、峰值）。
+ *   · `email` 是按**用途**命名却占着一个**层级**，于是没人知道该用哪个 —— 五个灰的混乱由此而来。
+ *
+ * ⚠️ **同一个问题此前已被就地绕过两次**（`TrafficPage` 轮数、`KpiStrip` 单位，各留了一条
+ *   「faint 实算 2.21:1」的注释就换了颜色）。第二次撞见同一类 bug，该交付的是**一个会变红的
+ *   检查**而不是第三行注释 —— 见 `tests/test_theme_contrast.py`，它会挡住任何把中性色调暗到
+ *   4.5 以下的改动。**别为了"更克制"往回调**，那条路已经走过一次了。
+ *
+ * 例外：饼图「其余」轨道仍用硬编码 `#454d57` —— 它是**非文字的装饰轨道**，不是要读的内容，
+ * 不受这条标尺约束（`TrafficPage.tsx` 的 donut）。
+ */
 export const THEMES = {
   dark: {
     isDark:true,
     appBg:"#0e1117", deskBg:"radial-gradient(130% 120% at 50% -10%, #151c26 0%, #080a0e 65%)",
     chromeBg:"#0c1015", chromeBorder:"rgba(255,255,255,.07)", titleText:"#cfd6df",
     railBg:"#0a0e12", railBorder:"rgba(255,255,255,.06)",
-    text:"#eef2f7", text2:"#aab3c0", muted:"#6b7480", email:"#8b95a1", faint:"#454d57",
+    text:"#eef2f7", text2:"#aab3c0", muted:"#798390",
     heroBg:"#131c20", heroBorder:"rgba(45,212,191,.25)", heroShadow:"none",
     cardBg:"#141a22", cardBorder:"rgba(255,255,255,.06)", curCardBg:"rgba(45,212,191,.07)",
     cardHoverShadow:"0 10px 26px rgba(0,0,0,.4)",
@@ -22,7 +46,7 @@ export const THEMES = {
     appBg:"#eef1f5", deskBg:"radial-gradient(130% 120% at 50% -10%, #f4f7fb 0%, #dbe1e9 100%)",
     chromeBg:"#f7f9fb", chromeBorder:"rgba(0,0,0,.1)", titleText:"#39414b",
     railBg:"#e7ebf0", railBorder:"rgba(0,0,0,.06)",
-    text:"#161b22", text2:"#4d5663", muted:"#8a93a0", email:"#6b7682", faint:"#aab2bd",
+    text:"#161b22", text2:"#4d5663", muted:"#606b77",
     heroBg:"#ffffff", heroBorder:"rgba(14,159,142,.3)", heroShadow:"0 1px 3px rgba(0,0,0,.05)",
     cardBg:"#ffffff", cardBorder:"rgba(0,0,0,.07)", curCardBg:"rgba(14,159,142,.05)",
     cardHoverShadow:"0 10px 26px rgba(0,0,0,.12)",

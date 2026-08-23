@@ -26,7 +26,7 @@ export function isCardExpiring(a: Account): boolean {
 export default function CardBadge({ a, t, compact }: { a: Account; t: Theme; compact?: boolean }) {
   if (a.cards <= 0) {
     return compact ? null : (
-      <span style={{ fontSize: 9.5, color: t.faint, fontFamily: "'JetBrains Mono'" }}>无重置卡</span>
+      <span style={{ fontSize: 9.5, color: t.muted, fontFamily: "'JetBrains Mono'" }}>无重置卡</span>
     );
   }
 

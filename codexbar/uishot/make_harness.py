@@ -94,9 +94,13 @@ STUB = """
   // ★ IPC 调用计数。用来回答「这个操作到底有没有触发扫描」——`run_traffic` 是唯一会真起
   //   python 的那条,页面上完全看不出来,只能数。配 `--virtual-time-budget` 拉长虚拟时间,
   //   可以把 30s 的心跳压缩到秒级验证。
-  var ipc = {};
+  var ipc = {}, sizes = [];
   function invoke(cmd, args) {
     ipc[cmd] = (ipc[cmd] || 0) + 1;
+    // 记下每次 setSize 的目标高度 —— 菜单栏的高度就是这么定的,只数次数看不出设成了多少
+    if (cmd.indexOf('set_size') >= 0 || cmd.indexOf('setSize') >= 0) {
+      try { sizes.push(JSON.stringify(args)); } catch (e) { sizes.push('?'); }
+    }
     args = args || {};
     switch (cmd) {
       case 'plugin:event|listen':
@@ -108,9 +112,16 @@ STUB = """
       case 'plugin:event|emit':
         fire(args.event, args.payload);
         return Promise.resolve(null);
+      // ★ `?snap_delay=<ms>` 让快照**异步**送达。默认 0(同步)保持既有行为。
+      //   真机上快照是 `invoke` 异步取的,内容会在挂载**之后**才长出来 —— harness 原本内联同步给,
+      //   按设计绕开了这个竞态,也就**看不见**任何"挂载时量了一次、之后再没量"的缺陷。
+      //   菜单栏高度钉死在 PANEL_H_MIN 那个 bug 就是这么漏掉的。
       case 'read_traffic_snapshot':
-      case 'run_traffic':
-        return Promise.resolve(SNAPSHOT);
+      case 'run_traffic': {
+        var dly = parseInt(p.get('snap_delay') || '0', 10);
+        if (!dly) return Promise.resolve(SNAPSHOT);
+        return new Promise(function (res) { setTimeout(function () { res(SNAPSHOT); }, dly); });
+      }
       // ★ **脱敏** fixture。真实 state.json 的邮箱/account_id 能认人,绝不进伺服目录;
       //   结构、额度、套餐、到期日保留真实形状,否则量不出真实排版。
       case 'read_state':
@@ -162,6 +173,12 @@ STUB = """
       else if (nav === 'settings') fire('navigate-settings');
       else if (nav === 'home') { /* 账号池是默认页,不发导航事件 */ }
       else fire('navigate-traffic');
+
+      // ★ `?mbshow=<ms>` 在指定时刻发 `menubar-shown` —— Rust 是在 `win.show()` 之后发它的
+      //   (lib.rs 的 `toggle_menubar`)。菜单栏的高度靠这个事件在**窗口真正可见时**重量一次,
+      //   所以要验那条路径,必须能在 harness 里模拟"用户点了托盘"。
+      var mbs = parseInt(p.get('mbshow') || '0', 10);
+      if (mbs) setTimeout(function () { fire('menubar-shown'); }, mbs);
     }, 500);
 
     // `?click=a,b` —— 按**文本**依次点击(全站 45 处是 div/span+onClick,没有 button 可选)。
@@ -222,11 +239,41 @@ STUB = """
         // ★ 先看 mounted:它为 0 说明整页没渲染,此时 overflow 的"无"是**假阴性**,不是通过。
         mounted: r ? r.querySelectorAll('*').length : 0,
         rootW: r ? r.scrollWidth + '/' + r.clientWidth : null,
+        // 菜单栏弹窗的高度由 JS 量 `.mb-root` 的 scrollHeight 再 setSize 出来。
+        // 量它随时间怎么变,才能区分「内容超过 PANEL_H_MAX 被钳」和「量早了、之后没再量」。
+        mbH: (function () {
+          var e = document.querySelector('.mb-root');
+          return e ? { scroll: e.scrollHeight, client: e.clientHeight,
+                       bodyScroll: document.body.scrollHeight } : null;
+        })(),
         overflow: over,
+        // ★★ **被 flex 压扁的元素** —— 既有的 `overflow` 探针对它完全是瞎的:
+        //   flex 布局在空间不够时**压缩子项**而不是溢出,所以 `scrollWidth > clientWidth` 永远不成立,
+        //   元素还在 DOM 里、文本也还在,只是渲染宽被压到接近 0 ⇒ 肉眼看是"这个字段没了"。
+        //   2026-08-23 缩菜单栏宽度时踩到:332px 下当前号那行的「到期 2026-09-08」整个消失,
+        //   而 overflow=无、DOM 里日期一个不少,两种自动检查全绿。判据只能是**渲染宽 vs 自然宽**。
+        squeezed: (function () {
+          var r0 = document.getElementById('root');
+          var out = [], all = r0 ? r0.querySelectorAll('*') : [];
+          for (var i = 0; i < all.length; i++) {
+            var e = all[i];
+            if (e.children.length) continue;                 // 只看叶子节点
+            var tag = e.tagName;
+            if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'TITLE') continue;
+            if (tag === 'svg' || tag === 'path' || tag === 'circle' || tag === 'rect') continue;
+            var t = (e.textContent || '').trim();
+            if (!t) continue;
+            var shown = e.getBoundingClientRect().width;
+            if (shown > 4) continue;                          // 还看得见就不算
+            out.push(t.slice(0, 24) + ' →' + Math.round(shown) + 'px');
+          }
+          return out.slice(0, 8);
+        })(),
         errors: errors.slice(0, 4),
         unknownCmds: unknown.filter(function (v, i, a) { return a.indexOf(v) === i; }),
         clicks: clicks,
         // 只报关心的两个,别把 plugin:event|* 的噪音带进来
+        sizes: sizes,
         ipc: { run_traffic: ipc['run_traffic'] || 0,
                read_traffic_snapshot: ipc['read_traffic_snapshot'] || 0 },
         // 字体探针:app 的字体是本地 woff2,没加载上会静默回落到系统 sans —— 截图上看不出来

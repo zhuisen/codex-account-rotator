@@ -241,11 +241,18 @@ export default function StackedArea({
         <div key={`tip-${hv}`} style={{
           position: "absolute", top: 8, pointerEvents: "none", width: 130,
           left: `calc(${(x(hv) / VW) * 100}% + ${x(hv) / VW <= 0.55 ? 14 : -144}px)`,
-          background: "rgba(10,13,16,.6)", backdropFilter: "blur(6px)",
-          border: "1px solid rgba(255,255,255,.12)", borderRadius: 8, padding: "7px 9px",
-          fontFamily: "'JetBrains Mono'", color: "#eef2f7",
+          // ★ 浮层此前**恒为深色**（`rgba(10,13,16,.6)` + 写死的浅色文字）。60% 半透明叠在
+          //   浅色主题的白卡片上会变成中灰 `#6c6e70`，那上面的副标题 `#8a93a0` 实算 **1.65:1**
+          //   —— 浅色主题下那行字基本看不见。是 2026-08-23 统一灰阶时**算出来的**，不是肉眼看出来的：
+          //   半透明浮层的实际底色取决于它盖住了什么，光看色值不会发现。
+          //   半透明 + 模糊是设计规范定的，所以改的是**底色跟主题**，不是把它做成不透明。
+          background: t.isDark ? "rgba(10,13,16,.6)" : "rgba(255,255,255,.78)",
+          backdropFilter: "blur(6px)",
+          border: `1px solid ${t.isDark ? "rgba(255,255,255,.12)" : "rgba(0,0,0,.12)"}`,
+          borderRadius: 8, padding: "7px 9px",
+          fontFamily: "'JetBrains Mono'", color: t.text,
         }}>
-          <div style={{ fontSize: 9.5, color: "#8a93a0", marginBottom: 4 }}>
+          <div style={{ fontSize: 9.5, color: t.muted, marginBottom: 4 }}>
             {tipTitle ? tipTitle(hv) : labels[hv]}
           </div>
           {/* layers 是自下而上的**降序**(大的贴基线),浮层直接按这个顺序列 = 大的先读 */}

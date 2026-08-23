@@ -15,7 +15,7 @@ function DeltaChip({ delta, t }: { delta: number; t: Theme }) {
       marginLeft: "auto", flexShrink: 0,
       fontSize: 9, fontWeight: 700, padding: "2px 8px", borderRadius: 999,
       fontVariantNumeric: "tabular-nums",
-      color: best ? t.accent : far ? "#E0901C" : t.email,
+      color: best ? t.accent : far ? "#E0901C" : t.text2,
       background: best ? t.accentSoft : far ? "rgba(224,144,28,.12)" : t.ghostBg,
     }}>{best ? "最优" : `${delta}%`}</span>
   );
@@ -62,7 +62,7 @@ export default function AccountCard({ a, isCurrent, isBest, isSelected, shortcut
         transition: "background .2s ease, border-color .2s ease",
       }}>
 
-      {shortcut && <span style={{ position: "absolute", top: 6, left: 10, fontSize: 9, color: t.faint, fontFamily: "'JetBrains Mono'" }}>⌘{shortcut}</span>}
+      {shortcut && <span style={{ position: "absolute", top: 6, left: 10, fontSize: 9, color: t.muted, fontFamily: "'JetBrains Mono'" }}>⌘{shortcut}</span>}
 
       <div style={{ display: "flex", gap: 11, alignItems: "center" }}>
         <Ring pct={known ? pct : 0} r={21} sw={5} color={qc} track={t.ringTrack} size={52} glow={glow}>
@@ -101,7 +101,7 @@ export default function AccountCard({ a, isCurrent, isBest, isSelected, shortcut
               : known && bestPct >= 0 && <DeltaChip delta={pct - bestPct} t={t} />}
           </div>
 
-          <div style={{ fontSize: 10.5, color: t.email, fontFamily: "'JetBrains Mono'", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{maskId(a.email, privacy)}</div>
+          <div style={{ fontSize: 10.5, color: t.text2, fontFamily: "'JetBrains Mono'", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{maskId(a.email, privacy)}</div>
 
           {known && a.windows.map(w => (
             <div key={w.label} style={{ display: "flex", alignItems: "center", gap: 6 }}>

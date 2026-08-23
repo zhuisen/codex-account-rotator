@@ -48,7 +48,7 @@ export default function DetailModal({ detail, privacy, t, onClose }: { detail: A
             ))}
           </tbody>
         </table>
-        <div style={{ marginTop: 12, fontSize: 9.5, color: t.faint, textAlign: "center" }}>点击文字可选中复制 · 完整 token 不显示(仅指纹)</div>
+        <div style={{ marginTop: 12, fontSize: 9.5, color: t.muted, textAlign: "center" }}>点击文字可选中复制 · 完整 token 不显示(仅指纹)</div>
       </div>
     </div>
   );

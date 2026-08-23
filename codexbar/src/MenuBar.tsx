@@ -15,7 +15,7 @@ import { todayView, fmtTok, colorOf } from "./traffic";
 import "./App.css";
 import "./menubar.css";
 
-const PANEL_W = 412;          // must match inner_size / toggle_menubar in lib.rs
+const PANEL_W = 352;          // ★ 三处必须一致，由 tests/test_menubar_width_sync.py 守着
 const PANEL_H_MIN = 220;
 const PANEL_H_MAX = 760;
 
@@ -98,6 +98,16 @@ export default function MenuBar() {
   // The panel is content-sized in the design (`height: fit-content`), but a Tauri window has a fixed
   // frame — so measure and follow. Without this the popover keeps a 580px frame and paints dead space
   // below a short pool, or clips a long one.
+  // ★★ 2026-08-22:弹窗重启后只显示上半截(实测 412×220 = 恰好 `PANEL_H_MIN`,而内容要 596)。
+  //
+  // 触发条件是**快照来得晚**:`useTraffic` 异步取快照,数据到达前今日 Tab 只有「头部+Tab+摘要」
+  // ≈190px,量出来被钳到 220。平时缓存热、快照 1ms 就到,测量赶在数据之后所以从没暴露;
+  // 这次 `PARSER_V` 7→8 让缓存作废,重启后首扫 ~23s,窗口就钉在 220 了。
+  //
+  // ⚠️ **真因有三种都能解释,我没能区分开**:① RO 压根没触发;② RO 触发了但**隐藏窗口上
+  //   `setSize` 失败**(启动时窗口是 `visible(false)` 建的),而失败被 `.catch` 吞掉;③ 只量了一次。
+  //   harness 复现出「只有一次 setSize(220)」,但 headless 的渲染管线本身就可能漏发 RO,
+  //   所以那不能算判据。**下面两处改动在三种假说下都成立**,不赌其中任何一个。
   useEffect(() => {
     const el = rootRef.current;
     if (!el) return;
@@ -105,13 +115,22 @@ export default function MenuBar() {
     const apply = () => {
       const h = Math.min(PANEL_H_MAX, Math.max(PANEL_H_MIN, Math.ceil(el.scrollHeight)));
       if (Math.abs(h - last) < 2) return;
-      last = h;
-      getCurrentWindow().setSize(new LogicalSize(PANEL_W, h)).catch(() => {});
+      // ★ **成功之后才记账**。原来是先 `last = h` 再 `setSize(...).catch(() => {})` ——
+      //   一旦这次 setSize 没生效(隐藏窗口/时序),`last` 已经写成新值,而内容之后不再变化
+      //   ⇒ RO 不再触发 ⇒ `apply()` 永远不会重跑,高度就**永久**钉在错的值上。
+      //   这是「把'我打算做'记成'我已经做到'」——同一类错误在本项目里犯过不止一次。
+      getCurrentWindow().setSize(new LogicalSize(PANEL_W, h))
+        .then(() => { last = h; })
+        .catch(() => { /* 没生效就不记账,下次还会重试 */ });
     };
     apply();
     const ro = new ResizeObserver(apply);
     ro.observe(el);
-    return () => ro.disconnect();
+    // ★ **弹出时必量一次**。这是唯一能保证窗口可见、且尺寸真正被用户看到的时刻 ——
+    //   不依赖 RO 有没有触发、也不依赖隐藏态的 setSize 是否成功。
+    //   `menubar-shown` 是 Rust 在 `win.show()` 之后发的(见 lib.rs 的 `toggle_menubar`)。
+    const un = listen("menubar-shown", () => { apply(); });
+    return () => { ro.disconnect(); void un.then((f) => f()); };
   }, []);
 
   useEffect(() => {
@@ -205,7 +224,7 @@ export default function MenuBar() {
       <div className="mb-list-header">
         <span className="mb-list-title" style={{ color: t.muted }}>可用账号</span>
         {lastRefreshAt && (
-          <span className="mb-refreshed" style={{ color: t.faint }}><IconRefresh size={10} />上次刷新 {fmtAgo(lastRefreshAt)}</span>
+          <span className="mb-refreshed" style={{ color: t.muted }}><IconRefresh size={10} />上次刷新 {fmtAgo(lastRefreshAt)}</span>
         )}
         <span className="mb-list-count" style={{ color: t.muted, marginLeft: lastRefreshAt ? undefined : "auto" }}>{alive.length} 个</span>
       </div>

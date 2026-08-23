@@ -58,7 +58,9 @@ export default function KpiStrip({ t, items, intro = 1 }: {
                 **用户唯一会盯着看的数字**，画错一次的代价远大于这行判断。 */}
             {n != null && fmt && intro >= 0 && intro < 1 ? fmt(n * intro) : v}
           </div>
-          {/* 9px + t.faint(#454d57) 在深色底上几乎隐形(实算 2.2:1) —— 用户实测"没看到" —— 定在 11px */}
+          {/* 曾是 9px + `t.faint`(#454d57,实算 2.2:1),用户实测「没看到」。字号定在 11px;
+              颜色那一半已由 2026-08-23 的三级灰阶统一解决(`t.muted` 现为 4.55:1),
+              闸在 tests/test_theme_contrast.py */}
           {sub && (
             <div style={{ fontSize: 11, color: subC ?? t.text2, fontFamily: "'JetBrains Mono'",
                           marginTop: 3, whiteSpace: "nowrap" }}>{sub}</div>

@@ -182,13 +182,13 @@ export default function App() {
                           borderRadius: 9, display: "flex", alignItems: "center",
                           justifyContent: navOpen ? "flex-start" : "center",
                           gap: 10, padding: navOpen ? "0 10px" : 0, flexShrink: 0,
-                          cursor: "pointer", color: t.faint, transition: "color .2s" }}>
+                          cursor: "pointer", color: t.muted, transition: "color .2s" }}>
               <span style={{ display: "grid", placeItems: "center", flexShrink: 0 }}>
                 <IconChevrons open={navOpen} />
               </span>
               {navOpen && <span style={{ fontSize: 11.5, whiteSpace: "nowrap" }}>折叠</span>}
             </div>
-            <span style={{ fontSize: 9, color: t.faint, fontFamily: "'JetBrains Mono'",
+            <span style={{ fontSize: 9, color: t.muted, fontFamily: "'JetBrains Mono'",
                            textAlign: navOpen ? "left" : "center", paddingLeft: navOpen ? 10 : 0,
                            marginTop: 6, flexShrink: 0 }}>{ver ? ver.split(".").slice(0, 2).join(".") : ""}</span>
         </div>
@@ -224,7 +224,7 @@ export default function App() {
                     color: autoSwitch ? t.accent : t.ghostText,
                     background: autoSwitch ? t.accentSoft : "transparent",
                   }}>
-                    <span style={{ width: 8, height: 8, borderRadius: "50%", background: autoSwitch ? t.accent : t.faint, animation: autoSwitch ? "cbDotPulse 2s ease-in-out infinite" : "none" }} />
+                    <span style={{ width: 8, height: 8, borderRadius: "50%", background: autoSwitch ? t.accent : t.muted, animation: autoSwitch ? "cbDotPulse 2s ease-in-out infinite" : "none" }} />
                     {autoSwitch ? "自动切号 开" : "自动切号"}
                   </span>
                   <span style={{ width: 1, height: 18, background: t.divider, margin: "0 1px" }} />
@@ -253,17 +253,17 @@ export default function App() {
                       <div style={{ display: "flex", alignItems: "baseline", gap: 9, marginTop: 3 }}>
                         <span style={{ fontSize: 24, fontWeight: 700, letterSpacing: "-.01em" }}>{cur.node}</span>
                         <PlanBadge plan={cur.plan} t={t} size={10} />
-                        <span style={{ fontSize: 12, color: t.email, fontFamily: "'JetBrains Mono'" }}>{maskId(cur.email, privacy)}</span>
+                        <span style={{ fontSize: 12, color: t.text2, fontFamily: "'JetBrains Mono'" }}>{maskId(cur.email, privacy)}</span>
                       </div>
                       <div style={{ display: "flex", alignItems: "center", gap: 13, marginTop: 8, fontSize: 12, color: t.text2, fontFamily: "'JetBrains Mono'" }}>
                         {cur.windows.map((w, i) => (
-                          <span key={w.label}>{i > 0 && <span style={{ color: t.faint, marginRight: 13 }}>·</span>}{w.label} <b style={{ color: sc }}>{w.pct}%</b> <span style={{ color: t.muted }}>↻{w.reset}</span></span>
+                          <span key={w.label}>{i > 0 && <span style={{ color: t.muted, marginRight: 13 }}>·</span>}{w.label} <b style={{ color: sc }}>{w.pct}%</b> <span style={{ color: t.muted }}>↻{w.reset}</span></span>
                         ))}
-                        {cur.windows.length > 0 && <span style={{ color: t.faint }}>·</span>}
+                        {cur.windows.length > 0 && <span style={{ color: t.muted }}>·</span>}
                         <span title={cur.expStale ? "OpenAI 上次复核订阅早于这个日期,所以「已过期」是拿陈旧快照下的结论 —— 续费不在它视野里。刷新 token 也拉不到新状态,要等 OpenAI 自己复核。" : undefined}>订阅至 {cur.exp}{cur.expStale && <span style={{ color: "#E0901C" }}>*</span>}</span>
                         {cur.cards > 0 && (
                           <>
-                            <span style={{ color: t.faint }}>·</span>
+                            <span style={{ color: t.muted }}>·</span>
                             <span style={{ display: "inline-flex", alignItems: "center", gap: 5, color: cur.cardDays != null && cur.cardDays <= CARD_WARN_DAYS ? "#f2b45c" : t.accent }}>
                               <IconTicket size={11} />重置卡 ×{cur.cards}
                               {cur.cardExp

@@ -218,7 +218,7 @@ export default function PlatformPage({ t, data, raw, cacheMode, pk, range, setRa
   const kpis: Kpi[] = [
     { k: "总 token", v: fmtTok(v?.agg.total ?? 0), n: v?.agg.total ?? 0, fmt: fmtTok,
       sub: dTok ? `环比 ${dTok.txt}` : "环比 —",
-      subC: dTok ? (dTok.up ? UP : DOWN) : t.faint },
+      subC: dTok ? (dTok.up ? UP : DOWN) : t.muted },
     { k: "请求轮数", v: (v?.agg.rounds ?? 0).toLocaleString(),
       n: v?.agg.rounds ?? 0, fmt: (x) => Math.round(x).toLocaleString() },
     { k: isToday ? "小时均" : "日均", v: fmtTok((v?.agg.total ?? 0) / days),
@@ -259,7 +259,7 @@ export default function PlatformPage({ t, data, raw, cacheMode, pk, range, setRa
           {data?.platforms[pk]?.name ?? pk} 消耗
         </span>
         <CacheChip mode={cacheMode} />
-        <span style={{ fontSize: 11, color: t.faint, fontFamily: "'JetBrains Mono'", overflow: "hidden",
+        <span style={{ fontSize: 11, color: t.muted, fontFamily: "'JetBrains Mono'", overflow: "hidden",
                        textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{SRC[pk] ?? ""}</span>
         <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
           <Seg opts={["models", "total"] as const} cur={mode} on={setMode}
@@ -402,7 +402,7 @@ export default function PlatformPage({ t, data, raw, cacheMode, pk, range, setRa
               );
             })}
           </div>
-          <div style={{ fontSize: 9.5, color: t.faint, marginTop: 8, lineHeight: 1.5 }}>
+          <div style={{ fontSize: 9.5, color: t.muted, marginTop: 8, lineHeight: 1.5 }}>
             {/* 脚注只解释当前口径真正用到的价:讲一个没参与计算的折扣率,读者会以为费用里含了它 */}
             {countsCacheRead(cacheMode)
               ? `缓存读 = 输入价 ${cacheRatioText} · `

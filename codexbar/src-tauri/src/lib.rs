@@ -733,7 +733,7 @@ fn toggle_menubar(app: &AppHandle, tray_rect: Option<tauri::Rect>) {
                     tauri::Size::Physical(s) => (s.width as f64, s.height as f64),
                     tauri::Size::Logical(s) => (s.width, s.height),
                 };
-                let panel_w = 412.0; // must match inner_size width
+                let panel_w = 352.0; // must match inner_size width（守卫见 tests/test_menubar_width_sync.py）
                 let x = px + sw / 2.0 - panel_w / 2.0;
                 let y = py + sh + 4.0;
                 let _ = win.set_position(PhysicalPosition::new(x as i32, y as i32));
@@ -872,7 +872,7 @@ pub fn run() {
                 WebviewUrl::App("menubar.html".into()),
             )
             .title("CodexBar")
-            .inner_size(412.0, 580.0)
+            .inner_size(352.0, 580.0)
             .decorations(false)
             .always_on_top(true)
             .skip_taskbar(true)
