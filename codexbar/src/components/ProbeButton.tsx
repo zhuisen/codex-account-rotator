@@ -53,6 +53,10 @@ export default function ProbeButton({ t, label, hint, onConfirm, loading, loadin
     cursor: loading ? "default" : "pointer",
     userSelect: "none" as const,
     display: "inline-flex" as const,
+    // ★ 同 GhostButton:按钮**永不断字**。「探针 全池」被劈成「探针 全 / 池」是窄窗实测缺陷
+    //   (用户 2026-08-24 截图)。这个按钮尤其不能挤 —— 它是全 app 唯一花钱的控件,
+    //   琥珀 + ⚡ + 「计费」角标那一整套警示语言,靠的就是它一眼可辨的完整外形。
+    whiteSpace: "nowrap" as const, flexShrink: 0,
     alignItems: "center" as const,
     gap: 6,
     opacity: loading ? 0.6 : 1,

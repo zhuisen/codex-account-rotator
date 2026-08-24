@@ -16,9 +16,13 @@ export default function Seg<T extends string | number>({ opts, cur, on, label, t
   t: Theme;
 }): React.ReactElement {
   return (
-    <div style={{ display: "flex", gap: 2, padding: 2, border: `1px solid ${t.ghostBorder}`, borderRadius: 9 }}>
+    <div style={{ display: "flex", gap: 2, padding: 2, border: `1px solid ${t.ghostBorder}`, borderRadius: 9,
+                  // ★ 900px 实测:六个档位「分模型/总量/今日/7d/14d/30d」被压成三行竖排
+                  //   (探针:内容高 48/行高 13)。与总览头部按钮同一个病根。
+                  flexWrap: "wrap", rowGap: 2 }}>
       {opts.map((o) => (
         <span key={String(o)} onClick={() => on(o)} style={{
+          whiteSpace: "nowrap", flexShrink: 0,
           padding: "4px 11px", borderRadius: 7, fontSize: 11, cursor: "pointer", userSelect: "none",
           fontFamily: "'JetBrains Mono'", transition: "background .2s, color .2s",
           fontWeight: cur === o ? 700 : 400,

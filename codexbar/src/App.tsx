@@ -13,6 +13,7 @@ import LogsPage from "./pages/LogsPage";
 import TrafficPage from "./pages/TrafficPage";
 import PlatformPage from "./pages/PlatformPage";
 import type { Range } from "./traffic";
+import { colorOf } from "./traffic";
 import SettingsPage, { getSettings, patchSettings, TRAY_STYLES } from "./pages/SettingsPage";
 import { useStore } from "./hooks/useStore";
 import { useExpiryWatch } from "./hooks/useExpiryWatch";
@@ -22,6 +23,8 @@ import { useKeyboard } from "./hooks/useKeyboard";
 import { fmtAgo, CARD_WARN_DAYS, maskId } from "./helpers";
 import { usePrivacy } from "./hooks/usePrivacy";
 import { useTraffic } from "./hooks/useTraffic";
+import { useGrokQuota } from "./hooks/useGrokQuota";
+import GrokCard from "./components/GrokCard";
 import { IconTicket } from "./components/CardBadge";
 import ProbeButton from "./components/ProbeButton";
 import PlanBadge from "./components/PlanBadge";
@@ -72,6 +75,39 @@ export default function App() {
   const [autoSwitch, setAutoSwitch] = useState(() => getSettings().autoSwitchEnabled);
   // 侧栏折叠态。**默认折叠**（DEFAULTS.navOpen = false），选择会记住 —— 每次启动都弹回默认的开关很烦人。
   const [navOpen, setNavOpen] = useState(() => getSettings().navOpen);
+
+  /**
+   * ★★ **窄窗自动折叠侧栏**（用户 2026-08-24 定稿：「尺寸小到一定程度后，需要折叠起侧边栏」）。
+   *
+   * 侧栏展开 176px / 折叠 52px，差 **124px** —— 正好是三列九宫格在窄窗下缺的那一点。
+   * 实测（`uishot/sweep.py`，账号卡自然宽 637）：
+   *   · 展开：**≥860 干净**，840 起单张卡溢出
+   *   · 折叠：**≥740 干净**，720 起溢出
+   * 差值 120px 与侧栏宽度差吻合，所以阈值取展开态的下限 860，窗口下限取折叠态的 740。
+   * 两个数**必须一起改**，闸在 `tests/test_narrow_window_nowrap.py`。
+   *
+   * ★ **这是显示层的临时覆盖，不改用户偏好**。变窄时只 `setNavOpen(false)`、**不写
+   * localStorage**；变宽时从偏好里读回来。否则用户拖窄一次，"侧栏默认展开"这个设置就被
+   * 永久抹掉了 —— 那是拿一次布局意外去改一条长期偏好。
+   * ★ 窄窗下用户仍可手动展开（那条路径照旧写偏好），一直保持到下次跨过阈值。
+   *
+   * ★ 为什么不做等比缩放：试过 `zoom`，**在 WKWebView 里语义与 Chrome 不同**，
+   * 真机上把版面撑爆（用户 2026-08-24 截图），而 harness 跑的是 Chrome、全程报"干净"——
+   * 用错引擎验证得到的假绿。折叠侧栏是纯 React 状态，两个引擎行为一致。
+   */
+  useEffect(() => {
+    const NARROW_W = 860;
+    let narrow = window.innerWidth < NARROW_W;
+    if (narrow) setNavOpen(false);
+    const onResize = () => {
+      const now = window.innerWidth < NARROW_W;
+      if (now === narrow) return;            // 只在**跨过阈值**时动作,不是每次 resize 都覆盖
+      narrow = now;
+      setNavOpen(now ? false : getSettings().navOpen);
+    };
+    window.addEventListener("resize", onResize);
+    return () => { window.removeEventListener("resize", onResize); };
+  }, []);
   const { privacy, toggle: togglePrivacy } = usePrivacy();
 
   const t = THEMES[theme];
@@ -117,6 +153,20 @@ export default function App() {
   //   取数走 `useTraffic`:先画上次的快照(一次文件读),再后台重扫,所以进页面不再有那 1~4 秒白屏。
   const { data: traffic, raw: trafficRaw, cacheMode, prefs: platPrefs, busy: trafficBusy,
           err: trafficErr, refresh: refreshTraffic } = useTraffic({ enabled: page === "traffic" });
+  /**
+   * ★ 这是全 app 唯一一条会**主动联网**的数据路径(`useTraffic` 扫的是本机盘,零消耗不联网),
+   *   所以 `enabled` 是白名单不是黑名单:**只有这两个页面**要看 grok 额度。
+   *   **只有总览**(用户 2026-08-24 两次定稿:先要「号的额度在上面」,后要「grok 的用量
+   *   不要放在 AI 用量信息里,放在总览里就好」)。用量页、日志页、设置页一律不触发 ——
+   *   那一页整页都是"本机盘扫出来的 token 消耗",而 grok 额度是云端账单,本来就不同源。
+   *
+   *   频次仍有四道闸:sidecar 新鲜度 10min · `visibilityState` 门(窗口隐藏时零请求) ·
+   *   Rust 侧 `GROK_COALESCE_SECS=300` 双检 · 设置页「后台自动刷新」总开关。
+   *   ⚠️ 已知取舍:总览是默认页,所以**每次启动 app 会打一次**(token 已过期时连请求都不发,
+   *   本地短路)。这个端点不计费、不消耗额度,换来的是打开窗口时数字已经在那儿。
+   */
+  const { snap: grokSnap, busy: grokBusy, err: grokErr, refresh: refreshGrok } =
+    useGrokQuota({ enabled: page === "overview" });
 
   // ★ `name` 是展开态显示的中文名，`tip` 只在**折叠态**当悬浮提示 —— 展开后标签已经在那儿，
   //   再挂一个 title 是重复。原来 traffic 的 tip 写死「Claude / Codex / Grok」三家，
@@ -129,7 +179,10 @@ export default function App() {
   ];
 
   return (
-    <div style={{ width: "100vw", height: "100vh", display: "flex", flexDirection: "column", background: t.appBg, color: t.text, fontFamily: "'Space Grotesk'", borderRadius: 12, overflow: "hidden", boxShadow: t.shadow, transition: "background-color .35s ease, color .35s ease" }}>
+    // ★ `cb-light` 供 App.css 的滚动条规则按主题反色 —— 白色拇指在浅色底上等于隐形。
+    //   加这个 class 之前那条规则是**死规则**(写完顺手核了一下才发现根节点没有它)。
+    <div className={theme === "light" ? "cb-light" : undefined}
+         style={{ width: "100vw", height: "100vh", display: "flex", flexDirection: "column", background: t.appBg, color: t.text, fontFamily: "'Space Grotesk'", borderRadius: 12, overflow: "hidden", boxShadow: t.shadow, transition: "background-color .35s ease, color .35s ease" }}>
 
       {/* Title bar */}
       <div data-tauri-drag-region style={{ height: 38, flexShrink: 0, display: "flex", alignItems: "center", padding: "0 14px", gap: 8, borderBottom: `1px solid ${t.chromeBorder}`, background: t.chromeBg, position: "relative", transition: "background-color .35s ease" }}>
@@ -197,13 +250,23 @@ export default function App() {
         <div style={{ flex: 1, minWidth: 0, padding: "16px 20px", display: "flex", flexDirection: "column", overflow: "hidden" }}>
           {page === "overview" && (
             <>
-              <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 12 }}>
-                <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
-                  <span style={{ fontSize: 20, fontWeight: 700, letterSpacing: "-.01em" }}>总览</span>
-                  <span style={{ fontSize: 11.5, color: t.muted, fontFamily: "'JetBrains Mono'" }}>{summary}</span>
+              {/* ★ `flexWrap` + `rowGap`:空间不够时**整块**换行,而不是把里面的按钮压扁。
+                  断字是 bug(见 GhostButton/ProbeButton 的 nowrap),换行只是变高、零信息损失。 */}
+              <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between",
+                            marginBottom: 12, flexWrap: "wrap", rowGap: 8, columnGap: 12 }}>
+                <div style={{ display: "flex", alignItems: "baseline", gap: 10, minWidth: 0 }}>
+                  {/* ★ 标题**永不断字**。窄窗下曾被劈成「总 / 览」(用户 2026-08-24 截图)。 */}
+                  <span style={{ fontSize: 20, fontWeight: 700, letterSpacing: "-.01em",
+                                 whiteSpace: "nowrap", flexShrink: 0 }}>总览</span>
+                  {/* ★ 这行摘要是**第一个该让位**的:窄窗下它的信息价值最低(下面每张卡都写着状态),
+                      所以给 `minWidth:0` + 省略号,让它先缩,把空间让给按钮。 */}
+                  <span style={{ fontSize: 11.5, color: t.muted, fontFamily: "'JetBrains Mono'",
+                                 whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
+                                 minWidth: 0 }}>{summary}</span>
                 </div>
                 <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 5 }}>
-                <div style={{ display: "flex", gap: 7, alignItems: "center" }}>
+                <div style={{ display: "flex", gap: 7, alignItems: "center",
+                              flexWrap: "wrap", justifyContent: "flex-end", rowGap: 7 }}>
                   <GhostButton t={t} onClick={() => run("refresh-all", ["refresh-all", "--notify"], `已刷新全池 · ${counts.total} 个号`)} loading={loadingAction === "refresh-all"} loadingText="刷新中…"><IconRefresh spin={loadingAction === "refresh-all"} />刷新全池</GhostButton>
                   <GhostButton t={t} onClick={() => run("health", ["health"], "已检查各号 token")} accent loading={loadingAction === "health"} loadingText="检查中…">
                     检查 token
@@ -255,16 +318,21 @@ export default function App() {
                         <PlanBadge plan={cur.plan} t={t} size={10} />
                         <span style={{ fontSize: 12, color: t.text2, fontFamily: "'JetBrains Mono'" }}>{maskId(cur.email, privacy)}</span>
                       </div>
-                      <div style={{ display: "flex", alignItems: "center", gap: 13, marginTop: 8, fontSize: 12, color: t.text2, fontFamily: "'JetBrains Mono'" }}>
+                      {/* ★ **每一段 nowrap、段与段之间才允许换行。**
+                          窄窗实测(760px)曾把日期劈成「订阅至 2026- / 09-08」、「至 2026- / 09-21」——
+                          **断开的日期比断开的按钮更糟**:它会被读成另一个日期,而不是"看起来挤"。
+                          与 GhostButton/ProbeButton 的 nowrap 是同一个病根(用户 2026-08-24 报的头部
+                          断字只是它的第一处),所以同批一起修,别只补被点名的那一处。 */}
+                      <div style={{ display: "flex", alignItems: "center", gap: 13, marginTop: 8, fontSize: 12, color: t.text2, fontFamily: "'JetBrains Mono'", flexWrap: "wrap", rowGap: 6 }}>
                         {cur.windows.map((w, i) => (
-                          <span key={w.label}>{i > 0 && <span style={{ color: t.muted, marginRight: 13 }}>·</span>}{w.label} <b style={{ color: sc }}>{w.pct}%</b> <span style={{ color: t.muted }}>↻{w.reset}</span></span>
+                          <span key={w.label} style={{ whiteSpace: "nowrap" }}>{i > 0 && <span style={{ color: t.muted, marginRight: 13 }}>·</span>}{w.label} <b style={{ color: sc }}>{w.pct}%</b> <span style={{ color: t.muted }}>↻{w.reset}</span></span>
                         ))}
                         {cur.windows.length > 0 && <span style={{ color: t.muted }}>·</span>}
-                        <span title={cur.expStale ? "OpenAI 上次复核订阅早于这个日期,所以「已过期」是拿陈旧快照下的结论 —— 续费不在它视野里。刷新 token 也拉不到新状态,要等 OpenAI 自己复核。" : undefined}>订阅至 {cur.exp}{cur.expStale && <span style={{ color: "#E0901C" }}>*</span>}</span>
+                        <span style={{ whiteSpace: "nowrap" }} title={cur.expStale ? "OpenAI 上次复核订阅早于这个日期,所以「已过期」是拿陈旧快照下的结论 —— 续费不在它视野里。刷新 token 也拉不到新状态,要等 OpenAI 自己复核。" : undefined}>订阅至 {cur.exp}{cur.expStale && <span style={{ color: "#E0901C" }}>*</span>}</span>
                         {cur.cards > 0 && (
                           <>
                             <span style={{ color: t.muted }}>·</span>
-                            <span style={{ display: "inline-flex", alignItems: "center", gap: 5, color: cur.cardDays != null && cur.cardDays <= CARD_WARN_DAYS ? "#f2b45c" : t.accent }}>
+                            <span style={{ display: "inline-flex", alignItems: "center", gap: 5, whiteSpace: "nowrap", color: cur.cardDays != null && cur.cardDays <= CARD_WARN_DAYS ? "#f2b45c" : t.accent }}>
                               <IconTicket size={11} />重置卡 ×{cur.cards}
                               {cur.cardExp
                                 ? (cur.cardsExpiring > 0 ? ` · ${cur.cardsExpiring} 张 ${cur.cardExp} 到期` : ` · 至 ${cur.cardExp}`)
@@ -310,6 +378,15 @@ export default function App() {
                           onProbe={(label) => run(`probe-${a.aid}`, ["probe", label], `探针 ${label}`)}
                           onRename={(next) => run(`rename-${a.aid}`, ["rename", a.aid, next], `${a.node} → ${next}`)} />
                       );})}
+                      {/* ★ grok 卡。**渲染在格子里,但绝不进 `alive` 数组** —— 那个数组同时驱动
+                          ⌘1~⌘9 切号(`aliveByLabel[idx]` 直接 switch)、计数徽章、探针全池的号数、
+                          自动切号。混进去 ⌘4 会"切"到一个切不了的东西上,而且不报错。
+                          闸在 tests/test_grok_not_in_pool_ui.py。 */}
+                      <GrokCard t={t} color={colorOf(traffic, "grok")} snap={grokSnap}
+                                disabled={!!platPrefs.by?.grok?.off}
+                                privacy={privacy} busy={grokBusy} err={grokErr}
+                                onRefresh={refreshGrok}
+                                onOpen={() => { setDrill("grok"); setPage("traffic"); }} />
                     </div>
                     {dead.length > 0 && (
                       <details style={{ marginTop: 12 }}>

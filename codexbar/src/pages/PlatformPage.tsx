@@ -9,6 +9,7 @@ import { RANGES, rangeLabel, bucketsFor, sumBuckets, costOfBucket, savingOfBucke
 import KpiStrip, { type Kpi, UP, DOWN } from "../components/KpiStrip";
 import { useIntro, introEnabled } from "../hooks/useIntro";
 import CacheChip from "../components/CacheChip";
+import DisclosureBanner from "../components/DisclosureBanner";
 
 const AMBER = "#E0A21C";
 const SRC: Record<string, string> = {
@@ -20,26 +21,18 @@ const SRC: Record<string, string> = {
   agy: "traffic/agy-ledger/usage.jsonl（wrapper 记账）",
 };
 
-/** 采集不完整的平台的横幅。`coverage` 缺席 = 全量采集,**不渲染任何东西**。 */
+/** 采集不完整的平台的横幅。`coverage` 缺席 = 全量采集,**不渲染任何东西**。
+ *
+ *  壳走 `DisclosureBanner`(与 grok 额度那条共用同一套像素),**文案仍留在 `coverageNote`** ——
+ *  两处共用视觉、各自拥有措辞。把文案也搬进通用件会让它变成第二个文案真源。 */
 function CoverageBanner({ t, coverage }: {
   t: Theme; coverage?: Coverage;
 }): React.ReactElement | null {
   const pct = coveragePct(coverage);
   if (pct == null || !coverage) return null;
-  return (
-    <div style={{ display: "flex", gap: 8, alignItems: "flex-start",
-                  border: `1px solid rgba(224,144,28,.35)`,
-                  background: t.isDark ? "rgba(224,144,28,.09)" : "rgba(224,144,28,.10)",
-                  borderRadius: 9, padding: "7px 10px", marginBottom: 10 }}>
-      <span style={{ fontFamily: "'JetBrains Mono'", fontSize: 9.5, fontWeight: 700, color: AMBER,
-                     whiteSpace: "nowrap", paddingTop: 1, letterSpacing: ".03em" }}>
-        覆盖 {coverage.covered}/{coverage.total}
-      </span>
-      <span style={{ fontSize: 10.5, lineHeight: 1.55, color: t.text2 }}>
-        {coverageNote(coverage)}
-      </span>
-    </div>
-  );
+  return <DisclosureBanner t={t} tone="amber"
+                           badge={`覆盖 ${coverage.covered}/${coverage.total}`}
+                           note={coverageNote(coverage)} />;
 }
 
 /** 平台详情(交接稿 §5–§8)。 */
@@ -83,6 +76,10 @@ function money(x: number): string {
  * 中间那 26px 是分区竖线所在的空列。
  */
 const GAP = 26;
+/** ★ 表格内容的最小宽。**光给容器加 `overflowX:auto` 不够** —— `ROW` 模板里有一列 `1fr`,
+ *  它会把行撑到"可用宽"而不是"自然宽",于是行仍被约束成 684、内部继续溢出,滚动条永远不出现。
+ *  钉一个 minWidth,滚动才真的发生(900px 实测自然宽 698,留 2px 余量)。 */
+const TABLE_MIN = 700;
 const RATE_W = 58 + 58 + 74 + 16;   // 输入 + 输出 + 费用/百万 + 间隙
 const ROW: React.CSSProperties = {
   display: "grid", alignItems: "center",
@@ -273,6 +270,7 @@ export default function PlatformPage({ t, data, raw, cacheMode, pk, range, setRa
           只有带 coverage 字段的平台才渲染，其余平台一个像素都不多。 */}
       <CoverageBanner t={t} coverage={data?.platforms[pk]?.coverage} />
 
+
       <KpiStrip t={t} items={kpis} intro={intro} />
 
       {busy && !data && <div style={{ fontSize: 12, color: t.muted }}>扫描中…</div>}
@@ -335,17 +333,22 @@ export default function PlatformPage({ t, data, raw, cacheMode, pk, range, setRa
           「同左第 N 行」——那说明一旦逐行对齐，卡片边界本身就是多余的。
 
           「费率卡 · API 牌价」这个标题去掉了，改成表头上方的分组名。 */}
+      {/* ★ 这是一张**宽数据表**:11 列的 `gridTemplateColumns` 加起来约 698px,是硬下限,
+          压不动也不该压(数字列压窄会 `###` 或串位)。900px 窄窗实测右侧被切掉,
+          裁掉的正是「费用/百万」那一列 —— **数据表被裁比排版难看严重得多**。
+          所以给它自己的横向滚动:装不下就能滚,一列都不少。
+          (扫描探针会跳过 overflow:auto 的容器 —— 可滚动是取舍,不是缺陷。) */}
       {!!v?.models.length && (
-        <div style={{ marginTop: 14 }}>
+        <div style={{ marginTop: 14, overflowX: "auto" }}>
           <div style={{ display: "grid", gridTemplateColumns: `1fr ${GAP}px ${RATE_W}px`,
                         fontFamily: "'JetBrains Mono'", fontSize: 10, color: t.muted,
-                        letterSpacing: ".06em", marginBottom: 4 }}>
+                        letterSpacing: ".06em", marginBottom: 4, minWidth: TABLE_MIN }}>
             <span style={{ color: t.text2, fontWeight: 700 }}>模型消耗</span>
             <span />
             <span style={{ color: t.text2, fontWeight: 700 }}>API 牌价</span>
           </div>
 
-          <div style={{ fontFamily: "'JetBrains Mono'", fontSize: 10.5 }}>
+          <div style={{ fontFamily: "'JetBrains Mono'", fontSize: 10.5, minWidth: TABLE_MIN }}>
             <div style={{ ...ROW, fontSize: 9, color: t.muted, letterSpacing: ".07em",
                           padding: "0 4px 6px", borderBottom: `1px solid ${t.cardBorder}` }}>
               <span /><span>模型</span><span />

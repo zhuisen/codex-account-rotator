@@ -70,9 +70,14 @@ export default function AccountCard({ a, isCurrent, isBest, isSelected, shortcut
         </Ring>
 
         <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 4 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
+          {/* ★ 三列九宫格下这一行**零余量**:`plus4 活 USE 最优` 实测自然宽 126、可用 117。
+              零余量意味着任何扰动都会破 —— 分数缩放下的字形量化就够了(每个内联元素舍入
+              半像素,十几个累积出 9px)。所以指定**唯一让位者**:名字截省略号,徽章一个不压。
+              名字截一点还认得出,徽章少一半就读不出是 USE 还是 PRO。 */}
+          <div style={{ display: "flex", alignItems: "center", gap: 7, minWidth: 0 }}>
             {editing === null ? (
-              <span style={{ fontSize: 13.5, fontWeight: 700, color: t.text }}>{a.node}</span>
+              <span style={{ fontSize: 13.5, fontWeight: 700, color: t.text, minWidth: 0,
+                             overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{a.node}</span>
             ) : (
               <input
                 autoFocus value={editing}
@@ -127,12 +132,16 @@ export default function AccountCard({ a, isCurrent, isBest, isSelected, shortcut
       </div>
 
       {isSelected && (
-        <div onClick={(e) => e.stopPropagation()} style={{ display: "flex", gap: 6, marginTop: 10, paddingTop: 8, borderTop: `1px solid ${t.divider}` }}>
+        <div onClick={(e) => e.stopPropagation()} style={{ display: "flex", gap: 6, marginTop: 10, paddingTop: 8, borderTop: `1px solid ${t.divider}`,
+                     // ★ 6 个按钮塞在三列网格的一张 ~300px 卡里放不下。不换行时 flex 会把每个
+                     //   压到 ~20px ⇒「切换到此号」变成一列竖排的单字(用户 2026-08-24 截图)。
+                     //   探针实测:内容高 80px / 行高 13px = 六行。
+                     flexWrap: "wrap", rowGap: 6 }}>
           {!isCurrent && !isDead && (
-            <span onClick={onSwitch} style={{ flex: 1, textAlign: "center", fontSize: 11, fontWeight: 700, color: t.accentText, background: t.accent, padding: "5px 0", borderRadius: 6, cursor: "pointer" }}>切换到此号</span>
+            <span onClick={onSwitch} style={{ flex: "1 1 auto", minWidth: 84, textAlign: "center", fontSize: 11, fontWeight: 700, whiteSpace: "nowrap", color: t.accentText, background: t.accent, padding: "5px 8px", borderRadius: 6, cursor: "pointer" }}>切换到此号</span>
           )}
           {isCurrent && (
-            <span style={{ flex: 1, textAlign: "center", fontSize: 11, fontWeight: 600, color: t.accent, padding: "5px 0" }}>✓ 当前使用中</span>
+            <span style={{ flex: "1 1 auto", minWidth: 84, textAlign: "center", fontSize: 11, fontWeight: 600, whiteSpace: "nowrap", color: t.accent, padding: "5px 0" }}>✓ 当前使用中</span>
           )}
           {!isDead && (
             <ProbeButton t={t} variant="inline" label="探针"
@@ -141,13 +150,13 @@ export default function AccountCard({ a, isCurrent, isBest, isSelected, shortcut
           )}
           <span onClick={() => setEditing(a.node)}
                 title="改这个号的显示名。菜单栏标题、弹窗、卡片会一起变（label 只是昵称，不影响套餐判定）"
-                style={{ fontSize: 11, color: t.muted, padding: "5px 10px", borderRadius: 6, cursor: "pointer", border: `1px solid ${t.ghostBorder}` }}>重命名</span>
-          <span onClick={() => onShowDetail(a.aid)} style={{ fontSize: 11, color: t.muted, padding: "5px 10px", borderRadius: 6, cursor: "pointer", border: `1px solid ${t.ghostBorder}` }}>详情</span>
+                style={{ fontSize: 11, color: t.muted, padding: "5px 10px", borderRadius: 6, cursor: "pointer", whiteSpace: "nowrap", flexShrink: 0, border: `1px solid ${t.ghostBorder}` }}>重命名</span>
+          <span onClick={() => onShowDetail(a.aid)} style={{ fontSize: 11, color: t.muted, padding: "5px 10px", borderRadius: 6, cursor: "pointer", whiteSpace: "nowrap", flexShrink: 0, border: `1px solid ${t.ghostBorder}` }}>详情</span>
           {!confirmDelete ? (
-            <span onClick={() => setConfirmDelete(true)} style={{ fontSize: 11, color: "#E0524D", padding: "5px 10px", borderRadius: 6, cursor: "pointer", border: "1px solid #E0524D40" }}>删除</span>
+            <span onClick={() => setConfirmDelete(true)} style={{ fontSize: 11, color: "#E0524D", padding: "5px 10px", borderRadius: 6, cursor: "pointer", whiteSpace: "nowrap", flexShrink: 0, border: "1px solid #E0524D40" }}>删除</span>
           ) : (
             <>
-              <span onClick={() => { setConfirmDelete(false); onRemove(a.node); }} style={{ fontSize: 11, fontWeight: 700, color: "#fff", background: "#E0524D", padding: "5px 10px", borderRadius: 6, cursor: "pointer" }}>确认删除</span>
+              <span onClick={() => { setConfirmDelete(false); onRemove(a.node); }} style={{ fontSize: 11, fontWeight: 700, color: "#fff", background: "#E0524D", padding: "5px 10px", borderRadius: 6, cursor: "pointer", whiteSpace: "nowrap", flexShrink: 0 }}>确认删除</span>
               <span onClick={() => setConfirmDelete(false)} style={{ fontSize: 11, color: t.muted, padding: "5px 10px", cursor: "pointer" }}>取消</span>
             </>
           )}

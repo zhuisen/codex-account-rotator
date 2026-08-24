@@ -1,0 +1,337 @@
+#!/usr/bin/env python3
+"""grok 周额度只读抓取器 —— 打一份 JSON 到 stdout,自己不落盘。
+
+端点是逆向出来的(2026-08-24):grok TUI 走 HTTP/2,路径压在 HPACK 里,`strings` 抓包看不见,
+解了 HPACK 才拿到 `GET /v1/billing?format=credits`。同批解出的还有 /v1/settings /v1/user
+/v1/models /v1/responses /v1/sessions/{id}/signals /v1/traces。**不是官方公开 API**,升级可能改。
+
+★★ 三条不可退让的纪律,改这个文件前先读:
+
+1. **绝不碰 `refresh_token`。** `~/.grok/auth.json` 是 grok CLI 自己的活文件,我们和它共用同一份
+   凭证;grok 的 refresh_token 单次有效,我们一刷,grok CLI 手里那份立刻作废。这与 CLAUDE.md §8
+   「绝不刷 active 号的 token(B7/B8/B14 连环杀号)」是完全同族的事故。token 过期就短路,把续期
+   交还给 grok CLI —— **哪怕看起来只差三行,也绝不实现「顺便刷一下」**。
+   闸在 `tests/test_grok_readonly.py`(AST 断言全文不得出现该字符串)。
+
+2. **只读、只 GET。** 不写 `~/.grok/` 下任何文件,**不取 `auth.json.lock`** —— 取了就可能阻塞
+   grok CLI 自己的刷新,把"只读展示"变成"干扰凭证轮换",绕回第 1 条。
+
+3. ★★ **退出码恒 0**(仅参数错误 2)。任何失败都以 `available:false` 的 JSON 打到 stdout。
+   因为 Rust 侧 `out.status.success()` 为假时走 `Err(String)`,而 `Err` 在前端三条消费路径上
+   分别是静默吞掉 / 截断成 200 字符 / toast —— **全都会被读成「没数据」**,等于把降级又折叠回去。
+   项目铁律:「读不到」和「确实没有」绝不能返回同一个值。
+
+用法:
+    grok-quota [--prev <上一份 .grok-quota.json>]
+
+`--prev` 只读,用来把上一次的成功读数搬进 `last_good`(降级时保留陈旧值,但字段名不同,
+消费方不可能误当现值)。
+"""
+import json
+import os
+import signal
+import ssl
+import sys
+import time
+from datetime import datetime
+from http.client import HTTPSConnection
+
+SCHEMA = 1
+
+DEFAULT_AUTH = os.path.expanduser("~/.grok/auth.json")
+DEFAULT_HOST = "cli-chat-proxy.grok.com"
+BILLING_PATH = "/v1/billing?format=credits"
+
+SOCKET_TIMEOUT = 10   # 单次 socket 操作
+HARD_DEADLINE = 20    # ★ 整体上限。http.client 的 timeout 只管单次操作,DNS 与多次 read 各自
+                      #   计时,总耗时能远超它;而 Rust 侧 run_* 全部没有超时,一个吊住的连接
+                      #   会永久占住 GROK_LOCK,此后每次刷新都在锁上排队、UI 永远转圈。
+
+# ★ 闭集。前端 `codexbar/src/grok.ts` 的 `grokReasonNote` 必须逐个覆盖,
+#   闸在 `tests/test_grok_reason_copy.py`(两边都从源解析,新增一个只改一边就红)。
+REASONS = (
+    "token_expired",
+    "unauthorized",
+    "auth_file_missing",
+    "auth_file_unreadable",
+    "auth_file_empty",
+    "bad_payload",
+    "http_error",
+    "network_error",
+)
+
+
+def auth_path():
+    return os.environ.get("GROK_AUTH_PATH") or DEFAULT_AUTH
+
+
+def billing_host():
+    """→ (host, port)。`GROK_BILLING_HOST` 可带端口(`127.0.0.1:8443`),**只为隔离测试**存在。
+
+    没有它,401 / 500 / 坏 payload 这三个降级态就只能拿真 token 打真上游去凑 —— 那既慢又
+    把测试结果绑在外网状态上,而这三个态恰恰是本次最需要钉死的(项目铁律:「读不到」不能长成 0)。
+    生产路径永远走默认值。
+    """
+    raw = os.environ.get("GROK_BILLING_HOST") or DEFAULT_HOST
+    host, _, port = raw.partition(":")
+    return host, (int(port) if port.isdigit() else 443)
+
+
+def iso_epoch(s):
+    """ISO8601 → epoch 秒。auth.json 用 `…Z`,账单接口用 `…+00:00`,两种都要认。"""
+    if not isinstance(s, str) or not s:
+        return None
+    try:
+        return int(datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp())
+    except ValueError:
+        return None
+
+
+def load_auth():
+    """→ (entries, reason)。entries 是 [(account_key, entry_dict)];失败时 entries 为 []。
+
+    解析失败**重试一次**:`~/.grok/auth.json.lock` 实测存在(内容 `pid:timestamp`),说明
+    grok CLI 刷 token 时会重写这个文件,我们有概率读到半截。重试比取锁安全(见文件头第 2 条)。
+    """
+    path = auth_path()
+    for attempt in (0, 1):
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+        except FileNotFoundError:
+            return [], "auth_file_missing"
+        except (OSError, ValueError):
+            if attempt == 0:
+                time.sleep(0.15)
+                continue
+            return [], "auth_file_unreadable"
+        if not isinstance(data, dict) or not data:
+            return [], "auth_file_empty"
+        entries = [(k, v) for k, v in data.items() if isinstance(v, dict)]
+        return (entries, None) if entries else ([], "auth_file_empty")
+    return [], "auth_file_unreadable"
+
+
+def parse_quota(payload):
+    """上游 JSON → 我们的 schema。字段逐个显式映射,不整个 dict 透传。
+
+    刻意与上游 camelCase 分家(`used_percent` 而非 `creditUsagePercent`):与仓内既有口径同风格,
+    且强制显式映射 —— 不留"猜字段名"的口子(项目吃过好几次这个亏)。
+    """
+    cfg = (payload or {}).get("config")
+    if not isinstance(cfg, dict):
+        return None
+    used = cfg.get("creditUsagePercent")
+    if not isinstance(used, (int, float)):
+        return None
+
+    period = cfg.get("currentPeriod") if isinstance(cfg.get("currentPeriod"), dict) else {}
+    start = iso_epoch(period.get("start")) or iso_epoch(cfg.get("billingPeriodStart"))
+    end = iso_epoch(period.get("end")) or iso_epoch(cfg.get("billingPeriodEnd"))
+    # ★ 窗口长度由起止**算出来**,不写死 10080 —— 本机实测恰好是整周,但那是观测不是保证。
+    window = round((end - start) / 60.0, 1) if (start and end and end > start) else None
+
+    products = []
+    for p in cfg.get("productUsage") or []:
+        if isinstance(p, dict) and isinstance(p.get("usagePercent"), (int, float)):
+            products.append({"product": p.get("product"), "used_percent": float(p["usagePercent"])})
+
+    def val(key):
+        v = cfg.get(key)
+        return float(v.get("val", 0)) if isinstance(v, dict) else None
+
+    return {
+        "used_percent": float(used),
+        "period_type": period.get("type"),
+        "period_start": start,
+        "period_end": end,
+        "window_minutes": window,
+        "products": products,
+        "on_demand_cap": val("onDemandCap"),
+        "on_demand_used": val("onDemandUsed"),
+        "prepaid_balance": val("prepaidBalance"),
+    }
+
+
+def fetch(token, user_id):
+    """→ (quota|None, reason|None, http_status|None, detail|None)。
+
+    `http_status is None` 明确表示**请求没发出去**(与"发出去了但失败"是两回事)。
+    """
+    conn = None
+    try:
+        host, port = billing_host()
+        conn = HTTPSConnection(host, port,
+                               context=ssl.create_default_context(),
+                               timeout=SOCKET_TIMEOUT)
+        conn.request("GET", BILLING_PATH, headers={
+            "authorization": "Bearer " + token,
+            "x-xai-token-auth": "xai-grok-cli",
+            "x-userid": user_id or "",
+            "x-grok-client-version": "1.0.4",
+            "x-grok-client-identifier": "grok-shell",
+            "x-grok-client-mode": "interactive",
+            "accept": "*/*",
+            "user-agent": "grok-pager/1.0.4 grok-shell/1.0.4 (macos; aarch64)",
+        })
+        resp = conn.getresponse()
+        status = resp.status
+        body = resp.read(1 << 20)
+    except Exception as exc:                       # noqa: BLE001 — 任何异常都要落成可展示的降级
+        return None, "network_error", None, "{}: {}".format(type(exc).__name__, exc)[:200]
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:                      # noqa: BLE001 — 关闭失败不影响已取到的数据
+                pass
+
+    if status in (401, 403):
+        return None, "unauthorized", status, "HTTP {}".format(status)
+    if status != 200:
+        return None, "http_error", status, "HTTP {}".format(status)
+    try:
+        payload = json.loads(body)
+    except ValueError:
+        return None, "bad_payload", status, "响应不是合法 JSON"
+    quota = parse_quota(payload)
+    if quota is None:
+        return None, "bad_payload", status, "响应里没有 config.creditUsagePercent"
+    return quota, None, status, None
+
+
+def prev_index(path):
+    """上一份 sidecar 的 {account_key: last_good}。读不到就空 dict —— 这是纯增益,不该让它失败。"""
+    if not path:
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            old = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    out = {}
+    for acc in (old.get("accounts") or []):
+        if not isinstance(acc, dict):
+            continue
+        key = acc.get("account_key")
+        if not key:
+            continue
+        # 上一次成功 → 用它本次的读数;上一次也失败 → 把它当时搬运的 last_good 继续往下传,
+        # 否则连续两次失败就会把陈旧读数丢掉(而那恰恰是最需要它的时候)。
+        if acc.get("available") and isinstance(acc.get("quota"), dict):
+            q = acc["quota"]
+            out[key] = {"used_percent": q.get("used_percent"),
+                        "fetched_at": old.get("fetched_at"),
+                        "period_end": q.get("period_end")}
+        elif isinstance(acc.get("last_good"), dict):
+            out[key] = acc["last_good"]
+    return out
+
+
+def scan_account(key, entry, carried):
+    token = entry.get("key")
+    exp = iso_epoch(entry.get("expires_at"))
+    acc = {
+        "account_key": key,
+        "user_id": entry.get("user_id"),
+        "email": entry.get("email"),
+        "token_expires_at": exp,
+        "available": False,
+        "reason": None,
+        "detail": None,
+        "http_status": None,
+        "quota": None,
+        "last_good": None,
+    }
+
+    if not token:
+        acc["reason"] = "auth_file_unreadable"
+        acc["detail"] = "条目里没有 key 字段"
+    elif exp is not None and exp <= time.time():
+        # ★ 本地短路:过期就不发请求。已知取舍 —— `expires_at` 是 grok CLI 写下的客户端时刻,
+        #   时钟漂移或它提前续期都可能让我们假阳性。代价是用户白跑一次 grok(无害);反过来
+        #   (发一个必然 401 的请求)会把"本地知道过期"和"服务端撤销/封号"混成同一个红灯。
+        #   判别实验:过期后手动发一次看是 401 还是 200。**当前 n=0,别当已知规律用。**
+        acc["reason"] = "token_expired"
+        acc["detail"] = "本地 expires_at 已过,未发请求"
+    else:
+        quota, reason, status, detail = fetch(token, entry.get("user_id"))
+        acc["http_status"] = status
+        if quota is not None:
+            acc["available"] = True
+            acc["quota"] = quota
+        else:
+            acc["reason"] = reason
+            acc["detail"] = detail
+
+    if not acc["available"]:
+        acc["last_good"] = carried.get(key)
+    return acc
+
+
+def main(argv):
+    prev = None
+    args = argv[1:]
+    while args:
+        a = args.pop(0)
+        if a == "--prev" and args:
+            prev = args.pop(0)
+        elif a in ("-h", "--help"):
+            print(__doc__)
+            return 0
+        else:
+            print("用法: grok-quota [--prev <path>]", file=sys.stderr)
+            return 2
+
+    def on_alarm(_sig, _frm):
+        raise TimeoutError("超过 {}s 整体上限".format(HARD_DEADLINE))
+    try:
+        signal.signal(signal.SIGALRM, on_alarm)
+        signal.alarm(HARD_DEADLINE)
+    except (ValueError, AttributeError):
+        pass  # 非主线程 / 非 POSIX:退回只有 socket 超时。别因为装不上闹钟就不干活。
+
+    carried = prev_index(prev)
+    entries, load_reason = load_auth()
+
+    accounts = []
+    if load_reason:
+        # 连账号都列不出来时,仍然产出一条**可展示**的记录,而不是空数组 ——
+        # 空数组会被 UI 读成"没有 grok 账号",与"读不到 auth 文件"是两回事。
+        accounts.append({
+            "account_key": None, "user_id": None, "email": None,
+            "token_expires_at": None, "available": False,
+            "reason": load_reason, "detail": None, "http_status": None,
+            "quota": None, "last_good": None,
+        })
+    else:
+        for key, entry in entries:
+            try:
+                accounts.append(scan_account(key, entry, carried))
+            except TimeoutError as exc:
+                accounts.append({
+                    "account_key": key, "user_id": entry.get("user_id"),
+                    "email": entry.get("email"), "token_expires_at": None,
+                    "available": False, "reason": "network_error",
+                    "detail": str(exc)[:200], "http_status": None,
+                    "quota": None, "last_good": carried.get(key),
+                })
+                break  # 闹钟已响,后面的号也来不及了
+
+    try:
+        signal.alarm(0)
+    except (ValueError, AttributeError):
+        pass
+
+    json.dump({
+        "schema": SCHEMA,
+        "fetched_at": int(time.time()),
+        "auth_path": auth_path(),
+        "accounts": accounts,
+    }, sys.stdout, ensure_ascii=False)
+    sys.stdout.write("\n")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

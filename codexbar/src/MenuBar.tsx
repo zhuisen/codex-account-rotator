@@ -5,10 +5,12 @@ import { LogicalSize } from "@tauri-apps/api/dpi";
 import { THEMES, STATUS_COLORS } from "./theme";
 import Toast from "./components/Toast";
 import AccountRow from "./components/AccountRow";
+import GrokRow from "./components/GrokRow";
 import ProbeButton from "./components/ProbeButton";
 import MenuBarToday from "./components/MenuBarToday";
 import { useStore } from "./hooks/useStore";
 import { useTraffic } from "./hooks/useTraffic";
+import { useGrokQuota } from "./hooks/useGrokQuota";
 import { fmtAgo } from "./helpers";
 import { usePrivacy } from "./hooks/usePrivacy";
 import { todayView, fmtTok, colorOf } from "./traffic";
@@ -51,7 +53,7 @@ export default function MenuBar() {
 
   // 交接稿 §5「弹窗只读缓存,不重复解析」。数据与主窗口共用同一份快照和同一条新鲜度规则,
   // 谁扫完都会广播给对方 —— 所以这里不会和主窗口各扫一遍。要立刻要准数就点摘要行那个 ↻。
-  const { data: traffic, cacheMode, busy: trafficBusy, refresh: refreshTraffic, refreshIfStale } =
+  const { data: traffic, cacheMode, prefs, busy: trafficBusy, refresh: refreshTraffic, refreshIfStale } =
     useTraffic();
   const today = useMemo(() => todayView(traffic), [traffic]);
   // 平台色从 scan.py 下发的注册表取,前端不再各写一份色表(加平台只改 scan.py)
@@ -143,6 +145,10 @@ export default function MenuBar() {
     return () => window.removeEventListener("keydown", handler);
   }, [refresh]);
 
+  // ★ grok **不进** `accounts`/`alive`:那两个数组同时驱动 ⌘1~⌘9 切号、计数徽章、
+  //   探针全池的号数、自动切号。混进去 ⌘3 会"切"到一个切不了的东西上,且不报错。
+  //   视觉复用账号卡,数据走独立通路 —— 闸在 tests/test_grok_not_in_pool_ui.py。
+  const { snap: grokSnap, busy: grokBusy } = useGrokQuota();
   const alive = accounts.filter(a => a.status !== "dead");
   const dead = accounts.filter(a => a.status === "dead");
   const bestPct = alive.reduce((m, a) => Math.max(m, a.windows[0]?.pct ?? -1), -1);
@@ -262,6 +268,11 @@ export default function MenuBar() {
               : () => run(`switch-${a.aid}`, ["switch", a.node], `已切到 ${a.node}`)}
             switching={loadingAction === `switch-${a.aid}`} />
         ))}
+
+        {/* grok:同款卡片、紫色左轨、无「切换」按钮。点行 = 弹主界面的 Grok 详情页。 */}
+        <GrokRow t={t} color={colorOf(traffic, "grok")} disabled={!!prefs.by?.grok?.off}
+                 snap={grokSnap} privacy={privacy} busy={grokBusy}
+                 onOpen={() => void openMain("navigate-platform", "grok")} />
 
         {dead.length > 0 && (
           <details className="mb-dead-fold">

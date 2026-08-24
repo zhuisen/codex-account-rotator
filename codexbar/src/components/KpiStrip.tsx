@@ -38,10 +38,13 @@ export default function KpiStrip({ t, items, intro = 1 }: {
 }): React.ReactElement {
   return (
     <div style={{ display: "flex", justifyContent: "space-evenly", alignItems: "flex-start", gap: 18,
+                  // ★★ **数字被裁比排版难看严重得多** —— 900px 实测「9.76B」的格子渲染宽 68px、
+                  //   自然宽 80px,右边直接切掉,读出来就是另一个数。所以窄了就换行,绝不裁。
+                  flexWrap: "wrap", rowGap: 14,
                   padding: "10px 18px", marginBottom: 9, borderRadius: 12,
                   background: t.isDark ? "#0e1319" : t.cardBg, border: `1px solid ${t.cardBorder}` }}>
       {items.map(({ k, v, c, sub, subC, n, fmt }) => (
-        <div key={k} style={{ minWidth: 0, textAlign: "center" }}>
+        <div key={k} style={{ minWidth: "max-content", textAlign: "center", flexShrink: 0 }}>
           {/* 标签 12.5px:从 11 / 12 / 12.5 / 13.5 四档里选的(用户 2026-08-10)。13.5 开始和 29px 的
               数值抢主次,11 又偏小。四档在 1000px 默认窗宽下都不溢出(最大需 701px / 可用 886px)。 */}
           <div style={{ fontSize: 12.5, color: "#10E0E0", fontFamily: "'JetBrains Mono'",

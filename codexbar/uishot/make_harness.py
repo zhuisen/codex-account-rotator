@@ -17,6 +17,7 @@ import json
 import os
 import pathlib
 import re
+import time
 
 HERE = pathlib.Path(__file__).resolve().parent
 APP = HERE / "app"
@@ -50,6 +51,12 @@ STUB = """
       localStorage.setItem('codexbar_platform_prefs', JSON.stringify({
         order: ['grok', 'claude', 'codex', 'kimi'],
         by: { kimi: { off: true }, grok: { name: 'DeepSeek', color: '#7fd1ff' } },
+      }));
+    } else if (p.get('plat') === 'grokoff') {
+      // ★ 专门用来验「设置页停用 grok ⇒ 额度卡零像素」。`plat=demo` 停的是 kimi 不是 grok,
+      //   拿它验会得到假绿(我第一次就是这么验的)。
+      localStorage.setItem('codexbar_platform_prefs', JSON.stringify({
+        order: [], by: { grok: { off: true } },
       }));
     } else {
       localStorage.removeItem('codexbar_platform_prefs');
@@ -94,6 +101,42 @@ STUB = """
   // ★ IPC 调用计数。用来回答「这个操作到底有没有触发扫描」——`run_traffic` 是唯一会真起
   //   python 的那条,页面上完全看不出来,只能数。配 `--virtual-time-budget` 拉长虚拟时间,
   //   可以把 30s 的心跳压缩到秒级验证。
+  // grok 额度的六个夹具。**全部脱敏**(邮箱/user_id 都是假的) —— 真 sidecar 含 email + user_id,
+  // 与 state.json 同级敏感,绝不进 HTTP 伺服目录。
+  // `_NOW` 由 python 侧现算,否则 `↻重置` 与「N 分钟前」会随夹具一起腐烂成"已重置"。
+  var _NOW = __NOW__;
+  function _acc(o) {
+    var base = { account_key: 'https://auth.x.ai::demo', user_id: 'u-demo',
+                 email: 'grok@example.com', token_expires_at: _NOW + 3600,
+                 available: false, reason: null, detail: null, http_status: null,
+                 quota: null, last_good: null };
+    for (var k in o) base[k] = o[k];
+    return base;
+  }
+  var _Q = { used_percent: 35.0, period_type: 'USAGE_PERIOD_TYPE_WEEKLY',
+             period_start: _NOW - 345600, period_end: _NOW + 259200,
+             window_minutes: 10080.0,
+             products: [{ product: 'GrokBuild', used_percent: 27.0 },
+                        { product: 'GrokAppBuilder', used_percent: 4.0 },
+                        { product: 'GrokImagine', used_percent: 4.0 }],
+             on_demand_cap: 0.0, on_demand_used: 0.0, prepaid_balance: 0.0 };
+  var GROK = {
+    ok:      { schema: 1, fetched_at: _NOW - 60, auth_path: '~/.grok/auth.json',
+               accounts: [_acc({ available: true, http_status: 200, quota: _Q })] },
+    expired: { schema: 1, fetched_at: _NOW - 60, auth_path: '~/.grok/auth.json',
+               accounts: [_acc({ reason: 'token_expired', token_expires_at: _NOW - 600,
+                                 detail: '本地 expires_at 已过,未发请求' })] },
+    '401':   { schema: 1, fetched_at: _NOW - 60, auth_path: '~/.grok/auth.json',
+               accounts: [_acc({ reason: 'unauthorized', http_status: 401, detail: 'HTTP 401' })] },
+    missing: { schema: 1, fetched_at: _NOW - 60, auth_path: '~/.grok/auth.json',
+               accounts: [_acc({ account_key: null, email: null, token_expires_at: null,
+                                 reason: 'auth_file_missing' })] },
+    // 降级 + 保留陈旧读数:细条要变琥珀并写明是几时的,横幅在上。两者必须同时出现。
+    stale:   { schema: 1, fetched_at: _NOW - 60, auth_path: '~/.grok/auth.json',
+               accounts: [_acc({ reason: 'network_error', detail: 'TimeoutError: 超过 20s 整体上限',
+                                 last_good: { used_percent: 35.0, fetched_at: _NOW - 10800,
+                                              period_end: _NOW + 259200 } })] },
+  };
   var ipc = {}, sizes = [];
   function invoke(cmd, args) {
     ipc[cmd] = (ipc[cmd] || 0) + 1;
@@ -140,6 +183,16 @@ STUB = """
         return Promise.resolve(null);
       case 'plugin:app|version':
         return Promise.resolve(__VERSION__);
+      // ★ grok 周额度。**不打桩就是假绿**:落到 default 会返回 null,页面永远画「未探测」,
+      //   而你想验的六个降级态一张都截不到 —— 页面照常渲染、零报错,看着像通过。
+      //   同族的前车之鉴:`metadata` 空对象 / `read_auth_tokens` 返 null 那两次假阴性。
+      //   `?grok=ok|expired|401|missing|never|stale`,email 一律脱敏。
+      case 'read_grok_quota':
+      case 'run_grok_quota': {
+        var g = p.get('grok') || 'ok';
+        if (g === 'never') return Promise.resolve(null);
+        return Promise.resolve(JSON.stringify(GROK[g] || GROK.ok));
+      }
       case 'plugin:autostart|is_enabled':
         return Promise.resolve(false);
       default:
@@ -231,7 +284,17 @@ STUB = """
       for (var i = 0; i < all.length && over.length < 6; i++) {
         var e = all[i];
         if (e.clientWidth > 0 && e.scrollWidth > e.clientWidth + 1) {
-          over.push((e.className || e.tagName) + ' ' + e.scrollWidth + '/' + e.clientWidth);
+          // ★ 带上文本片段。只报 `SPAN 210/174` 没法诊断 —— 得知道是**哪段内容**装不下。
+          //   同时排掉**本来就可滚动**的容器:每个页面自带滚动容器是项目规则,报它们纯属噪音。
+          var ocs = getComputedStyle(e);
+          if (ocs.overflowX === 'auto' || ocs.overflowX === 'scroll'
+              || ocs.overflow === 'auto' || ocs.overflow === 'scroll') continue;
+          // ★ **带省略号的元素本来就 scrollWidth > clientWidth** —— 那正是省略号在工作,
+          //   不是缺陷。不排掉的话,每个刻意做了截断的标签(数据源路径、长模型名)都会被报一次,
+          //   真缺陷淹在噪音里。这与「散文允许换行」是同一条原则:**刻意的取舍不是缺陷**。
+          if (ocs.textOverflow === 'ellipsis') continue;
+          over.push((e.className || e.tagName) + ' ' + e.scrollWidth + '/' + e.clientWidth
+                    + ' 「' + (e.textContent || '').trim().slice(0, 22) + '」');
         }
       }
       var r = document.getElementById('root');
@@ -246,7 +309,9 @@ STUB = """
           return e ? { scroll: e.scrollHeight, client: e.clientHeight,
                        bodyScroll: document.body.scrollHeight } : null;
         })(),
-        overflow: over,
+        // ★ 溢出探针会把**本来就可滚动**的容器算进去(每个页面都有自己的滚动容器,那是项目规则)。
+        //   过滤掉 overflow:auto/scroll 的元素,否则每次扫描都带一堆无意义的 DIV。
+        overflow: (over || []).filter(function (x) { return true; }),
         // ★★ **被 flex 压扁的元素** —— 既有的 `overflow` 探针对它完全是瞎的:
         //   flex 布局在空间不够时**压缩子项**而不是溢出,所以 `scrollWidth > clientWidth` 永远不成立,
         //   元素还在 DOM 里、文本也还在,只是渲染宽被压到接近 0 ⇒ 肉眼看是"这个字段没了"。
@@ -268,6 +333,53 @@ STUB = """
             out.push(t.slice(0, 24) + ' →' + Math.round(shown) + 'px');
           }
           return out.slice(0, 8);
+        })(),
+        // ★★ **折行探针** —— 前面三个探针对"文字在控件内部折行"全是瞎的:
+        //   `overflow` 要 scrollWidth>clientWidth(flex 压缩时不成立);
+        //   `squeezed` 只认渲染宽 ≤4px,而「切换到此号」被压到 ~20px 竖排,正好漏过;
+        //   `--dump-dom` 拿的是源文本,根本看不到浏览器在哪断的行。
+        //   判据只能是**渲染高 vs 单行高**:叶子文本节点高过 1.6 行 = 它折行了。
+        //   2026-08-24 用户连报三处(头部按钮 / 菜单栏刷新时间 / 卡片动作条),
+        //   全部靠肉眼截图发现 —— 这个探针就是为了让下一次不必再靠肉眼。
+        wrapped: (function () {
+          var r0 = document.getElementById('root');
+          var out = [], all = r0 ? r0.querySelectorAll('*') : [];
+          for (var i = 0; i < all.length; i++) {
+            var e = all[i];
+            if (e.children.length) continue;
+            var tag = e.tagName;
+            if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'TITLE') continue;
+            if (tag === 'svg' || tag === 'path' || tag === 'circle' || tag === 'rect') continue;
+            var t = (e.textContent || '').trim();
+            if (!t) continue;
+            var cs = getComputedStyle(e);
+            var lh = parseFloat(cs.lineHeight);
+            if (!lh || isNaN(lh)) lh = parseFloat(cs.fontSize) * 1.2;
+            // ★ 必须减掉 padding,比的是 **content box**。第一版拿 border box 比,
+            //   `padding: 7px 11px` 的按钮单行高就有 27px,对 13px 行高判成"折行" ——
+            //   一次扫描报出 4 个假阳性,而真正折行的那条淹没在里面。
+            var h = e.clientHeight
+                    - (parseFloat(cs.paddingTop) || 0) - (parseFloat(cs.paddingBottom) || 0);
+            if (h <= lh * 1.6) continue;               // 单行,正常
+            // ★★ **折行不等于缺陷。** 规则是「控件与原子值不许折行,散文可以」——
+            //   设置页的说明段落、降级横幅的那句话本来就该换行。第一版不分青红皂白全报,
+            //   一次扫描 10 处里 6 处是误报,而项目铁律说「一盏长亮的灯指错方向比没有更糟」。
+            //   判据三选一(命中即视为控件/原子值):
+            //     · 可点(cursor:pointer)—— 按钮、分段控件、可点的时间戳
+            //     · 等宽字体 —— 设计规范规定"一切数字/时间/代码/标签/模型名"都用 JetBrains Mono
+            //     · 短文本(≤12 字)—— 标题、徽章、单位这类不该断的碎片
+            // ★ **散文一律放行,先于任何其它判据** —— grok 降级横幅那段话在可点的卡片里,
+            //   会从祖先**继承** `cursor:pointer`,第一版据此把它判成控件。继承来的 pointer
+            //   说明不了这个元素是控件。控件文本天然短,所以长度门是更可靠的判据。
+            if (t.length > 20) continue;
+            var interactive = cs.cursor === 'pointer';
+            var mono = (cs.fontFamily || '').indexOf('JetBrains Mono') >= 0;
+            var atomic = t.length <= 12;
+            if (!interactive && !mono && !atomic) continue;   // 散文:允许换行
+            out.push(t.slice(0, 20) + ' 内容高' + Math.round(h) + '/行' + Math.round(lh)
+                     + (interactive ? ' [可点]' : mono ? ' [等宽]' : ' [短]'));
+          }
+          return out.slice(0, 12);
         })(),
         errors: errors.slice(0, 4),
         unknownCmds: unknown.filter(function (v, i, a) { return a.indexOf(v) === i; }),
@@ -331,6 +443,9 @@ def redacted_state():
 VERSION = json.loads((HERE.parent / "src-tauri/tauri.conf.json").read_text())["version"]
 stub = (STUB.replace("__SNAPSHOT__", json.dumps(snapshot))
             .replace("__VERSION__", json.dumps(VERSION))
+            # ★ 现算,不写死:grok 夹具里的重置时间和"N 分钟前"都是相对 now 的,
+            #   钉死一个时间戳会让夹具随日子腐烂成「已重置 / 3 天前」,那时截出来的图是错的。
+            .replace("__NOW__", str(int(time.time())))
             .replace("__STATE__", json.dumps(redacted_state())))
 ANCHOR = "<script type=\"module\""
 for src, dst in (("index.html", "harness.html"), ("menubar.html", "harness-menubar.html")):

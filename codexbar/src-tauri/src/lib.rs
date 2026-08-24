@@ -251,6 +251,106 @@ async fn run_traffic(app: AppHandle, args: Vec<String>) -> Result<String, String
 /// 读它就是一次 100KB 的文件读。
 const SNAPSHOT: &str = ".traffic-latest.json";
 
+/// grok 周额度的 sidecar。**刻意不进 `state.json`** —— `slots` 里的每个 key 都被轮换器当池成员
+/// 遍历(`_pick`/`cmd_refresh_all`/`cmd_keepalive`),而 `cmd_keepalive` 就是拿 refresh_token 去刷的。
+/// grok 的 refresh_token 单次有效、且与 grok CLI 共用同一份凭证,进池即进刷新器射程 ——
+/// 与 §8「绝不刷 active 号的 token(B7/B8/B14 连环杀号)」完全同族。
+/// 含 email + user_id,已进 `.gitignore`。
+const GROK_SNAPSHOT: &str = ".grok-quota.json";
+
+/// ★ 独立于 `SCAN_LOCK`:取额度是**联网**、重扫描是读本机盘,两种成本共用一把锁会互相阻塞
+/// (用户在 grok 详情页点 ↻,不该被一个正在跑的 1.4s 全盘扫描堵住)。
+static GROK_LOCK: Mutex<()> = Mutex::new(());
+/// 拿到锁后若 sidecar 比这个还新,就认为刚有人取过,直接复用,不起 python、不发外网请求。
+const GROK_COALESCE_SECS: u64 = 300;
+
+fn grok_snapshot_path() -> String {
+    format!("{}/{}", store_dir(), GROK_SNAPSHOT)
+}
+
+/// sidecar 若比 `max_age_secs` 还新就返回它。`fetched_at` 成败都会写,所以过期判断对降级态同样成立。
+fn fresh_grok(max_age_secs: u64) -> Option<String> {
+    let body = fs::read_to_string(grok_snapshot_path()).ok()?;
+    let v: Value = serde_json::from_str(&body).ok()?;
+    let at = v.get("fetched_at")?.as_u64()?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    if now.saturating_sub(at) <= max_age_secs {
+        Some(body)
+    } else {
+        None
+    }
+}
+
+/// 原子落盘,理由同 `write_traffic_snapshot`。
+fn write_grok_snapshot(body: &str) {
+    let path = grok_snapshot_path();
+    let tmp = format!("{}.tmp{}", path, std::process::id());
+    if fs::write(&tmp, body).is_ok() && fs::rename(&tmp, &path).is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+}
+
+/// 读 grok 额度 sidecar。`Ok(None)` = 从未取过(前端据此显示「未探测 · 点 ↻」而不是 0%)。
+#[tauri::command]
+fn read_grok_quota() -> Result<Option<String>, String> {
+    match fs::read_to_string(grok_snapshot_path()) {
+        Ok(s) if !s.trim().is_empty() => Ok(Some(s)),
+        Ok(_) => Ok(None),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("read grok snapshot: {}", e)),
+    }
+}
+
+/// 取一次 grok 周额度。**这是本 app 唯一一条主动联网的数据路径**(`check_update` 是点按钮才跑的 git)。
+///
+/// ★★ `grok-quota` 的退出码**恒 0**,任何失败都以 `available:false` 的 JSON 回来 ——
+/// 所以这里几乎不会走 `Err` 分支。这是刻意的:`Err(String)` 在前端会被读成"没数据",
+/// 而"读不到额度"必须作为**有内容的降级数据**送达,否则项目铁律
+/// 「『读不到』和『确实没有』不能返回同一个值」就在这一层被折叠掉了。
+/// 只有 spawn 本身失败(python 不存在之类)才是真的 `Err`。
+///
+/// ★ 不 `emit("state-changed")`、不 `refresh_tray()` —— 那两件事是账号池状态变更的信号,
+/// grok 不在池里,发了就是噪音。
+#[tauri::command]
+async fn run_grok_quota() -> Result<String, String> {
+    let script = format!("{}/grok-quota", store_dir());
+    let prev = grok_snapshot_path();
+    let out = tauri::async_runtime::spawn_blocking(move || {
+        let _guard = GROK_LOCK.lock();
+        // 双检:两个 webview 同时判定要取时,只有第一个真的发请求。
+        if let Some(fresh) = fresh_grok(GROK_COALESCE_SECS) {
+            return Ok(Err(fresh));
+        }
+        Command::new(python_bin())
+            .arg(&script)
+            .arg("--prev")   // 只读上一份,用来搬运 last_good(降级时保留陈旧读数)
+            .arg(&prev)
+            .output()
+            .map(Ok)
+    })
+    .await
+    .map_err(|e| format!("join: {}", e))?
+    .map_err(|e: std::io::Error| format!("exec: {}", e))?;
+    let out = match out {
+        Ok(o) => o,
+        Err(cached) => return Ok(cached),
+    };
+    if out.status.success() {
+        let body = String::from_utf8_lossy(&out.stdout).to_string();
+        write_grok_snapshot(&body);
+        Ok(body)
+    } else {
+        Err(format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        ))
+    }
+}
+
 /// 快照若比 `max_age_secs` 还新就返回它,否则 None。用于扫描前的合并判断。
 fn fresh_snapshot(max_age_secs: u64) -> Option<String> {
     let body = fs::read_to_string(snapshot_path()).ok()?;
@@ -1006,6 +1106,8 @@ pub fn run() {
             run_discover,
             set_tray_style,
             read_traffic_snapshot,
+            read_grok_quota,
+            run_grok_quota,
             check_update,
             set_dock_visible,
             set_main_visible,

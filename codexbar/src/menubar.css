@@ -256,7 +256,17 @@
 /* Tab 内容淡入(§3):切 Tab 时给 22ms 的位移淡入,和主窗口分段控件的手感一致 */
 .mb-pane { animation: cbFade .22s ease; }
 
-.mb-today-sum { padding: 12px 16px 0; display: flex; align-items: baseline; gap: 10px; }
+.mb-today-sum {
+  padding: 12px 16px 0; display: flex; align-items: baseline; gap: 10px;
+  /* ★★ **这一行绝不换行**(用户 2026-08-24 定稿)。我一度给它加了 `flex-wrap: wrap`,
+     刷新时刻掉到第二行 —— 用户明确否掉:菜单栏是紧凑面板,多一行比挤一点更糟。
+     正确解法是**让内容变短**,按用户给的顺序:① 金额取整省掉 3 个字符
+     (`$861.76` → `$862`,见 MenuBarToday 的 `compactUSD`);② 还不够再单独缩**金额**字号,
+     其余一律不动。**别再往 flex-wrap 上退。** */
+  flex-wrap: nowrap;
+}
+/* 四个块各自不被压缩 —— 少了这条,换行前 flex 会先把它们挤扁。 */
+.mb-today-tot, .mb-today-cost, .mb-today-delta, .mb-today-when { flex-shrink: 0; }
 .mb-today-tot {
   font-size: 26px; font-weight: 700;
   font-family: 'JetBrains Mono'; font-variant-numeric: tabular-nums;

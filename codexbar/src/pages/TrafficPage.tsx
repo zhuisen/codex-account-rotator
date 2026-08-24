@@ -291,9 +291,12 @@ function PlatformCard({ t, name, color, buckets, total, cost, isToday, yTotal, o
 
   return (
     <div style={box} onMouseEnter={() => setHov(true)} onMouseLeave={() => setHov(false)} onClick={onDrill}>
-      <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 7 }}>
+      {/* ★ 名字长时(Antigravity)会把「覆盖 14%」徽章和「明细 →」挤出卡片右缘(900/1000px 实测)。
+          让**名字**做唯一的让位者(省略号) —— 名字截一点还认得出,徽章少一半就读不出是什么。 */}
+      <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 7, minWidth: 0 }}>
         <span style={{ width: 9, height: 9, borderRadius: "50%", background: c, flexShrink: 0 }} />
-        <span style={{ fontSize: 13.5, fontWeight: 700 }}>{name}</span>
+        <span style={{ fontSize: 13.5, fontWeight: 700, minWidth: 0, overflow: "hidden",
+                       textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{name}</span>
         {/* ★ 采集不完整的平台必须当场标出来。没有这枚徽章,一个偏小的数字会被读成
             「这家用得少」而不是「只统计了一部分」—— 本项目已经因为这类静默降级栽过多次。
             用琥珀(警告语义)而不是红:数据本身没错,只是不全。 */}

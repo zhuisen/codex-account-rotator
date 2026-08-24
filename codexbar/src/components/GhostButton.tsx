@@ -28,6 +28,10 @@ export default function GhostButton({ t, onClick, children, accent, disabled, lo
       onMouseLeave={() => setHover(false)}
       style={{
         display: "inline-flex", alignItems: "center", gap: 6, padding: "7px 11px",
+        // ★ 按钮**永不断字**。缺这两条时 flex 会在空间不够时压缩按钮宽度,文字只能在按钮内部
+        //   折行 ——「刷新全池」变成「刷新全 / 池」,「检查 token」变成「检查 / token」。
+        //   窄窗实测(用户 2026-08-24 截图)。断字是 bug,不是排版取舍:按钮该整体换行,不该被劈开。
+        whiteSpace: "nowrap", flexShrink: 0,
         border: `1px solid ${accent ? t.accentBorder : (hover && !isDisabled ? t.accentBorder : t.ghostBorder)}`,
         borderRadius: 8, fontSize: 11,
         color: accent ? t.accentTextSoft : t.ghostText,

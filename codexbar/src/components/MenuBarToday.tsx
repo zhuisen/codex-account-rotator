@@ -4,6 +4,22 @@ import type { Theme } from "../theme";
 import { fmtUSD } from "../rates";
 import { fmtTok, cacheModeLabel, type TodayView, type CacheMode } from "../traffic";
 
+/**
+ * 摘要行专用的紧凑金额（用户 2026-08-24 定稿：「把金额变成整数，少了三个占位符」）。
+ *
+ * 菜单栏固定 352px，摘要行四块（总量 / 金额 / 环比 / 刷新时刻）实测差 ~20px 就装不下，
+ * 而 `$861.76` 的小数点加两位正好 3 个等宽字符 ≈ 23px —— 取整就够了，不必动别的。
+ *
+ * ★ **`< $10` 仍保两位**：`$0.101` 取整会变成 `$0`，把「有成本」显示成「零成本」——
+ * 那是项目铁律「读不到 ≠ 确实没有」的同族错误。省字符不能省到改变含义。
+ * 详情页与主窗仍用 `fmtUSD`（那里空间够，精度更有用）。
+ */
+function compactUSD(n: number): string {
+  if (n >= 1000) return `$${(n / 1000).toFixed(1)}K`;   // $12.3K
+  if (n >= 10) return `$${Math.round(n)}`;              // $862
+  return fmtUSD(n);                                     // $9.87 / $0.101
+}
+
 const AMBER = "#E0A21C";
 const UP = "#27B26B", DOWN = "#E0524D";
 
@@ -137,7 +153,7 @@ export default function MenuBarToday({ t, view, colors, cacheMode, refreshedAt, 
           {fmtTok(hv != null ? view.hourTok[hv] : view.totalTok)}
         </span>
         <span className="mb-today-cost" style={{ color: AMBER }}>
-          {fmtUSD(hv != null ? view.hourCost[hv] : view.totalCost)}
+          {compactUSD(hv != null ? view.hourCost[hv] : view.totalCost)}
         </span>
         {hv != null ? (
           <span className="mb-today-delta" style={{ color: t.accentText, background: t.accent }}>

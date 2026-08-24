@@ -30,6 +30,8 @@ app/**/.build_number
 .claude-tokens-cache.json
 .traffic-cache.json
 .traffic-latest.json
+# grok 周额度 sidecar:含 email + user_id + account_key,与 state.json 同级敏感
+.grok-quota.json
 *.bak
 # UI 验证 harness 的一次性夹具(含脱敏后的账号池快照,仍不入库)
 codexbar/src/_*_probe.json

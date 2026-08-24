@@ -36,3 +36,29 @@ body { background: #0e1117; font-family: 'Space Grotesk', system-ui, sans-serif;
 
 /* 侧栏折叠/展开的宽度过渡。系统里开了「减弱动态效果」就不过渡 —— 直接到位。 */
 @media (prefers-reduced-motion: reduce) { .cb-rail { transition: none !important; } }
+
+/* ★★ **主窗口的滚动条**（2026-08-24，用户报「右侧有一条黑边」）。
+ *
+ * 根因不是布局，是**主窗从来没给滚动条做过样式** —— `::-webkit-scrollbar` 之前只在
+ * `menubar.css` 里给菜单栏列表做了一份。主窗用系统默认滚动条，在深色底上就是一条黑带，
+ * 而且它**占布局宽度**（macOS「始终显示滚动条」时），把图表右缘和 `→` 挤到底下。
+ *
+ * ⚠️ **我的 harness 看不到这个**：headless Chrome 默认用覆盖式滚动条（不占宽），
+ * 所以扫描全程报"干净"。这是继 `zoom` 之后第二次「验证环境 ≠ 运行环境」——
+ * 那次是引擎不同(Chrome vs WKWebView)，这次是滚动条模式不同。
+ *
+ * 度量照抄 `.mb-list`（5px / 白 12% / 透明轨道），全局一套，别再各页面各写一份。
+ */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, .12);
+  border-radius: 6px;
+}
+::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, .2); }
+/* 浅色主题:白色拇指在白底上等于隐形 —— 按主题反过来。
+   `.cb-light` 由根节点带上(见 App.tsx 的 className)。 */
+.cb-light ::-webkit-scrollbar-thumb { background: rgba(0, 0, 0, .16); }
+.cb-light ::-webkit-scrollbar-thumb:hover { background: rgba(0, 0, 0, .26); }
+/* 两条轴交汇的小方块,默认会画成不透明色块 */
+::-webkit-scrollbar-corner { background: transparent; }
