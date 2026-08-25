@@ -50,7 +50,10 @@ class GrokQuotaDirectionAndColor(unittest.TestCase):
         for name, (_, code) in self.files.items():
             with self.subTest(f=name):
                 self.assertIn("<Ring", code, "{} 里没有环 —— 断言打空了".format(name))
-                self.assertRegex(code, r"background:\s*color", "{} 的条没用平台色".format(name))
+                # ★ 允许降级分支覆盖(`degraded ? "#E0901C" : color`),但**平台色必须仍在表达式里** ——
+                #   健康态的条永远是平台色。放松成 `background:` 就成了空守卫。
+                self.assertRegex(code, r"background:\s*[^,;\n]*\bcolor\b",
+                                 "{} 的条没用平台色".format(name))
 
     # ---- ① 方向 ------------------------------------------------------------
 
@@ -125,17 +128,43 @@ class GrokQuotaDirectionAndColor(unittest.TestCase):
 
     # ---- ④ 失败态保留语义色 ---------------------------------------------------
 
-    def test_failure_states_keep_semantic_colour(self):
+    def test_failure_states_stay_disclosed(self):
         """「读不到」必须与「读到了」一眼可分 —— 全染紫就把这条铁律抹掉了。
 
-        ★ 断言的是**接线**不是**出现过**:第一版只查 `"grokReasonTone" in code`,
-        而 import 那行里本来就有这个名字 —— 把 `tone={grokReasonTone(a)}` 改成 `tone="muted"`
-        照样绿。变异测试当场抓出来的空守卫,与「同前缀 ≠ 同标识」同族。"""
+        ★★ **2026-08-24 改口径**:降级**说明**从整条横幅退成一个感叹号 + 悬浮
+        (用户定稿)。理由是 grok 的 token 寿命就是 6 小时,「已过期」按设计每天要弹几次
+        且能自愈 —— **天天弹又自愈的横幅不是警报是噪音**,而噪音会训练人忽略真警报。
+
+        所以这条闸守的**不再是"有没有横幅"**,而是那半不能让的:
+          ① 失败态挂得上标记(`GrokStaleMark`),标记里带得到 reason 文案;
+          ② **数字不假装是活的** —— 有旧读数就标「旧/上次」,没有就画 `—`,
+             两条路径都**绝不出现 `0`**(`0%` 是"这周没用"的合法值)。
+        """
         for name, (_, code) in self.files.items():
             with self.subTest(f=name):
-                self.assertRegex(code, r"tone=\{grokReasonTone\(",
-                                 "{}:披露横幅的色调不是按 reason 算的".format(name))
-                self.assertIn("<DisclosureBanner", code, "{}:失败态没有披露横幅".format(name))
+                self.assertIn("<GrokStaleMark", code,
+                              "{}:失败态没有任何标记 —— 那就成了静默吞掉".format(name))
+                self.assertRegex(code, r"<GrokStaleMark[^>]*a=\{a\}",
+                                 "{}:标记没拿到账号数据,悬浮说明会是空的".format(name))
+
+    def test_degraded_number_never_looks_live(self):
+        """★★ 这是**降级里唯一不可退让**的一条:数字绝不假装是活的。
+
+        标记可以小到一个字符,但读数必须自己说明它是旧的 —— 否则用户看到一个正常的
+        百分比,没有任何办法知道它是 3 小时前的。**省掉的是解释,不是披露。**
+        """
+        for name, (_, code) in self.files.items():
+            with self.subTest(f=name):
+                # ★ 琥珀必须**绑在降级分支上**。只查 `'"#E0901C"' in code` 会被
+                #   `numColor` / `glow` 里的同一个色值满足 ⇒ 把底注那处改成 `t.muted`
+                #   照样绿(变异测试第 N 次抓到同款:**同一个字面量出现在别处 ≠ 这一处还在**)。
+                self.assertRegex(code, r'(degraded|stale)[^;\n]{0,48}"#E0901C"',
+                                 "{}:旧读数没有强制琥珀,会和当前读数长得一样".format(name))
+                # 没有旧读数时画 `—`,不画 0
+                self.assertIn('"—"', code,
+                              "{}:没有旧读数时没画占位符 —— 可能画成了 0".format(name))
+                self.assertRegex(code, r"上次读数|的读数|暂时读不到",
+                                 "{}:降级态没有一句话说明这个数是旧的".format(name))
 
     def test_low_quota_still_warns_somewhere(self):
         """环恒紫之后,低额度不能变成完全无声 —— 数字阈值色 + glow 是仅剩的两个报警口。
@@ -146,7 +175,9 @@ class GrokQuotaDirectionAndColor(unittest.TestCase):
             with self.subTest(f=name):
                 # 两种写法都要认:JSX prop `color={numColor(x)}` 与样式对象 `color: numColor`。
                 # 只认其中一种就会在另一个组件上假绿 —— 第一版正是如此。
-                self.assertRegex(code, r"color[:=]\s*\{?\s*numColor",
+                # 同上:降级分支可以覆盖成琥珀,但**健康态的阈值色必须仍接着** ——
+                # 那是环恒紫之后仅剩的两个报警口之一。
+                self.assertRegex(code, r"color[:=]\s*\{?\s*[^,;\n]*numColor",
                                  "{}:数字没有接上阈值色".format(name))
                 self.assertRegex(code, r"<Ring\b[^>]*glow=\{",
                                  "{}:glow 没有传给 <Ring>,低额度时不会亮".format(name))

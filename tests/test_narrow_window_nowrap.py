@@ -182,6 +182,39 @@ class ButtonsNeverBreakMidWord(unittest.TestCase):
             self.assertIn('className={theme === "light" ? "cb-light" : undefined}', self.app,
                           "写了 .cb-light 的滚动条规则,但根节点没有这个 class —— 死规则")
 
+    def test_grid_columns_can_actually_shrink(self):
+        """★★ CSS Grid 里裸 `1fr` = `minmax(auto, 1fr)`,最小值是 **min-content 不是 0**。
+
+        后果:列**压不下去**,卡片内部那些 `minWidth:0` + 省略号**根本没机会生效**,
+        只能整个网格溢出。2026-08-25 实测暴露 —— 差值角标从 `-8%` 变成 `-22%`(宽一个字符),
+        860px 下网格自然宽 659 / 可用 644,右侧被裁。
+
+        ⚠️ **真教训不是"下限要重新量"** —— 是**下限本来就不该随内容宽度浮动**。
+        用 `minmax(0, 1fr)` 之后列能缩、省略号接手,布局不再受数据摆布。
+        """
+        self.assertNotRegex(self.app, r'gridTemplateColumns:\s*"1fr 1fr 1fr"',
+                            "九宫格用了裸 1fr —— 列压不下去,内容一变宽就整体溢出")
+        self.assertRegex(self.app, r"gridTemplateColumns:[^\n]*minmax\(0",
+                         "九宫格没有用 minmax(0, ...) —— 列的最小值仍是 min-content")
+
+    def test_account_name_can_never_vanish(self):
+        """★★ 只给 `minWidth: 0` 会让 flex 把名字压到 **0px 直接消失**。
+
+        2026-08-25 实测:Pro1 那行徽章最多(PRO+活+USE+当前),860px 下自然宽 122 / 可用 114,
+        flex 就把唯一可缩的名字压没了 —— **认不出这是哪个号,比裁掉半个日期严重得多**。
+        所以名字要有**下限**(截成 `Pro…` 也还认得出),整行允许换行让徽章掉到第二行。
+        """
+        # ★ 名字那个 span 在 **AccountCard.tsx**,不在 App.tsx。
+        #   第一版对着 self.app 断言 ⇒ 测试恒红,而恒红的测试**任何变异都会"变红"**,
+        #   变异测试的绿灯全是假的(今天第二次踩:先证明基线是绿的,再做变异)。
+        card = strip_comments((SRC / "components" / "AccountCard.tsx").read_text(encoding="utf-8"))
+        m = re.search(r"<span style=\{\{[^}]*fontSize:\s*13\.5[^}]*\}\}>\{a\.node\}", card, re.S)
+        self.assertIsNotNone(m, "找不到账号名那个 span —— 断言可能打空了")
+        self.assertNotRegex(m.group(0), r"minWidth:\s*0\b",
+                            "账号名 minWidth 是 0 —— flex 会把它压到消失")
+        self.assertRegex(m.group(0), r"minWidth:\s*[1-9]\d",
+                         "账号名没有宽度下限")
+
     def test_summary_yields_space_first(self):
         """窄窗下该让位的是那行摘要(下面每张卡都写着状态),不是按钮。"""
         m = re.search(r"\{summary\}", self.app)

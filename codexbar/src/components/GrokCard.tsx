@@ -1,9 +1,9 @@
 import Ring from "./Ring";
-import DisclosureBanner from "./DisclosureBanner";
+import GrokStaleMark from "./GrokStaleMark";
 import type { Theme } from "../theme";
 import type { GrokSnapshot, GrokAccount } from "../grok";
-import { grokRemPct, grokLastGoodRemPct, grokReasonNote, grokReasonTone, grokQuotaVisible } from "../grok";
-import { fmtEta, maskId } from "../helpers";
+import { grokRemPct, grokLastGoodRemPct, grokQuotaVisible } from "../grok";
+import { fmtEta, fmtAgo, maskId } from "../helpers";
 
 const MONO = "'JetBrains Mono'";
 
@@ -49,15 +49,7 @@ export default function GrokCard({ t, color, snap, privacy, busy, err, disabled,
   //   `err` 也在这之后判:取不到快照时我们分不清"这机器有没有 grok",
   //   对没装的人保持安静比报一个他看不懂的错更有价值。
   if (!grokQuotaVisible(snap, { disabled })) return null;
-  if (err) {
-    return (
-      <div style={{ background: t.cardBg, border: `1px solid ${t.cardBorder}`,
-                    borderRadius: 12, padding: "12px 12px 4px" }}>
-        <DisclosureBanner t={t} tone="red" badge="grok 读不到"
-                          note={`读不到本机的额度快照：${err}`} />
-      </div>
-    );
-  }
+
   const a: GrokAccount | null = snap?.accounts?.[0] ?? null;
   const rem = grokRemPct(a);
   const lgRem = grokLastGoodRemPct(a);
@@ -93,7 +85,12 @@ export default function GrokCard({ t, color, snap, privacy, busy, err, disabled,
       )}
 
       <div style={{ display: "flex", gap: 11, alignItems: "center" }}>
-        <Ring pct={shownRem ?? 0} r={21} sw={5} color={shownRem == null ? t.ringTrack : color}
+        {/* ★★ 降级时环与条**强制琥珀**,与菜单栏行同口径。
+            截图核对时发现两个 surface 曾不一致(行是琥珀、卡还是平台紫)——
+            **同一个状态两种画法**正是这套闸一直在防的东西。
+            琥珀在这里表示的是"这个数不是现在的",不是额度水位。 */}
+        <Ring pct={shownRem ?? 0} r={21} sw={5}
+              color={shownRem == null ? t.ringTrack : (degraded ? "#E0901C" : color)}
               track={t.ringTrack} size={52} glow={glow}>
           <span style={{ fontSize: 13, fontWeight: 700, color: t.text,
                          fontVariantNumeric: "tabular-nums", lineHeight: 1 }}>
@@ -108,6 +105,11 @@ export default function GrokCard({ t, color, snap, privacy, busy, err, disabled,
             <span title="grok 不在轮换池,只显示额度,不参与切号"
                   style={{ fontSize: 9, fontWeight: 700, padding: "1px 5px", borderRadius: 5,
                            color, border: `1px solid ${hexA(color, .45)}` }}>只读</span>
+            {/* ★ 降级说明**只在这里**,一个字符 + 悬浮。理由见 GrokStaleMark 的文件头。 */}
+            {degraded && a && <GrokStaleMark t={t} a={a} size={11} />}
+            {/* ★ 读**本机 sidecar** 失败(IO 层)。与"额度读不到"是两回事,所以文案不同,
+                但呈现方式一致 —— 都是一个感叹号,不再各弹各的横幅。 */}
+            {!!err && <GrokStaleMark t={t} note={`读不到本机的额度快照：${err}`} tone="red" size={11} />}
           </div>
           <div style={{ fontSize: 10.5, color: t.text2, fontFamily: MONO, overflow: "hidden",
                         textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
@@ -118,10 +120,12 @@ export default function GrokCard({ t, color, snap, privacy, busy, err, disabled,
             <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
               <span style={{ fontSize: 9, color: t.muted, fontFamily: MONO }}>周</span>
               <div style={{ flex: 1, height: 4, borderRadius: 2, background: t.barTrack, overflow: "hidden" }}>
-                <div style={{ height: "100%", width: `${shownRem}%`, background: color, borderRadius: 2,
+                <div style={{ height: "100%", width: `${shownRem}%`,
+                              background: degraded ? "#E0901C" : color, borderRadius: 2,
                               transition: "width .55s cubic-bezier(.4,0,.2,1)" }} />
               </div>
-              <span style={{ fontSize: 10, fontWeight: 600, color: numColor(shownRem),
+              <span style={{ fontSize: 10, fontWeight: 600,
+                             color: degraded ? "#E0901C" : numColor(shownRem),
                              fontFamily: MONO, fontVariantNumeric: "tabular-nums" }}>
                 {Math.round(shownRem)}%
               </span>
@@ -134,18 +138,15 @@ export default function GrokCard({ t, color, snap, privacy, busy, err, disabled,
       </div>
 
       {/* ★ 降级披露放卡内底部。**语义色，不染紫** —— "读不到"必须与"读到了"一眼可分。 */}
-      {degraded && a && (
-        <div style={{ marginTop: 9 }}>
-          <DisclosureBanner t={t} tone={grokReasonTone(a)}
-                            badge={lgRem != null ? "旧读数" : "读不到"}
-                            note={grokReasonNote(a)} />
-        </div>
-      )}
-      {!degraded && shownRem != null && (
-        <div style={{ marginTop: 9, fontSize: 9.5, color: t.muted, fontFamily: MONO }}>
-          xAI 账单 · 不在轮换池
-        </div>
-      )}
+      {/* ★ 底注一行,降级与否都在同一位置、同样高度 —— 卡片不会因为 token 过期就长高一截。
+          ★★ **数字绝不假装是活的**:有上次读数就说明它是几时的,没有就说「暂时读不到」。
+             省掉的是**解释**(挪进感叹号的悬浮),不是**披露**。 */}
+      <div style={{ marginTop: 9, fontSize: 9.5, fontFamily: MONO,
+                    color: degraded ? "#E0901C" : t.muted }}>
+        {degraded
+          ? (lgRem != null ? `${fmtAgo(a?.last_good?.fetched_at)}的读数` : "额度暂时读不到")
+          : "xAI 账单 · 不在轮换池"}
+      </div>
     </div>
   );
 }

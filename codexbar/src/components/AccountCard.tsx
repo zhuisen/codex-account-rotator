@@ -74,9 +74,15 @@ export default function AccountCard({ a, isCurrent, isBest, isSelected, shortcut
               零余量意味着任何扰动都会破 —— 分数缩放下的字形量化就够了(每个内联元素舍入
               半像素,十几个累积出 9px)。所以指定**唯一让位者**:名字截省略号,徽章一个不压。
               名字截一点还认得出,徽章少一半就读不出是 USE 还是 PRO。 */}
-          <div style={{ display: "flex", alignItems: "center", gap: 7, minWidth: 0 }}>
+          {/* ★★ `minWidth: 0` 单独用会把名字压到 **0px 直接消失**(2026-08-25 实测:
+              Pro1 那行徽章最多 —— PRO+活+USE+当前 —— 860px 下自然宽 122 / 可用 114,
+              flex 就把唯一可缩的名字压没了)。**认不出是哪个号,比裁掉半个日期更糟。**
+              所以两条一起:名字给一个**下限**(4 个字符宽,截成 `Pro…` 也还认得出),
+              整行允许换行 —— 宽屏永不触发,只在下限宽度让徽章掉到第二行。 */}
+          <div style={{ display: "flex", alignItems: "center", gap: 7, minWidth: 0,
+                        flexWrap: "wrap", rowGap: 4 }}>
             {editing === null ? (
-              <span style={{ fontSize: 13.5, fontWeight: 700, color: t.text, minWidth: 0,
+              <span style={{ fontSize: 13.5, fontWeight: 700, color: t.text, minWidth: 40,
                              overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{a.node}</span>
             ) : (
               <input

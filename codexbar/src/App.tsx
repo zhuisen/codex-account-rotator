@@ -365,7 +365,14 @@ export default function App() {
                 const bestPct = alive.reduce((m, a) => Math.max(m, a.windows[0]?.pct ?? -1), -1);
                 return (
                   <div style={{ flex: 1, overflow: "auto" }}>
-                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12, alignContent: "start" }}>
+                    {/* ★★ **`minmax(0, 1fr)` 不是 `1fr`** —— CSS Grid 里裸 `1fr` 等价于 `minmax(auto, 1fr)`,
+                        最小值是 **min-content 而不是 0**,所以列**压不下去**,卡片内部那些
+                        `minWidth:0` + 省略号根本没机会生效,只能整个网格溢出。
+                        2026-08-25 实测暴露:差值角标从 `-8%` 变成 `-22%`(宽一个字符),
+                        860px 下网格自然宽 659 / 可用 644 ⇒ 右侧被裁。
+                        ⚠️ 真正的教训不是"下限要重量" —— 是**下限本来就不该随数据浮动**。
+                        改成 minmax(0,1fr) 之后,列能缩、省略号接手,布局不再受内容宽度摆布。 */}
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 12, alignContent: "start" }}>
                       {alive.map((a) => {
                         const shortcutIdx = aliveByLabel.findIndex(x => x.aid === a.aid);
                         // 改名按 aid 不按 label:cmd_rename 两者都认,而 aid 唯一 —— 重名时不会改到别的号上

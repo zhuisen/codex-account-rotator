@@ -1,8 +1,8 @@
 import Ring from "./Ring";
-import DisclosureBanner from "./DisclosureBanner";
+import GrokStaleMark from "./GrokStaleMark";
 import type { Theme } from "../theme";
 import type { GrokSnapshot, GrokAccount } from "../grok";
-import { grokRemPct, grokLastGoodRemPct, grokReasonNote, grokReasonTone, grokQuotaVisible } from "../grok";
+import { grokRemPct, grokLastGoodRemPct, grokQuotaVisible } from "../grok";
 import { fmtEta, maskId } from "../helpers";
 
 const MONO = "'JetBrains Mono'";
@@ -66,39 +66,33 @@ export default function GrokRow({ t, color, snap, privacy, busy, disabled, onOpe
 
   // ---- 降级态 --------------------------------------------------------------
   // ★ 绝不画 0%。`0` 在环里和"这周一点没用"长得一模一样,而这里的真相是"读不到"。
+  // ---- 降级态 --------------------------------------------------------------
+  // ★ 与总览卡同一套:一个感叹号 + 悬浮说明,读数如实标「旧」。**不弹横幅** ——
+  //   token 6 小时一过期,横幅按设计每天要弹几次,那是噪音不是警报(见 GrokStaleMark 文件头)。
+  // ★ 绝不画 0%:`0` 在环里和"这周一点没用"长得一模一样,而这里的真相是"读不到"。
   if (!a.available) {
     const stale = lgRem != null;
     return (
-      <>
-        <div style={{ padding: "0 2px" }}>
-          <DisclosureBanner t={t} tone={grokReasonTone(a)} badge="grok 额度 读不到"
-                            note={grokReasonNote(a)} />
+      <Shell t={t} color={color} onOpen={onOpen}>
+        <Ring pct={stale ? lgRem : 0} r={18} sw={4.5}
+              color={stale ? "#E0901C" : t.ringTrack} track={t.ringTrack} size={46}>
+          <span style={{ fontSize: 12, fontWeight: 700, color: stale ? t.text : t.muted,
+                         fontVariantNumeric: "tabular-nums", lineHeight: 1 }}>
+            {stale ? Math.round(lgRem) : "—"}
+          </span>
+        </Ring>
+        <div className="mb-row-info">
+          <NameLine t={t} color={color} email={a.email} privacy={privacy} mark={<GrokStaleMark t={t} a={a} size={10} />} />
+          <div className="mb-row-meta">
+            <span style={{ fontSize: 9, color: "#E0901C", fontFamily: MONO }}>
+              {stale ? "上次读数" : "额度暂时读不到"}
+            </span>
+          </div>
         </div>
-        {stale && (
-          <Shell t={t} color={color} onOpen={onOpen}>
-            <Ring pct={lgRem} r={18} sw={4.5} color="#E0901C" track={t.ringTrack} size={46}>
-              <span style={{ fontSize: 12, fontWeight: 700, color: t.text,
-                             fontVariantNumeric: "tabular-nums", lineHeight: 1 }}>{Math.round(lgRem)}</span>
-            </Ring>
-            <div className="mb-row-info">
-              <NameLine t={t} color={color} email={a.email} privacy={privacy} />
-              <div className="mb-row-meta">
-                <span style={{ fontSize: 9, color: t.muted, fontFamily: MONO }}>周</span>
-                <div className="mb-row-bar" style={{ background: t.barTrack }}>
-                  <div style={{ height: "100%", width: `${lgRem}%`, background: "#E0901C", borderRadius: 2 }} />
-                </div>
-                <span style={{ fontSize: 9.5, fontWeight: 600, color: "#E0901C",
-                               fontVariantNumeric: "tabular-nums" }}>{lgRem.toFixed(0)}%</span>
-                <span style={{ fontSize: 9, color: "#E0901C", fontFamily: MONO }}>旧读数</span>
-              </div>
-            </div>
-          </Shell>
-        )}
-      </>
+      </Shell>
     );
   }
 
-  // ---- 健康态 --------------------------------------------------------------
   const q = a.quota!;
   const remPct = rem ?? 0;   // ★ 名字带方向:裸 `remPct` 正是这类反相 bug 的温床
   // 与账号卡同一把尺:`quotaColor` 吃的是**剩余**,环、条、数字三处同向。
@@ -145,7 +139,7 @@ function Shell({ t, color, onOpen, children }: { t: Theme; color: string; onOpen
   );
 }
 
-function NameLine({ t, color, email, privacy }: { t: Theme; color: string; email?: string | null; privacy?: boolean }) {
+function NameLine({ t, color, email, privacy, mark }: { t: Theme; color: string; email?: string | null; privacy?: boolean; mark?: React.ReactNode }) {
   return (
     <>
       <div className="mb-row-name-line">
@@ -154,6 +148,7 @@ function NameLine({ t, color, email, privacy }: { t: Theme; color: string; email
         <span className="mb-row-badge-cur"
               title="grok 不在轮换池,只显示额度,不参与切号"
               style={{ color, border: `1px solid ${hexA(color, .45)}` }}>只读</span>
+        {mark}
       </div>
       {email !== undefined && (
         <div className="mb-row-sub">
