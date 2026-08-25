@@ -767,13 +767,25 @@ fn format_tray_title() -> String {
                 return format!("✗ {} 失效", label);
             }
             if let Some(q) = slot.get("quota") {
-                // Codex retired 5h; only weekly(10080)/monthly(43200) are real. Pick the first
-                // real window (primary then secondary); phantom slots (wm<5000) are ignored.
-                let win = ["primary", "secondary"].iter().find_map(|k| {
-                    let w = &q[*k];
-                    let wm = w["window_minutes"].as_f64().unwrap_or(0.0);
-                    if wm >= 5000.0 && w["used_percent"].is_number() { Some(w) } else { None }
-                });
+                // ★★ 2026-08-25:Plus 的 5 小时窗口回来了(实测 window_minutes=300)。
+                // 只丢**空槽**(wm<=0),不再按量级丢 —— 旧判据 `wm>=5000` 会把合法的 5h 当垃圾。
+                // ★ 取**最紧的**那个窗口,不是"第一个":plus 的 primary 现在是 5h、周退到
+                //   secondary,而 pro 只有周。取第一个会让两类号显示的不是同一种东西,
+                //   且与主界面 hero 环(取 tightest)说的不一致。
+                let win = ["primary", "secondary"]
+                    .iter()
+                    .filter_map(|k| {
+                        let w = &q[*k];
+                        let wm = w["window_minutes"].as_f64().unwrap_or(0.0);
+                        let used = w["used_percent"].as_f64();
+                        match (wm > 0.0, used) {
+                            (true, Some(u)) => Some((w, u)),
+                            _ => None,
+                        }
+                    })
+                    // 剩余最少 = 已用最多 ⇒ 取 used 最大的那个
+                    .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+                    .map(|(w, _)| w);
                 let Some(w) = win else {
                     // 额度未知:**不编数字**,也不上色(那是对余量的判断,没余量就没得判),
                     // 按档位退成 "—"(与仓库那条老规矩一致)
@@ -787,7 +799,18 @@ fn format_tray_title() -> String {
                 };
                 let used = w["used_percent"].as_f64().unwrap_or(0.0);
                 let wm = w["window_minutes"].as_f64().unwrap_or(0.0);
-                let win_tag = if wm >= 40000.0 { "月" } else { "周" };
+                // ★★ 标签按**实际时长**算,不是两分法。旧版 `>=40000 ? 月 : 周` 会把
+                //    5 小时窗口(300)标成「周」—— **那比不显示更糟:它把 5 小时的余量
+                //    说成一周的余量**。与 helpers.ts 的 `winLabel` 同一套档位。
+                let win_tag: String = if wm >= 40000.0 {
+                    "月".into()
+                } else if wm >= 10000.0 {
+                    "周".into()
+                } else if wm >= 1440.0 {
+                    format!("{}天", (wm / 1440.0).round() as i64)
+                } else {
+                    format!("{}h", (wm / 60.0).round() as i64)
+                };
                 let now_ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs_f64();
                 let ra = w["resets_at"].as_f64().unwrap_or(0.0);
                 let rem = if ra > 0.0 && ra <= now_ts { 100 } else { (100.0 - used).max(0.0) as u32 };

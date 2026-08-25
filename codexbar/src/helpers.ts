@@ -39,6 +39,12 @@ export interface Account {
   status: "live" | "low" | "cool" | "dead";
   windows: QuotaWindow[];
   tightest: number;
+  /** `tightest` 这个数**出自哪个窗口**（整个对象，不只是 label）。
+   *  ★★ 规则：**单个汇总数字一律取「最紧」的窗口** —— hero 环、卡片环、菜单栏行、托盘标题
+   *  全部用它；只有"有空间列清单"的地方（卡片下方的细条）才把 `windows` 全画出来。
+   *  拿 `windows[0]` 会在两个窗口时显示**较宽松**的那个，把真正的约束藏起来
+   *  （5h 回归后这是常态，而 5h 缺席的那一年里根本不可能暴露）。 */
+  tightestWin: QuotaWindow | null;
   exp: string;
   /** 这个到期日已不可信(已过期,但 OpenAI 上次复核订阅还早于它) —— 见 `expStale` 的计算处 */
   expStale: boolean;
@@ -74,15 +80,29 @@ export function winRem(w?: Win): number | null {
   return 100 - w.used_percent;
 }
 
-// Codex retired the 5h window (2026-07). A real quota window is now weekly (10080)
-// or monthly (43200); anything shorter is a deprecated/phantom slot (e.g. the empty
-// {window_minutes: 0, resets_at: null} Codex still returns) and must not be shown.
-const REAL_WINDOW_MIN = 5000;
+/**
+ * 一个额度窗口是不是**真的**。
+ *
+ * ★★ 2026-08-25 改判据（Plus 的 5 小时窗口回来了，实测 `primary.window_minutes = 300`）。
+ *
+ * 这里要挡的东西**从来没变过**：Codex 仍会返回**空槽** `{window_minutes: 0, resets_at: null}`。
+ * 变的是判据 —— 2026-07 那会儿真窗口只剩周/月，所以「够大(≥5000)」**恰好等价于**「非空」，
+ * 于是当时用了这个代理判据。5h 回归之后那个等价关系断了：`300 < 5000`，
+ * **一个合法窗口会被当垃圾丢掉**，用户看不到自己的 5 小时额度。
+ *
+ * 所以现在直接判「有没有值」，不再判「够不够大」。用量级去猜语义，量级一变就失效。
+ * ⚠️ 同一份判据还有**两个副本**：`codex-rotate` 的 `_win_real`、`lib.rs` 托盘那段。
+ *    跨语言没法共用，**改这里必须同时改那两处**（闸在 `tests/test_quota_windows.py`）。
+ */
+const REAL_WINDOW_MIN = 1;
 
+/** 窗口名按**实际时长**算，不写死那几个已知值 —— 上游加一个新窗口时不至于全标成「周」。 */
 function winLabel(w?: Win): string {
   const mins = w?.window_minutes ?? 0;
   if (mins >= 40000) return "月";
-  return "周";
+  if (mins >= 10000) return "周";
+  if (mins >= 1440) return `${Math.round(mins / 1440)}天`;
+  return `${Math.round(mins / 60)}h`;
 }
 
 export function fmtEta(ts?: number): string {
@@ -161,7 +181,7 @@ export function poolRefreshedAt(slots: Record<string, Slot>): number | undefined
 }
 
 function buildWindow(w: Win | undefined): QuotaWindow | null {
-  // Drop deprecated/phantom windows (old 5h = 300, empty slot = 0/undefined).
+  // 只丢**空槽**(window_minutes 为 0/缺失)。5h(300) 是合法窗口,别再按量级丢。
   if (!w || (w.window_minutes ?? 0) < REAL_WINDOW_MIN) return null;
   const pctRaw = winRem(w);
   if (pctRaw == null) return null;
@@ -184,7 +204,13 @@ export function slotToAccount(aid: string, slot: Slot, tokens: Record<string, To
   const w2 = buildWindow(q?.secondary);
   if (w2) windows.push(w2);
 
-  const tightest = windows.length > 0 ? Math.min(...windows.map(w => w.pct)) : -1;
+  // ★★ 不只算最小值,还要记住**是哪一个窗口** —— hero 环的数字取 `tightest`,标签却取
+  //    `windows[0].label`。只有一个窗口时两者永远一致,**5h 回归后就有两个窗口了**,
+  //    数字可能来自周、标签却写着 5h。这是"恢复 5h"这件事本身引入的缺陷,不是老 bug。
+  const tightestWin = windows.length > 0
+    ? windows.reduce((a, b) => (b.pct < a.pct ? b : a))
+    : null;
+  const tightest = tightestWin ? tightestWin.pct : -1;
 
   let status: Account["status"] = "live";
   if (slot.auth_dead) status = "dead";
@@ -214,7 +240,7 @@ export function slotToAccount(aid: string, slot: Slot, tokens: Record<string, To
 
   return {
     aid, node: slot.label ?? "?", email: slot.email ?? "",
-    status, windows, tightest, deadAt: slot.auth_dead_at,
+    status, windows, tightest, tightestWin, deadAt: slot.auth_dead_at,
     exp: slot.sub_until?.slice(0, 10) ?? "—",
     /**
      * 这个到期日**是否已经不可信**。判据:到期日已过 **且** OpenAI 上次复核订阅早于该到期日 ——

@@ -313,7 +313,7 @@ export default function App() {
                   <div style={{ display: "flex", alignItems: "center", gap: 18, background: t.heroBg, border: `1px solid ${t.heroBorder}`, borderRadius: 14, padding: "15px 18px", marginBottom: 13, boxShadow: t.heroShadow, transition: "background-color .35s ease, border-color .35s ease" }}>
                     <Ring pct={cur.tightest < 0 ? 0 : cur.tightest} r={33} sw={6} color={sc} track={t.ringTrack} size={80}>
                       <span style={{ fontSize: 19, fontWeight: 700, color: t.text, fontVariantNumeric: "tabular-nums", lineHeight: 1, marginTop: -1 }}>{cur.tightest < 0 ? "—" : cur.tightest}<span style={{ fontSize: 10, color: t.muted }}>%</span></span>
-                      <span style={{ fontSize: 8.5, color: t.muted, fontFamily: "'JetBrains Mono'", lineHeight: 1, marginTop: 2 }}>{cur.windows[0]?.label ?? ""}</span>
+                      <span style={{ fontSize: 8.5, color: t.muted, fontFamily: "'JetBrains Mono'", lineHeight: 1, marginTop: 2 }}>{cur.tightestWin?.label ?? ""}</span>
                     </Ring>
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: ".14em", color: t.accent, fontFamily: "'JetBrains Mono'" }}>当前使用中</div>
@@ -366,7 +366,10 @@ export default function App() {
                 const alive = aliveByLabel;
                 const dead = accounts.filter(a => a.status === "dead");
                 // Delta baseline = best remaining quota among usable accounts.
-                const bestPct = alive.reduce((m, a) => Math.max(m, a.windows[0]?.pct ?? -1), -1);
+                // ★★ 基准必须用 `tightest`,不能用 `windows[0]`。后者在 5h 回归后会拿
+                //    **plus 的 5h** 去和 **pro 的周** 比 —— 两把不同的尺,算出来的
+                //    「-22%」是个没有意义的数,而它长得和正常角标一模一样。
+                const bestPct = alive.reduce((m, a) => Math.max(m, a.tightest), -1);
                 return (
                   <div style={{ flex: 1, overflow: "auto" }}>
                     {/* ★★ **`minmax(0, 1fr)` 不是 `1fr`** —— CSS Grid 里裸 `1fr` 等价于 `minmax(auto, 1fr)`,

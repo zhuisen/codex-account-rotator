@@ -38,7 +38,9 @@ export default function AccountCard({ a, isCurrent, isBest, isSelected, shortcut
   const isDead = a.status === "dead";
   const isCool = a.status === "cool";
   const sc = STATUS_COLORS[a.status] ?? STATUS_COLORS.live;
-  const pct = a.windows[0]?.pct ?? -1;
+  // ★ 环取**最紧**的窗口,不是第一个 —— 下方细条会把所有窗口列全,环是那份清单的"最坏值"。
+  //   用 windows[0] 会让环显示 5h、而真正卡住你的是周,**把约束藏起来**。
+  const pct = a.tightest;
   const known = pct >= 0 && !isDead;
   // Quota-driven colour for live/low (handoff rule), status colour for cool/dead where the state
   // matters more than the number.

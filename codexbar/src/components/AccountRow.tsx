@@ -23,7 +23,10 @@ export default function AccountRow({ a, isCurrent, isBest, bestPct, privacy, t, 
   const isDead = a.status === "dead";
   const isCool = a.status === "cool";
   const sc = STATUS_COLORS[a.status] ?? STATUS_COLORS.live;
-  const pct = a.windows[0]?.pct ?? -1;
+  // ★ 菜单栏只有一行的位置,所以必须画**最紧**的那个窗口 —— 画第一个会在
+  //   plus 号上显示 5h、藏掉更紧的周,而那正是用户要看的约束。
+  const tw = a.tightestWin;
+  const pct = a.tightest;
   const known = pct >= 0 && !isDead;
   const qc = isDead || isCool ? sc : quotaColor(pct);
   const glow = known && pct <= 20 ? (pct <= 10 ? "#E0524D" : "#E0901C") : undefined;
@@ -68,14 +71,14 @@ export default function AccountRow({ a, isCurrent, isBest, bestPct, privacy, t, 
         </div>
 
         <div className="mb-row-meta">
-          {known && a.windows[0] ? (
+          {known && tw ? (
             <>
-              <span style={{ fontSize: 9, color: t.muted, fontFamily: "'JetBrains Mono'" }}>{a.windows[0].label}</span>
+              <span style={{ fontSize: 9, color: t.muted, fontFamily: "'JetBrains Mono'" }}>{tw.label}</span>
               <div className="mb-row-bar" style={{ background: t.barTrack }}>
                 <div style={{ height: "100%", width: `${pct}%`, background: qc, borderRadius: 2, transition: "width .55s cubic-bezier(.4,0,.2,1)" }} />
               </div>
               <span style={{ fontSize: 9.5, fontWeight: 600, color: pct < 50 ? AMBER : t.text2, fontVariantNumeric: "tabular-nums" }}>{pct}%</span>
-              <span style={{ fontSize: 9, color: t.muted, fontFamily: "'JetBrains Mono'" }}>↻{a.windows[0].reset}</span>
+              <span style={{ fontSize: 9, color: t.muted, fontFamily: "'JetBrains Mono'" }}>↻{tw.reset}</span>
             </>
           ) : (
             <span className="mb-row-dead">{isDead ? "token 失效 · 需重登" : "未探测"}</span>
