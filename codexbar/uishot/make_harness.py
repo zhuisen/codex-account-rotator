@@ -137,7 +137,7 @@ STUB = """
                                  last_good: { used_percent: 35.0, fetched_at: _NOW - 10800,
                                               period_end: _NOW + 259200 } })] },
   };
-  var ipc = {}, sizes = [];
+  var ipc = {}, sizes = [], emitted = [];
   function invoke(cmd, args) {
     ipc[cmd] = (ipc[cmd] || 0) + 1;
     // 记下每次 setSize 的目标高度 —— 菜单栏的高度就是这么定的,只数次数看不出设成了多少
@@ -153,6 +153,10 @@ STUB = """
       case 'plugin:event|emit_to':
         return Promise.resolve(null);
       case 'plugin:event|emit':
+        // ★ 记下**发了哪个事件**。验"点菜单栏的账号跳去哪一页"只能靠它 ——
+        //   `ipc` 只数 run_traffic/read_traffic_snapshot,截图也看不出跳转意图
+        //   (菜单栏与主窗是两个 webview,harness 里只渲染其中一个)。
+        emitted.push(args.event + (args.payload != null ? '=' + args.payload : ''));
         fire(args.event, args.payload);
         return Promise.resolve(null);
       // ★ `?snap_delay=<ms>` 让快照**异步**送达。默认 0(同步)保持既有行为。
@@ -388,6 +392,7 @@ STUB = """
         sizes: sizes,
         ipc: { run_traffic: ipc['run_traffic'] || 0,
                read_traffic_snapshot: ipc['read_traffic_snapshot'] || 0 },
+        emitted: emitted.slice(0, 12),
         // 字体探针:app 的字体是本地 woff2,没加载上会静默回落到系统 sans —— 截图上看不出来
         fonts: {
           mono: document.fonts.check('12px "JetBrains Mono"'),

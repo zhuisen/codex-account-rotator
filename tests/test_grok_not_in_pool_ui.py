@@ -102,6 +102,57 @@ class GrokNeverEntersPoolArrays(unittest.TestCase):
         self.assertNotIn("grok", m.group(1).lower())
 
 
+class MenubarAlwaysNamesItsDestination(unittest.TestCase):
+    """★ 菜单栏每个「打开主窗口」的入口都必须**指明去哪个版块**。
+
+    用户 2026-08-25 报:在菜单栏点账号,进去却是用量页。根因是账号行调的是
+    **不带事件**的 `openMain()` —— 主窗口就停在上次那一页,于是"去哪"由**上一次的浏览历史**
+    决定,而不是由这次点了什么决定。
+
+    ⚠️ 这个 bug 的形态值得记:它**不是每次都错**。上次停在总览时点账号是对的,
+    停在用量页时才错 —— 「有时对有时错」比恒错更难被报上来,也更难复现。
+    根治办法不是修那一处,是让「不指定目的地」这种写法**根本写不出来**。
+
+    每个 `navigate-*` 事件也必须在 App.tsx 有对应监听,否则点了没反应且不报错。
+    """
+    DEST_EVENTS = ("navigate-overview", "navigate-traffic", "navigate-platform", "navigate-settings")
+
+    @classmethod
+    def setUpClass(cls):
+        cls.mb = strip_comments(MENUBAR.read_text(encoding="utf-8"))
+        cls.app = strip_comments(APP.read_text(encoding="utf-8"))
+
+    def test_no_bare_open_main(self):
+        """`openMain()` 不带参数 = 沿用上次的页面。"""
+        bare = re.findall(r"openMain\(\s*\)", self.mb)
+        self.assertEqual(bare, [],
+                         "菜单栏有 {} 处 `openMain()` 没指定目的地 —— "
+                         "落在哪一页取决于上次浏览到哪".format(len(bare)))
+
+    def test_every_open_main_names_a_known_event(self):
+        calls = re.findall(r'openMain\(\s*"([^"]+)"', self.mb)
+        self.assertGreaterEqual(len(calls), 4, "抓到的入口太少 —— 断言可能打空了")
+        for ev in set(calls):
+            with self.subTest(event=ev):
+                self.assertIn(ev, self.DEST_EVENTS, "菜单栏用了未登记的跳转事件 {}".format(ev))
+
+    def test_every_event_has_a_listener(self):
+        """★ 发了事件但主窗口没监听 = **点了没反应,而且不报错**。"""
+        for ev in set(re.findall(r'openMain\(\s*"([^"]+)"', self.mb)):
+            with self.subTest(event=ev):
+                self.assertRegex(self.app, r'listen(?:<[^>]*>)?\(\s*"' + re.escape(ev) + r'"',
+                                 "App.tsx 没有监听 {} —— 点了不会有反应".format(ev))
+
+    def test_account_rows_go_to_overview(self):
+        """账号行必须去总览,不是别的版块。"""
+        rows = re.findall(r"<AccountRow[^>]*onSelect=\{([^}]*)\}", self.mb, re.S)
+        self.assertGreaterEqual(len(rows), 2, "没抓到账号行(可用 + 失效两处)")
+        for expr in rows:
+            with self.subTest(expr=expr.strip()[:50]):
+                self.assertIn("navigate-overview", expr,
+                              "账号行没有去总览:{!r}".format(expr.strip()[:60]))
+
+
 class GrokIsInvisibleWhenAbsent(unittest.TestCase):
     """★ **没装 grok 的机器上必须零像素。**
 

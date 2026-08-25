@@ -90,9 +90,15 @@ export default function MenuBar() {
       //   图标就会和窗口状态脱节(关了窗图标还占着位置且点不动)。
       const { invoke } = await import("@tauri-apps/api/core");
       await invoke("set_main_visible", { show: true });
-      const main = await WebviewWindow.getByLabel("main");
-      if (main) { await main.center(); }
+      // ★★ **跳转排在居中之前,而且居中单独 catch。**
+      //   原来是 `center()` → `emit()` 共用一个 try —— 居中一旦抛异常,跳转**连带被吞掉**,
+      //   表现为"点了菜单栏,窗口开了但停在上次那一页",与忘记传事件的症状**一模一样**。
+      //   跳转是本质、居中是装饰:本质的先做,且不受装饰的成败影响。
       if (navigateTo) await emit(navigateTo, payload);
+      const main = await WebviewWindow.getByLabel("main");
+      if (main) {
+        try { await main.center(); } catch { /* 居中失败不该影响已发出的跳转 */ }
+      }
       getCurrentWindow().hide();
     } catch (e) { console.error(e); }
   }, []);
@@ -261,7 +267,7 @@ export default function MenuBar() {
       <div className="mb-list">
         {alive.map(a => (
           <AccountRow key={a.aid} a={a} isCurrent={a.aid === currentNode} isBest={hero?.aid === a.aid}
-            bestPct={bestPct} privacy={privacy} t={t} onSelect={() => openMain()}
+            bestPct={bestPct} privacy={privacy} t={t} onSelect={() => void openMain("navigate-overview")}
             // 当前号不给按钮:切到自己是空操作,画出来只会让人以为点了没反应。
             // 失效号在下面那个折叠区,本来就不传。
             onSwitch={a.aid === currentNode ? undefined
@@ -283,7 +289,7 @@ export default function MenuBar() {
             </summary>
             <div className="mb-dead-list">
               {dead.map(a => (
-                <AccountRow key={a.aid} a={a} isCurrent={a.aid === currentNode} isBest={false} bestPct={bestPct} privacy={privacy} t={t} onSelect={() => openMain()} />
+                <AccountRow key={a.aid} a={a} isCurrent={a.aid === currentNode} isBest={false} bestPct={bestPct} privacy={privacy} t={t} onSelect={() => void openMain("navigate-overview")} />
               ))}
             </div>
           </details>

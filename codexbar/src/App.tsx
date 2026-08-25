@@ -127,6 +127,10 @@ export default function App() {
   // menubar → 主窗口的三个跳转入口。齿轮=设置;今日 Tab 底栏=流量总览;点平台图例行=该平台详情。
   useEffect(() => {
     const uns = [
+      // ★ 账号行 → 总览。此前账号行调的是**不带事件**的 `openMain()`,主窗口就停在上次那一页 ——
+      //   上次停在用量页,点账号就落在用量页(用户 2026-08-25 报)。
+      //   「打开主窗口」和「去哪个版块」是两件事,前者不该顺带决定后者。
+      listen("navigate-overview", () => { setDrill(null); setPage("overview"); void invoke("set_main_visible", { show: true }); }),
       listen("navigate-settings", () => { setPage("settings"); void invoke("set_main_visible", { show: true }); }),
       listen("navigate-traffic", () => { setDrill(null); setPage("traffic"); void invoke("set_main_visible", { show: true }); }),
       listen<string>("navigate-platform", (e) => {
