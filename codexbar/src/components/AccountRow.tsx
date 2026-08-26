@@ -1,5 +1,5 @@
 import { STATUS_COLORS, STATUS_TEXT, type Theme } from "../theme";
-import { type Account, quotaColor, maskId } from "../helpers";
+import { type Account, maskId, winBarColor, winNumColor } from "../helpers";
 import Ring from "./Ring";
 import PlanBadge from "./PlanBadge";
 import CardBadge, { isCardExpiring, AMBER } from "./CardBadge";
@@ -28,7 +28,11 @@ export default function AccountRow({ a, isCurrent, isBest, bestPct, privacy, t, 
   const tw = a.tightestWin;
   const pct = a.tightest;
   const known = pct >= 0 && !isDead;
-  const qc = isDead || isCool ? sc : quotaColor(pct);
+  // ★★ 环取**最紧窗口的识别色**,不再是额度水位色(用户 2026-08-26 从四版 demo 选的 C:
+  //    「两行 + 双色相,5h 青 / 周 绿」)。**这是知情的取舍**:条与环不再报警,
+  //    仅剩两个报警口 ——「百分数按阈值变色」和「低额度 glow」,别顺手删。
+  //    死号/冷却仍走状态色:那两个不是额度,是账号状态。
+  const qc = isDead || isCool ? sc : winBarColor(tw, pct, t);
   const glow = known && pct <= 20 ? (pct <= 10 ? "#E0524D" : "#E0901C") : undefined;
   const expiring = isCardExpiring(a);
   const delta = known && bestPct >= 0 ? pct - bestPct : null;
@@ -71,15 +75,24 @@ export default function AccountRow({ a, isCurrent, isBest, bestPct, privacy, t, 
         </div>
 
         <div className="mb-row-meta">
-          {known && tw ? (
-            <>
-              <span style={{ fontSize: 9, color: t.muted, fontFamily: "'JetBrains Mono'" }}>{tw.label}</span>
-              <div className="mb-row-bar" style={{ background: t.barTrack }}>
-                <div style={{ height: "100%", width: `${pct}%`, background: qc, borderRadius: 2, transition: "width .55s cubic-bezier(.4,0,.2,1)" }} />
-              </div>
-              <span style={{ fontSize: 9.5, fontWeight: 600, color: pct < 50 ? AMBER : t.text2, fontVariantNumeric: "tabular-nums" }}>{pct}%</span>
-              <span style={{ fontSize: 9, color: t.muted, fontFamily: "'JetBrains Mono'" }}>↻{tw.reset}</span>
-            </>
+          {known && a.windows.length > 0 ? (
+            /* ★ 每个窗口一行（Plus = 5h + 周；Pro 只有周，所以天然一行，不需要特例）。
+               条与标签走**窗口识别色**（`winColor`）；百分数仍按阈值变色 —— 那是仅剩的报警口。 */
+            <div style={{ display: "flex", flexDirection: "column", gap: 3, flex: 1, minWidth: 0 }}>
+              {a.windows.map((w) => {
+                const wc = isDead || isCool ? sc : winBarColor(w, w.pct, t);
+                return (
+                  <div key={w.label} style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    <span style={{ fontSize: 9, color: wc, fontFamily: "'JetBrains Mono'", width: 15, flexShrink: 0 }}>{w.label}</span>
+                    <div className="mb-row-bar" style={{ background: t.barTrack, flex: 1 }}>
+                      <div style={{ height: "100%", width: `${w.pct}%`, background: wc, borderRadius: 2, transition: "width .55s cubic-bezier(.4,0,.2,1)" }} />
+                    </div>
+                    <span style={{ fontSize: 9.5, fontWeight: 600, color: winNumColor(w.pct, t), fontVariantNumeric: "tabular-nums", width: 30, textAlign: "right" }}>{w.pct}%</span>
+                    <span style={{ fontSize: 9, color: t.muted, fontFamily: "'JetBrains Mono'", whiteSpace: "nowrap" }}>↻{w.reset}</span>
+                  </div>
+                );
+              })}
+            </div>
           ) : (
             <span className="mb-row-dead">{isDead ? "token 失效 · 需重登" : "未探测"}</span>
           )}

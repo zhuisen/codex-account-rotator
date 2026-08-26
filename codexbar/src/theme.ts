@@ -22,6 +22,28 @@
  * 例外：饼图「其余」轨道仍用硬编码 `#454d57` —— 它是**非文字的装饰轨道**，不是要读的内容，
  * 不受这条标尺约束（`TrafficPage.tsx` 的 donut）。
  */
+/**
+ * 总览卡片（账号卡 + grok 卡）的**字号标尺**。
+ *
+ * 用户 2026-08-26 从 4 档 demo 里选的 **D 档「整体 +3（宽松）」**（起因：「里面的字太小了」）。
+ * demo 留档：`~/Downloads/codexbar_card_type_demo_20260826.html`（含四档字号 × 三档配色，
+ * 每档都渲染了实测真实尺寸 330×160 与最窄 207×180，并算了对比度）。
+ *
+ * ★★ **必须集中一处**，两个理由：
+ *   ① 账号卡与 grok 卡并排在同一排网格里，字号差一点就看得出来；
+ *   ② 这些数字之间**互相约束** —— 隐藏占位行要与真行等高、grok 页脚要与账号卡页脚等高，
+ *      靠的就是两边读同一份数。散在两个文件里改，迟早只改一处，而症状是"卡片错开几像素"，
+ *      不报错、只能靠截图发现（本轮已经栽过一次）。
+ * ★ `PlanBadge` 的默认 `size` **不要动** —— 菜单栏行也用它，改默认值会连带把菜单栏放大。
+ *   这里通过 `size={CARD_TYPE.planBadge}` 显式传入。
+ */
+export const CARD_TYPE = {
+  name: 16.5, status: 12, planBadge: 10, useBadge: 10, curBadge: 10.5, delta: 11,
+  email: 13, winLabel: 12, pct: 13, eta: 12, note: 12, exp: 12.5,
+  ring: 58, ringR: 24, ringSw: 5, ringNum: 15, bar: 5, shortcut: 11,
+  badgeFont: 12, badgeIcon: 12, badgePad: "3px 9px",
+} as const;
+
 export const THEMES = {
   dark: {
     isDark:true,

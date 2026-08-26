@@ -80,10 +80,11 @@ export default function App() {
    * ★★ **窄窗自动折叠侧栏**（用户 2026-08-24 定稿：「尺寸小到一定程度后，需要折叠起侧边栏」）。
    *
    * 侧栏展开 176px / 折叠 52px，差 **124px** —— 正好是三列九宫格在窄窗下缺的那一点。
-   * 实测（`uishot/sweep.py`，账号卡自然宽 637）：
-   *   · 展开：**≥860 干净**，840 起单张卡溢出
-   *   · 折叠：**≥740 干净**，720 起溢出
-   * 差值 120px 与侧栏宽度差吻合，所以阈值取展开态的下限 860，窗口下限取折叠态的 740。
+   * ★★ 下限**随字号走**：用户 2026-08-26 选了 D 档字号（整体 +3），实测**卡片宽 ≥240px**
+   * 才站得住、≤235px 页脚就会在内部折行 ⇒ 展开 **≥960**、折叠 **≥840**（旧值 860/740 是
+   * 旧字号下的数，字号一改就失效）。取 `NARROW_W = 960`、`minWidth = 860`（留 20px 余量）。
+   * ★ 方向：窗口 ≥ `NARROW_W` 时侧栏是**开**的，所以必须 `NARROW_W ≥ 展开态下限`。
+   *   闸里原来写的是 `≤`（反的），因为当时两个数恰好都是 860，错了也一直是绿的。
    * 两个数**必须一起改**，闸在 `tests/test_narrow_window_nowrap.py`。
    *
    * ★ **这是显示层的临时覆盖，不改用户偏好**。变窄时只 `setNavOpen(false)`、**不写
@@ -96,7 +97,7 @@ export default function App() {
    * 用错引擎验证得到的假绿。折叠侧栏是纯 React 状态，两个引擎行为一致。
    */
   useEffect(() => {
-    const NARROW_W = 860;
+    const NARROW_W = 960;
     let narrow = window.innerWidth < NARROW_W;
     if (narrow) setNavOpen(false);
     const onResize = () => {
@@ -370,6 +371,17 @@ export default function App() {
                 //    **plus 的 5h** 去和 **pro 的周** 比 —— 两把不同的尺,算出来的
                 //    「-22%」是个没有意义的数,而它长得和正常角标一模一样。
                 const bestPct = alive.reduce((m, a) => Math.max(m, a.tightest), -1);
+                // ★★ 跨所有卡收集窗口**槽位**(按时长升序),卡片按槽位渲染、缺哪个补哪个的等高空行。
+                //    Plus 有 5h+周两行、Pro 只有周一行,不补的话下方全体错开一行(用户 2026-08-26 截图)。
+                //    ★ 记的是**标签而不是行数**:只补行数的话 Pro 的「周」会顶到第一行、
+                //      和 Plus 的「5h」画在同一条线上 —— 对齐了,但对齐的是两种不同的窗口,
+                //      **比错开更糟:它让人以为在横向比同一个量**。
+                //    ★ 不写死 ["5h","周"]:窗口形状是上游观测,2026-07 只有周、08-25 又变回两个。
+                const winSlots = (() => {
+                  const mins = new Map<string, number>();
+                  for (const a of alive) for (const w of a.windows) mins.set(w.label, w.mins);
+                  return [...mins.entries()].sort((x, y) => x[1] - y[1]).map(([label]) => label);
+                })();
                 return (
                   <div style={{ flex: 1, overflow: "auto" }}>
                     {/* ★★ **`minmax(0, 1fr)` 不是 `1fr`** —— CSS Grid 里裸 `1fr` 等价于 `minmax(auto, 1fr)`,
@@ -379,12 +391,14 @@ export default function App() {
                         860px 下网格自然宽 659 / 可用 644 ⇒ 右侧被裁。
                         ⚠️ 真正的教训不是"下限要重量" —— 是**下限本来就不该随数据浮动**。
                         改成 minmax(0,1fr) 之后,列能缩、省略号接手,布局不再受内容宽度摆布。 */}
-                    <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 12, alignContent: "start" }}>
+                    {/* `data-cards-grid` 供 uishot 探针定位这一排卡片（对齐闸只看格子里的，
+                        hero 卡也有同名窗口行，混进来会变成假红）。不参与样式。 */}
+                    <div data-cards-grid style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 12, alignContent: "start" }}>
                       {alive.map((a) => {
                         const shortcutIdx = aliveByLabel.findIndex(x => x.aid === a.aid);
                         // 改名按 aid 不按 label:cmd_rename 两者都认,而 aid 唯一 —— 重名时不会改到别的号上
                         return (
-                        <AccountCard key={a.aid} a={a} isCurrent={a.aid === currentNode} isBest={hero?.aid === a.aid} isSelected={selectedCard === a.aid} shortcut={shortcutIdx >= 0 && shortcutIdx < 9 ? shortcutIdx + 1 : undefined} bestPct={bestPct} probing={loadingAction === `probe-${a.aid}`} privacy={privacy} t={t}
+                        <AccountCard key={a.aid} a={a} isCurrent={a.aid === currentNode} isBest={hero?.aid === a.aid} isSelected={selectedCard === a.aid} shortcut={shortcutIdx >= 0 && shortcutIdx < 9 ? shortcutIdx + 1 : undefined} bestPct={bestPct} winSlots={winSlots} probing={loadingAction === `probe-${a.aid}`} privacy={privacy} t={t}
                           onSelect={() => setSelectedCard(selectedCard === a.aid ? null : a.aid)}
                           onSwitch={() => run(`switch-${a.aid}`, ["switch", a.node], `当前号 → ${a.node}`)}
                           onShowDetail={(aid) => { invoke<AccountDetail>("read_account_detail", { aid }).then(d => setDetailModal(d)).catch(() => {}); }}
@@ -397,7 +411,7 @@ export default function App() {
                           自动切号。混进去 ⌘4 会"切"到一个切不了的东西上,而且不报错。
                           闸在 tests/test_grok_not_in_pool_ui.py。 */}
                       <GrokCard t={t} color={colorOf(traffic, "grok")} snap={grokSnap}
-                                disabled={!!platPrefs.by?.grok?.off}
+                                disabled={!!platPrefs.by?.grok?.off} winSlots={winSlots}
                                 privacy={privacy} busy={grokBusy} err={grokErr}
                                 onRefresh={refreshGrok}
                                 onOpen={() => { setDrill("grok"); setPage("traffic"); }} />

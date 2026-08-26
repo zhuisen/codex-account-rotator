@@ -106,9 +106,16 @@ class ButtonsNeverBreakMidWord(unittest.TestCase):
     def test_narrow_threshold_and_min_width_agree(self):
         """★ 自动折叠阈值 与 窗口 `minWidth` 是**一对**,只改一个就会破。
 
-        实测(`uishot/sweep.py`,账号卡自然宽 637):侧栏展开 ≥860 干净、840 起溢出;
-        折叠 ≥740 干净、720 起溢出。差 120px = 侧栏宽度差(176-52)。
-        所以 `NARROW_W` 必须 ≤ 展开态下限,`minWidth` 必须 ≥ 折叠态下限。
+        ★★ 2026-08-26 两处一起改了,**下限随字号走**:用户选了 D 档字号(整体 +3),
+        实测卡片宽 **≥240px 才站得住**、≤235px 就页脚内折行 ⇒ 对应窗口下限整体抬高:
+          · 侧栏展开 ≥960 干净(卡宽 240)、940 起破;
+          · 侧栏折叠 ≥840 干净(卡宽 241)、820 起破。差 124px = 侧栏宽度差(176-52)。
+        取 `NARROW_W = 960`、`minWidth = 860`(比折叠下限留 20px 余量)。
+
+        ★ **方向**:`NARROW_W` 是"低于它就折叠"。所以窗口 ≥ `NARROW_W` 时侧栏是**开**的,
+          必须 `NARROW_W >= 展开态下限` —— 否则在 [展开下限, NARROW_W) 这段里侧栏还开着、
+          卡片已经挤破了。原来这里写的是 `<=`(方向反的),因为当时两个数恰好都是 860,
+          错了也一直是绿的 —— **相等会让方向错误隐形**,所以现在两个数不同了才暴露。
         单独调其中一个的症状:**窗口能被拖到某个宽度,那里侧栏还没折叠、卡片已经溢出** ——
         而且不报错,只是右边少一块。
         """
@@ -122,10 +129,11 @@ class ButtonsNeverBreakMidWord(unittest.TestCase):
         win = conf["app"]["windows"][0]
         self.assertIn("minWidth", win,
                       "窗口没有 minWidth —— 能被拖到任意窄,就没有可以宣称干净的宽度")
-        self.assertLessEqual(narrow, 860,
-                             "NARROW_W({}) 高于展开态实测下限 860".format(narrow))
-        self.assertGreaterEqual(win["minWidth"], 740,
-                                "minWidth({}) 低于折叠态实测下限 740".format(win["minWidth"]))
+        self.assertGreaterEqual(narrow, 960,
+                                "NARROW_W({}) 低于展开态实测下限 960 —— 那段宽度里侧栏还开着,"
+                                "而卡片已经挤破了".format(narrow))
+        self.assertGreaterEqual(win["minWidth"], 840,
+                                "minWidth({}) 低于折叠态实测下限 840".format(win["minWidth"]))
         self.assertLess(win["minWidth"], narrow,
                         "minWidth 应当**低于**折叠阈值,否则自动折叠永远不会触发")
 
@@ -208,7 +216,10 @@ class ButtonsNeverBreakMidWord(unittest.TestCase):
         #   第一版对着 self.app 断言 ⇒ 测试恒红,而恒红的测试**任何变异都会"变红"**,
         #   变异测试的绿灯全是假的(今天第二次踩:先证明基线是绿的,再做变异)。
         card = strip_comments((SRC / "components" / "AccountCard.tsx").read_text(encoding="utf-8"))
-        m = re.search(r"<span style=\{\{[^}]*fontSize:\s*13\.5[^}]*\}\}>\{a\.node\}", card, re.S)
+        # ★ 锚点**不要挂在字号数值上**。原来写死 `fontSize: 13.5`,2026-08-26 把字号提取成
+        #   `CARD_TYPE`(用户选了 D 档)后这条立刻打空 —— 幸好有下面那句"断言可能打空了"接住,
+        #   否则它会静默变成"永远通过"。改成认**被测的那个属性本身**(渲染 `{a.node}` 的 span)。
+        m = re.search(r"<span style=\{\{[^}]*\}\}>\{a\.node\}", card, re.S)
         self.assertIsNotNone(m, "找不到账号名那个 span —— 断言可能打空了")
         self.assertNotRegex(m.group(0), r"minWidth:\s*0\b",
                             "账号名 minWidth 是 0 —— flex 会把它压到消失")

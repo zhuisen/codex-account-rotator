@@ -385,6 +385,86 @@ STUB = """
           }
           return out.slice(0, 12);
         })(),
+        // ★★ **对齐探针**:报每张账号卡里「到期」那行的 y 坐标。卡片之间要对齐到同一条
+        //   水平线,靠肉眼比截图判不准(用户 2026-08-26 用红线标出来才发现),而且
+        //   偏移可能有**多个来源**(窗口条数不同、徽章行折行数不同),只看一个会漏。
+        //   同时报徽章行的高度 —— 那是第二个偏移源。
+        alignY: (function () {
+          var out = { expiry: [], bars: [], rings: [], expanded: [], cards: [] };
+          var grid = document.querySelector('[data-cards-grid]');
+          if (!grid) return out;
+
+          // 这个元素属于哪张卡 = 网格的哪个**直接子元素**。比"向上找账号名"可靠 ——
+          // 后者在某些层级会先撞到 hero 或相邻卡（我 2026-08-26 就被这样误导过一轮）。
+          function cardOf(el) {
+            var n = el;
+            while (n && n.parentElement !== grid) n = n.parentElement;
+            return n;
+          }
+          var meta = new Map();       // card 元素 → {name, expanded}
+          Array.prototype.forEach.call(grid.children, function (card) {
+            var name = '?';
+            card.querySelectorAll('span').forEach(function (x) {
+              if (name === '?' && /^(plus\d+|Pro\d+|grok)$/.test((x.textContent || '').trim()))
+                name = x.textContent.trim();
+            });
+            // ★ 展开态判据 = 动作条里那颗「重命名」按钮。它只在选中时渲染,
+            //   且不是任何其他地方的文案 —— 比按 class/结构猜稳。
+            var expanded = false;
+            card.querySelectorAll('span').forEach(function (x) {
+              if ((x.textContent || '').trim() === '重命名') expanded = true;
+            });
+            var cr = card.getBoundingClientRect();
+            var rowMain = card.querySelector(':scope > div');
+            var col = rowMain && rowMain.children.length > 1 ? rowMain.children[1] : null;
+            var hs = [];
+            if (col) Array.prototype.forEach.call(col.children, function (c) {
+              hs.push(Math.round(c.getBoundingClientRect().height));
+            });
+            out.cards.push(name + ' ' + Math.round(cr.width) + '×' + Math.round(cr.height)
+                           + ' 列内=[' + hs.join(',') + ']');
+            meta.set(card, { name: name, expanded: expanded });
+            if (expanded) out.expanded.push(name);
+          });
+          // ★ 标签里带上**网格行号**（卡片顶边）。卡片多于 3 张时网格会换行，
+          //   跨行比 y 必然把"第二行"读成错位 —— 那是把两排东西放一起比。
+          function tag(el) {
+            var c = cardOf(el);
+            var m = c ? meta.get(c) : null;
+            if (!m || !c) return '?#r0';
+            return m.name + (m.expanded ? '(展开)' : '') + '#r'
+                   + Math.round(c.getBoundingClientRect().top);
+          }
+
+          // 「到期」行
+          grid.querySelectorAll('span').forEach(function (e) {
+            var t = (e.textContent || '').trim();
+            if (t.indexOf('到期') !== 0) return;
+            var r = e.getBoundingClientRect();
+            if (r.width >= 1) out.expiry.push(tag(e) + '@' + Math.round(r.top));
+          });
+
+          // 条形行:按「窗口标签 → y」收。同一种窗口(5h / 周)必须落在同一条线上 ——
+          // 只看「到期」对齐不够,用户的红线画在条上。
+          grid.querySelectorAll('span').forEach(function (e) {
+            var t = (e.textContent || '').trim();
+            if (t.charAt(0) !== '↻') return;              // ↻ = 重置倒计时,每条条形行都有
+            var row = e.parentElement; if (!row) return;
+            var lab = row.firstElementChild;
+            var vis = row.style.visibility !== 'hidden';
+            out.bars.push(tag(e) + '/' + (lab ? lab.textContent.trim() : '?') + (vis ? '' : '(空)')
+                          + '@' + Math.round(row.getBoundingClientRect().top));
+          });
+
+          // 环:卡片里唯一 52×52 的 svg。报**中心 y** —— 环是圆的,比顶边更能反映"看起来在不在一条线上"。
+          // ★ 用户 2026-08-26 指出环顶对齐难看,改回居中;居中之后它也必须跨卡对齐,所以一并守住。
+          grid.querySelectorAll('svg').forEach(function (e) {
+            var r = e.getBoundingClientRect();
+            if (Math.round(r.width) !== 52) return;
+            out.rings.push(tag(e) + '@' + Math.round(r.top + r.height / 2));
+          });
+          return out;
+        })(),
         errors: errors.slice(0, 4),
         unknownCmds: unknown.filter(function (v, i, a) { return a.indexOf(v) === i; }),
         clicks: clicks,
@@ -440,6 +520,36 @@ def redacted_state():
         sl.pop("name", None)
         sl["file"] = f"{fake}.json"
         out_slots[fake] = sl
+    # ★★ `?lowquota=1` 把额度压到会**触发警告色**的档位。
+    #    真实数据现在全是高额度,所以「低额度夺色」那条路径**截图根本证明不了** ——
+    #    而它正是用户明确要求的行为(2026-08-26:「低额度靠条色报警」)。
+    #    只改 used_percent,窗口结构/套餐/到期日全部保真。
+    if os.environ.get("CODEXBAR_LOW_QUOTA"):
+        levels = [(72.0, 5.0), (95.0, 58.0)]     # (5h 已用, 周已用) → 剩 28% 琥珀 / 剩 5% 红
+        for i, sl in enumerate(out_slots.values()):
+            q = sl.get("quota") or {}
+            for k, used in zip(("primary", "secondary"), levels[i % len(levels)]):
+                w = q.get(k)
+                if isinstance(w, dict) and w.get("window_minutes"):
+                    w["used_percent"] = used
+    # ★★ `?cardexp=1` 只给**第一个**号一张快到期的重置卡 ⇒ 它的徽章文案变长
+    #    （「重置卡 ×1 · 剩1天」），另一个号仍是短文案。
+    #    这是**唯一能证伪"卡片已对齐"的夹具**：页脚一旦因文案长短而折行高度就不同，
+    #    而条形区是从页脚往上推的 —— 真实数据里两个号的徽章恰好一样长，
+    #    只用它截图会得到一个**看起来对齐、实际没被验过**的结论。
+    if os.environ.get("CODEXBAR_CARD_EXPIRING"):
+        soon = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + 86400))
+        first = next(iter(out_slots.values()), None)
+        if first is not None:
+            first["credits_detail"] = {"credits": [{"status": "available", "expires_at": soon}]}
+    # ★★ `?unprobed=1`：加一个**刚加进来、从没探测过**的号（`windows: []`）。
+    #    这个夹具不是凑数的，它一次抓到两件事（2026-08-26）：
+    #      ① 池里到 3 个号时，三列网格把 grok 挤到**第二行** —— 对齐必须按排比，跨排比必然误报；
+    #      ② 没有窗口的卡不画任何条形行，行数与兄弟卡不同 ⇒ 它的「到期」高 9px。
+    #    真实 state.json 里两个号都探测过，**不造这个状态就永远验不到**。
+    if os.environ.get("CODEXBAR_UNPROBED"):
+        fake = "user-demo990000000000000000000000"
+        out_slots[fake] = {"label": "Newbie", "email": "newbie@example.com", "file": f"{fake}.json"}
     return {"active": idmap.get(raw.get("active"), ""), "slots": out_slots,
             "last_proxy_ts": raw.get("last_proxy_ts")}
 

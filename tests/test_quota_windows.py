@@ -147,5 +147,112 @@ class HeroRingLabelMatchesItsNumber(unittest.TestCase):
                          "tightest 不是从窗口列表里挑出来的,拿不到它是哪个窗口")
 
 
+class WindowColourRule(unittest.TestCase):
+    """★★ C′：**窗口识别色 + 低额度夺色**（用户 2026-08-26 定稿）。
+
+    两个诉求本来打架，这条规则是它们的和解：
+      · 「5h 和周的颜色不一样」→ 平时按**窗口**取色（青 / 绿）；
+      · 「低额度靠条色报警」  → **跌破阈值时警告色夺回条色**。
+    即 **识别是常态，报警是例外，而例外优先** —— 额度快没了的时候，
+    「这是哪个窗口」远不如「这个要没了」重要。
+
+    这条闸守两件事：
+      ① 夺色**真的在**（低额度必须返回警告色，不能只按窗口分色）；
+      ② 两个 surface **不许各写一份** —— 菜单栏行与总览卡都必须调同一个函数。
+         本项目在 grok 那边栽过一次：同一状态两个 surface 两种画法，靠截图才发现。
+    """
+    SURFACES = ("components/AccountRow.tsx", "components/AccountCard.tsx")
+
+    @classmethod
+    def setUpClass(cls):
+        cls.ts = strip_comments(HELPERS.read_text(encoding="utf-8"))
+
+    def test_low_quota_takes_over_the_bar_colour(self):
+        """★ 用户要求①：低额度靠条色报警。判据打在函数体上，不是"这个词出现过"。"""
+        i = self.ts.index("export function winBarColor")
+        body = self.ts[i:self.ts.index("\n}", i)]
+        self.assertRegex(body, r'return\s*"#E0901C"',
+                         "低额度不再返回琥珀 —— 条色报警没了")
+        self.assertRegex(body, r'return\s*"#E0524D"',
+                         "危险档不再返回红")
+        # ★ 夺色必须**排在**识别色之前,否则永远轮不到
+        warn = min(body.index('"#E0901C"'), body.index('"#E0524D"'))
+        self.assertLess(warn, body.index("winColor("),
+                        "警告色排在识别色之后 —— 那样低额度永远夺不到色")
+
+    def test_identity_colour_survives_at_healthy_levels(self):
+        """反向:别把窗口识别色整个删掉 —— 那就退回改动前了。"""
+        i = self.ts.index("export function winBarColor")
+        body = self.ts[i:self.ts.index("\n}", i)]
+        self.assertIn("winColor(", body, "正常档不再按窗口取色,双色相没了")
+
+    def test_both_surfaces_use_the_same_rule(self):
+        for rel in self.SURFACES:
+            code = strip_comments((ROOT / "codexbar" / "src" / rel).read_text(encoding="utf-8"))
+            with self.subTest(f=rel):
+                self.assertIn("winBarColor(", code, "{} 没走统一的配色规则".format(rel))
+                self.assertNotIn("quotaColor(", code,
+                                 "{} 还在直接用 quotaColor —— 与另一个 surface 会分叉".format(rel))
+
+
+class NumberAndBarNeverDisagree(unittest.TestCase):
+    """★★ 策略③：**百分比数字与条形共用同一套阈值**（用户 2026-08-26 定稿）。
+
+    改动前三个 surface **各写一份，而且写的还不一样**：
+      · `AccountCard` / `AccountRow` —— `pct < 50 ? 琥珀 : 次级灰`，**没有红档**；
+      · `GrokCard`                   —— 三档（≤10 红 / <50 琥珀 / 否则灰）。
+    症状：剩 7% 时**条是红的、账号卡的数字却是琥珀** —— 同一个状态两种说法，
+    而它不报错、不折行、不溢出，任何自动化都看不见，只能靠人盯着截图。
+
+    这条闸守三件事：
+      ① 判据只有**一处**（`quotaLevel`），条色与数字色都从它取；
+      ② 数字**有红档**（回到两档就等于把危险说成警告）；
+      ③ 三个 surface 都调 `winNumColor`，谁也不许再手写一份。
+    """
+    SURFACES = ("components/AccountCard.tsx", "components/AccountRow.tsx", "components/GrokCard.tsx")
+
+    @classmethod
+    def setUpClass(cls):
+        cls.ts = strip_comments(HELPERS.read_text(encoding="utf-8"))
+
+    def test_single_threshold_predicate(self):
+        """★ 条色与数字色必须**都**走 `quotaLevel` —— 两处各写一串 if 迟早分叉。"""
+        self.assertIn("function quotaLevel", self.ts, "quotaLevel 不见了")
+        for fn in ("winBarColor", "winNumColor"):
+            i = self.ts.index("export function {}".format(fn))
+            body = self.ts[i:self.ts.index("\n}", i)]
+            with self.subTest(f=fn):
+                self.assertIn("quotaLevel(", body,
+                              "{} 没有走 quotaLevel —— 阈值又变成两份了".format(fn))
+
+    def test_number_keeps_a_danger_level(self):
+        """★★ 数字必须有红档。退回两档 = 把「危险」说成「警告」，而条还是红的。"""
+        i = self.ts.index("export function winNumColor")
+        body = self.ts[i:self.ts.index("\n}", i)]
+        self.assertRegex(body, r'return\s*"#E0524D"', "数字没有危险档(红)")
+        self.assertRegex(body, r'return\s*"#E0901C"', "数字没有警告档(琥珀)")
+        self.assertIn("t.text2", body, "数字正常态不再是中性灰 —— 策略③的前半句没了")
+
+    def test_normal_state_stays_neutral(self):
+        """反向：正常态**不许**染窗口识别色（那是策略②，用户没选它）。
+
+        判据打在函数体上：`winNumColor` 里不该出现 `winColor(`。
+        """
+        i = self.ts.index("export function winNumColor")
+        body = self.ts[i:self.ts.index("\n}", i)]
+        self.assertNotIn("winColor(", body,
+                         "数字正常态跟着染窗口色了 —— 那是策略②，一屏六个彩色数字")
+
+    def test_no_surface_hand_rolls_the_rule(self):
+        for rel in self.SURFACES:
+            code = strip_comments((ROOT / "codexbar" / "src" / rel).read_text(encoding="utf-8"))
+            with self.subTest(f=rel):
+                self.assertIn("winNumColor(", code,
+                              "{}:没走统一的数字取色".format(rel))
+                self.assertNotRegex(
+                    code, r"pct\s*<\s*50\s*\?",
+                    "{}:又手写了一份 `pct < 50 ?` 阈值 —— 这正是本闸要挡的".format(rel))
+
+
 if __name__ == "__main__":
     unittest.main()

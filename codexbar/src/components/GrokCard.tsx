@@ -1,11 +1,15 @@
 import Ring from "./Ring";
 import GrokStaleMark from "./GrokStaleMark";
-import type { Theme } from "../theme";
+import { CardBadgeGhost } from "./CardBadge";
+import { CARD_TYPE as Z, type Theme } from "../theme";
 import type { GrokSnapshot, GrokAccount } from "../grok";
 import { grokRemPct, grokLastGoodRemPct, grokQuotaVisible } from "../grok";
-import { fmtEta, fmtAgo, maskId } from "../helpers";
+import { fmtEta, fmtAgo, maskId, winNumColor } from "../helpers";
 
 const MONO = "'JetBrains Mono'";
+
+/** grok 只有一个计费周期窗口（xAI 账单周），标签与账号卡的周窗口同名 —— 靠它对上同一条槽位。 */
+const GROK_WIN = "周";
 
 /**
  * 总览九宫格里的 grok 额度卡（用户 2026-08-24：「工作台也要显示 grok」）。
@@ -29,8 +33,14 @@ const MONO = "'JetBrains Mono'";
  * ★ 颜色**由调用方传入**（`colorOf(traffic, "grok")`），不在这里写死 `#8b7cf6`：
  * 用户在设置页能给平台改色，写死就跟不上（CLAUDE.md §5 的既有铁律）。
  */
-export default function GrokCard({ t, color, snap, privacy, busy, err, disabled, onOpen, onRefresh }: {
+export default function GrokCard({ t, color, snap, privacy, busy, err, disabled, winSlots, onOpen, onRefresh }: {
   t: Theme;
+  /**
+   * 与账号卡**同一份**窗口槽位表（见 `AccountCard` 的同名 prop）。grok 没有 5h 窗口，
+   * 那个槽位画一行隐藏的等高行 —— 它和账号卡并排在同一行网格里，
+   * 不占槽的话它的「周」会和别人的「5h」画在同一条线上。
+   */
+  winSlots: string[];
   /** grok 的平台识别色，来自 `colorOf(data, "grok")`（已折进用户偏好）。 */
   color: string;
   snap: GrokSnapshot | null;
@@ -56,10 +66,14 @@ export default function GrokCard({ t, color, snap, privacy, busy, err, disabled,
   const degraded = !!a && !a.available;
 
   // 数字的阈值色。**唯一还在报警的地方** —— 环和条已按用户要求恒紫。
-  const numColor = (p: number | null) =>
-    p == null ? t.muted : p <= 10 ? "#E0524D" : p < 50 ? "#E0901C" : t.text2;
+  // ★ 阈值走 `winNumColor`(与账号卡、菜单栏行同一处判据)。这里本来就是三档、
+  //   与它们不一致的是那两处;改成调同一个函数是**防止将来单独漂移**,不是修 bug。
+  const numColor = (p: number | null) => p == null ? t.muted : winNumColor(p, t);
 
   const shownRem = degraded ? lgRem : rem;
+  // 槽位表里必须有 grok 自己那格：池里一个账号都没有（或都探测失败）时 winSlots 是空的，
+  // 不兜的话 grok 的条会**一整条消失**——「读不到 ≠ 确实没有」的另一种形态。
+  const slotRows = winSlots.includes(GROK_WIN) ? winSlots : [...winSlots, GROK_WIN];
   const glow = shownRem != null && shownRem <= 20 ? (shownRem <= 10 ? "#E0524D" : "#E0901C") : undefined;
 
   return (
@@ -72,8 +86,8 @@ export default function GrokCard({ t, color, snap, privacy, busy, err, disabled,
     }}>
       {/* 账号卡左上角是 ⌘N 快捷键提示。grok **没有**快捷键(它不在 aliveByLabel 里,
           见 tests/test_grok_not_in_pool_ui.py),所以这里放的是"它是什么"而不是"怎么切它"。 */}
-      <span style={{ position: "absolute", top: 6, left: 10, fontSize: 9, color,
-                     fontFamily: MONO, letterSpacing: ".04em" }}>CLI</span>
+      <span style={{ position: "absolute", top: 6, left: 10, color,
+                     fontFamily: MONO, letterSpacing: ".04em", fontSize: Z.shortcut }}>CLI</span>
       {onRefresh && (
         // ★ stopPropagation:点卡片是"进 Grok 详情",点 ↻ 是"重取额度",两个动作叠在同一块区域上。
         //   不拦的话点 ↻ 会顺带跳页 —— 而这个按钮存在的意义正是"不离开总览就刷新"。
@@ -84,26 +98,28 @@ export default function GrokCard({ t, color, snap, privacy, busy, err, disabled,
                          cursor: busy ? "default" : "pointer", opacity: busy ? .4 : 1 }}>↻</button>
       )}
 
-      <div style={{ display: "flex", gap: 11, alignItems: "center" }}>
+      {/* `flex:1` + 内容列 `alignSelf:stretch`：与账号卡同款底吊布局，环仍垂直居中。
+          理由与那条「别改回顶对齐」的警告见 AccountCard 同处注释。 */}
+      <div style={{ display: "flex", gap: 11, alignItems: "center", flex: 1, minHeight: 0 }}>
         {/* ★★ 降级时环与条**强制琥珀**,与菜单栏行同口径。
             截图核对时发现两个 surface 曾不一致(行是琥珀、卡还是平台紫)——
             **同一个状态两种画法**正是这套闸一直在防的东西。
             琥珀在这里表示的是"这个数不是现在的",不是额度水位。 */}
-        <Ring pct={shownRem ?? 0} r={21} sw={5}
+        <Ring pct={shownRem ?? 0} r={Z.ringR} sw={Z.ringSw}
               color={shownRem == null ? t.ringTrack : (degraded ? "#E0901C" : color)}
-              track={t.ringTrack} size={52} glow={glow}>
-          <span style={{ fontSize: 13, fontWeight: 700, color: t.text,
+              track={t.ringTrack} size={Z.ring} glow={glow}>
+          <span style={{ fontSize: Z.ringNum, fontWeight: 700, color: t.text,
                          fontVariantNumeric: "tabular-nums", lineHeight: 1 }}>
             {shownRem == null ? "—" : Math.round(shownRem)}
           </span>
         </Ring>
 
-        <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 4 }}>
+        <div style={{ flex: 1, minWidth: 0, alignSelf: "stretch", display: "flex", flexDirection: "column", gap: 4 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
-            <span style={{ fontSize: 13.5, fontWeight: 700, color }}>grok</span>
+            <span style={{ fontSize: Z.name, fontWeight: 700, color }}>grok</span>
             {/* 与旁边三张卡唯一需要的区别:它们能切,这张不能。 */}
             <span title="grok 不在轮换池,只显示额度,不参与切号"
-                  style={{ fontSize: 9, fontWeight: 700, padding: "1px 5px", borderRadius: 5,
+                  style={{ fontSize: Z.curBadge, fontWeight: 700, padding: "1px 5px", borderRadius: 5,
                            color, border: `1px solid ${hexA(color, .45)}` }}>只读</span>
             {/* ★ 降级说明**只在这里**,一个字符 + 悬浮。理由见 GrokStaleMark 的文件头。 */}
             {degraded && a && <GrokStaleMark t={t} a={a} size={11} />}
@@ -111,41 +127,63 @@ export default function GrokCard({ t, color, snap, privacy, busy, err, disabled,
                 但呈现方式一致 —— 都是一个感叹号,不再各弹各的横幅。 */}
             {!!err && <GrokStaleMark t={t} note={`读不到本机的额度快照：${err}`} tone="red" size={11} />}
           </div>
-          <div style={{ fontSize: 10.5, color: t.text2, fontFamily: MONO, overflow: "hidden",
+          <div style={{ fontSize: Z.email, color: t.text2, fontFamily: MONO, overflow: "hidden",
                         textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
             {a?.email ? maskId(a.email, privacy) : (busy ? "正在取额度…" : "未探测")}
           </div>
 
-          {shownRem != null && (
-            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-              <span style={{ fontSize: 9, color: t.muted, fontFamily: MONO }}>周</span>
-              <div style={{ flex: 1, height: 4, borderRadius: 2, background: t.barTrack, overflow: "hidden" }}>
+          {/* 弹性留白：把条形区压到卡片底边，与账号卡同款（理由见 AccountCard 同处注释）。 */}
+          <div aria-hidden style={{ flex: 1, minHeight: 0 }} />
+
+          {shownRem != null && slotRows.map(label => label !== GROK_WIN ? (
+            // 没有这个窗口 ⇒ 同构隐藏行占位，高度由构造保证与真行一致。
+            <div key={label} aria-hidden style={{ display: "flex", alignItems: "center", gap: 6, visibility: "hidden" }}>
+              <span style={{ fontSize: Z.winLabel, fontFamily: MONO }}>{label}</span>
+              <div style={{ flex: 1, height: Z.bar }} />
+              <span style={{ fontSize: Z.pct, fontWeight: 600, fontFamily: MONO }}>00%</span>
+              <span style={{ fontSize: Z.eta, fontFamily: MONO }}>↻0d00h</span>
+            </div>
+          ) : (
+            <div key={label} style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <span style={{ fontSize: Z.winLabel, color: t.muted, fontFamily: MONO }}>{GROK_WIN}</span>
+              <div style={{ flex: 1, height: Z.bar, borderRadius: 2, background: t.barTrack, overflow: "hidden" }}>
                 <div style={{ height: "100%", width: `${shownRem}%`,
                               background: degraded ? "#E0901C" : color, borderRadius: 2,
                               transition: "width .55s cubic-bezier(.4,0,.2,1)" }} />
               </div>
-              <span style={{ fontSize: 10, fontWeight: 600,
+              <span style={{ fontSize: Z.pct, fontWeight: 600,
                              color: degraded ? "#E0901C" : numColor(shownRem),
                              fontFamily: MONO, fontVariantNumeric: "tabular-nums" }}>
                 {Math.round(shownRem)}%
               </span>
-              <span style={{ fontSize: 9, color: t.muted, fontFamily: MONO }}>
+              <span style={{ fontSize: Z.eta, color: t.muted, fontFamily: MONO }}>
                 ↻{fmtEta((degraded ? a?.last_good?.period_end : a?.quota?.period_end) ?? undefined)}
               </span>
             </div>
-          )}
-        </div>
-      </div>
+          ))}
 
-      {/* ★ 降级披露放卡内底部。**语义色，不染紫** —— "读不到"必须与"读到了"一眼可分。 */}
-      {/* ★ 底注一行,降级与否都在同一位置、同样高度 —— 卡片不会因为 token 过期就长高一截。
-          ★★ **数字绝不假装是活的**:有上次读数就说明它是几时的,没有就说「暂时读不到」。
-             省掉的是**解释**(挪进感叹号的悬浮),不是**披露**。 */}
-      <div style={{ marginTop: 9, fontSize: 9.5, fontFamily: MONO,
-                    color: degraded ? "#E0901C" : t.muted }}>
-        {degraded
-          ? (lgRem != null ? `${fmtAgo(a?.last_good?.fetched_at)}的读数` : "额度暂时读不到")
-          : "xAI 账单 · 不在轮换池"}
+          {/* ★ 降级披露放卡内底部。**语义色，不染紫** —— "读不到"必须与"读到了"一眼可分。 */}
+          {/* ★ 底注一行,降级与否都在同一位置、同样高度 —— 卡片不会因为 token 过期就长高一截。
+              ★★ **数字绝不假装是活的**:有上次读数就说明它是几时的,没有就说「暂时读不到」。
+                 省掉的是**解释**(挪进感叹号的悬浮),不是**披露**。
+              ★★ 位置与外框刻意与账号卡的「到期」行**同构**（同在内容列内、同样的
+                 `marginTop/paddingTop/borderTop`）：条形行的位置是从列底往上推的，
+                 页脚高度不一样，上面的条就落不到同一条线上（实测差 8~16px）。
+                 所以这不是装饰性的分隔线，**它是对齐的一部分**。 */}
+          {/* ★ 字号写在**文字自己**身上，不写在容器上：容器一改字号，里面那个行内占位盒的
+              strut 就跟着变矮（实测差 2px），而账号卡的同位置容器没设字号 ——
+              同一个占位盒在两张卡里会量出两个高度，对齐就差这 2px。 */}
+          <div style={{ display: "flex", flexDirection: "column", gap: 6,
+                        marginTop: 5, paddingTop: 7, borderTop: `1px solid ${t.divider}`,
+                        color: degraded ? "#E0901C" : t.muted }}>
+            <span style={{ fontSize: Z.exp, fontFamily: MONO, whiteSpace: "nowrap",
+                         overflow: "hidden", textOverflow: "ellipsis" }}>{degraded
+              ? (lgRem != null ? `${fmtAgo(a?.last_good?.fetched_at)}的读数` : "额度暂时读不到")
+              : "xAI 账单 · 不在轮换池"}</span>
+            {/* grok 没有重置卡这个概念，占位只为让页脚与账号卡等高（见 CardBadgeGhost 说明）。 */}
+            <span style={{ alignSelf: "flex-end" }}><CardBadgeGhost /></span>
+          </div>
+        </div>
       </div>
     </div>
   );
