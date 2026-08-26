@@ -64,7 +64,13 @@ VIEWS = [
     # ★ 需要 `CODEXBAR_UNPROBED=1` 生成的 harness 才有第 3 个号（见 make_harness 同名夹具）。
     #   没有它时这一行等价于「总览·侧栏展开」,不会假红,只是少测两件事。
     ("总览·未探测号",    "/harness.html?nav=home&rail=open&grok=ok",                  [1200, 1000, 960]),
-    ("用量总览",         "/harness.html?nav=traffic&rail=open",                       [1200, 1000, 900]),
+    # ★ 1037 / 913 是**紧凑区列宽的“谷底”**（发版前评审算出来的）：
+    #   `auto-fill` 的格宽随窗宽呈锯齿波，谷底处每格只剩 264px、名字仅余 68px，
+    #   `Antigravity`（注册表里最长）余量近零。**整百宽度全落在舒适段，只挑整百必漏**。
+    #   另：`make_harness.py` 的探针对 `textOverflow: ellipsis` 直接跳过，
+    #   所以“名字被截断”这类缺陷**结构上抢不到**，只能靠宽度采样 + 人看。
+    ("用量总览",         "/harness.html?nav=traffic&rail=open",                       [1200, 1037, 1000, 960]),
+    ("用量总览·谷底",     "/harness.html?nav=traffic",                                 [940, 913, 880]),
     ("平台详情",         "/harness.html?nav=platform:claude&rail=open",               [1200, 1000, 900]),
     ("设置",            "/harness.html?nav=settings&rail=open",                      [1200, 1000, 900]),
     ("菜单栏·账号",      "/harness-menubar.html?w=352&grok=ok",                       [520]),

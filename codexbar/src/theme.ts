@@ -44,6 +44,24 @@ export const CARD_TYPE = {
   badgeFont: 12, badgeIcon: 12, badgePad: "3px 9px",
 } as const;
 
+/**
+ * 平台详情页「模型消耗」宽表的**字号与列宽标尺**（用户 2026-08-26：「模型数字放大，现在太小了」）。
+ *
+ * 与 `CARD_TYPE` 同一口径：卡片那批用户选了 D 档「整体 +3」，这张表原本比它还小一档
+ * （body 10.5 / 列头 9），所以按同样的比例抬（body 13 / 列头 11），两个界面才读起来是一套东西。
+ *
+ * ★★ **字号与列宽必须一起改**。这是 11 列的宽数据表，列宽是按 10.5px 的字量出来的；
+ *    只放大字号会让数字列**串位或显示成 `###`** —— 而那看起来像数据错了，不像排版没跟上。
+ *    列宽按 13/10.5 ≈ 1.24 缩放后重新实测自然宽，`min` 也要跟着抬（见 PlatformPage 的 TABLE_MIN）。
+ * ★ 名字列一并加宽（180→210）：模型名已经在截断（`deepseek-pro/deepseek-v4-pro`），
+ *   字号一大截得更狠。截断本身可接受（有 `title` 兜全称），但不该因为放大而更严重。
+ */
+export const TABLE_TYPE = {
+  body: 13, colHead: 11, groupHead: 12, note: 11.5,
+  dot: 14, name: 210, tok: 77, share: 55, rounds: 74, cost: 84,
+  gap: 26, rateIn: 72, rateOut: 72, ratePerM: 92,
+} as const;
+
 export const THEMES = {
   dark: {
     isDark:true,

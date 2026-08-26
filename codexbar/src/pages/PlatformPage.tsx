@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { type Theme, modelColor } from "../theme";
+import { type Theme, modelColor, TABLE_TYPE as TZ } from "../theme";
 import { costOf, fmtUSD, priceOf, isPriced } from "../rates";
 import StackedArea, { type Layer } from "../components/StackedArea";
 import Seg from "../components/Seg";
@@ -75,15 +75,20 @@ function money(x: number): string {
  * 是「改了一处忘另一处」的经典位置，而症状是表头和数据错位一列，看着像数据错了。
  * 中间那 26px 是分区竖线所在的空列。
  */
-const GAP = 26;
+const GAP = TZ.gap;
 /** ★ 表格内容的最小宽。**光给容器加 `overflowX:auto` 不够** —— `ROW` 模板里有一列 `1fr`,
  *  它会把行撑到"可用宽"而不是"自然宽",于是行仍被约束成 684、内部继续溢出,滚动条永远不出现。
- *  钉一个 minWidth,滚动才真的发生(900px 实测自然宽 698,留 2px 余量)。 */
-const TABLE_MIN = 700;
-const RATE_W = 58 + 58 + 74 + 16;   // 输入 + 输出 + 费用/百万 + 间隙
+ *  钉一个 minWidth,滚动才真的发生。
+ *  ★★ **由列宽算出来,不再写死一个实测值**(旧版是 `700`,注释写着"900px 实测自然宽 698")。
+ *  2026-08-26 放大字号时列宽全变了,那个 700 当场失真 —— 写死的实测值**不会报错,
+ *  只会让表在某个宽度悄悄被裁掉最右边那一列**(而裁掉的正是「费用/百万」)。
+ *  56 是条形列的最小可读宽度,与旧版给它的余量一致。 */
+const TABLE_MIN = TZ.dot + TZ.name + 56 + TZ.tok + TZ.share + TZ.rounds + TZ.cost
+                 + TZ.gap + TZ.rateIn + TZ.rateOut + TZ.ratePerM;
+const RATE_W = TZ.rateIn + TZ.rateOut + TZ.ratePerM + 16;   // 输入 + 输出 + 费用/百万 + 间隙
 const ROW: React.CSSProperties = {
   display: "grid", alignItems: "center",
-  gridTemplateColumns: `14px 180px 1fr 62px 44px 60px 68px ${GAP}px 58px 58px 74px`,
+  gridTemplateColumns: `${TZ.dot}px ${TZ.name}px 1fr ${TZ.tok}px ${TZ.share}px ${TZ.rounds}px ${TZ.cost}px ${GAP}px ${TZ.rateIn}px ${TZ.rateOut}px ${TZ.ratePerM}px`,
 };
 /** 数字列一律右对齐 + 等宽数位（`tabular-nums`），否则每次刷新数字会左右跳。 */
 const R: React.CSSProperties = { textAlign: "right", fontVariantNumeric: "tabular-nums" };
@@ -341,15 +346,15 @@ export default function PlatformPage({ t, data, raw, cacheMode, pk, range, setRa
       {!!v?.models.length && (
         <div style={{ marginTop: 14, overflowX: "auto" }}>
           <div style={{ display: "grid", gridTemplateColumns: `1fr ${GAP}px ${RATE_W}px`,
-                        fontFamily: "'JetBrains Mono'", fontSize: 10, color: t.muted,
+                        fontFamily: "'JetBrains Mono'", fontSize: TZ.groupHead, color: t.muted,
                         letterSpacing: ".06em", marginBottom: 4, minWidth: TABLE_MIN }}>
             <span style={{ color: t.text2, fontWeight: 700 }}>模型消耗</span>
             <span />
             <span style={{ color: t.text2, fontWeight: 700 }}>API 牌价</span>
           </div>
 
-          <div style={{ fontFamily: "'JetBrains Mono'", fontSize: 10.5, minWidth: TABLE_MIN }}>
-            <div style={{ ...ROW, fontSize: 9, color: t.muted, letterSpacing: ".07em",
+          <div style={{ fontFamily: "'JetBrains Mono'", fontSize: TZ.body, minWidth: TABLE_MIN }}>
+            <div style={{ ...ROW, fontSize: TZ.colHead, color: t.muted, letterSpacing: ".07em",
                           padding: "0 4px 6px", borderBottom: `1px solid ${t.cardBorder}` }}>
               <span /><span>模型</span><span />
               <span style={R}>TOKEN</span><span style={R}>占比</span><span style={R}>轮数</span>
@@ -405,7 +410,7 @@ export default function PlatformPage({ t, data, raw, cacheMode, pk, range, setRa
               );
             })}
           </div>
-          <div style={{ fontSize: 9.5, color: t.muted, marginTop: 8, lineHeight: 1.5 }}>
+          <div style={{ fontSize: TZ.note, color: t.muted, marginTop: 8, lineHeight: 1.6 }}>
             {/* 脚注只解释当前口径真正用到的价:讲一个没参与计算的折扣率,读者会以为费用里含了它 */}
             {countsCacheRead(cacheMode)
               ? `缓存读 = 输入价 ${cacheRatioText} · `

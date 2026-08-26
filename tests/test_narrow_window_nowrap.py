@@ -235,5 +235,53 @@ class ButtonsNeverBreakMidWord(unittest.TestCase):
         self.assertIn("minWidth: 0", block, "summary 没有 minWidth:0,flex 不会让它先缩")
 
 
+class WideTableMinWidthIsDerivedNotMeasured(unittest.TestCase):
+    """★★ 宽数据表的 `minWidth` 必须**由列宽算出来**，不许写一个实测常数。
+
+    起因（2026-08-26，一轮里踩了两次同一类）：
+      · `test_narrow_window_nowrap` 有条断言锚在字号字面量 `13.5` 上，字号提取成常量后当场打空；
+      · `PlatformPage` 的 `TABLE_MIN = 700` 注释写着「900px 实测自然宽 698」——
+        用户要求放大模型表字号、列宽全部重算后，那个 700 **立刻失真**。
+
+    失真的症状**不是报错**：表照常渲染，只是在某个宽度下最右边一列被悄悄裁掉，
+    而裁掉的正是「费用/百万」（这张表里唯一回答"钱花在哪个型号上"的列）。
+    横向滚动条也不会出现 —— `minWidth` 太小时行会被约束成可用宽，内部继续溢出。
+
+    ★ 所以判据是**结构性的**：`TABLE_MIN` 必须是一个由 `TABLE_TYPE` 各列宽相加的表达式。
+      这样字号一改、列宽一改，下限自动跟上，没有"忘了同步"这一步可漏。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.code = strip_comments((SRC / "pages" / "PlatformPage.tsx").read_text(encoding="utf-8"))
+        cls.theme = strip_comments((SRC / "theme.ts").read_text(encoding="utf-8"))
+
+    def test_anchor_exists(self):
+        self.assertIn("TABLE_MIN", self.code, "TABLE_MIN 不见了 —— 断言可能打空了")
+        self.assertIn("TABLE_TYPE", self.theme, "theme 里没有 TABLE_TYPE —— 断言可能打空了")
+
+    def test_table_min_is_not_a_hardcoded_number(self):
+        m = re.search(r"const TABLE_MIN\s*=\s*([^;]+);", self.code, re.S)
+        self.assertIsNotNone(m, "找不到 TABLE_MIN 的定义")
+        expr = m.group(1)
+        self.assertNotRegex(expr.strip(), r"^\s*\d+\s*$",
+                            "TABLE_MIN 又被写成一个常数了 —— 字号/列宽一改它就失真，"
+                            "而症状是最右边一列被悄悄裁掉，不报错")
+        self.assertIn("TZ.", expr, "TABLE_MIN 没有从列宽标尺推导")
+
+    def test_grid_columns_come_from_the_scale(self):
+        """列宽也不许散落成字面量 —— 那样 TABLE_MIN 推导得再对也白搭。"""
+        m = re.search(r"gridTemplateColumns:\s*`([^`]+)`", self.code)
+        self.assertIsNotNone(m, "找不到模型表的列模板")
+        tpl = m.group(1)
+        self.assertGreaterEqual(tpl.count("TZ."), 8,
+                                "模型表的列宽还有写死的字面量:{}".format(tpl))
+
+    def test_table_font_sizes_come_from_the_scale(self):
+        """★ 字号与列宽必须同源。只放大字号不改列宽 = 数字串位。"""
+        for token in ("TZ.body", "TZ.colHead", "TZ.groupHead"):
+            self.assertIn(token, self.code, "模型表的字号没有走 {}".format(token))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -159,6 +159,17 @@ export default function TrafficPage({ t, data, raw, cacheMode, prefs, range, set
     kpis.push({ k: "缓存", v: raw ? `${rawCacheShare.toFixed(1)}%` : "—" });
   }
 
+  /**
+   * 图例的**主次双区**切分。放在 JSX 之外算，一是让 `view` 的空值只判一次，
+   * 二是 `legendMax` / `legendGrand` 两个基准要被两个区**共用** —— 分头各算一份的话，
+   * 长尾的占比和头部的占比迟早用上不同分母，而那种错**看起来完全正常**。
+   */
+  const twoZone = (view?.per.length ?? 0) >= 5;
+  const legendHead = view ? (twoZone ? view.per.slice(0, 3) : view.per) : [];
+  const legendTail = view && twoZone ? view.per.slice(3) : [];
+  const legendMax = Math.max(1, view?.per[0]?.total ?? 1);
+  const legendGrand = Math.max(1, view?.grand ?? 1);
+
   return (
     <div style={{ display: "flex", flexDirection: "column", minHeight: 0, height: "100%", overflow: "auto" }}>
       {/* 顶栏 */}
@@ -201,9 +212,33 @@ export default function TrafficPage({ t, data, raw, cacheMode, prefs, range, set
         </div>
       )}
 
-      {/* 平台图例行 */}
+      {/* ★★ 平台图例：**主次双区**（用户 2026-08-26 从 4 档 demo 里选的 D 档）。
+          起因：「现在模型多起来，会导致我的窗口要上下要很长」。本机快照已经是 **7 个平台**
+          （提这个需求的截图那会儿还是 5 个），单列每多一个就多 28px：7 行 221px、12 行 366px。
+
+          前 3 名保留完整行（条形是这一行里**唯一一眼可比**的东西，要给它全宽），
+          其余进紧凑区。这尊重真实分布 —— 本机 Claude+Codex 占 98%，其余全是长尾。
+
+          ★ **只在有 ≥2 个长尾时才分区**（即总数 ≥5）。恰好 4 个时长尾只有 1 个，
+            为一个孤零零的格子换一种版式，读者要多认一种结构却什么也没省。
+          ★ 紧凑区列数走 `auto-fill` + `minmax`，**不写死断点**：宽度够就多塞一个
+            （1014px→4 个/行、820→3、620→2），侧栏一折叠自动跟上。
+            ★ **264px 这个下限的判据是"放得下完整平台名"**，不是"能塞几个"。
+              先前取 220 确实塞进了 4 个，但名字被截成 `Anti…` / `Dee…` ——
+              **认不出是哪个平台，比少放一个严重得多**；名字给了 `minWidth: 65`(实测最长名宽)，
+              数字一列都不压(占比/总量/费用少一位就读错)。
+              ⚠️ 先前写 250 漏算了格子自身的 `padding: 0 4px`，1000px 下实测需要 257 ——
+                sweep 的溢出探针当场抓到（DIV 257/250）。**下限要含内边距**。
+              实测：1014px→3 个/行、~1284px→4，窗口越宽自动越多。
+
+              ★★ 是 `auto-fill` **不是** `auto-fit`。`auto-fit` 会把空轨**塌缩**，于是长尾只有
+                2~3 个时，剩下的 `1fr` 把每格拉到 ~630px —— 名字孤零零在最左、中间大片空白，
+                与「紧凑区」的目标正好相反。
+                实测（1276px 容器）：2 格 auto-fit **631px** / auto-fill **309px**；
+                4 格时两者都是 309px —— **当前 7 个平台（长尾恒为 4）看不出任何差别**，
+                这正是它容易被漏掉的原因，现有夹具也永远测不到。发版前评审抓到。 */}
       <div style={{ marginTop: 9 }}>
-        {view?.per.map((p) => {
+        {legendHead.map((p) => {
           const c = colorOf(data, p.key);
           return (
             <div key={p.key} onClick={() => onDrill(p.key)}
@@ -215,13 +250,13 @@ export default function TrafficPage({ t, data, raw, cacheMode, prefs, range, set
               <span style={{ width: 12, height: 12, borderRadius: 4, background: c, flexShrink: 0 }} />
               <span style={{ width: 92, fontSize: 12.5, fontWeight: 600 }}>{p.name}</span>
               <div style={{ flex: 1, height: 8, borderRadius: 4, background: t.barTrack, overflow: "hidden", minWidth: 40 }}>
-                <div style={{ width: `${(p.total / Math.max(1, view.per[0].total)) * 100}%`,
+                <div style={{ width: `${(p.total / legendMax) * 100}%`,
                               height: "100%", background: c }} />
               </div>
               <span style={{ width: 74, textAlign: "right", fontSize: 13, fontWeight: 700,
                              fontFamily: "'JetBrains Mono'", fontVariantNumeric: "tabular-nums" }}>{fmtTok(p.total)}</span>
               <span style={{ width: 52, textAlign: "right", fontSize: 11, color: t.muted, fontFamily: "'JetBrains Mono'" }}>
-                {((p.total / Math.max(1, view.grand)) * 100).toFixed(1)}%
+                {((p.total / legendGrand) * 100).toFixed(1)}%
               </span>
               {/* ★ 轮数是**要读的数字**。此处曾用 `t.faint`(#454d57,深色底实算 **2.21:1**,远低于 WCAG 4.5)
               被就地换掉 —— 那个 token 已于 2026-08-23 删除,中性文字统一成三级且每级都过 4.5,
@@ -235,6 +270,41 @@ export default function TrafficPage({ t, data, raw, cacheMode, prefs, range, set
             </div>
           );
         })}
+
+        {/* 紧凑区（长尾）。★ 交互必须与完整行**一模一样** —— 同样的 `onDrill`、
+            同样的 `setHoverKey`（悬停要点亮堆叠图里对应的那一层）。少接一个 handler
+            的症状是"这几个平台悬停没反应"，不报错、只是行为悄悄少了一半。 */}
+        {legendTail.length > 0 && (
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(264px, 1fr))",
+                        gap: "0 14px", borderTop: `1px solid ${t.divider}` }}>
+            {legendTail.map((p) => {
+              const c = colorOf(data, p.key);
+              return (
+                <div key={p.key} onClick={() => onDrill(p.key)}
+                     onMouseEnter={() => setHoverKey(p.key)} onMouseLeave={() => setHoverKey(null)}
+                     style={{ display: "flex", alignItems: "center", gap: 6, height: 24, cursor: "pointer",
+                              padding: "0 4px", minWidth: 0,
+                              background: hoverKey === p.key ? "rgba(255,255,255,.04)" : "transparent",
+                              transition: "background .15s" }}>
+                  <span style={{ width: 10, height: 10, borderRadius: 3, background: c, flexShrink: 0 }} />
+                  {/* 名字是这一格里唯一可伸缩的东西：格子被压窄时让它截省略号，
+                      数字一个都不压（占比/总量/费用少一位就读错）。 */}
+                  <span title={p.name} style={{ flex: 1, minWidth: 65, fontSize: 12, fontWeight: 600,
+                                                overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</span>
+                  <span style={{ width: 38, textAlign: "right", fontSize: 11, color: t.muted,
+                                 fontFamily: "'JetBrains Mono'", fontVariantNumeric: "tabular-nums", flexShrink: 0 }}>
+                    {((p.total / legendGrand) * 100).toFixed(1)}%
+                  </span>
+                  <span style={{ width: 48, textAlign: "right", fontSize: 12, fontWeight: 700,
+                                 fontFamily: "'JetBrains Mono'", fontVariantNumeric: "tabular-nums", flexShrink: 0 }}>{fmtTok(p.total)}</span>
+                  <span style={{ width: 50, textAlign: "right", fontSize: 11, fontWeight: 700, color: AMBER,
+                                 fontFamily: "'JetBrains Mono'", fontVariantNumeric: "tabular-nums", flexShrink: 0 }}>{fmtUSD(p.cost)}</span>
+                  <span style={{ width: 12, textAlign: "right", color: t.muted, fontSize: 11, flexShrink: 0 }}>→</span>
+                </div>
+              );
+            })}
+          </div>
+        )}
       </div>
 
       {/* 平台卡片 / 今日饼图卡片 */}
