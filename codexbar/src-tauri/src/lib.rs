@@ -772,14 +772,27 @@ fn format_tray_title() -> String {
                 // ★ 取**最紧的**那个窗口,不是"第一个":plus 的 primary 现在是 5h、周退到
                 //   secondary,而 pro 只有周。取第一个会让两类号显示的不是同一种东西,
                 //   且与主界面 hero 环(取 tightest)说的不一致。
+                let now_ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs_f64();
+                // ★★ 快照的拍摄时刻。判据要用它,所以在过滤之前取出来。
+                //    `captured_at` 挂在 quota 对象上、不在窗口里。
+                let cap = q["captured_at"].as_f64();
                 let win = ["primary", "secondary"]
                     .iter()
                     .filter_map(|k| {
                         let w = &q[*k];
                         let wm = w["window_minutes"].as_f64().unwrap_or(0.0);
                         let used = w["used_percent"].as_f64();
-                        match (wm > 0.0, used) {
-                            (true, Some(u)) => Some((w, u)),
+                        // ★★ 与 `helpers.ts::winRem` **同一条判据**(跨语言没法共用,只能同步改):
+                        //    `resets_at` 过了**不等于**已确认重置为满额。分两种 ——
+                        //    · 快照晚于重置点 ⇒ 读数属于新窗口,采信;
+                        //    · 快照更旧     ⇒ 重置了但没有任何新读数 ⇒ **不参与**,
+                        //      于是走下面已有的「额度未知 → —」那条路,而不是编一个 100。
+                        //    旧版这里是 `if ra <= now_ts { 100 }`,画出来的 100% 与实测的
+                        //    100% 长得一模一样 —— 用户无从分辨。闸在 test_quota_never_fabricated.py。
+                        let ra = w["resets_at"].as_f64().unwrap_or(0.0);
+                        let confirmed = !(ra > 0.0 && ra <= now_ts) || cap.map_or(false, |c| c > ra);
+                        match (wm > 0.0, used, confirmed) {
+                            (true, Some(u), true) => Some((w, u)),
                             _ => None,
                         }
                     })
@@ -811,9 +824,9 @@ fn format_tray_title() -> String {
                 } else {
                     format!("{}h", (wm / 60.0).round() as i64)
                 };
-                let now_ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs_f64();
                 let ra = w["resets_at"].as_f64().unwrap_or(0.0);
-                let rem = if ra > 0.0 && ra <= now_ts { 100 } else { (100.0 - used).max(0.0) as u32 };
+                // ★ 不再有「过期 → 100」这一支:未确认的窗口在上面的过滤里就出局了。
+                let rem = (100.0 - used).max(0.0) as u32;
                 let eta = if ra > 0.0 && ra > now_ts {
                     let secs = (ra - now_ts) as u64;
                     let h = secs / 3600;

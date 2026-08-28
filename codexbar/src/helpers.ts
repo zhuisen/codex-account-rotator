@@ -78,9 +78,28 @@ export const CARD_WARN_DAYS = 3;
 export const now = () => Date.now() / 1000;
 export const clamp = (n: number) => Math.max(0, Math.min(100, Math.round(n)));
 
-export function winRem(w?: Win): number | null {
+/**
+ * 这个窗口的**剩余**百分比，或 `null` = **没有可信的读数**。
+ *
+ * ★★ 旧版是「`resets_at` 一过就 `return 100`」—— 那是**编造**：重置时刻到了
+ * **不等于**已确认重置为满额，而画出来的 100% 与实测的 100% 长得一模一样，用户无从分辨。
+ * 这与本仓库的头号铁律「读不到 ≠ 确实没有」是同一件事，只是换了个面孔。
+ * （2026-08-28 三方评审 codex/grok 共同指出；托盘 `lib.rs` 有独立的第二份实现，必须同步。）
+ *
+ * ★ 过了重置点分两种，别一律作废：
+ *   · 快照 `capturedAt` **晚于** `resets_at` ⇒ 这份读数本来就是重置之后拍的，
+ *     `used_percent` 属于新窗口，**照常采信**（服务端回了个已过期的 resets_at，读数却是新的）；
+ *   · 快照更旧 ⇒ 重置了但**还没有任何新读数** ⇒ 返回 `null`。
+ *
+ * 返回 `null` 时 `buildWindow` 会把整个窗口丢掉，于是它不参与 `tightest`；
+ * 全都没了就走**已有的**「—／未探测」路径 —— 不新增一种"假装知道"的渲染。
+ */
+export function winRem(w?: Win, capturedAt?: number): number | null {
   if (!w || w.used_percent == null) return null;
-  if (w.resets_at && w.resets_at <= now()) return 100;
+  if (w.resets_at && w.resets_at <= now()) {
+    if (capturedAt != null && capturedAt > w.resets_at) return 100 - w.used_percent;
+    return null;
+  }
   return 100 - w.used_percent;
 }
 
@@ -264,10 +283,12 @@ export function poolRefreshedAt(slots: Record<string, Slot>): number | undefined
   return newest;
 }
 
-function buildWindow(w: Win | undefined): QuotaWindow | null {
+function buildWindow(w: Win | undefined, capturedAt?: number): QuotaWindow | null {
   // 只丢**空槽**(window_minutes 为 0/缺失)。5h(300) 是合法窗口,别再按量级丢。
   if (!w || (w.window_minutes ?? 0) < REAL_WINDOW_MIN) return null;
-  const pctRaw = winRem(w);
+  // ★ `capturedAt` 挂在 quota 对象上、不在窗口里,必须显式传进来 ——
+  //   少传这一个参数,判据就退化回"过期即 100%"而且**不会报错**。
+  const pctRaw = winRem(w, capturedAt);
   if (pctRaw == null) return null;
   return {
     label: winLabel(w),
@@ -284,9 +305,9 @@ export function slotToAccount(aid: string, slot: Slot, tokens: Record<string, To
   const coolSec = (slot.cooling_until ?? 0) > n ? Math.max(0, (slot.cooling_until ?? 0) - n) : 0;
 
   const windows: QuotaWindow[] = [];
-  const w1 = buildWindow(q?.primary);
+  const w1 = buildWindow(q?.primary, q?.captured_at);
   if (w1) windows.push(w1);
-  const w2 = buildWindow(q?.secondary);
+  const w2 = buildWindow(q?.secondary, q?.captured_at);
   if (w2) windows.push(w2);
 
   // ★★ 不只算最小值,还要记住**是哪一个窗口** —— hero 环的数字取 `tightest`,标签却取

@@ -193,19 +193,41 @@ def _slot_token(aid, slot, force=False):
 
 
 def _win_used(slot, key):
-    w = (slot.get("quota") or {}).get(key) or {}
+    """This window's used_percent, or **None when we have no confirmed reading for it**.
+
+    ★★ `None` means "not observed", NOT "0% used". The old version returned 0 for both
+    "the reset time passed" and "there is no reading at all", so an account we knew nothing
+    about sorted as completely idle and **out-ranked every account with a real measurement**.
+    That is not a display bug — `_used` feeds `_pick`, so it changed where traffic went.
+
+    ★ 过了重置点分两种，别一律作废（grok 2026-08-28 的判据）:
+      · 快照 `captured_at` **晚于** `resets_at` ⇒ 读数本来就是重置之后拍的,`used_percent`
+        属于新窗口,照常采信 —— 一律作废会把真实数据白白丢掉;
+      · 快照更旧 ⇒ 窗口重置了但**还没有任何新读数**确认 ⇒ 未知。
+    """
+    q = slot.get("quota") or {}
+    w = q.get(key) or {}
+    u = w.get("used_percent")
+    if u is None:
+        return None
     ra = w.get("resets_at")
     if ra and ra <= time.time():
-        return 0  # window already reset → full headroom
-    u = w.get("used_percent")
-    return u if u is not None else 0
+        cap = q.get("captured_at")
+        return u if (cap is not None and cap > ra) else None
+    return u
 
 
 def _used(slot):
     """Sort key for _pick: primary (5h) first, weekly as tie-break. Without the weekly component, five
     accounts whose 5h windows all reset sort in dict-insertion order and every request lands on the
     first one — even if its weekly quota is nearly exhausted (observed: main at 9% weekly picked first)."""
-    return (_win_used(slot, "primary"), _win_used(slot, "secondary"))
+    # ★★ 每个窗口是 `(未知?, 已用)` 两级键:**有读数的一律排在未知之前**,层内按已用升序。
+    #    把"未知"塞进同一条百分比轴,就是拿一个**没有发生的观测**当成最有利的观测。
+    #    数据完整时排序与改动前完全一致;全都未知时并列,退回原有顺序。
+    def k(key):
+        u = _win_used(slot, key)
+        return (1, 0.0) if u is None else (0, u)
+    return (k("primary"), k("secondary"))
 
 
 # ★ 选号迟滞(百分点)。0 = 旧行为「谁低选谁」。
@@ -273,7 +295,11 @@ def _pick(prev_id, exclude=None, conv=None):
     if PICK_HYSTERESIS > 0:
         last = s.get("last_aid")
         if last and last not in exclude and last in slots and ok(last, slots[last]):
-            if _win_used(slots[last], "primary") <= _win_used(avail[0][1], "primary") + PICK_HYSTERESIS:
+            # ★ 任一侧未知就**不粘**。迟滞的意思是"贵不了多少就继续用它",
+            #   而"贵多少"在缺少读数时**无从谈起** —— 拿 None 当 0 正是上面刚修掉的那个错。
+            lu = _win_used(slots[last], "primary")
+            bu = _win_used(avail[0][1], "primary")
+            if lu is not None and bu is not None and lu <= bu + PICK_HYSTERESIS:
                 return last, slots[last], "sticky"
 
     return avail[0][0], avail[0][1], "new"

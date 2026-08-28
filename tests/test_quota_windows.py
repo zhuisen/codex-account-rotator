@@ -68,8 +68,10 @@ class WindowPredicateIsConsistent(unittest.TestCase):
         标签用的 `wm >= 40000.0`(月/周分档)也被当成下限报红 —— **同一个变量的比较,
         语义完全不同**。判据:有效性那处紧跟 `used_percent` 一起决定要不要这个窗口。
         """
-        m = re.search(r"let wm = [^;]*;\s*let used[^;]*;\s*match \(wm\s*([><=]+)\s*([0-9.]+)",
-                      self.rs, re.S)
+        # ★ 锚点只认 `match (wm ...` 这一处 —— 标签分档用的是 `if wm >= 40000.0`,形状不同,
+        #   不会被误收。**别再把前面的 `let wm/let used` 一起写进正则**:2026-08-28 给托盘加
+        #   「未确认的窗口不参与」时中间多了两行 let,这条当场打空(靠下面那句自检接住的)。
+        m = re.search(r"match \(wm\s*([><=]+)\s*([0-9.]+)", self.rs, re.S)
         self.assertIsNotNone(m, "找不到托盘的窗口有效性判断 —— 断言可能打空了")
         op, v = m.group(1), float(m.group(2))
         self.assertIn(op, (">", ">="), "有效性判断的方向反了")

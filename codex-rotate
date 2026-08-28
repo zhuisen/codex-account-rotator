@@ -253,21 +253,74 @@ def _autosync_live(s):
 
 # ---------- quota (rate-limit telemetry from session rollouts) ----------
 
-def _find_rl(o):
-    """Locate the rate-limit object: a dict whose 'primary' is a dict with used_percent."""
+# ★★ **账号级**额度的 limit_id。新版 Codex 在同一条会话记录里同时写多套额度：
+#    `codex`(账号) 与 `codex_bengalfox`(limit_name="GPT-5.3-Codex-Spark",模型专属)。
+#    本机 400 个 rollout 实测:`codex` ×27160(真实值 7~9% 已用),
+#    `codex_bengalfox` ×9635 且 **100% 都是 0%/0%** —— 取错就是一个假的「100% 剩余」。
+#    这是**白名单不是黑名单**:下次 Codex 再加一套模型额度时默认**挡在外面**,
+#    而不是默认混进来 —— 后者正是 2026-08-28 这个 bug 的成因。
+ACCOUNT_LIMIT_IDS = ("codex",)
+
+
+def _is_by_limit_id_key(k):
+    """新协议把各套额度收进一个**以 limit_id 为键**的字典(`rateLimitsByLimitId`)。
+
+    ★ 只有这种容器的键才是 ID。普通字段名(`rate_limits` / `payload`)不是 —— 第一版把任意父键
+    都当成 ID,于是**老协议**(整条只有一套、无 limit_id)被贴上 `limit_id="rate_limits"`、
+    当成"不认识的限额"挡掉了。被 legacy 那条测试当场抓住,记在这里免得再写一遍。
+    """
+    return isinstance(k, str) and k.replace("-", "").replace("_", "").lower() == "ratelimitsbylimitid"
+
+
+def _iter_rl(o, key_hint=None):
+    """Yield every rate-limit-shaped dict (its 'primary' is a dict with used_percent).
+
+    `key_hint` is set ONLY while walking a limits-keyed-by-id map, because there the inner object
+    need not repeat its own `limit_id`. Anywhere else the parent key is a field name, not an id.
+    """
     if isinstance(o, dict):
         p = o.get("primary")
         if isinstance(p, dict) and "used_percent" in p:
-            return o
-        for v in o.values():
-            r = _find_rl(v)
-            if r:
-                return r
+            if o.get("limit_id") is None and key_hint is not None:
+                o = dict(o, limit_id=key_hint)
+            yield o
+            return
+        for k, v in o.items():
+            if _is_by_limit_id_key(k) and isinstance(v, dict):
+                for kk, vv in v.items():
+                    yield from _iter_rl(vv, kk if isinstance(kk, str) else None)
+            else:
+                yield from _iter_rl(v)
     elif isinstance(o, list):
         for v in o:
-            r = _find_rl(v)
-            if r:
-                return r
+            yield from _iter_rl(v, key_hint)
+
+
+def _find_rl(o):
+    """Locate the **account-level** rate-limit object in one rollout event.
+
+    ★★ The old version was "the first dict whose primary has used_percent", with no notion of
+    WHICH limit it was. New Codex writes several limits per event, and the model-specific ones
+    read 0%/0% forever — so whichever happened to come first decided the number on screen, and
+    switching the newest session (new / resume / pause / archive a task) flipped it. That is the
+    2026-08-28 "sometimes 100%, sometimes 87%" report.
+
+    ★ Window shape can NOT be used to tell them apart: the Spark limit also appears with the
+      10080-minute weekly shape (measured 2752 times), identical to a Pro account's own window.
+
+    ★ Unknown ids yield **None**, never a guess. `_live_quota` just skips the line, and
+      `cmd_quota --save` then keeps the previous snapshot — "unknown" is safe, "the wrong
+      limit" paints a fabricated number that is indistinguishable from a measured one.
+    """
+    cands = list(_iter_rl(o))
+    if not cands:
+        return None
+    named = [c for c in cands if c.get("limit_id") is not None]
+    if not named:
+        return cands[0]          # pre-limit_id protocol: one set per event, nothing to choose
+    for c in named:
+        if c.get("limit_id") in ACCOUNT_LIMIT_IDS:
+            return c
     return None
 
 
@@ -510,7 +563,12 @@ REAL_WINDOW_MIN = 1
 
 # Quota snapshots read STRAIGHT FROM the server (authoritative, live) vs derived from a local rollout.
 # "usage-api" = official GET /backend-api/codex/usage; "probe" = legacy x-codex-* header read.
-SERVER_SOURCES = ("usage-api", "probe")
+# ★★ `"proxy"` 是 2026-08-28 补上的。proxy 的读数取自 `x-codex-*` **响应头**,
+#    与 usage-api 一样是**服务端直读**,却一直不在名单里 —— 于是 `_server_reading_is_fresher`
+#    对 `source="proxy"` 的现存快照直接返回 False,**更旧的本地 rollout 可以合法覆盖它**。
+#    症状与那次「一会 100% 一会 87%」同族:数字被一个更差的来源回滚,而没有任何一处报错。
+#    (codex 与 fable 两家评审独立指出。加进来只会让保护**更多**,新旧仍由时间戳把关。)
+SERVER_SOURCES = ("usage-api", "probe", "proxy")
 
 
 def _iso_ts(v):
