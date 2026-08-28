@@ -338,7 +338,13 @@ def _mark_dead(aid, token_fp=None):
     _mutate_state(f)
 
 
-def _record_quota(aid, headers):
+def _record_quota(aid, headers, status=None):
+    # ★★ 默认值必须是**安全**的那一侧，不是最宽松的那一侧。
+    #    第一版写 `status=200` —— 调用点一旦漏传，就默认落进「完整清单」档、
+    #    恢复整体替换，而**没有任何测试会经过调用点**（单测直接调函数）。
+    #    这与今天刚修掉的「没有读数 → 当 0% 已用」是同一个形态：
+    #    **把"不知道"默认成最有利/最宽松的取值**。现在漏传 = 不替换。
+    #    调用点是否真的传了，由 tests/test_quota_never_fabricated.py 的 AST 闸盯着。
     """Per-request quota accounting: parse the x-codex-* rate-limit response headers and write the
     SERVED account's real quota to its slot — accurate, since the proxy knows exactly which account
     served this request (no rollout time-window guessing). Also records last_aid for the UI."""
@@ -363,18 +369,31 @@ def _record_quota(aid, headers):
         "captured_at": time.time(),
         "source": "proxy",
     }
+    # ★★ **只有 2xx 才是完整清单**（grok 2026-08-28 定的绑法：完整性跟**响应类型**走，
+    #    不跟**写入方身份**走）。`_finish` 对任何非 401 都调这里，429 另有两处专门调用；
+    #    而限流/错误响应**可能只带一个窗口的头**，整体替换就会把另一个真实窗口写成 null。
+    #    「零个头的 429」是本仓库记录过的事实（CHANGELOG B16），上面的早退已挡住；
+    #    未知的是「恰好一个头」—— 无从证实也无从证伪，所以这里锁**不变量**而不是等证据。
+    #
+    #    ★ **不要改成「非 2xx 时逐窗口保留」**：`captured_at` 挂在 quota **对象**上，
+    #      保留下来的窗口会蹭到兄弟窗刚刷新的时间戳，于是 `helpers.ts::winRem` 的
+    #      「快照晚于重置点才采信」会把幽灵窗**认证成真实读数**，永远画一条绿色 100%。
+    #      按 2xx 绑则没有这个问题：`/usage` 恒 403 的机器上，下一次成功的 2xx 就会清掉它。
+    complete = 200 <= (status or 0) < 300
+
     def f(s):
         if aid in s.get("slots", {}):
             prev = (((s["slots"][aid].get("quota") or {}).get("primary") or {}).get("used_percent"))
-            s["slots"][aid]["quota"] = q
-            s["slots"][aid]["quota_status"] = "ok"
+            if complete:
+                s["slots"][aid]["quota"] = q
+                s["slots"][aid]["quota_status"] = "ok"
             s["last_aid"] = aid
             s["last_proxy_ts"] = time.time()  # lets codex-rotate/plugin tell "via cxp" from "plain codex"
             # ★ 只在**跨过整数百分点**时记一行:服务端只回整数,所以这就是能拿到的最细粒度。
             # 目的是攒「每 1% 对应多少 token」的样本,判定额度计量到底算不算缓存命中的部分 ——
             # 这一条决定了会话粘性/迟滞是省额度还是只省钱(订阅制下后者=什么也没省)。
             # 现有证据只有 n=3、Δ% 只有 2~3(整数量化 ±50%),不足以下结论。
-            if prev is not None and pu is not None and pu != prev:
+            if complete and prev is not None and pu is not None and pu != prev:
                 s.setdefault("quota_marks", []).append(
                     {"aid": aid, "t": round(time.time(), 1), "from": prev, "to": pu})
                 del s["quota_marks"][:-400]      # 上界,避免 state.json 无限长
@@ -503,7 +522,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _finish(self, conn, resp, aid, label):
         """Relay the chosen upstream response back to codex, recording quota + session affinity."""
-        _record_quota(aid, resp.getheaders())
+        _record_quota(aid, resp.getheaders(), resp.status)
         # ★ 只在**真正成功服务过**之后才登记会话归属 —— 挑中但 401/429 失败的号不该被粘住。
         conv = getattr(self, "_conv_key", None)
         if conv:
@@ -599,7 +618,7 @@ class Handler(BaseHTTPRequestHandler):
                         if resp.status == 429:
                             # 评审指出:强刷后拿到 429 原本被当成功直接转发,绕过了下面的冷却+换号,
                             # 该号不进冷却,codex 退避后大概率再次选中它。
-                            _record_quota(aid, resp.getheaders())
+                            _record_quota(aid, resp.getheaders(), resp.status)
                             _cool(aid)
                             _plog(f"429 (retry-refresh) → cooled [{label}], failing over", rid)
                             continue
@@ -611,7 +630,7 @@ class Handler(BaseHTTPRequestHandler):
                     _plog(f"401 invalidated → marked dead [{label}], failing over", rid)
                     continue
                 if resp.status == 429:
-                    _record_quota(aid, resp.getheaders())
+                    _record_quota(aid, resp.getheaders(), resp.status)
                     _cool(aid)
                     _plog(f"429 → cooled [{label}], failing over", rid)
                     continue

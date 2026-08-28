@@ -213,5 +213,131 @@ class AFresherServerReadingIsNeverRevertedByAnOlderEcho(unittest.TestCase):
         self.assertFalse(self.cli._server_reading_is_fresher(existing, {"event_ts": NOW - 30}))
 
 
+class OnlyACompleteResponseMayReplaceTheQuota(unittest.TestCase):
+    """★★ 「这次响应完不完整」跟**响应类型**走，不跟**写入方身份**走（grok 2026-08-28 定的绑法）。
+
+    `_finish` 对**任何非 401** 响应都调 `_record_quota`（`proxy.py:506`），429 另有两处专门调用
+    （`:602` `:614`）。而 `_record_quota` 是**整体替换** `slot["quota"]`，守卫只有
+    `if pu is None and su is None: return` —— 只要有**一个**头在就往下走，另一个窗口被写成全 null。
+
+    | 响应 | 完整性 | 允许 |
+    |---|---|---|
+    | usage-api 200 / proxy **2xx** | 完整清单 | 整体替换，**可以删窗口** |
+    | proxy **4xx/5xx**（含 429） | 不完整 | **不许替换** |
+
+    ★ **为什么不做成「proxy 永不删、逐窗口保留」**（我原本的打算，被 grok 推翻）：
+      `captured_at` 挂在 **quota 对象**上、不在窗口里。逐窗口 upsert 时，每写一次活着的窗口
+      就把对象级 `captured_at` 刷新一次，而 v0.12.9 的判据是「`resets_at` 已过 **且**
+      `captured_at > resets_at` ⇒ 当作重置后的新读数」—— 幽灵窗自己的时间戳早已冻住，
+      读到的却是**兄弟窗刚刷新的那个**。于是 v0.12.9 会把幽灵**认证成真实读数**，
+      永远画一条绿色的 100%。**那个修法会让 v0.12.9 变成幽灵认证器，比不修更糟。**
+      按响应类型绑则没有这个问题：`/usage` 恒 403 的机器上，**下一次成功的 2xx 就会清掉**
+      消失的窗口，幽灵活不过「这个号下一次被成功服务」。
+
+    ★ 「零个头的 429」是本仓库自己记录过的事实（CHANGELOG B16），现有守卫已挡住；
+      未知的只有「**恰好一个头**」—— 而 `proxy.log` 对额度写入零留痕，无从证实也无从证伪。
+      所以这里锁的是**不变量**（部分观测不许当完整清单），不是等证据。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.px = load("crp_proxy_2", ROOT / "proxy" / "proxy.py")
+
+    _OMIT = object()
+
+    def _run(self, status, headers, before):
+        """★★ 打桩 `_mutate_state`：真实现会写**真的 state.json**。
+        测试绝不能碰真数据（仓库既有铁律），所以在这里把它换成对夹具 dict 的操作。"""
+        st = {"slots": {"A": dict(before)}}
+        orig = self.px._mutate_state
+        self.px._mutate_state = lambda f: f(st)
+        try:
+            # ★ `status is _OMIT` ⇒ **真的省略实参**，这样才走得到默认值那条路径。
+            #   显式传 `None` 是测不到默认值的（第一版就是这么写的，变异不红）。
+            if status is self._OMIT:
+                self.px._record_quota("A", headers)
+            else:
+                self.px._record_quota("A", headers, status)
+        finally:
+            self.px._mutate_state = orig
+        return st["slots"]["A"]
+
+    def test_anchor_exists(self):
+        import inspect
+        sig = inspect.signature(self.px._record_quota)
+        self.assertIn("status", sig.parameters,
+                      "_record_quota 不接受 status —— 无法按响应类型判完整性（断言可能打空了）")
+
+    def test_the_default_status_is_the_SAFE_side(self):
+        """★★ 漏传 status 时必须**不替换**，不是"当成 2xx 照常替换"。
+
+        第一版默认 `status=200`：调用点漏传就悄悄恢复整体替换，而单测直接调函数、
+        **永不经过调用点**，所以变异「调用点不再传状态码」当时不红。
+        这与「没有读数 → 当 0% 已用」是同一个形态：把"不知道"默认成最宽松的取值。
+        """
+        before = {"quota": {"primary": {"used_percent": 12.0, "window_minutes": 300,
+                                        "resets_at": FUTURE},
+                            "captured_at": NOW, "source": "usage-api"}}
+        # ★★ 必须**省略**实参。第一版显式传 `None`，于是默认值那条路径从未被执行 ——
+        #    把默认值改回宽松的 200 时这条测试照样绿（变异测试当场抓到，本轮第三次同款）。
+        after = self._run(self._OMIT, [("x-codex-primary-used-percent", "0")], before)
+        self.assertEqual(after["quota"]["primary"]["used_percent"], 12.0,
+                         "status 缺失时仍然替换了 quota —— 默认值站在了危险的那一侧")
+
+    def test_every_call_site_passes_a_status(self):
+        """★ 单测测不到调用点（它们在请求处理器里），所以用 AST 盯住：
+        每个 `_record_quota(...)` 调用都必须传第 3 个参数。"""
+        import ast
+        src = (ROOT / "proxy" / "proxy.py").read_text(encoding="utf-8")
+        calls = [n for n in ast.walk(ast.parse(src))
+                 if isinstance(n, ast.Call) and getattr(n.func, "id", None) == "_record_quota"]
+        self.assertGreaterEqual(len(calls), 3, "找不到调用点 —— 断言可能打空了")
+        for c in calls:
+            with self.subTest(line=c.lineno):
+                self.assertGreaterEqual(len(c.args) + len(c.keywords), 3,
+                                        "proxy.py:{} 的 _record_quota 没传 status —— "
+                                        "会退回「不替换」而静默丢掉真实读数".format(c.lineno))
+
+    def test_a_429_carrying_one_window_does_not_wipe_the_other(self):
+        """★★ 这就是要挡的那件事：限流响应只带一个窗口，另一个不许被写成 null。"""
+        before = {"quota": {"primary": {"used_percent": 12.0, "window_minutes": 300,
+                                        "resets_at": FUTURE},
+                            "secondary": {"used_percent": 40.0, "window_minutes": 10080,
+                                          "resets_at": FUTURE},
+                            "captured_at": NOW, "source": "usage-api"}}
+        partial = [("x-codex-primary-used-percent", "99"),
+                   ("x-codex-primary-window-minutes", "300")]   # 没有 secondary 那三个头
+        after = self._run(429, partial, before)
+        sec = (after.get("quota") or {}).get("secondary") or {}
+        self.assertEqual(sec.get("window_minutes"), 10080,
+                         "429 的部分观测把周窗口抹掉了 —— 一个真实窗口就这么消失")
+        self.assertEqual(sec.get("used_percent"), 40.0)
+
+    def test_a_5xx_does_not_replace_the_quota_either(self):
+        before = {"quota": {"primary": {"used_percent": 12.0, "window_minutes": 300,
+                                        "resets_at": FUTURE},
+                            "captured_at": NOW, "source": "usage-api"}}
+        after = self._run(503, [("x-codex-primary-used-percent", "0")], before)
+        self.assertEqual((after["quota"]["primary"] or {}).get("used_percent"), 12.0,
+                         "5xx 响应替换了 quota —— 它不是完整清单")
+
+    def test_a_2xx_still_replaces_as_before(self):
+        """反向：2xx 是完整清单，行为必须与改动前一致（含删掉已消失的窗口）。"""
+        before = {"quota": {"primary": {"used_percent": 12.0, "window_minutes": 300,
+                                        "resets_at": FUTURE},
+                            "secondary": {"used_percent": 40.0, "window_minutes": 10080,
+                                          "resets_at": FUTURE},
+                            "captured_at": NOW - 999, "source": "usage-api"}}
+        full = [("x-codex-primary-used-percent", "7"),
+                ("x-codex-primary-window-minutes", "10080")]
+        after = self._run(200, full, before)
+        self.assertEqual(after["quota"]["primary"]["used_percent"], 7.0,
+                         "2xx 没有替换 —— 那会让 proxy 的实时读数永远进不来")
+        self.assertEqual(after["quota"]["source"], "proxy")
+        # ★ 2xx 有权删：上游不再返回的窗口必须消失，否则 /usage 不可达的机器上会留下永久幽灵
+        self.assertIsNone((after["quota"]["secondary"] or {}).get("window_minutes"),
+                          "2xx 没有清掉已消失的窗口 —— 幽灵窗口会永久留存")
+
+
 if __name__ == "__main__":
     unittest.main()
