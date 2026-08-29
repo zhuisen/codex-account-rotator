@@ -80,13 +80,14 @@ emit autosync \
   <key>WatchPaths</key><array><string>$HOME/.codex/auth.json</string></array>" \
     "$ROT" sync
 
-emit keepalive \
-    '  <key>StartCalendarInterval</key><dict><key>Hour</key><integer>4</integer><key>Minute</key><integer>30</integer></dict>' \
-    "$ROT" keepalive
-
-emit refreshquota \
-    '  <key>StartCalendarInterval</key><dict><key>Hour</key><integer>7</integer><key>Minute</key><integer>0</integer></dict>' \
-    "$ROT" refresh-all
+# ★★ keepalive(04:30) 与 refreshquota(07:00) 已于 2026-08-29 按用户要求**取消**，不再生成。
+#    · refreshquota 是真冗余 —— quotad 每 300s 已经全池扫一遍（`tick_usage` → `refresh-all`）。
+#    · keepalive 的职责由 proxy 接手：`_slot_token` 挑到 token 过期的**非活跃**号时会当场
+#      OAuth 续期（双重锁保护）。
+#    ⚠️ **但覆盖面不同**：proxy 只续它**挑得中**的号。一个长期不被挑中的号，token 到期后
+#      **不会自愈** —— 2026-08-29 的 plus5 就是这样断的（11 天没续、access 过期 18.5h、
+#      额度扫描每 300s 静默失败）。补救是手动 `codex-rotate refresh <label>`（非活跃号安全）。
+#    ★ CLI 的 `keepalive` / `refresh-all` 子命令**都还在**，随时可手动跑；取消的只是定时器。
 
 emit quotad \
     '  <key>RunAtLoad</key><true/>
@@ -101,7 +102,7 @@ emit proxy \
 
 echo
 echo "==> loaded:"
-for n in autosync keepalive refreshquota quotad proxy; do
+for n in autosync quotad proxy; do
     printf '  %-13s %s\n' "$n" \
         "$(launchctl print "gui/$UID_NUM/$PREFIX.$n" 2>/dev/null | awk '/^\tstate = /{print $3; exit}' || echo '?')"
 done

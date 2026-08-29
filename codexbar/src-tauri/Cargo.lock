@@ -594,7 +594,7 @@ dependencies = [
 
 [[package]]
 name = "codexbar"
-version = "0.12.10"
+version = "0.12.11"
 dependencies = [
  "libc",
  "log",

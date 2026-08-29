@@ -35,7 +35,7 @@ clone 到哪个目录都行 —— `deploy.sh` 会把仓库路径烧进二进制
 
 | 痛点 | 怎么解的 |
 |---|---|
-| ① token 失效要重登 | keepalive 定期 OAuth 刷新闲置号 + 代理发现过期当场刷新 → **永不手动重登** |
+| ① token 失效要重登 | 代理挑到 token 过期的**非活跃**号时当场 OAuth 续期(双重锁) → 有流量的号**不用手动重登**。⚠️ 定时保活(keepalive)已于 2026-08-29 取消,所以**长期不被挑中的号不会自愈** —— 那种情况手动 `codex-rotate refresh <label>` 即可(非活跃号安全);真死了才 `codex login` |
 | ② 会话内切号要重启 | 代理逐请求透明轮换;Codex 每请求发完整上下文 → **中途换号无感、不重启**。同一段对话靠 body 里的 `prompt_cache_key` 粘住同一个号(codex 不发 `previous_response_id`,见 CHANGELOG B26) |
 | ③ 额度不实时 | **事件驱动**:quotad 监测 codex 活动(4 路本地信号)→ 数秒内读**官方 usage API**(零消耗)刷当前号;实测发起调用后 **+8s** 见数、运行中每 20s 续刷。另有 300s 全池扫描兜底 + 代理逐请求记账 |
 | ④ 撞限要手动换 | 代理撞 429 → 标冷却 → 下个请求自动换号 |
@@ -45,7 +45,6 @@ clone 到哪个目录都行 —— `deploy.sh` 会把仓库路径烧进二进制
 ```
                     ┌─ 账号池层 (auth.json swap) ────────────────────┐
   codex login 新号 ─┤  codex-rotate(CLI)  +  autosync(watcher)     │
-                    │  keepalive(launchd 04:30,OAuth 保活闲置号)    │
                     │  槽位 auth/<account_id>.json(以 OAuth id 主键) │
                     └────────────────────────────────────────────────┘
                                    │ 复用同一个池
@@ -82,7 +81,7 @@ clone 到哪个目录都行 —— `deploy.sh` 会把仓库路径烧进二进制
 | `traffic/scan.py` | **多 AI 流量总览扫描器**(`[--days N] [--json] [--no-cache]`)。读 Claude / Codex / Grok / Kimi / Antigravity 五家 + OpenClaw / Reasonix / DeepSeek Harness 三个宿主源(按模型名回流各家)（平台注册表在文件里，**加一家 = 写个解析器 + 加一行**，前端自动跟上）,**纯本地只读、不联网、不消耗任何额度**,与账号池无关。CodexBar「AI用量信息」页的数据源 |
 | `traffic/discover.py` | **数据源体检**(`--json`):找本机还有哪些 AI 把用量落了盘,并现场验算它的 token 口径。纯本地只读、不联网、不碰凭证,SQLite 一律 `mode=ro`,**只出报告不自动启用**(接一家的实质是写解析器) |
 | `claude/claude_tokens.py` | ⚠️ 只统计 Claude 的旧扫描器,能力已被 `traffic/scan.py` 完全覆盖(v0.7.0 起 app 不再调用)。保留仅作 CLI |
-| `scripts/install-launchd.sh` | **生成并加载 5 个 launchd 服务**(autosync/keepalive/refreshquota/quotad/proxy)。生成而非提交成文件:plist 内嵌绝对路径,提交的副本换台机器就是错的,且会静默漂移(旧的 `launchd/*.plist` 就漂到了写死 `/usr/bin/python3`)。★脚本会**解析并钉住 OpenSSL 版的 python3**,见「维护约定」 |
+| `scripts/install-launchd.sh` | **生成并加载 3 个 launchd 服务**(autosync/quotad/proxy)。★ keepalive(04:30)与 refreshquota(07:00)已于 2026-08-29 按需取消 —— 前者职责由代理接手(覆盖面见上表①),后者与 quotad 的 300s 全池扫描重复。两个 CLI 子命令仍可手动跑。生成而非提交成文件:plist 内嵌绝对路径,提交的副本换台机器就是错的,且会静默漂移(旧的 `launchd/*.plist` 就漂到了写死 `/usr/bin/python3`)。★脚本会**解析并钉住 OpenSSL 版的 python3**,见「维护约定」 |
 | `auth/`(gitignored) | 每号凭证槽位 `<account_id>.json`(0600) |
 | `state.json`(gitignored) | 池状态(slots/active/last_aid/last_proxy_ts) |
 | `RUNBOOK.md` | 运维手册(起停/排障/常见操作/踩坑) |
@@ -165,4 +164,4 @@ codex-rotate probe plus5 --model gpt-5.5 --effort low
 - ★ **绝不让 python 解释器由 PATH 或 shebang 决定**。Cloudflare 按 TLS ClientHello 指纹拦截,macOS 的 `/usr/bin/python3`(LibreSSL 2.8.3)对 `GET /backend-api/codex/usage` 恒返 **403**,OpenSSL 3.x 同请求恒 **200**(2026-08-01 受控实验,单一变量,各 3 次,同 token/header/IP)。launchd 默认 PATH 只有 `/usr/bin:/bin:...`,所以 `#!/usr/bin/env python3` 必踩。装服务一律走 `scripts/install-launchd.sh`;CodexBar 侧见 `python_bin()`。
   - 排查提示:用 macOS 自带 `curl` 复现"也被挡"**不算独立证据**——它同样链 LibreSSL,是同一个失败模式。换 TLS 栈才是对照组。
 - 改 `launchd` 的日志路径要同步 `codexbar/src-tauri/src/lib.rs` 的 `read_logs`(路径是写死的字面量,`proxy` 那条是 `proxy/proxy.log` 不是 `proxy.log`)。
-- 改 `state.json` schema 或凭证逻辑要谨慎:proxy / codex-rotate / autosync / keepalive 都读写它。
+- 改 `state.json` schema 或凭证逻辑要谨慎:proxy / codex-rotate / autosync / quotad 都读写它(CodexBar 只读)。
