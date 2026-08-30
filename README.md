@@ -4,7 +4,28 @@
 
 > 日常:用 **`cxp`** 代替 `codex`,你的 Codex 会话就会在多个号之间**逐请求透明轮换**:撞限自动换号、token 自动刷新、长会话消耗摊到所有号 ≈ **把额度上限扩成 N 倍**。菜单栏实时看每号余量。
 
-> 🆕 **新电脑从零搭建** → [**SETUP.md**](SETUP.md)(凭证不搬运,新机 `codex login` 重新生成)。日常用法 / 排障 / 不变量 → [RUNBOOK.md](RUNBOOK.md)。
+> 📦 **安装** → [**docs/INSTALL.md**](docs/INSTALL.md)（两半可以只装一半；凭证不搬运，新机 `codex login` 重新生成）。
+
+## 界面
+
+| 账号总览（打码模式） | AI 用量 · 近 14 天 |
+|---|---|
+| ![账号总览](docs/screenshots/01-accounts.png) | ![用量近14天](docs/screenshots/02-usage-14d.png) |
+| 每号 5h/周双窗口余量、订阅到期、重置卡；`>` 打码开关把邮箱与 account_id 遮成定宽占位，布局不跳 | 堆叠面积图按平台，KPI 条给总量/日均/等效费用/环比 |
+
+| AI 用量 · 今日 | 平台详情 · 分模型 |
+|---|---|
+| ![用量今日](docs/screenshots/03-usage-today.png) | ![平台详情](docs/screenshots/04-platform.png) |
+| 今日档按小时分桶，坐标轴只覆盖已过去的小时 | 分模型 token/占比/轮数/折算费用 + 该平台的实际牌价与缓存折扣 |
+
+| 菜单栏 · 账号 | 菜单栏 · 今日 |
+|---|---|
+| ![菜单栏账号](docs/screenshots/05-menubar-acc.png) | ![菜单栏今日](docs/screenshots/06-menubar-today.png) |
+| 当前号、建议切换目标、号间差值；点行尾「切换」不用开主窗口 | 今日总量 + 小时堆叠图 + 各平台明细，底栏直达流量总览 |
+
+> 截图用的是**真实数据形状**配**脱敏账号夹具**（邮箱/姓名/account_id 全部替换），并额外开了打码模式。
+
+---
 
 ## 先看这个:这套东西是两半
 
@@ -23,11 +44,11 @@ git clone https://github.com/zhuisen/codex-account-rotator.git && cd codex-accou
 bash codexbar/scripts/setup-signing.sh && bash codexbar/scripts/deploy.sh
 ```
 
-clone 到哪个目录都行 —— `deploy.sh` 会把仓库路径烧进二进制。完整说明见 [SETUP.md §6](SETUP.md)。
+clone 到哪个目录都行 —— `deploy.sh` 会把仓库路径烧进二进制。完整说明见 [docs/INSTALL.md §5](docs/INSTALL.md#5-构建桌面应用)。
 
 覆盖的 CLI:**Claude Code · Codex · Grok · Kimi · Antigravity(agy) · OpenClaw · Reasonix · DeepSeek Harness**。加一家 = 在 `traffic/scan.py` 写个解析器 + 注册表加一行,前端自动跟上。
 
-⚠️ **agy 只覆盖 print 模式**(`agy -p`,即 `omc ask` / `omc team` 走的那条)。它自己**不落用量**,数据是 `bin/agy` wrapper 从 `--output-format json` 抄下来的;**交互式会话拿不到**,页面上有覆盖率徽章标注。装这一家需要一步额外配置,见 `SETUP.md` §2.1。
+⚠️ **agy 只覆盖 print 模式**(`agy -p`,即 `omc ask` / `omc team` 走的那条)。它自己**不落用量**,数据是 `bin/agy` wrapper 从 `--output-format json` 抄下来的;**交互式会话拿不到**,页面上有覆盖率徽章标注。装这一家需要一步额外配置，见 [docs/INSTALL.md §5](docs/INSTALL.md#5-构建桌面应用)。
 
 ---
 
@@ -84,7 +105,7 @@ clone 到哪个目录都行 —— `deploy.sh` 会把仓库路径烧进二进制
 | `scripts/install-launchd.sh` | **生成并加载 3 个 launchd 服务**(autosync/quotad/proxy)。★ keepalive(04:30)与 refreshquota(07:00)已于 2026-08-29 按需取消 —— 前者职责由代理接手(覆盖面见上表①),后者与 quotad 的 300s 全池扫描重复。两个 CLI 子命令仍可手动跑。生成而非提交成文件:plist 内嵌绝对路径,提交的副本换台机器就是错的,且会静默漂移(旧的 `launchd/*.plist` 就漂到了写死 `/usr/bin/python3`)。★脚本会**解析并钉住 OpenSSL 版的 python3**,见「维护约定」 |
 | `auth/`(gitignored) | 每号凭证槽位 `<account_id>.json`(0600) |
 | `state.json`(gitignored) | 池状态(slots/active/last_aid/last_proxy_ts) |
-| `RUNBOOK.md` | 运维手册(起停/排障/常见操作/踩坑) |
+| `docs/INSTALL.md` | 安装指南(两半分装/数据源/卸载/自检) |
 | `CHANGELOG.md` | 版本史 + bug 日志 |
 
 外部依赖:`~/.codex/config.toml` 里有一个 dormant 的 `[model_providers.rotateproxy]` 块;`~/.codex/rotateproxy.config.toml` 是 cxp 的 profile overlay。详见 RUNBOOK。

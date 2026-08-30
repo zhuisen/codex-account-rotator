@@ -47,3 +47,12 @@ traffic/agy-ledger/
 # SLM 适配器落的本机工具产物,不属于本仓库
 .agent/
 .cursor/
+
+# ── 内部工作文档：**刻意不入库**（2026-08-30 开源时用 git filter-repo 从全历史移除）
+# 它们含运维细节、账号池规模与进行时 WIP，属于开发者本地资产，不属于公开仓。
+# 原件与被重写前的完整历史留档在 ~/archive/codex-account-rotator/pre-filter-repo-20260830/
+CLAUDE.md
+AGENTS.md
+memory.md
+RUNBOOK.md
+SETUP.md
