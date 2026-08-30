@@ -5,6 +5,8 @@
 > 日常:用 **`cxp`** 代替 `codex`,你的 Codex 会话就会在多个号之间**逐请求透明轮换**:撞限自动换号、token 自动刷新、长会话消耗摊到所有号 ≈ **把额度上限扩成 N 倍**。菜单栏实时看每号余量。
 
 > 📦 **安装** → [**docs/INSTALL.md**](docs/INSTALL.md)（两半可以只装一半；凭证不搬运，新机 `codex login` 重新生成）。
+> 🪟 **Windows** → [**docs/WINDOWS.md**](docs/WINDOWS.md)。v1.0.0 起提供 Windows 安装包（NSIS/MSI，由 CI 在真 Windows 上构建）。
+> ⚠️ 开发机只有 macOS，Windows 端**没有端到端真机验证**，请当 beta 用 —— 哪些验过、哪些没验，那份文档逐条写明。
 
 ## 界面
 

@@ -76,6 +76,74 @@
 
 ---
 
+### v1.0.0 — 首个公开发布：开源、Windows 支持 — 2026-08-31
+
+**开源**
+- 仓库转为公开，MIT License。新增面向公众的 `docs/INSTALL.md`（两半可分装）与
+  `docs/WINDOWS.md`；`README.md` 加界面截图。
+- 发布前做了三方独立密钥审计（本会话 + grok + codex，各自设计判据），
+  外加 gitleaks 全历史扫描：**805 个 blob、122 个 commit、零真实凭证**，
+  不需要轮换任何 token。SETUP 里那些 JWT/refresh_token 是字面截断的占位符。
+  ★ 我自己的第一版扫描器**扫了 0 个 blob 却报「干净」**（`--batch-check` 的格式串
+  写成了独立参数，命令静默退化）—— 后续所有扫描都加了「输入非空 + 已知形状自检」两道断言。
+  这一类假清白差点变成一次「可以公开」的放行。
+- ★ grok 抓到我整类漏掉的东西：**每条 commit 与 tag 的作者 ident**
+  （真名 + 用户名 + 主机型号），文件层清理动不了它。
+- 用 `git filter-repo` 重写全历史：移除 5 份内部工作文档（它们分别活在
+  30/33/11/15/10 个 commit 里，从 HEAD 删掉 ≠ 从历史删掉）、统一作者身份、
+  抹除绝对路径与主机名。122 → 117 commit（只改过这些文档的 commit 变空被剪掉）。
+  重写前的完整历史与文档原件留档在本机 archive。
+
+**Windows 支持（beta）**
+- ★★ **原本根本编译不过**：`set_activation_policy` 有一处调用没加 `cfg` 门，
+  而该方法与枚举在 tauri 2.x 里都是 macOS 专属。
+- 三个**静默**缺陷（编译和运行都不报错，只是什么都不做）：
+  ① 托盘 `set_title` 在 Windows 是空函数 —— 百分比、ETA、四种样式、阈值颜色全部消失；
+  ② `icons/tray.png` 是 macOS 模板图，218 个不透明像素**全是 #000000**，
+     深色任务栏上就是隐形图标；
+  ③ 单实例闸门是 `#[cfg(unix)]` —— Windows 完全没有守卫，
+     开机自启撞上手动启动就是两个托盘、两个池同写 `state.json`。
+- **`portalock.py`**：`import fcntl` 在模块顶层，Windows 上三个进程在 import 阶段就死。
+  `msvcrt.locking` 是错的替代品 —— 本仓库依赖的四条性质它只满足一条，
+  致命的是阻塞获取约 10 秒就放弃，而 `.refresh.lock` 要跨一整个 OAuth POST（实测可达 30 秒）；
+  放弃 = 第二个刷新者拿到它以为的锁 = 两边消费同一个一次性 refresh_token = **掉号**
+  （B7/B8/B14 的机制）。改用 `LockFileEx`（内核阻塞、无超时上限）。
+  POSIX 上是**同一性**：`portalock.flock is fcntl.flock`。
+- ★ `_codex_running` 的 `except` 分支返回 `False`，而 `False` 的含义是
+  「放手去覆盖活会话的 auth.json」。**这在 macOS 上也是真 bug**（pgrep 超时即可触发）：
+  查不到必须站到不会掉号的那一边。已改为返回 `True`（跳过本轮轮换）。
+- 其余：`pgrep`→CIM 查询、`codex.cmd` 经 `shutil.which` 解析（原先异常会穿出去，
+  让刚移走的 auth.json **永不还原**）、`os.replace` 加退避重试（Windows 上有读者打开时会
+  `PermissionError`，而本仓库一直有三个并发读者）、`store_dir` 改用 `USERPROFILE`
+  （Windows 通常没有 `HOME`，空串会拼出盘根路径）、`python_bin` 改为**探测 `--version`**
+  （`python.exe` 在未装 Python 时是应用商店存根：存在、能启动、退出码 0、什么都不做）。
+- 8 个数据源里 **7 个** 是 `%USERPROFILE%\.<name>`，与 macOS 同形；
+  唯一例外是 **reasonix**（`%APPDATA%\reasonix`），依据是从其二进制里抽出的路径表。
+  每条路径都经独立对抗核验（重抽 strings / 重 clone 源码 / 追 `dirs` crate 区分
+  `home_dir()`=FOLDERID_Profile 与 `config_dir()`=%APPDATA%），无一被推翻。
+  ★ 路径猜错的症状是**静默扫出 0 行**，所以这张表按证据写而不是按 `~/.x` 惯例推。
+
+**CI**
+- 新增 GitHub Actions：`ci.yml`（不变量守卫 + macOS/Windows 双平台构建）与
+  `release.yml`（打 tag 出 macOS universal `.dmg` + Windows NSIS/MSI，草稿 Release）。
+- ★ Windows leg 会真跑锁的行为契约测试 —— 那是 `LockFileEx` 分支**唯一会被执行**的地方，
+  开发机是 macOS。
+- ★ 绝不写 `macos-13`：那个 Intel runner 已退役，列它会让 job 排队约 24 小时后
+  **取消整个 run**，把 Windows 产物一起带走。
+
+**测试**：158 → **165 条**。新增 `tests/test_portalock.py`（同一套行为契约在两个平台跑：
+互斥 / 异常类型 / 崩溃自释放 / 阻塞不放弃）。两条形状守卫都做了变异验证，
+其中一条**第一次没通过** —— 它断言 `"BlockingIOError" in source`，
+在把 `raise` 改成 `OSError` 后照样绿，因为 docstring 里还写着那个词。
+两条都已改为打在 AST 上。
+
+**已知限制**（`docs/WINDOWS.md` 逐条写明）：Windows 托盘无文字，信息降级进 tooltip
+（**要悬停才看得见**，不等价于 macOS 常驻显示）；launchd 的三个常驻服务在 Windows 上
+**没有等价物**，代理与 quotad 只能手动起；Windows 产物**未签名**，SmartScreen 会警告；
+**账号池那一半没有任何端到端真机验证** —— 开发机只有 macOS。
+
+---
+
 ### v0.12.11 — 取消两个 launchd 定时器，并把本轮买来的教训写进文档 — 2026-08-29
 
 用户决定停用 `keepalive`(04:30) 与 `refreshquota`(07:00)。`install-launchd.sh` 由 5 服务改为 **3**
