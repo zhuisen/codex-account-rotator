@@ -43,7 +43,10 @@ STUB = """
       // `?nav=open` 展开侧栏。默认折叠 —— 与真实默认值一致。
       navOpen: p.get('rail') === 'open',
     }));
-    localStorage.setItem('codexbar_privacy', '0');
+    // ★ `?privacy=1` 打开打码模式(`usePrivacy` + `maskId`)。默认 0 —— 与真实默认值一致。
+    //   给对外截图用:夹具已把邮箱/姓名/account_id 换成假的,打码是**第二层**,
+    //   两层都要 —— 夹具保证"截到的不是真人",打码保证"版式就是用户分享时看到的那个"。
+    localStorage.setItem('codexbar_privacy', p.get('privacy') === '1' ? '1' : '0');
     // 菜单栏停留页:`?tab=today` 直接渲染今日 Tab(默认账号页)
     localStorage.setItem('codexbar_mb_tab', p.get('tab') === 'today' ? 'today' : 'acc');
     // 平台偏好:`?plat=demo` 套一组示范偏好(停用一家 + 改名改色 + 换顺序),用来验设置面板与总览
