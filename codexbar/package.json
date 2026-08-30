@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "devport vite --strictPort --port {PORT}",
     "build": "tsc -b && vite build",
+    "tauri": "tauri",
     "lint": "oxlint",
     "preview": "vite preview"
   },
