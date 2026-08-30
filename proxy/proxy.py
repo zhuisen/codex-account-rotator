@@ -18,7 +18,12 @@ stdlib-only; streams the SSE response back close-delimited.
 """
 import base64
 import datetime
-import fcntl
+try:
+    import fcntl                       # POSIX
+except ModuleNotFoundError:            # Windows —— 语义等价的 LockFileEx 兼容层,见 portalock.py
+    import os as _os, sys as _sys
+    _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+    import portalock as fcntl          # noqa: F401  (drop-in: flock / LOCK_EX / LOCK_NB)
 import hashlib
 import http.client
 import json

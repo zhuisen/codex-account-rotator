@@ -39,3 +39,12 @@ jobs:
       - run: npm run build
         working-directory: codexbar
       - run: cargo check --manifest-path codexbar/src-tauri/Cargo.toml
+
+      # ★★ 这一步才是 Windows 锁实现的**唯一真实验证**。开发机是 macOS,
+      #    `portalock` 的 LockFileEx 分支在那边一行都跑不到 —— 只有这里会真的执行它。
+      #    跑的是行为契约(互斥/异常类型/崩溃自释放/阻塞不放弃),不是形状断言。
+      #    ⚠️ 只跑这一个文件:其余 158 条守卫里有依赖 POSIX 路径与工具的,
+      #    整套搬上 Windows 会因为无关原因红,那种红会淹掉真信号。
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - run: python -m unittest tests.test_portalock -v
