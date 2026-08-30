@@ -2,7 +2,7 @@
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-wrapper="${script_dir}/codex-wrapper-with-logout-guard.sh"
+wrapper="${CODEX_WRAPPER_UNDER_TEST:-${script_dir}/codex-wrapper-with-logout-guard.sh}"
 fixture_home="$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/codex-resume-repair-test.XXXXXX")"
 
 cleanup() {
@@ -17,6 +17,48 @@ trap cleanup EXIT
   "$fixture_home/.local/npm-global/bin" \
   "$fixture_home/tmp"
 /bin/cp /usr/bin/true "$fixture_home/.local/npm-global/bin/codex"
+
+assert_blocked() {
+  local stderr_file="$fixture_home/blocked.stderr"
+
+  if HOME="$fixture_home" TMPDIR="$fixture_home/tmp" "$wrapper" "$@" \
+    > /dev/null 2> "$stderr_file"; then
+    /usr/bin/printf 'expected command to be blocked: %s\n' "$*" >&2
+    exit 1
+  fi
+  if ! /usr/bin/grep -q '自动恢复最近一条' "$stderr_file"; then
+    /usr/bin/printf 'missing session-isolation explanation: %s\n' "$*" >&2
+    exit 1
+  fi
+}
+
+assert_allowed() {
+  if ! HOME="$fixture_home" TMPDIR="$fixture_home/tmp" "$wrapper" "$@" \
+    > /dev/null 2>&1; then
+    /usr/bin/printf 'expected command to pass through: %s\n' "$*" >&2
+    exit 1
+  fi
+}
+
+assert_blocked resume --last
+assert_blocked resume --all --last
+assert_blocked resume --include-non-interactive --last
+assert_blocked --profile rotateproxy fork --last
+assert_allowed resume
+assert_allowed resume --all
+assert_allowed resume --include-non-interactive
+assert_allowed resume named-task
+assert_allowed resume 内存测试
+assert_allowed -C /tmp resume
+assert_allowed --profile rotateproxy fork
+assert_allowed --profile rotateproxy fork --all
+assert_allowed resume --help
+assert_allowed resume --last --help
+assert_allowed fork --help
+assert_allowed resume 11111111-1111-1111-1111-111111111111
+assert_allowed fork 11111111-1111-1111-1111-111111111111
+assert_allowed -C /tmp resume 11111111-1111-1111-1111-111111111111
+assert_allowed --version
 
 /usr/bin/sqlite3 "$fixture_home/.codex/state_5.sqlite" <<'SQL'
 CREATE TABLE threads (
@@ -37,7 +79,20 @@ INSERT INTO threads VALUES
 ('66666666-6666-6666-6666-666666666666',0,'rotateproxy',1,'user','cli','archived'),
 ('77777777-7777-7777-7777-777777777777',0,'rotateproxy',0,'user','cli',''),
 ('88888888-8888-8888-8888-888888888888',0,'rotateproxy',0,'user','cli','');
+ALTER TABLE threads ADD COLUMN name TEXT;
+ALTER TABLE threads ADD COLUMN updated_at INTEGER NOT NULL DEFAULT 0;
+UPDATE threads
+SET name = 'named-task',
+    updated_at = 1788080000
+WHERE id = '11111111-1111-1111-1111-111111111111';
 SQL
+
+session_list="$(HOME="$fixture_home" TMPDIR="$fixture_home/tmp" "$wrapper" sessions)"
+if ! /usr/bin/grep -q 'named-task' <<< "$session_list" \
+  || ! /usr/bin/grep -q '11111111-1111-1111-1111-111111111111' <<< "$session_list"; then
+  /usr/bin/printf '%s\n' 'named session listing regression failed' >&2
+  exit 1
+fi
 
 history="$fixture_home/.codex/history.jsonl"
 /opt/homebrew/bin/jq -nc '{session_id:"11111111-1111-1111-1111-111111111111",text:"do not overwrite"}' > "$history"

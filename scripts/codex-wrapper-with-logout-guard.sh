@@ -1,6 +1,93 @@
 #!/usr/bin/env bash
 export CODEX_HOME="${HOME}/.codex"
 
+# The npm install used on this machine cannot run `codex agents` because that command requires the
+# standalone app-server package. Keep session discovery local and read-only instead.
+list_codex_sessions() {
+  local db="${CODEX_HOME}/state_5.sqlite"
+
+  if [ ! -f "$db" ]; then
+    printf 'Codex session database not found: %s\n' "$db" >&2
+    return 1
+  fi
+
+  /usr/bin/sqlite3 -header -column "$db" <<'SQL'
+SELECT
+  name AS session_name,
+  id AS session_id,
+  strftime('%Y-%m-%d %H:%M', updated_at, 'unixepoch', 'localtime') AS updated_local
+FROM threads
+WHERE archived = 0
+  AND name IS NOT NULL
+  AND trim(name) <> ''
+  AND (thread_source = 'user' OR thread_source IS NULL)
+  AND source IN ('cli', 'vscode', 'exec')
+ORDER BY updated_at DESC
+LIMIT 100;
+SQL
+}
+
+if [ "${1:-}" = "sessions" ]; then
+  list_codex_sessions
+  exit $?
+fi
+
+# Native resume/fork pickers are explicit user choices and must remain available. Only --last skips
+# that choice and can silently append a new task to whichever thread happens to be newest.
+guard_automatic_session_resume() {
+  local -a args=("$@")
+  local command=""
+  local arg
+  local index=0
+  local has_last=0
+
+  # Global Codex options may precede the subcommand. Skip the options supported by 0.150.1 so
+  # `codex -C <dir> resume` cannot bypass the same isolation rule as `codex resume`.
+  while [ "$index" -lt "${#args[@]}" ]; do
+    arg="${args[$index]}"
+    case "$arg" in
+      -c|--config|--enable|--disable|--remote|--remote-auth-token-env|-i|--image|-m|--model|--local-provider|-p|--profile|-s|--sandbox|-C|--cd|--add-dir|-a|--ask-for-approval)
+        index=$((index + 2))
+        ;;
+      --*=*|-*)
+        index=$((index + 1))
+        ;;
+      *)
+        command="$arg"
+        break
+        ;;
+    esac
+  done
+
+  case "$command" in
+    resume|fork)
+      index=$((index + 1))
+      while [ "$index" -lt "${#args[@]}" ]; do
+        case "${args[$index]}" in
+          -h|--help) return 0 ;;
+          --last) has_last=1 ;;
+        esac
+        index=$((index + 1))
+      done
+      [ "$has_last" -eq 1 ] || return 0
+      cat >&2 <<'WARN'
+⛔ 已拦截自动恢复最近一条 Codex 会话
+
+`--last` 会跳过选择器，容易把新任务续进最近的旧 thread。
+原生 picker、session name 和 session ID 均可正常使用。
+
+新任务：直接运行 codex，进入后用 /new <task-name>
+选择当前目录会话：codex resume
+选择全部会话：codex resume --all
+指定会话：codex resume <session_id|session_name>
+WARN
+      return 64
+      ;;
+  esac
+}
+
+guard_automatic_session_resume "$@" || exit $?
+
 # Native resume/fork filters by thread metadata. Codex can leave genuine interactive sessions with
 # has_user_event=0, and cxp sessions are stamped rotateproxy even though this machine intentionally
 # resumes them through plain Codex. Repair only sessions recorded in history.jsonl that already have
