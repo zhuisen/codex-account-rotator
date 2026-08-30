@@ -402,7 +402,14 @@ def _scan_kimi_file(path):
 # 停用某家:`--exclude grok`,或在 `traffic/sources.local.json` 写 {"disabled": ["grok"]}
 # (该文件 gitignored,是本机偏好不是仓库配置)。停用后它不出现在输出里,UI 上自然消失。
 OPENCLAW_ROOT = Path(os.environ.get("OPENCLAW_HOME") or (HOME / ".openclaw")) / "agents"
-REASONIX_ROOT = Path(os.environ.get("REASONIX_HOME") or (HOME / ".reasonix")) / "stats"
+# ★ 八个源里**只有 reasonix 在 Windows 上不落家目录** —— 它自己的二进制里嵌着那张表
+#   (`| Windows | %APPDATA%\reasonix |` vs `| macOS | ~/.reasonix |`,从安装的 binary 里
+#   抽 strings 实证)。其余七家都是 `homedir()/.<name>`,`Path.home()` 直接通用。
+#   猜错的症状是**静默扫出 0 行**,没有任何报错 —— 所以这一行是按证据写的,不是按惯例。
+_REASONIX_HOME = (Path(os.environ["APPDATA"]) / "reasonix"
+                  if os.name == "nt" and os.environ.get("APPDATA")
+                  else HOME / ".reasonix")
+REASONIX_ROOT = Path(os.environ.get("REASONIX_HOME") or _REASONIX_HOME) / "stats"
 DSH_ROOT = Path(os.environ.get("DSH_HOME") or (HOME / ".dsh")) / "sessions"
 
 # 宿主内**路由出来**的平台。OpenClaw 自己不是平台(用户 2026-08-12 定稿:「openclaw 不算平台,

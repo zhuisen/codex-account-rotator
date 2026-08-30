@@ -105,6 +105,29 @@ def _cred_lock(nonblock=False):
         yield
 
 
+def _replace_retry(tmp, dst, timeout=2.0):
+    """`os.replace` 的 Windows 加固版。
+
+    POSIX 上 rename 覆盖一个正被读取的文件毫无问题(inode 换掉,读者继续读旧的)。
+    **Windows 不是** —— Python 打开文件时不带 `FILE_SHARE_DELETE`,所以只要有任何一个
+    进程正打开着目标文件,替换就抛 `PermissionError`。而本仓库恰好一直有并发读者
+    (proxy / quotad / CodexBar 都在读 state.json),所以这在 Windows 上不是罕见竞态,
+    是**日常**。退避重试即可,读者持有的时间都是毫秒级。
+    POSIX 上第一次就成功,零额外开销。
+    """
+    deadline = time.time() + timeout
+    delay = 0.01
+    while True:
+        try:
+            os.replace(tmp, dst)
+            return
+        except PermissionError:
+            if time.time() >= deadline:
+                raise
+            time.sleep(delay)
+            delay = min(delay * 2, 0.2)
+
+
 def _atomic_write(path, data, mode=0o600):
     # UNIQUE temp name (mkstemp) — a fixed `*.tmp` is shared by the proxy + autosync + manual CLI, and
     # concurrent writers to the same temp path interleave bytes → corrupt JSON. Atomic os.replace then
@@ -115,7 +138,7 @@ def _atomic_write(path, data, mode=0o600):
         with os.fdopen(fd, "w") as f:
             json.dump(data, f, indent=2)
         os.chmod(tmp, mode)
-        os.replace(tmp, path)
+        _replace_retry(tmp, path)
     except Exception:
         try:
             os.unlink(tmp)
@@ -680,10 +703,17 @@ def cmd_login(args):
         print(f"已把 [{prev_label}] 的 auth.json 移开并存回槽位 —— 登录期间本机没有可被作废的 token")
     print("launching `codex login`…")
 
+    # ★ Windows 上 npm 装的是 `codex.cmd`,CreateProcess 不认它 —— 直接传 "codex"
+    #   会抛 FileNotFoundError,而下面只接了 KeyboardInterrupt,异常会穿出去,
+    #   **让上面刚移走的 auth.json 永远不被还原**(本机从此没有任何可用凭证)。
+    #   shutil.which 会解析出带扩展名的真实路径。
+    codex_exe = shutil.which("codex") or "codex"
     try:
-        rc = subprocess.call(["codex", "login"])
-    except KeyboardInterrupt:
-        rc = 130
+        rc = subprocess.call([codex_exe, "login"])
+    except (KeyboardInterrupt, OSError) as e:
+        rc = 130 if isinstance(e, KeyboardInterrupt) else 127
+        if not isinstance(e, KeyboardInterrupt):
+            print(f"启动 codex 失败: {e}")
     if rc != 0 or not LIVE.exists():
         # Failed or aborted: put the previous credentials back, otherwise plain codex / omc / the proxy
         # are left with NO auth at all until the next daily keepalive.
@@ -895,10 +925,26 @@ def _codex_running():
     """True if a real `codex` CLI process is running — skip auth.json rotation then (codex owns its live
     token and may be mid-refresh). Conservative: also true during a cxp session (the proxy-routed codex
     binary), which is fine — rotation just waits for the next keepalive run. Ignores our own tooling."""
+    # Windows 没有 pgrep。`tasklist /FO CSV /V` 给不出完整命令行,`wmic` 已弃用 ——
+    # 用 PowerShell 的 CIM 查询拿 CommandLine,再交给下面同一套过滤逻辑。
+    if os.name == "nt":
+        cmd = ["powershell", "-NoProfile", "-Command",
+               "Get-CimInstance Win32_Process | "
+               "Where-Object { $_.Name -like '*codex*' -or $_.CommandLine -like '*codex*' } | "
+               "ForEach-Object { $_.CommandLine }"]
+    else:
+        cmd = ["pgrep", "-fl", "codex"]
     try:
-        out = subprocess.run(["pgrep", "-fl", "codex"], capture_output=True, text=True, timeout=5).stdout
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=5).stdout
     except Exception:
-        return False
+        # ★★ **查不到必须站到安全侧**,也就是返回 True(= 跳过轮换)。
+        #    唯一的调用方是 `if _codex_running(): return "skip: codex running"` ——
+        #    返回 False 的意思是「放手去覆盖活会话的 auth.json」,而这正是
+        #    B7/B8/B14 那串掉号事故的动作。代价只是本轮不轮换、等下一次;
+        #    反过来的代价是杀号。
+        #    这是仓库那条铁律的同一形态:「这一枪没打中」不能和「确实没有」返回同一个值 ——
+        #    在两者必须合并成布尔时,就得合并到**不会造成损失**的那一边。
+        return True
     for line in out.splitlines():
         low = line.lower()
         if ("codex-rotate" in low or "codex-account-rotator" in low

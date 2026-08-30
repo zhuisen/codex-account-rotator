@@ -30,7 +30,12 @@ fn store_dir() -> String {
         }
     }
     // 兜底:仓库默认位置。走到这里说明不是用 deploy.sh 构建的。
-    let home = std::env::var("HOME").unwrap_or_default();
+    // ★ Windows 上 **`HOME` 通常没有设置**(那是 POSIX 惯例),取到空串会拼出
+    //   `/Projects/tools/...` 这种指向盘根的路径 —— 于是每一条命令都失败,
+    //   而报错是 "找不到 codex-rotate",完全指不到真因。用 USERPROFILE。
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_default();
     format!("{}/Projects/tools/codex-account-rotator", home)
 }
 
@@ -51,12 +56,47 @@ fn python_bin() -> String {
             return p;
         }
     }
-    for cand in ["/opt/homebrew/bin/python3", "/usr/local/bin/python3"] {
-        if std::path::Path::new(cand).exists() {
-            return cand.into();
+    #[cfg(not(target_os = "windows"))]
+    {
+        for cand in ["/opt/homebrew/bin/python3", "/usr/local/bin/python3"] {
+            if std::path::Path::new(cand).exists() {
+                return cand.into();
+            }
         }
+        "python3".into()
     }
-    "python3".into()
+    // ★★ Windows 上不能靠"文件存在"判断。`python.exe` 在没装 Python 时是**应用商店的占位存根**:
+    //    它存在、能启动、退出码为 0,却什么都不执行 —— 用 `Path::exists()` 判会选中它,
+    //    然后每条命令都返回空输出,而 UI 上看到的是"没有数据",不是"解释器没找到"。
+    //    所以必须**真的跑一次 `--version` 并检查输出**。
+    //    上面那条 LibreSSL 403 的顾虑在这里不适用:Windows 版 CPython 链的是 OpenSSL。
+    //    结果缓存 —— 有 6 个调用点,每次都探测等于每条命令多起一个进程。
+    #[cfg(target_os = "windows")]
+    {
+        use std::sync::OnceLock;
+        static RESOLVED: OnceLock<String> = OnceLock::new();
+        RESOLVED
+            .get_or_init(|| {
+                for cand in ["py", "python3", "python"] {
+                    let ok = std::process::Command::new(cand)
+                        .arg("--version")
+                        .output()
+                        .map(|o| {
+                            o.status.success()
+                                && (String::from_utf8_lossy(&o.stdout).contains("Python 3")
+                                    || String::from_utf8_lossy(&o.stderr).contains("Python 3"))
+                        })
+                        .unwrap_or(false);
+                    if ok {
+                        return cand.to_string();
+                    }
+                }
+                // 一个都探不到:仍返回 "python",让调用方拿到真实的启动失败错误,
+                // 而不是在这里静默换成别的东西。
+                "python".to_string()
+            })
+            .clone()
+    }
 }
 
 /// The tray has no native menu any more (a menu forces macOS to open it on right-click, and both
