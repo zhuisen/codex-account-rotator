@@ -1,0 +1,61 @@
+name: release
+
+# 打 v* tag 时构建两个平台的产物并挂到 Release。
+# ★ 这是 Windows 端唯一的真实验证手段 —— 开发机只有 macOS,交叉编译只能证明"编译得过",
+#   证明不了打包、安装、WebView2 与托盘行为。CI 的 Windows leg 是真机构建。
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false          # 一边挂掉不要把另一边的产物一起弄丢
+      matrix:
+        include:
+          # ★★ 绝不要写 macos-13:那个 Intel runner 已退役,列它会让 job 排队约 24 小时
+          #    然后**取消整个 run**,把 Windows 那条腿一起带走(在另一个项目上实测过)。
+          #    macos-latest 是 ARM,靠 universal target 同时出 Intel 产物。
+          - platform: macos-latest
+            args: '--target universal-apple-darwin'
+            rust-targets: 'aarch64-apple-darwin,x86_64-apple-darwin'
+          - platform: windows-latest
+            args: '--bundles nsis,msi'
+            rust-targets: ''
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: codexbar/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust-targets }}
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: codexbar/src-tauri -> target
+
+      # Linux 才需要 webkit2gtk 一类的系统依赖;mac/win 无需额外 apt。
+      # Windows 的 WebView2 由 NSIS 安装包自带 bootstrapper 处理,构建机不用装。
+      - run: npm ci
+        working-directory: codexbar
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: codexbar
+          tagName: ${{ github.ref_name }}
+          releaseName: 'CodexBar ${{ github.ref_name }}'
+          releaseDraft: true          # 先出草稿,人工核过产物再公开
+          prerelease: false
+          args: ${{ matrix.args }}

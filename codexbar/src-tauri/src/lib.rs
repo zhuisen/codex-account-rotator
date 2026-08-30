@@ -124,6 +124,18 @@ fn apply_activation_policy(app: &AppHandle) {
             tauri::ActivationPolicy::Accessory
         });
     }
+    // Windows has no Dock and no activation policy. The nearest equivalent to "don't take up a
+    // slot" is keeping the window out of the taskbar; unlike macOS it is a *per-window* property,
+    // so there is no cold-start flash to avoid and no `Reopen` event to handle.
+    // ★ Deliberately NOT tied to `main_visible`: a hidden window is already absent from the
+    //   taskbar, so recomputing it from visibility would be a no-op that reads as if it did
+    //   something. The switch alone is the whole condition here.
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(w) = app.get_webview_window("main") {
+            let _ = w.set_skip_taskbar(!DOCK_ENABLED.load(Ordering::Relaxed));
+        }
+    }
 }
 
 /// 显示/隐藏主窗口。**前端一切显示隐藏主窗的地方都要走这里**,不要直接 `win.hide()` ——
@@ -710,6 +722,8 @@ fn fmt_tok(n: u64) -> String {
 
 /// 阈值 → RGB。沿用仓库既有那条(handoff §5.1.5:剩余 <50% 琥珀、否则绿),
 /// 只把「耗尽」单独标红 —— 0 是天然边界,不是新发明的阈值。
+// 只有 macOS 的 attributedTitle 会用到它 —— Windows 托盘没有文字可上色。
+#[cfg(target_os = "macos")]
 fn rem_rgb(rem: u32) -> (f64, f64, f64) {
     if rem == 0 { (0.878, 0.322, 0.302) }        // #E0524D 红
     else if rem < 50 { (0.878, 0.565, 0.110) }   // #E0901C 琥珀
@@ -722,6 +736,18 @@ fn refresh_tray(app: &AppHandle) {
     let title = format_tray_title();
     if let Some(tray) = app.tray_by_id("main") {
         let _ = tray.set_title(Some(&title));
+        // ★★ **Windows 托盘没有文字**。`TrayIcon::set_title` 在 Windows 上是**空实现**
+        //   (tray-icon 的 win/mod.rs 里那个 fn 体是空的),所以上面那行不报错、也什么都不做 ——
+        //   四种样式、百分比、ETA、颜色**全部消失**,而编译和运行都不会有任何抱怨。
+        //   这正是本仓库最怕的形态:失败是静默的。
+        //   Windows 上唯一能显示这串信息的位置是 tooltip(悬停气泡),上限 127 字符。
+        //   ⚠️ 这不是等价替换:tooltip 要**悬停才看得见**,而 macOS 是常驻可见。
+        //   把百分比烧进图标是后续方案(见 docs/WINDOWS_PORT_PLAN.md),不在本轮。
+        #[cfg(target_os = "windows")]
+        {
+            let tip: String = title.chars().take(127).collect();
+            let _ = tray.set_tooltip(Some(&tip));
+        }
     }
     #[cfg(target_os = "macos")]
     {
@@ -908,11 +934,21 @@ fn toggle_menubar(app: &AppHandle, tray_rect: Option<tauri::Rect>) {
 /// 锁文件放在 app 数据目录而不是 `/tmp`:`/tmp` 会被系统清理,文件一旦在持锁期间被删,
 /// 新进程会在**另一个 inode** 上建文件并成功加锁,两个又都活了。
 ///
-/// `Acquired` 里的 `File` 必须由调用方持有到进程结束 —— 一旦 drop,fd 关闭,锁就没了。
-#[cfg(unix)]
+/// `Acquired` 里的 guard 必须由调用方持有到进程结束 —— 一旦 drop,fd/句柄关闭,锁就没了。
+///
+/// ★★ **Windows 用命名互斥体,不是锁文件**(2026-08-30 补齐平权)。`CreateMutexW` 同样是
+/// 内核级原子操作:并发创建时**恰好一个**拿到全新对象,其余拿到已存在句柄并置
+/// `ERROR_ALREADY_EXISTS`,不存在"检查与获取之间的窗口"。崩溃安全也同源 —— 内核对象随
+/// **进程终止**自动释放,`kill`/panic/断电都不会留陈旧锁。
+/// 名字用 `Local\` 前缀:限定在当前登录会话,多用户各自一个实例才是对的行为
+/// (`Global\` 会让第二个登录用户被第一个挡住)。
+/// ⚠️ 这里刻意**不**用锁文件 —— Windows 上"删掉正被持有的锁文件再重建"这条路径和 `/tmp`
+/// 被清理那个坑同族,而命名内核对象根本没有文件可删。
+/// 三态语义与 unix 侧逐字对应,尤其 `Undetermined` 必须 fail-open。
 enum InstanceLock {
     /// 拿到锁,本进程是唯一实例。
-    Acquired(std::fs::File),
+    /// ★ 这个字段**从不被读**,它的全部作用就是"活着" —— drop 即放锁。
+    Acquired(#[allow(dead_code)] InstanceGuard),
     /// **确定**另一个实例正持锁(`flock` 返回 `EWOULDBLOCK`)—— 本进程必须退出。
     HeldByOther,
     /// ★ **判定不了**:锁文件打不开(HOME 缺失/目录建不了/磁盘满/权限异常),或该文件系统
@@ -923,6 +959,41 @@ enum InstanceLock {
     /// 而且症状是静默的(没有窗口、没有托盘、没有报错),几乎无法诊断。
     /// 这是仓库那条铁律的同一形态:「这一枪没打中」绝不能和「确实没有」返回同一个值。
     Undetermined,
+}
+
+/// 持有到进程结束的守卫。unix 是持锁的 fd,windows 是互斥体句柄 —— 两边都靠"活着"维持锁。
+#[cfg(unix)]
+type InstanceGuard = std::fs::File;
+
+/// ★ 不实现 `Drop` 关句柄:进程退出时内核回收,而提前 drop 反而会**提前放锁**。
+///   包一层 newtype 只是为了让 `InstanceLock::Acquired(..)` 在两个平台上同形。
+#[cfg(windows)]
+struct InstanceGuard(#[allow(dead_code)] windows_sys::Win32::Foundation::HANDLE);
+#[cfg(windows)]
+unsafe impl Send for InstanceGuard {}
+
+#[cfg(windows)]
+fn acquire_single_instance_lock() -> InstanceLock {
+    use windows_sys::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
+    use windows_sys::Win32::System::Threading::CreateMutexW;
+
+    // UTF-16、NUL 结尾。名字里不能有反斜杠以外的路径分隔符,`Local\` 前缀是命名空间不是目录。
+    let name: Vec<u16> = "Local\\com.doushutangmu.codexbar.single-instance\0"
+        .encode_utf16()
+        .collect();
+    // SAFETY: name 是刚构造、仍存活的 NUL 结尾 UTF-16 缓冲;其余参数为空/false 的合法取值。
+    let h = unsafe { CreateMutexW(std::ptr::null(), 0, name.as_ptr()) };
+    if h.is_null() {
+        // 建不出对象(极少见:名字冲突到别的类型、会话受限)。**按判定不了处理** ——
+        // 与 unix 侧一样,宁可多开一个,也不能静默到一个都起不来。
+        return InstanceLock::Undetermined;
+    }
+    // ★ 必须在 `CreateMutexW` **成功之后**立刻读:GetLastError 会被后续任何 API 覆盖。
+    //   句柄非空且 ERROR_ALREADY_EXISTS ⇒ 对象本来就在 ⇒ 另一个实例正活着。
+    if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+        return InstanceLock::HeldByOther;
+    }
+    InstanceLock::Acquired(InstanceGuard(h))
 }
 
 #[cfg(unix)]
@@ -959,7 +1030,8 @@ fn acquire_single_instance_lock() -> InstanceLock {
 pub fn run() {
     // ★ 必须在 `tauri::Builder` **之前**:晚一步就会先把托盘和两个 webview 建出来再退出,
     //   开机瞬间照样闪两个图标。`_lock` 要一直活到进程结束,所以绑在这里而不是 `let _ =`。
-    #[cfg(unix)]
+    // ★ 两个平台都要:Windows 上开机自启(注册表 Run 键)与用户手点会并发,
+    //   没有守卫就是两个托盘、两个池同时读写 state.json。
     let _lock = match acquire_single_instance_lock() {
         // 已经有一个在跑。**静默退出,不弹主窗口** —— 能走到这里的现实路径只有上面那个开机竞态,
         // 在那个时刻弹窗会破坏「主窗关着就不占程序坞」这条已定稿的行为。用户想要主窗口时的入口
@@ -996,7 +1068,13 @@ pub fn run() {
             None,
         ))
         .setup(|app| {
-            // Hide from Dock — LSUIElement alone isn't reliable with Tauri
+            // Hide from Dock — LSUIElement alone isn't reliable with Tauri.
+            // ★ Both the method and the enum are #[cfg(macos)] in tauri 2.x, so an un-gated call
+            //   is a hard compile error on Windows — not a no-op. `apply_activation_policy()`
+            //   above was already gated; this second call site was missed.
+            //   Windows has no Dock: the taskbar equivalent is set_skip_taskbar(), applied to the
+            //   main window in apply_activation_policy().
+            #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
             let handle = app.handle();
@@ -1027,16 +1105,28 @@ pub fn run() {
             });
 
             // ---- tray icon ----
-            let tray_bytes = include_bytes!("../icons/tray.png");
+            // ★★ **两个平台不能共用同一张图**。`icons/tray.png` 是 macOS 模板图:36x36、
+            //    218 个不透明像素**全是 #000000**,靠 `icon_as_template` 让系统按明暗主题反色。
+            //    Windows 没有模板图这个概念,直接用它 = 深色任务栏上画黑色 = **图标隐形**,
+            //    而且不报任何错(用户只会觉得"装完没反应")。所以 Windows 走彩色 icon.ico。
+            #[cfg(not(target_os = "windows"))]
+            let tray_bytes: &[u8] = include_bytes!("../icons/tray.png");
+            #[cfg(target_os = "windows")]
+            let tray_bytes: &[u8] = include_bytes!("../icons/32x32.png");
             let tray_icon = tauri::image::Image::from_bytes(tray_bytes)?;
 
             // ★ NO native menu is attached. On macOS a tray icon with a menu ALWAYS opens that menu on
             // right-click — there is no per-button opt-out — so the only way to make both buttons show
             // our own popover is to have no menu at all. The actions that lived there moved: 打开主窗口
             // = click any account row, 刷新全池/检查 token = popover footer, 退出 = Settings (quit_app).
-            let _tray = TrayIconBuilder::with_id("main")
-                .icon(tray_icon)
-                .icon_as_template(true)
+            let builder = TrayIconBuilder::with_id("main").icon(tray_icon);
+            // `icon_as_template` 是 macOS 专属语义(系统按主题反色);Windows/Linux 上设它无意义。
+            #[cfg(target_os = "macos")]
+            let builder = builder.icon_as_template(true);
+            // Windows 托盘不显示标题,只有 tooltip —— 建的时候就给上,别等第一次 refresh_tray。
+            #[cfg(target_os = "windows")]
+            let builder = builder.tooltip(format_tray_title());
+            let _tray = builder
                 .title(format_tray_title())
                 .on_tray_icon_event(|tray, event| {
                     if let TrayIconEvent::Click {

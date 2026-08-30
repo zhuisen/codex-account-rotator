@@ -31,6 +31,18 @@ libc = "0.2.189"
 #   无 Deref、无访问器(已核 tauri/src/tray/mod.rs:398),tray-icon 虽有 `ns_status_item()` 也够不到。
 #   所以用 objc2 在**本进程**的 NSApp.windows 里找到 NSStatusBarButton 自己设。
 #   版本对齐依赖树里已有的(objc2 0.6 / app-kit 0.3 / foundation 0.3),避免同一套绑定引入两份。
+# ★ Windows 单实例守卫用命名互斥体(CreateMutexW)。依赖树里本来就有 windows-sys 0.59
+#   (tauri 传递引入),这里显式声明只为拿到那两个 feature,不额外增加一份编译。
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+    # ★ CreateMutexW 的第一个参数是 Win32::Security::SECURITY_ATTRIBUTES —— windows-sys 按
+    #   **参数类型的 feature** 决定要不要导出这个函数,少了它模块在、函数不在,
+    #   报错是 "no `CreateMutexW` in `Win32::System::Threading`",很容易误判成路径写错。
+    "Win32_Security",
+] }
+
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 objc2-app-kit = "0.3"

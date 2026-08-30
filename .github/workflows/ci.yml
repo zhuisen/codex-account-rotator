@@ -1,0 +1,41 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  invariants:
+    # 不变量守卫是纯 stdlib Python(AST 静态分析 + 隔离夹具),不碰凭证、不联网。
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - run: python3 -m unittest discover -s tests -p 'test_*.py' -v
+
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: codexbar/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: codexbar/src-tauri -> target
+      - run: npm ci
+        working-directory: codexbar
+      # ★ 用 `npm run build` 不是 `tsc --noEmit`:构建走 tsc -b(project references)且开着
+      #   noUnusedLocals,--noEmit 不开 —— 曾连过两轮 --noEmit 却在真构建时被 TS6133 打回。
+      - run: npm run build
+        working-directory: codexbar
+      - run: cargo check --manifest-path codexbar/src-tauri/Cargo.toml
