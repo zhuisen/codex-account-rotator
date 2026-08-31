@@ -20,7 +20,7 @@
 | 单实例守卫 | ✅ 已实现 | 命名互斥体（`Local\` 命名空间） |
 | 托盘 | ⚠️ **降级** | 见下「已知差异」 |
 | **账号池 + 轮换代理** | ⚠️ **未经真机验证** | 代码路径已补齐，但 OAuth 登录、代理转发、轮换都没在 Windows 上跑过 |
-| 定时服务 | ❌ **未做** | launchd 是 macOS 专属，Windows 的任务计划程序等价物尚未实现 |
+| 定时服务 | ⚠️ **已实现，未真机验证** | `scripts/install-windows.ps1` 用任务计划程序注册同样的 3 个服务。★ 与 macOS **两处真实差异**：autosync 从「文件变化即触发」降级为**每分钟轮询**（Task Scheduler 没有文件监视触发器），新号入池最慢延迟 1 分钟；崩溃恢复靠 `RestartOnFailure`（只认非零退出码）+ 每 5 分钟补拉触发器，不是 launchd 那种立刻重启 |
 | 开机自启 | ✅ 应可用 | `tauri-plugin-autostart` 在 Windows 上走注册表 Run 键 |
 
 ---
@@ -87,8 +87,10 @@ macOS 用的是模板图（全黑、由系统按主题反色）。Windows 没有
 
 ## 仍未做的事
 
-1. **定时服务**：macOS 的 3 个 launchd 服务（proxy / autosync / quotad）在 Windows 上没有等价物。
-   代理和 quotad 目前只能手动起。任务计划程序或 Windows 服务的封装尚未实现。
+1. ~~**定时服务**~~ **已实现**（`scripts/install-windows.ps1`，v1.0.4）。仍未真机验证；
+   两处刻意的语义差异（autosync 轮询、崩溃恢复不是立刻）写在脚本文件头。
+   两个安装器的服务集合由 `tests/test_installers_agree.py` 守着 —— 只改一边会让某个平台
+   静默少一个常驻进程，而这正是 Windows 端从 v1.0.0 到 v1.0.3 的实际状态。
 2. **托盘百分比**：见上。
 3. **端到端真机验证**：需要一台 Windows 机器。以下全部**未验证**：
    - 安装包能否正常安装、WebView2 缺失时 NSIS bootstrapper 是否正确拉起

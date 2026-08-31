@@ -92,16 +92,35 @@ command = "/path/to/codex-account-rotator/proxy/auth-token"
 
 ## 4. launchd 服务与登录
 
+**macOS**：
+
 ```bash
 bash scripts/install-launchd.sh     # 生成 + 加载 3 个服务
 launchctl list | grep codex-rotate  # 应有 3 行
 ```
+
+**Windows**（v1.0.4 起）：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\install-windows.ps1
+schtasks /Query /TN "com.doushutangmu.codex-rotate.proxy"
+```
+
+> ⚠️ **Windows 上有两处刻意的语义差异**（平台限制，不是 bug）：
+> ① `autosync` 从「文件变化即触发」降级为**每分钟轮询** —— Task Scheduler 没有文件监视触发器，
+>    所以 `codex login` 后新号入池最慢延迟 1 分钟（macOS 上是秒级）。
+> ② 崩溃恢复靠 `RestartOnFailure`（**只认非零退出码**）+ 每 5 分钟补拉触发器，
+>    不是 launchd 那种「退出就立刻重启」。
+>
+> 卸载：`powershell -File scripts\install-windows.ps1 -Uninstall`
 
 | 服务 | 触发 | 作用 |
 |---|---|---|
 | `…proxy` | KeepAlive 常驻 | 轮换代理，听 `127.0.0.1:8011` |
 | `…autosync` | WatchPaths `~/.codex/auth.json` | `codex login` 新号秒级入池 |
 | `…quotad` | RunAtLoad + KeepAlive | 活动驱动读官方 usage API 刷额度（零消耗）+ 300s 全池扫描兜底 |
+
+两个平台注册的是**同一组服务**（名字、入口脚本、端口都一致），由 `tests/test_installers_agree.py` 守着 —— 只改一边会让某个平台**静默少一个常驻进程**，而症状是「额度不更新」这类看起来跟安装器无关的现象。
 
 脚本自解析仓库根并**校验 python3 是 OpenSSL 构建**，找不到就报错退出，不会静默装成坏的。
 

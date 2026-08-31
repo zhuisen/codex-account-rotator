@@ -48,3 +48,15 @@ jobs:
       - uses: actions/setup-python@v5
         with: { python-version: '3.12' }
       - run: python -m unittest tests.test_portalock -v
+
+      # ★ Windows 服务安装器的**语法**在 macOS 上根本验不了(本机没有 pwsh) ——
+      #   这里让 PowerShell 真解析一遍。只做语法解析,**不执行**:执行会真的往
+      #   任务计划程序里注册服务。
+      - name: PowerShell 语法检查 install-windows.ps1
+        shell: pwsh
+        run: |
+          $errs = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            "scripts/install-windows.ps1", [ref]$null, [ref]$errs) | Out-Null
+          if ($errs) { $errs | ForEach-Object { Write-Error $_ }; exit 1 }
+          Write-Host "OK: install-windows.ps1 语法通过"
