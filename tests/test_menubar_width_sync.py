@@ -32,7 +32,11 @@ class TestMenubarWidthSync(unittest.TestCase):
     def test_three_widths_agree(self):
         tsx = _one(TSX, r"^const PANEL_W = (\d+);", "PANEL_W")
         inner = _one(RS, r"\.inner_size\((\d+(?:\.\d+)?), \d+(?:\.\d+)?\)", "inner_size 宽度")
-        toggle = _one(RS, r"^\s*let panel_w = (\d+(?:\.\d+)?);", "toggle_menubar 的 panel_w")
+        # ★ 2026-08-31 起 toggle_menubar 里是 `352.0 * scale` —— `set_position` 收的是**物理**
+        #   像素,而 352 是**逻辑**宽,不乘 scale 在 Retina 上会偏半个面板宽(既有缺陷,当时一并修)。
+        #   闸守的仍是「三处逻辑宽必须一致」,所以只放宽表达式形状,不放宽数值。
+        toggle = _one(RS, r"^\s*let panel_w = (\d+(?:\.\d+)?)\s*\*\s*scale;",
+                      "toggle_menubar 的 panel_w(逻辑宽)")
         self.assertEqual(tsx, inner, "MenuBar.tsx 的 PANEL_W 与 lib.rs 的 inner_size 宽度不一致")
         self.assertEqual(tsx, toggle, "MenuBar.tsx 的 PANEL_W 与 toggle_menubar 的 panel_w 不一致")
 

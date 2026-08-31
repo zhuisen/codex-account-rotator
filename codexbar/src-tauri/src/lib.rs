@@ -18,6 +18,57 @@ use tauri::{
 /// `option_env!` 在编译时取到它。这样别人 clone 到任何目录、跑一次 deploy.sh 就能用。
 ///
 /// 运行期 env 仍然优先 —— 那条留给隔离测试(从终端起 app 时才有效)。
+/// 脚本目录 —— **只放代码,不放数据**。
+///
+/// 优先安装包里的资源:CI 构建出来的 .exe / .dmg 身边没有仓库,而 app 本质上是
+/// `codex-rotate` 与 `traffic/scan.py` 的壳。2026-08-31 用户实测:Windows 安装包
+/// 装完后每条命令都报 `can't open file '…\\traffic\\scan.py'` —— 因为 `store_dir()`
+/// 只能猜一个 `%USERPROFILE%\\Projects\\tools\\…`,而那里什么都没有。
+/// 回落到 `store_dir()` 是给「从仓库跑 deploy.sh」这条既有路径留的,行为不变。
+static SCRIPT_ROOT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+fn script_dir() -> String {
+    SCRIPT_ROOT.get().cloned().unwrap_or_else(store_dir)
+}
+
+/// 数据目录 —— `state.json` / `auth/` / 缓存 / 快照。
+///
+/// ★ **绝不能等于脚本目录**:脚本进了安装包之后,按 `__file__` 推出来的数据位置就会
+/// 落在 app 内部 —— macOS 上那里只读,Windows 上每次更新被整个替换。
+/// 优先级刻意让 macOS 现状**零变化**:`deploy.sh` 会把仓库路径烧进 `CODEXBAR_STORE_DEFAULT`,
+/// 所以老装法仍然指向仓库,已有的 state.json/auth 一个都不会"丢"。
+/// 只有两者都没有(= CI 构建的安装包)才回落到系统的 app 数据目录。
+static DATA_ROOT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+fn data_dir() -> String {
+    DATA_ROOT.get().cloned().unwrap_or_else(store_dir)
+}
+
+/// ★★ **所有子进程的唯一入口**。两件事只在这里做一次:
+///
+/// ① **Windows 上不带 `CREATE_NO_WINDOW`,每次 spawn 都会闪一个控制台窗口。**
+///    本 app 每 2 分钟扫一次流量、每次切号/刷新都起 python —— 用户看到的就是
+///    命令行窗口不停地闪。macOS 上没有这个概念,所以这个坑只在 Windows 显形,
+///    而开发机是 macOS ⇒ 只能靠"所有 spawn 都走这里"来保证不漏。
+/// ② **把数据目录用环境变量交给 python**。脚本本来按 `__file__` 推数据位置,
+///    脚本一旦被打进安装包,数据就会跟着写进 app 内部(macOS 只读、更新即抹掉)。
+///
+/// 新增任何子进程调用都必须走这里,别再直接 `Command::new`。
+fn spawn_cmd(program: &str) -> Command {
+    let mut c = Command::new(program);
+    c.env("CODEX_ROTATE_STORE", data_dir());
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        c.creation_flags(CREATE_NO_WINDOW);
+    }
+    c
+}
+
+/// python 子进程。等价于 `spawn_cmd(&python_bin())`,单独留个名字是因为调用点多。
+fn py_cmd() -> Command {
+    spawn_cmd(&python_bin())
+}
+
 fn store_dir() -> String {
     if let Ok(p) = std::env::var("CODEXBAR_STORE") {
         if !p.is_empty() {
@@ -78,8 +129,15 @@ fn python_bin() -> String {
         RESOLVED
             .get_or_init(|| {
                 for cand in ["py", "python3", "python"] {
-                    let ok = std::process::Command::new(cand)
-                        .arg("--version")
+                    // ★ 不能走 py_cmd():那会递归回 python_bin()。这里手动加同一个 flag ——
+                    //   探测发生在启动时且逐个候选试,不加就是开机连闪几个黑窗。
+                    let mut probe = std::process::Command::new(cand);
+                    probe.arg("--version");
+                    {
+                        use std::os::windows::process::CommandExt;
+                        probe.creation_flags(0x0800_0000);
+                    }
+                    let ok = probe
                         .output()
                         .map(|o| {
                             o.status.success()
@@ -111,20 +169,20 @@ fn quit_app(app: AppHandle) {
 
 #[tauri::command]
 fn read_state() -> Result<Value, String> {
-    let path = format!("{}/state.json", store_dir());
+    let path = format!("{}/state.json", data_dir());
     let data = fs::read_to_string(&path).map_err(|e| format!("read state: {}", e))?;
     serde_json::from_str(&data).map_err(|e| format!("parse state: {}", e))
 }
 
 #[tauri::command]
 async fn run_rotate(app: AppHandle, args: Vec<String>) -> Result<String, String> {
-    let store = store_dir();
+    let store = script_dir();
     if args.first().map_or(true, |c| !ALLOWED_CMDS.contains(&c.as_str())) {
         return Err(format!("disallowed command: {:?}", args.first()));
     }
     let rot = format!("{}/codex-rotate", store);
     let out = tauri::async_runtime::spawn_blocking(move || {
-        Command::new(python_bin()).arg(&rot).args(&args).output()
+        py_cmd().arg(&rot).args(&args).output()
     })
     .await
     .map_err(|e| format!("join: {}", e))?
@@ -233,9 +291,9 @@ const SCAN_COALESCE_SECS: u64 = 90;
 /// ★ 它**只产出报告,不改任何配置**。要不要把新发现接进来,得人去写解析器(见 discover.py 头部)。
 #[tauri::command]
 async fn run_discover() -> Result<String, String> {
-    let script = format!("{}/traffic/discover.py", store_dir());
+    let script = format!("{}/traffic/discover.py", script_dir());
     let out = tauri::async_runtime::spawn_blocking(move || {
-        Command::new(python_bin()).arg(&script).arg("--json").output()
+        py_cmd().arg(&script).arg("--json").output()
     })
     .await
     .map_err(|e| format!("join: {}", e))?
@@ -256,7 +314,7 @@ async fn run_traffic(app: AppHandle, args: Vec<String>) -> Result<String, String
     {
         return Err(format!("disallowed arg: {:?}", bad));
     }
-    let script = format!("{}/traffic/scan.py", store_dir());
+    let script = format!("{}/traffic/scan.py", script_dir());
     let forced = args.iter().any(|a| a == "--no-cache");
     let out = tauri::async_runtime::spawn_blocking(move || {
         // 串行化:第二个调用者在这里等第一个扫完
@@ -266,7 +324,7 @@ async fn run_traffic(app: AppHandle, args: Vec<String>) -> Result<String, String
                 return Ok(Err(fresh)); // Err 分支借用来表示"复用快照",不是错误
             }
         }
-        Command::new(python_bin())
+        py_cmd()
             .arg(&script)
             .args(&args)
             .output()
@@ -317,7 +375,7 @@ static GROK_LOCK: Mutex<()> = Mutex::new(());
 const GROK_COALESCE_SECS: u64 = 300;
 
 fn grok_snapshot_path() -> String {
-    format!("{}/{}", store_dir(), GROK_SNAPSHOT)
+    format!("{}/{}", data_dir(), GROK_SNAPSHOT)
 }
 
 /// sidecar 若比 `max_age_secs` 还新就返回它。`fetched_at` 成败都会写,所以过期判断对降级态同样成立。
@@ -368,7 +426,7 @@ fn read_grok_quota() -> Result<Option<String>, String> {
 /// grok 不在池里,发了就是噪音。
 #[tauri::command]
 async fn run_grok_quota() -> Result<String, String> {
-    let script = format!("{}/grok-quota", store_dir());
+    let script = format!("{}/grok-quota", script_dir());
     let prev = grok_snapshot_path();
     let out = tauri::async_runtime::spawn_blocking(move || {
         let _guard = GROK_LOCK.lock();
@@ -376,7 +434,7 @@ async fn run_grok_quota() -> Result<String, String> {
         if let Some(fresh) = fresh_grok(GROK_COALESCE_SECS) {
             return Ok(Err(fresh));
         }
-        Command::new(python_bin())
+        py_cmd()
             .arg(&script)
             .arg("--prev")   // 只读上一份,用来搬运 last_good(降级时保留陈旧读数)
             .arg(&prev)
@@ -420,7 +478,7 @@ fn fresh_snapshot(max_age_secs: u64) -> Option<String> {
 }
 
 fn snapshot_path() -> String {
-    format!("{}/{}", store_dir(), SNAPSHOT)
+    format!("{}/{}", data_dir(), SNAPSHOT)
 }
 
 /// 原子落盘:先写同目录临时文件再 `rename`。直接覆写会让并发的读者读到半截 JSON —— 主窗口在扫描、
@@ -457,9 +515,9 @@ fn read_traffic_snapshot() -> Result<Option<String>, String> {
 /// **只在用户点按钮时才跑**,没有任何定时器 —— 这是本 app 除探针外唯一会主动联网的动作。
 #[tauri::command]
 async fn check_update() -> Result<String, String> {
-    let store = store_dir();
+    let store = store_dir();   // ★ 第三种概念:git 要的是**仓库**,既不是脚本目录也不是数据目录
     let out = tauri::async_runtime::spawn_blocking(move || {
-        Command::new("git")
+        spawn_cmd("git")
             .args(["-C", &store, "ls-remote", "--tags", "--refs", "origin"])
             .output()
     })
@@ -498,7 +556,7 @@ fn read_auth_tokens() -> Result<Value, String> {
     let mut result = serde_json::Map::new();
     for (aid, slot) in slots {
         let file = slot["file"].as_str().unwrap_or("");
-        let path = format!("{}/auth/{}", store_dir(), file);
+        let path = format!("{}/auth/{}", data_dir(), file);
         if let Ok(data) = fs::read_to_string(&path) {
             if let Ok(auth) = serde_json::from_str::<Value>(&data) {
                 if let Some(tokens) = auth.get("tokens") {
@@ -562,7 +620,7 @@ fn b64_decode(input: &str) -> Result<Vec<u8>, String> {
 fn read_logs() -> Result<String, String> {
     let mut lines = Vec::new();
     for name in ["keepalive.log", "refreshquota.log", "proxy/proxy.log", "quotad.log"] {
-        let path = format!("{}/{}", store_dir(), name);
+        let path = format!("{}/{}", data_dir(), name);
         if let Ok(data) = fs::read_to_string(&path) {
             for line in data.lines().rev().take(100) {
                 if !line.trim().is_empty() {
@@ -582,7 +640,7 @@ fn read_account_detail(aid: String) -> Result<Value, String> {
     let state: Value = read_state()?;
     let slot = state["slots"].get(&aid).ok_or("account not found")?;
     let file = slot["file"].as_str().unwrap_or("");
-    let path = format!("{}/auth/{}", store_dir(), file);
+    let path = format!("{}/auth/{}", data_dir(), file);
     let data = fs::read_to_string(&path).map_err(|e| format!("read: {}", e))?;
     let auth: Value = serde_json::from_str(&data).map_err(|e| format!("parse: {}", e))?;
     let tokens = auth.get("tokens").cloned().unwrap_or(Value::Null);
@@ -738,7 +796,7 @@ fn set_tray_style(app: AppHandle, style: u8) {
 /// 小时),所以求和即今日总量 —— 省掉在 Rust 里做本地日期算术。本 crate 没有 chrono,手算
 /// localtime 在 DST / 半小时时区上很容易错,而那种错会静默算到别的日子上去。
 fn today_tokens() -> Option<u64> {
-    let path = format!("{}/.traffic-latest.json", store_dir());
+    let path = format!("{}/.traffic-latest.json", data_dir());
     let data = fs::read_to_string(&path).ok()?;
     let v: Value = serde_json::from_str(&data).ok()?;
     let mut sum = 0u64;
@@ -807,7 +865,7 @@ fn refresh_tray(app: &AppHandle) {
 static ACTIVE_REM: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(u32::MAX);
 
 fn format_tray_title() -> String {
-    let path = format!("{}/state.json", store_dir());
+    let path = format!("{}/state.json", data_dir());
     let Ok(data) = fs::read_to_string(&path) else {
         return "codex".into();
     };
@@ -921,6 +979,34 @@ fn format_tray_title() -> String {
 
 // ---- toggle menubar popover ----
 
+/// 弹窗落点的**纯算术**部分,抽出来是为了能在没有 Windows 机器的情况下测到它。
+///
+/// 全部是**物理**像素。`icon` = 托盘图标的 (x, y, w, h);`mon` = 图标所在屏的 (x, y, w, h)。
+///
+/// 两条判据:
+/// - **下方放不下且上方放得下 ⇒ 翻到图标上方**。不看平台看空间 —— macOS 菜单栏在顶部所以恒走下方,
+///   而 Windows 任务栏通常在底部,托盘在右下角,无条件向下 = 整个弹窗在屏幕外(用户 2026-08-31 实测
+///   报「什么都看不到」)。任务栏也可能在左/右/上,所以硬编码平台是错的。
+/// - **双轴钳位**:托盘贴着屏幕右缘是 Windows 的常态,居中会把面板推出屏外。
+fn place_popover(
+    icon: (f64, f64, f64, f64),
+    mon: (f64, f64, f64, f64),
+    panel_w: f64,
+    panel_h: f64,
+) -> (f64, f64) {
+    let (px, py, sw, sh) = icon;
+    let (mx, my, mw, mh) = mon;
+    let below = py + sh + 4.0;
+    let above = py - panel_h - 4.0;
+    let y = if below + panel_h > my + mh && above >= my { above } else { below };
+    // ★ 钳位顺序:先 `min`(不越出右/下缘)再 `max`(不越出左/上缘)。反过来的话,
+    //   **面板比屏幕还大**时 `min` 会算出负数,窗口被丢到屏幕外 —— 单测抓到的正是这个。
+    //   两者冲突时让左/上缘赢:宁可右/下被裁,也不能整个不可见。
+    let x = (px + sw / 2.0 - panel_w / 2.0).min(mx + mw - panel_w).max(mx);
+    let y = y.min(my + mh - panel_h).max(my);
+    (x, y)
+}
+
 fn toggle_menubar(app: &AppHandle, tray_rect: Option<tauri::Rect>) {
     if let Some(win) = app.get_webview_window("menubar") {
         if win.is_visible().unwrap_or(false) {
@@ -935,9 +1021,47 @@ fn toggle_menubar(app: &AppHandle, tray_rect: Option<tauri::Rect>) {
                     tauri::Size::Physical(s) => (s.width as f64, s.height as f64),
                     tauri::Size::Logical(s) => (s.width, s.height),
                 };
-                let panel_w = 352.0; // must match inner_size width（守卫见 tests/test_menubar_width_sync.py）
-                let x = px + sw / 2.0 - panel_w / 2.0;
-                let y = py + sh + 4.0;
+                // ★★ **托盘图标所在的那块屏**,不是主屏。多屏 / 混合 DPI 下用主屏会把弹窗
+                //    拽回主屏,用自身 scale 换算则在缩放不同的副屏上偏出去。
+                let mon = win
+                    .available_monitors()
+                    .ok()
+                    .and_then(|ms| {
+                        ms.into_iter().find(|m| {
+                            let mp = m.position();
+                            let sz = m.size();
+                            px >= mp.x as f64
+                                && px < mp.x as f64 + sz.width as f64
+                                && py >= mp.y as f64
+                                && py < mp.y as f64 + sz.height as f64
+                        })
+                    })
+                    .or_else(|| win.primary_monitor().ok().flatten());
+
+                // `panel_w`/窗口高度是**逻辑**像素,而 set_position 收的是**物理**像素 ——
+                // 不乘 scale 的话 Retina 上居中会偏半个面板宽(既有缺陷,顺手一并修)。
+                let scale = mon.as_ref().map(|m| m.scale_factor()).unwrap_or(1.0);
+                let panel_w = 352.0 * scale; // 逻辑宽守卫见 tests/test_menubar_width_sync.py
+                let panel_h = win
+                    .outer_size()
+                    .map(|s| s.height as f64)
+                    .unwrap_or(600.0 * scale);
+
+                let (mx, my, mw, mh) = match mon.as_ref() {
+                    Some(m) => {
+                        let mp = m.position();
+                        let sz = m.size();
+                        (mp.x as f64, mp.y as f64, sz.width as f64, sz.height as f64)
+                    }
+                    None => (0.0, 0.0, f64::MAX, f64::MAX),
+                };
+
+                // ★★ **不能无条件向下开**。macOS 菜单栏恒在顶部,所以"图标下方"一直是对的;
+                //    **Windows 任务栏通常在底部**,托盘在右下角 —— 往下开整个弹窗都在屏幕外,
+                //    用户报的就是"什么都看不到"。任务栏还可能在任意一边。
+                //    判据不看平台、看**放得下放不下**:下方溢出且上方放得下 ⇒ 翻到图标上方。
+                //    图标本身在任务栏里,所以"图标上方"天然避开了任务栏。
+                let (x, y) = place_popover((px, py, sw, sh), (mx, my, mw, mh), panel_w, panel_h);
                 let _ = win.set_position(PhysicalPosition::new(x as i32, y as i32));
             }
             let _ = win.show();
@@ -1108,6 +1232,32 @@ pub fn run() {
             None,
         ))
         .setup(|app| {
+            // ★★ 先把「脚本在哪」「数据在哪」定下来 —— 后面所有 python 调用都依赖它。
+            //    2026-08-31 Windows 实测:CI 构建的安装包身边没有仓库,`store_dir()` 只能猜一个
+            //    `%USERPROFILE%\Projects\tools\…`,于是每条命令都报 can't open file。
+            {
+                use tauri::Manager;
+                // ① 脚本:安装包里的 resources/scripts 优先
+                if let Ok(res) = app.path().resource_dir() {
+                    let cand = res.join("scripts");
+                    if cand.join("traffic").join("scan.py").is_file() {
+                        let _ = SCRIPT_ROOT.set(cand.to_string_lossy().to_string());
+                    }
+                }
+                // ② 数据:env > 构建期烧进去的仓库路径 > app 数据目录
+                //    前两条保证「从仓库跑 deploy.sh」这条既有路径**行为完全不变** ——
+                //    已有的 state.json / auth/ 仍在仓库里，不会因为这次改动而"消失"。
+                let data = std::env::var("CODEXBAR_STORE").ok().filter(|v| !v.is_empty())
+                    .or_else(|| option_env!("CODEXBAR_STORE_DEFAULT").map(|v| v.to_string())
+                                 .filter(|v| !v.is_empty()))
+                    .or_else(|| app.path().app_data_dir().ok()
+                                 .map(|d| d.to_string_lossy().to_string()));
+                if let Some(d) = data {
+                    let _ = fs::create_dir_all(&d);
+                    let _ = DATA_ROOT.set(d);
+                }
+            }
+
             // Hide from Dock — LSUIElement alone isn't reliable with Tauri.
             // ★ Both the method and the enum are #[cfg(macos)] in tauri 2.x, so an un-gated call
             //   is a hard compile error on Windows — not a no-op. `apply_activation_policy()`
@@ -1184,7 +1334,7 @@ pub fn run() {
             // ---- startup: refresh every account from the official usage API (GET, zero quota) ----
             // Safe to run on every launch/login again: refresh-all no longer sends a billed
             // POST /codex/responses — it reads GET /backend-api/codex/usage, which costs no quota.
-            let store_startup = store_dir();
+            let store_startup = script_dir();
             let handle_startup = handle.clone();
             tauri::async_runtime::spawn(async move {
                 tokio::time::sleep(Duration::from_secs(3)).await;
@@ -1194,8 +1344,8 @@ pub fn run() {
                     // expiry dates the banner needs. It self-limits — it only hits the rate-limited
                     // detail endpoint when an account actually holds cards and the 12h cache is
                     // stale — so running it on every launch costs nothing on a warm cache.
-                    let c = std::process::Command::new(python_bin()).arg(&rot).arg("refresh-all").output();
-                    let _ = std::process::Command::new(python_bin()).arg(&rot).arg("credits").output();
+                    let c = py_cmd().arg(&rot).arg("refresh-all").output();
+                    let _ = py_cmd().arg(&rot).arg("credits").output();
                     c
                 }).await;
                 let _ = handle_startup.emit("state-changed", ());
@@ -1212,7 +1362,7 @@ pub fn run() {
             // does not change).
             let handle_timer = handle.clone();
             tauri::async_runtime::spawn(async move {
-                let path = format!("{}/state.json", store_dir());
+                let path = format!("{}/state.json", data_dir());
                 let mut seen: Option<(std::time::SystemTime, u64)> = None;
                 let mut since_tick = 0u32;
                 loop {
@@ -1306,4 +1456,62 @@ pub fn run() {
                 }
             }
         });
+}
+
+
+#[cfg(test)]
+mod popover_tests {
+    use super::place_popover;
+
+    // macOS:菜单栏在顶部,图标 (100,0,24,24),屏 1440x900,面板 352x600
+    #[test]
+    fn macos_top_menubar_opens_below() {
+        let (x, y) = place_popover((100.0, 0.0, 24.0, 24.0), (0.0, 0.0, 1440.0, 900.0), 352.0, 600.0);
+        assert_eq!(y, 28.0, "顶部菜单栏应向下开");
+        // 图标在最左侧,居中会算出 -64 ⇒ 被钳到 0。这是对的:钳位优先于居中。
+        assert_eq!(x, 0.0, "越出左缘时应钳到屏幕内");
+    }
+
+    // 居中本身:图标在屏幕中部,不触发任何钳位
+    #[test]
+    fn centers_under_the_icon_when_no_clamping_applies() {
+        let (x, _) = place_popover((700.0, 0.0, 24.0, 24.0), (0.0, 0.0, 1440.0, 900.0), 352.0, 600.0);
+        assert_eq!(x, 700.0 + 12.0 - 176.0, "未触发钳位时应严格以图标中心居中");
+    }
+
+    // ★★ Windows:任务栏在底部,托盘图标在右下角。向下开会整个出屏 —— 必须翻到上方。
+    #[test]
+    fn windows_bottom_taskbar_flips_above() {
+        // 1920x1080 屏,图标在 (1850, 1050),任务栏高 ~30
+        let (_x, y) = place_popover((1850.0, 1050.0, 24.0, 24.0), (0.0, 0.0, 1920.0, 1080.0), 352.0, 600.0);
+        assert!(y < 1050.0, "底部任务栏时弹窗必须开在图标上方,实际 y={}", y);
+        assert!(y >= 0.0, "翻上去之后不能越出屏幕顶部,实际 y={}", y);
+        assert_eq!(y, 1050.0 - 600.0 - 4.0, "应紧贴图标上沿");
+    }
+
+    // ★ 托盘贴右缘:居中会把面板推出屏外,必须钳位
+    #[test]
+    fn right_edge_icon_is_clamped_into_screen() {
+        let (x, _y) = place_popover((1900.0, 1050.0, 16.0, 16.0), (0.0, 0.0, 1920.0, 1080.0), 352.0, 600.0);
+        assert!(x + 352.0 <= 1920.0, "面板右缘越出屏幕,x={}", x);
+        assert!(x >= 0.0);
+    }
+
+    // ★ 副屏:坐标不是从 0 开始,钳位必须按**该屏**的原点算,不能按 0
+    #[test]
+    fn secondary_monitor_uses_its_own_origin() {
+        // 副屏在主屏右侧,原点 (1920,0),尺寸 1920x1080
+        let (x, y) = place_popover(
+            (3800.0, 1050.0, 16.0, 16.0), (1920.0, 0.0, 1920.0, 1080.0), 352.0, 600.0);
+        assert!(x >= 1920.0, "被错误地拽回主屏,x={}", x);
+        assert!(x + 352.0 <= 3840.0, "越出副屏右缘,x={}", x);
+        assert!(y < 1050.0, "副屏底部同样要翻转");
+    }
+
+    // 上下都放不下时不能返回负数把窗口丢到屏外
+    #[test]
+    fn tiny_screen_still_stays_on_screen() {
+        let (x, y) = place_popover((10.0, 300.0, 16.0, 16.0), (0.0, 0.0, 400.0, 500.0), 352.0, 600.0);
+        assert!(x >= 0.0 && y >= 0.0, "极小屏下越出屏幕 x={} y={}", x, y);
+    }
 }

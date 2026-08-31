@@ -76,6 +76,62 @@
 
 ---
 
+### v1.0.2 — Windows 版根本跑不起来：三个 blocker 一起修 — 2026-08-31
+
+用户实测 Windows 安装包，三个问题，**都是我把审计标为 blocker 的项照发了**。
+
+**① 安装包里没有 Python 脚本 ⇒ 每条命令都失败**
+```
+python.exe: can't open file 'C:\Users\…\Projects\tools\codex-account-rotator\traffic\scan.py'
+```
+CodexBar 本质是 `codex-rotate` 与 `traffic/scan.py` 的**壳**，而 CI 构建的 .exe 身边没有仓库，
+`store_dir()` 只能猜一个 `%USERPROFILE%\Projects\tools\…`。
+修法不是改猜的路径，是**把脚本打进安装包**（`bundle.resources`），并把一个概念拆成两个：
+
+- `script_dir()` —— 代码，优先安装包里的 `resources/scripts`
+- `data_dir()` —— `state.json` / `auth/` / 缓存，**绝不能等于脚本目录**
+
+★ 拆分是必须的：脚本一旦进包，按 `__file__` 推出来的数据位置就落在 app 内部 ——
+macOS 上那里**只读**，Windows 上每次更新被**整个替换**。
+所以 Python 侧同步认 `CODEX_ROTATE_STORE`（不设时行为逐字不变，已双向实测）。
+优先级刻意让 macOS 现状零变化：`deploy.sh` 烧进的仓库路径仍然优先，已有的 state/auth 不会"消失"。
+
+**② 终端窗口不停闪**
+Windows 上 `Command::new` 每次 spawn 都会弹一个控制台窗口，而本 app 每 2 分钟扫一次流量。
+新增 `spawn_cmd()` 作为**所有子进程的唯一入口**，统一带 `CREATE_NO_WINDOW` ——
+做成单一入口是因为这个坑只在 Windows 显形，而开发机是 macOS，靠"每处记得加"必然漏。
+`python_bin()` 里的探测也单独加了（它不能走那个入口，会递归）。
+
+**③ 菜单栏弹窗开在屏幕外**
+`toggle_menubar` 原来无条件 `y = 图标下方`。macOS 菜单栏恒在顶部所以一直对；
+**Windows 任务栏通常在底部**，托盘在右下角 —— 往下开整个弹窗都在屏幕外，用户报「什么都看不到」。
+改法不看平台、看放不放得下：下方溢出且上方放得下 ⇒ 翻到图标上方（图标本身在任务栏里，
+所以"图标上方"天然避开任务栏）；另加**双轴钳位**（托盘贴右缘是 Windows 的常态）与
+**按图标所在屏**取 monitor（多屏/混合 DPI 下用主屏会把弹窗拽回主屏）。
+落点算术抽成纯函数 `place_popover()` + **6 条单测**，这样没有 Windows 机器也测得到。
+其中两条一上来就红：面板比屏幕高时钳位顺序算出负数把窗口丢到屏外（真 bug），以及我自己写错的断言。
+★ 顺带修一个既有缺陷：`panel_w` 是**逻辑**像素却直接用在**物理**坐标里，
+Retina 上居中一直偏半个面板宽。
+
+**④ Windows 用 macOS 的红黄绿灯**（用户同批报）
+窗口控制按钮的**位置属于「必须各平台原生」**那一类（OS 级肌肉记忆 + 无障碍），
+不能像标题栏配色那样统一。macOS 保持左上红黄绿，Windows 改为右上 `─ □ ✕`：
+无圆角、无间距、齐平右上角（Fitts 定律的角落优势）、46×整条标题栏高、
+hover **变亮**（与 macOS 反向）、关闭键 hover 走 Windows 的系统语义红 `#e81123`。
+判平台走 `navigator.userAgent` 而**不是新加 Tauri 命令** —— harness 打桩的是 IPC，
+每加一个命令就要补一个桩，漏补的症状是整页零渲染（那正好量出来是"零溢出零报错"的假阴性）。
+`?os=windows` 可强制，两版都已在 macOS 上渲染核对过。
+★ 顺带把**一直是死的绿灯**接上了缩放。
+
+**⑤ 菜单栏宽度闸抓到了我自己**：`panel_w` 表达式一变，`test_menubar_width_sync` 当场变红。
+只放宽了表达式形状、没放宽数值，变异验证仍变红。
+
+**测试**：171 条 Python + 6 条 Rust 单测（`place_popover`）。
+
+> ⚠️ **Windows 用户必须重装**：v1.0.0/v1.0.1 的安装包里没有脚本，装了也用不了。
+
+---
+
 ### v1.0.1 — 额度在 100%/64% 之间跳：修复早就发了，但从来没跑 — 2026-08-31
 
 用户报额度反复跳。**根因不是代码错，是修复没被加载。**

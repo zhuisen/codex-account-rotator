@@ -3,6 +3,7 @@ import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { isWindowsUI } from "./helpers";
 import { THEMES } from "./theme";
 import Ring from "./components/Ring";
 import Toast from "./components/Toast";
@@ -113,6 +114,8 @@ export default function App() {
 
   const t = THEMES[theme];
   const win = useMemo(() => getCurrentWindow(), []);
+  // 平台判定只影响窗口控制的位置与形状,不影响任何数据逻辑。
+  const winUI = useMemo(() => isWindowsUI(), []);
   const summary = `${counts.total} nodes · ${counts.live} 活 · ${counts.cool} 冷 · ${counts.dead} 死`;
 
   // ★ Dock 显示开关在 localStorage,Rust 侧读不到 —— 每次启动由主窗口 webview 应用一次,
@@ -191,9 +194,13 @@ export default function App() {
 
       {/* Title bar */}
       <div data-tauri-drag-region style={{ height: 38, flexShrink: 0, display: "flex", alignItems: "center", padding: "0 14px", gap: 8, borderBottom: `1px solid ${t.chromeBorder}`, background: t.chromeBg, position: "relative", transition: "background-color .35s ease" }}>
-        <span onClick={() => { invoke("set_main_visible", { show: false }).catch(() => {}); }} style={{ width: 12, height: 12, borderRadius: "50%", background: "#ff5f57", cursor: "pointer" }} title="隐藏" />
-        <span onClick={() => win.minimize()} style={{ width: 12, height: 12, borderRadius: "50%", background: "#febc2e", cursor: "pointer" }} title="最小化" />
-        <span style={{ width: 12, height: 12, borderRadius: "50%", background: "#28c840" }} />
+        {/* ★ 窗口控制:macOS 左上红黄绿 / Windows 右上 ─ □ ✕(见下方 winCtl)。
+            位置是 OS 级肌肉记忆,属于「必须各平台原生」那一类,不能统一。 */}
+        {!winUI && <>
+          <span onClick={() => { invoke("set_main_visible", { show: false }).catch(() => {}); }} style={{ width: 12, height: 12, borderRadius: "50%", background: "#ff5f57", cursor: "pointer" }} title="隐藏" />
+          <span onClick={() => win.minimize()} style={{ width: 12, height: 12, borderRadius: "50%", background: "#febc2e", cursor: "pointer" }} title="最小化" />
+          <span onClick={() => { win.toggleMaximize().catch(() => {}); }} style={{ width: 12, height: 12, borderRadius: "50%", background: "#28c840", cursor: "pointer" }} title="缩放" />
+        </>}
         <span data-tauri-drag-region style={{ position: "absolute", left: 0, right: 0, textAlign: "center", fontSize: 12.5, fontWeight: 600, letterSpacing: ".02em", color: t.titleText, pointerEvents: "none" }}>CodexBar</span>
         <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 10 }}>
           <span onClick={togglePrivacy} title={privacy ? "打码中 — 邮箱与 account_id 已遮蔽,可安全截图。点击恢复" : "打码:遮蔽邮箱与 account_id,方便截图分享"}
@@ -206,6 +213,35 @@ export default function App() {
             <span onClick={() => setTheme("dark")} style={{ display: "grid", placeItems: "center", width: 24, height: 20, borderRadius: 6, cursor: "pointer", color: t.moonColor, background: t.moonBg, transition: "background .25s, color .25s" }}><IconMoon /></span>
           </div>
           <span style={{ fontSize: 11, color: t.muted, fontFamily: "'JetBrains Mono'" }}>{ver ? `v${ver}` : ""}</span>
+          {/* ★ Windows 窗口控制:右上 ─ □ ✕。按 Windows 规范做,不是把红绿灯挪个位置 ——
+              ① 无圆角、无间距、**齐平右上角**(贴边是 Fitts 定律的角落优势,Windows 用户靠它盲点);
+              ② 每格 46×整条标题栏高,不是 24×20 的小图标;
+              ③ hover **变亮**(Windows 与 macOS 反向),关闭键 hover 变 #e81123 红底白字;
+              ④ 必须比上面那些工具图标更靠右,否则用户会点到主题切换。
+              关闭走 `set_main_visible(false)` 而不是真退出:本 app 常驻托盘,
+              真退出的入口在设置页(与 macOS 一致)。 */}
+          {winUI && (
+            <div style={{ display: "flex", alignSelf: "stretch", marginRight: -14, marginLeft: 6 }}>
+              {([
+                ["─", "最小化", () => { win.minimize().catch(() => {}); }, false],
+                ["□", "最大化 / 还原", () => { win.toggleMaximize().catch(() => {}); }, false],
+                ["✕", "隐藏到托盘", () => { invoke("set_main_visible", { show: false }).catch(() => {}); }, true],
+              ] as [string, string, () => void, boolean][]).map(([glyph, label, onClick, danger]) => (
+                <span key={label} title={label} onClick={onClick}
+                      onMouseEnter={(e) => {
+                        e.currentTarget.style.background = danger ? "#e81123" : t.chromeHoverBg;
+                        e.currentTarget.style.color = danger ? "#fff" : t.text;
+                      }}
+                      onMouseLeave={(e) => {
+                        e.currentTarget.style.background = "transparent";
+                        e.currentTarget.style.color = t.muted;
+                      }}
+                      style={{ display: "grid", placeItems: "center", width: 46, alignSelf: "stretch",
+                               fontSize: 12, cursor: "pointer", color: t.muted, userSelect: "none",
+                               transition: "background .15s, color .15s" }}>{glyph}</span>
+              ))}
+            </div>
+          )}
         </div>
       </div>
 

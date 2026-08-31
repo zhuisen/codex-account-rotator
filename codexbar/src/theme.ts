@@ -67,6 +67,9 @@ export const THEMES = {
     isDark:true,
     appBg:"#0e1117", deskBg:"radial-gradient(130% 120% at 50% -10%, #151c26 0%, #080a0e 65%)",
     chromeBg:"#0c1015", chromeBorder:"rgba(255,255,255,.07)", titleText:"#cfd6df",
+    // 标题栏内控件的 hover 底色。深色抬白、浅色压黑(设计规范:hover 在 Windows 上"变亮")。
+    // Windows 的 ─ □ ✕ 用它;关闭键例外,hover 走固定的 #e81123(那是 Windows 的系统语义色)。
+    chromeHoverBg:"rgba(255,255,255,.08)",
     railBg:"#0a0e12", railBorder:"rgba(255,255,255,.06)",
     text:"#eef2f7", text2:"#aab3c0", muted:"#798390",
     heroBg:"#131c20", heroBorder:"rgba(45,212,191,.25)", heroShadow:"none",
@@ -85,6 +88,7 @@ export const THEMES = {
     isDark:false,
     appBg:"#eef1f5", deskBg:"radial-gradient(130% 120% at 50% -10%, #f4f7fb 0%, #dbe1e9 100%)",
     chromeBg:"#f7f9fb", chromeBorder:"rgba(0,0,0,.1)", titleText:"#39414b",
+    chromeHoverBg:"rgba(0,0,0,.06)",
     railBg:"#e7ebf0", railBorder:"rgba(0,0,0,.06)",
     text:"#161b22", text2:"#4d5663", muted:"#606b77",
     heroBg:"#ffffff", heroBorder:"rgba(14,159,142,.3)", heroShadow:"0 1px 3px rgba(0,0,0,.05)",

@@ -55,9 +55,14 @@ KIMI_ROOT = Path(os.environ.get("KIMI_HOME") or (HOME / ".kimi-code")) / "sessio
 #   结构化 token 字段零命中;云端 cloudcode-pa 的 retrieveUserQuota 只回剩余请求数、不回 token)。
 #   这个目录里的账本是 `bin/agy` wrapper 从 `--output-format json` 的 stdout 抄下来的,
 #   **不是 agy 的原生产物** —— 所以只覆盖 print 模式,交互式会话永远不在里面。
+# ★ 同 codex-rotate:脚本可能被打进桌面应用的安装包,而数据必须落到真正的数据目录
+# (app 内部在 macOS 只读、在 Windows 每次更新被替换)。不设时行为与从前完全一致。
+_STORE = Path(os.environ.get("CODEX_ROTATE_STORE")
+              or Path(__file__).resolve().parent.parent)
+
 AGY_ROOT = Path(os.environ.get("AGY_LEDGER_DIR")
-                or (Path(__file__).resolve().parent / "agy-ledger"))
-CACHE = Path(__file__).resolve().parent.parent / ".traffic-cache.json"
+                or (_STORE / "traffic" / "agy-ledger"))
+CACHE = _STORE / ".traffic-cache.json"
 
 CACHE_V = 1
 # ★ 改任何 _scan_* 的解析逻辑(改变 rows 里存什么/怎么算)必须 +1,否则那些此生不再变 mtime 的文件

@@ -41,7 +41,11 @@ from pathlib import Path
 CODEX_HOME = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
 LIVE = CODEX_HOME / "auth.json"
 SESSIONS = CODEX_HOME / "sessions"
-STORE = Path(__file__).resolve().parent
+# ★★ 数据目录(state.json / auth/)**可以与脚本位置分离**。
+# 脚本被打进桌面应用的安装包之后,`__file__` 指向 app 内部 —— macOS 上那里只读,
+# Windows 上每次更新被整个替换。CodexBar 通过 `CODEX_ROTATE_STORE` 把真正的数据目录传进来。
+# 不设时行为与从前完全一致(= 脚本所在目录),所以从仓库直接跑 CLI 不受影响。
+STORE = Path(os.environ.get("CODEX_ROTATE_STORE") or Path(__file__).resolve().parent)
 AUTH_DIR = STORE / "auth"
 STATE = STORE / "state.json"
 OAUTH_TOKEN_URL = "https://auth.openai.com/oauth/token"

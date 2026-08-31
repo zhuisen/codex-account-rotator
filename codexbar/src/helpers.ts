@@ -383,3 +383,26 @@ export function recommended(accounts: Account[]): Account | null {
   const avail = accounts.filter(a => a.status === "live" || a.status === "low");
   return avail.sort((x, y) => y.tightest - x.tightest || x.node.localeCompare(y.node))[0] ?? null;
 }
+
+/**
+ * 是否用 **Windows 版窗口控制**（右上 ─ □ ✕），而不是 macOS 的左上红黄绿。
+ *
+ * ★ 窗口控制按钮的**位置属于「必须各平台原生」**那一类（OS 级肌肉记忆 + 无障碍）——
+ *   与"可以统一品牌"的标题栏配色不同，这个不能一刀切。用户 2026-08-31 实测 Windows 版
+ *   顶着一排 macOS 红绿灯，报「要右上角缩小放大删除」。
+ *
+ * ★ 判据走 `navigator.userAgent` 而**不是新加一个 Tauri 命令**：harness 打桩的是 IPC，
+ *   每加一个命令就要同步补一个桩，而漏补的症状是**整页零渲染** —— 那正好量出来是
+ *   「零溢出、零报错」，是个假阴性（本仓库 2026-08-11 连中两次）。
+ *
+ * `?os=windows|macos` 可强制，供 harness 在 macOS 上渲染 Windows 版式做像素核对。
+ */
+export function isWindowsUI(): boolean {
+  try {
+    const forced = new URLSearchParams(location.search).get("os");
+    if (forced) return forced === "windows";
+    return /Windows NT/i.test(navigator.userAgent);
+  } catch {
+    return false;   // 判定不了就按 macOS ——本机就是 macOS，保持既有行为
+  }
+}
