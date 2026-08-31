@@ -406,6 +406,10 @@ function PlatformSection({ t }: { t: Theme }) {
 function DiscoverPanel({ t }: { t: Theme }) {
   type Cand = {
     root: string; known: boolean; files: number; records: number;
+    /** 对应的已注册源 key;新发现的为 null。 */
+    key: string | null;
+    /** ★ 「已注册」≠「在扫」:被 sources.local.json 停用的源仍报 known,但一条都不解析。 */
+    enabled: boolean | null;
     verdict: string; state: "ok" | "ambiguous" | "reject" | "unknown";
     models: { model: string; total: number }[];
   };
@@ -422,6 +426,16 @@ function DiscoverPanel({ t }: { t: Theme }) {
       setErr(String(e).slice(0, 200));
     } finally {
       setBusy(false);
+    }
+  };
+
+  /** 启用一个**已注册但被停用**的源,然后重扫报告让状态跟上。 */
+  const enable = async (key: string) => {
+    try {
+      await invoke("set_scan_source", { key, on: true });
+      await run();
+    } catch (e: unknown) {
+      setErr(String(e).slice(0, 200));
     }
   };
 
@@ -443,7 +457,9 @@ function DiscoverPanel({ t }: { t: Theme }) {
         </span>
         <span style={{ fontSize: 10, color: t.muted, lineHeight: 1.5 }}>
           找本机还有哪些 AI 把用量落了盘，并<b>实测</b>它的口径（哪些字段加起来等于 total ⇒ 缓存要不要减）。
-          只出报告，不会自动启用。
+          <b>已注册但被停用</b>的源可一键启用；<b>新发现</b>的不能——实测只证明了<b>算术</b>
+          （哪些字段之和等于 total），没证明<b>语义</b>（某字段是输入还是输出、算不算缓存读），
+          而四类 token 单价不同，归错类会静默算出错的费用。把下面的结果发给我，我来写解析器。
         </span>
       </div>
 
@@ -460,16 +476,29 @@ function DiscoverPanel({ t }: { t: Theme }) {
                                        background: t.isDark ? "#0e1319" : t.cardBg,
                                        border: `1px solid ${t.cardBorder}` }}>
               <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                {/* ★ 三档,不是两档:「已注册」与「在扫」是两件事 —— 被停用的源有解析器却一条都不解析,
+                    两档写法会让它显示「已注册」而用户以为数据已经在图里了。 */}
                 <span style={{ fontSize: 8.5, fontWeight: 700, padding: "2px 6px", borderRadius: 5,
-                               color: c.known ? t.muted : t.accentText,
-                               background: c.known ? t.ghostBg : t.accent }}>
-                  {c.known ? "已注册" : "新发现"}
+                               color: !c.known ? t.accentText : c.enabled === false ? "#fff" : t.muted,
+                               background: !c.known ? t.accent : c.enabled === false ? "#E0901C" : t.ghostBg }}>
+                  {!c.known ? "新发现" : c.enabled === false ? "已停用" : "已注册"}
                 </span>
                 <span style={{ fontSize: 11.5, fontFamily: "'JetBrains Mono'", color: t.text }}>{c.root}</span>
                 <span style={{ marginLeft: "auto", fontSize: 9.5, color: t.muted,
                                fontFamily: "'JetBrains Mono'" }}>
                   {c.files} 文件 · {c.records} 条
                 </span>
+                {/* ★ 只有「已注册但被停用」能一键启用 —— 它已经有手写解析器,启用只是把它从
+                    disabled 列表里拿掉。新发现的**不给按钮**:见下方说明,那不是懒,是不能。 */}
+                {c.known && c.enabled === false && c.key && (
+                  <span onClick={() => { void enable(c.key!); }}
+                        title="把它从扫描层的停用列表里移除,下次扫描即纳入"
+                        style={{ fontSize: 9.5, fontWeight: 700, padding: "3px 9px", borderRadius: 6,
+                                 color: t.accentText, background: t.accent, cursor: "pointer",
+                                 userSelect: "none", whiteSpace: "nowrap" }}>
+                    启用
+                  </span>
+                )}
               </div>
               <div style={{ fontSize: 10, color: COLOR[c.state], marginTop: 4, lineHeight: 1.5 }}>
                 {c.verdict}

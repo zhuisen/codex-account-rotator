@@ -55,6 +55,13 @@ fn data_dir() -> String {
 fn spawn_cmd(program: &str) -> Command {
     let mut c = Command::new(program);
     c.env("CODEX_ROTATE_STORE", data_dir());
+    // ★★ **Windows 上 Python 的 stdout 默认是本地代码页(简体中文机器 = cp936)**,
+    //    而这边一律 `String::from_utf8_lossy` 解 —— 所有中文输出(discover 的口径判定、
+    //    `codex-rotate list/health` 的文案)都会变成一堆替换字符。用户 2026-08-31 实测报「字体乱码」。
+    //    两个变量都设:`PYTHONUTF8` 开 UTF-8 模式(3.7+),`PYTHONIOENCODING` 兜底老解释器。
+    //    macOS 上本来就是 UTF-8,设了无变化。
+    c.env("PYTHONUTF8", "1");
+    c.env("PYTHONIOENCODING", "utf-8");
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
@@ -289,6 +296,45 @@ const SCAN_COALESCE_SECS: u64 = 90;
 /// 它只读本机文件、不联网、不碰凭证 —— 和 `traffic/scan.py` 同一条安全线。
 ///
 /// ★ 它**只产出报告,不改任何配置**。要不要把新发现接进来,得人去写解析器(见 discover.py 头部)。
+/// 启用/停用**扫描层**的一个数据源(写 `<data_dir>/traffic/sources.local.json` 的 `disabled`)。
+///
+/// ★ 与设置页那排平台开关**不是一回事**,别混:
+///   - 那排开关是**展示层**(localStorage),数据仍在缓存里,关掉再开不用重扫;
+///   - 这里是**扫描层**,被停用的源压根不解析 —— 所以「扫描新数据源」报告里
+///     一个源可能显示「已注册」却根本没在扫,而用户无从分辨。这个命令就是给那一档用的。
+///
+/// 只接受**已注册**的 key(前端只对 `known && enabled === false` 的条目给按钮);
+/// 新发现的源不在此列 —— 那需要一个手写解析器,理由见 DiscoverPanel 的注释。
+#[tauri::command]
+fn set_scan_source(key: String, on: bool) -> Result<(), String> {
+    if key.is_empty() || !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+        return Err(format!("bad key: {:?}", key));
+    }
+    let dir = format!("{}/traffic", data_dir());
+    fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {}", e))?;
+    let path = format!("{}/sources.local.json", dir);
+    let mut cfg: serde_json::Value = fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    let mut disabled: Vec<String> = cfg
+        .get("disabled")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    disabled.retain(|k| k != &key);
+    if !on {
+        disabled.push(key);
+    }
+    cfg["disabled"] = serde_json::json!(disabled);
+    // 原子写:扫描器随时可能在读这份配置,直接覆写会让它读到半截 JSON。
+    let tmp = format!("{}.tmp{}", path, std::process::id());
+    fs::write(&tmp, serde_json::to_string_pretty(&cfg).unwrap_or_default())
+        .map_err(|e| format!("write: {}", e))?;
+    fs::rename(&tmp, &path).map_err(|e| format!("rename: {}", e))?;
+    Ok(())
+}
+
 #[tauri::command]
 async fn run_discover() -> Result<String, String> {
     let script = format!("{}/traffic/discover.py", script_dir());
@@ -1430,8 +1476,8 @@ pub fn run() {
             read_auth_tokens,
             read_logs,
             read_account_detail,
-            quit_app
-        ])
+            quit_app,
+            set_scan_source])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app, event| {

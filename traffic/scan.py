@@ -896,7 +896,9 @@ SOURCES = (
 
 SRC_META = {s["key"]: {"name": s["name"], "color": s["color"]} for s in SOURCES}
 
-LOCAL_CFG = Path(__file__).resolve().parent / "sources.local.json"
+# ★ 与 CACHE 同理:脚本会被打进安装包,而这份配置是**用户改的**(设置页停用/启用),
+# 必须落到数据目录 —— 写进 app 内部的话 Windows 每次更新被抹掉、macOS 上根本写不进去。
+LOCAL_CFG = _STORE / "traffic" / "sources.local.json"
 
 
 def _enabled_sources(only=None, exclude=None):

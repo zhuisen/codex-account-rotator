@@ -38,10 +38,16 @@ MAX_BYTES = 2_000_000    # 每个文件最多读尾部这么多
 MIN_RECORDS = 20         # 少于这么多条不下结论
 
 # 已注册的根目录 —— 报告里标"已注册",免得把自己已经在扫的东西当成新发现。
+# ★ 光有 KNOWN 不够:一个源可能**已注册却被停用**,那它报「已注册」而实际根本没在扫,
+#   用户没有第二个办法分辨。所以再带上 key 与 enabled —— 「已停用」正是唯一能安全自动启用的那类。
+KNOWN_BY_ROOT = {}          # root -> key
+ENABLED_KEYS = set()
 try:
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-    from scan import SOURCES                                   # noqa: E402
-    KNOWN = {str(s["root"]) for s in SOURCES}
+    from scan import SOURCES, _enabled_sources                 # noqa: E402
+    KNOWN_BY_ROOT = {str(s["root"]): s["key"] for s in SOURCES}
+    ENABLED_KEYS = {s["key"] for s in _enabled_sources()}
+    KNOWN = set(KNOWN_BY_ROOT)
 except Exception:                                              # 独立运行也要能用
     KNOWN = set()
 
@@ -128,6 +134,18 @@ def _harvest(o, out, models, depth=0, model=None):
     elif isinstance(o, list):
         for v in o[:200]:
             _harvest(v, out, models, depth + 1, model)
+
+
+def _reg_state(shown):
+    """这个根对应哪个已注册的源、它此刻**是否真的在扫**。
+
+    ★ 「已注册」与「在扫」是两件事:`sources.local.json` 的 `disabled` 会让一个有解析器的源
+      整个不被解析,而报告只说「已注册」——用户会以为它的数据已经在图里了。
+    """
+    for root, key in KNOWN_BY_ROOT.items():
+        if root == shown or root.startswith(shown + "/") or shown.startswith(root + "/"):
+            return {"key": key, "enabled": key in ENABLED_KEYS}
+    return {"key": None, "enabled": None}
 
 
 def classify(recs):
@@ -287,6 +305,7 @@ def probe(root):
             # 所以要双向判包含 —— 只写一个方向会把已注册的全标成"新发现"。
             "known": any(k == str(shown) or k.startswith(str(shown) + "/")
                          or str(shown).startswith(k + "/") for k in KNOWN),
+            **_reg_state(str(shown)),
             "files": total_files, "records": len(recs), "verdict": verdict, "state": state,
             "models": [{"model": m, "total": v} for m, v in models.most_common(10)]}
 
@@ -309,7 +328,9 @@ def main():
         return
     print(f"\n扫了 {len(roots)} 个候选根目录,{len(hits)} 个含 token 用量记录\n")
     for h in hits:
-        print(f"  [{'已注册' if h['known'] else '★ 新发现'}] {h['root']}  "
+        tag = ("★ 新发现" if not h["known"]
+               else "已注册" if h.get("enabled") else "已注册·**已停用**")
+        print(f"  [{tag}] {h['root']}  "
               f"({h['files']} 个文件 · {h['records']} 条 usage)")
         print(f"      口径: {h['verdict']}")
         if h["models"]:
