@@ -1871,6 +1871,87 @@ def _agy_wrap_gate_inner():
                       '      export PATH="$HOME/Projects/tools/codex-account-rotator/bin:$PATH"']}
 
 
+def _proc_start_epoch(pid):
+    """进程启动时刻(epoch)。用 `etime` 而不是 `lstart` —— 后者是本地化的日期串,
+    解析随 locale 变化;`etime` 是 `[[DD-]HH:]MM:SS` 的纯数字,稳定。"""
+    try:
+        out = subprocess.run(["ps", "-o", "etime=", "-p", str(pid)],
+                             capture_output=True, text=True, timeout=5).stdout.strip()
+    except Exception:
+        return None
+    if not out:
+        return None
+    days, _, rest = out.rpartition("-")
+    parts = [int(x) for x in rest.split(":")]
+    while len(parts) < 3:
+        parts.insert(0, 0)
+    secs = parts[0] * 3600 + parts[1] * 60 + parts[2] + (int(days) * 86400 if days else 0)
+    return time.time() - secs
+
+
+# 每个常驻服务**实际会加载的源文件**。quotad 用 SourceFileLoader 把 codex-rotate 整个载进内存,
+# 所以改 codex-rotate 也必须重启 quotad —— 这一条正是 2026-08-31 那次事故的成因。
+DAEMON_SOURCES = {
+    "proxy":  ["proxy/proxy.py", "portalock.py"],
+    "quotad": ["daemon/quota_daemon.py", "codex-rotate", "portalock.py"],
+}
+
+
+def stale_daemon_gate():
+    """★★ **常驻进程是不是还在跑旧代码**。-> {level, detail, lines}
+
+    2026-08-31 事故:`limit_id` 白名单(v0.12.9)与「非 2xx 不替换」(v0.12.10)两个修复,
+    在这台机器上**从来没生效过** —— 代码改了、测试绿了、发版了、打了 tag、部署了 app,
+    唯独 launchd 里的 quotad 从 08-27 就在跑,`SourceFileLoader` 早把旧的 codex-rotate
+    载进内存了。用户看到额度在 100%/64% 之间跳了三天,而**没有任何检查会为此变红**。
+
+    这就是全局规则里那条:**写了规则却没有闸,规则就会被违反,包括被写规则的人违反。**
+    第二次抓到同一类问题,交付物必须是一个会变红的检查,而不是又一条散文。
+
+    三态,与 `proxy_env_gate` 同构:
+      ok       —— 每个服务的进程都比它加载的源文件新
+      warn     —— 有服务在跑旧代码(或压根没在跑),给出确切的 kickstart 命令
+      unknown  —— 拿不到 PID 或算不出启动时刻。**不能算 ok** ——
+                  「查不到」和「确实是新的」返回同一个值,正是本仓库的头号铁律禁止的事。
+    """
+    stale, unknown = [], []
+    for svc, srcs in DAEMON_SOURCES.items():
+        script = "proxy/proxy.py" if svc == "proxy" else "daemon/quota_daemon.py"
+        try:
+            out = subprocess.run(["pgrep", "-f", str(STORE / script)],
+                                 capture_output=True, text=True, timeout=5).stdout.split()
+        except Exception:
+            unknown.append((svc, "pgrep 失败"))
+            continue
+        if not out:
+            stale.append((svc, "**没有在跑**"))
+            continue
+        started = _proc_start_epoch(out[0])
+        if started is None:
+            unknown.append((svc, "算不出启动时刻"))
+            continue
+        newest, newest_f = 0.0, None
+        for f in srcs:
+            fp = STORE / f
+            if fp.exists() and fp.stat().st_mtime > newest:
+                newest, newest_f = fp.stat().st_mtime, f
+        if newest and started < newest:
+            age = (newest - started) / 3600
+            stale.append((svc, "跑的是 %.1fh 前的代码(%s 已更新)" % (age, newest_f)))
+
+    if stale:
+        lines = ["⚠️  常驻服务在跑**旧代码** —— 已发布的修复在本机不会生效:"]
+        for svc, why in stale:
+            lines.append("      %-7s %s" % (svc, why))
+        lines.append("    修:  launchctl kickstart -k gui/$(id -u)/com.doushutangmu.codex-rotate.{proxy,quotad}")
+        return {"level": "warn", "detail": "stale", "lines": lines}
+    if unknown:
+        return {"level": "unknown", "detail": "undetermined",
+                "lines": ["?  服务代码新鲜度判定不了:" +
+                          ", ".join("%s(%s)" % (s, w) for s, w in unknown)]}
+    return {"level": "ok", "detail": "fresh", "lines": ["常驻服务代码 ✓ 均为最新"]}
+
+
 def proxy_env_gate():
     """★ 系统代理会不会黑洞掉发往本机代理的请求。-> {level, detail, lines}
 
@@ -1943,6 +2024,12 @@ def cmd_health(args):
     #   告警印在**最前面**（眼睛先落的地方）；正常时只在最后印一行，不挤占账号列表。
     gate = proxy_env_gate()
     agate = agy_wrap_gate()
+    dgate = stale_daemon_gate()
+    # ★ 旧代码那条排在最前面:它一响,下面所有额度数字都可能是旧逻辑算出来的,
+    #   先看到它才不会照着一个假数字去排查别的东西。
+    if dgate["level"] != "ok":
+        for _l in dgate["lines"]:
+            print(_l)
     if gate["level"] != "ok":
         for _l in gate["lines"]:
             print(_l)
@@ -1960,6 +2047,9 @@ def cmd_health(args):
                 print(_l)
         if agate["level"] == "ok":
             for _l in agate["lines"]:
+                print(_l)
+        if dgate["level"] == "ok":
+            for _l in dgate["lines"]:
                 print(_l)
         return
     online = "--local" not in args
@@ -2000,6 +2090,9 @@ def cmd_health(args):
             print(_l)
     if agate["level"] == "ok":
         for _l in agate["lines"]:
+            print(_l)
+    if dgate["level"] == "ok":
+        for _l in dgate["lines"]:
             print(_l)
 
 

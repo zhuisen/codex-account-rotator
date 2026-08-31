@@ -76,6 +76,44 @@
 
 ---
 
+### v1.0.1 — 额度在 100%/64% 之间跳：修复早就发了，但从来没跑 — 2026-08-31
+
+用户报额度反复跳。**根因不是代码错，是修复没被加载。**
+
+| 进程 | 启动 | 它缺的修复 |
+|---|---|---|
+| `quotad` | 08-27 09:30 | `limit_id` 白名单 `fb9659a` @ 08-28 16:45 |
+| `proxy` | 08-28 17:42 | 非 2xx 不替换 `9c5504a` @ 08-28 **17:44**（早 2 分钟） |
+
+`quota_daemon.py` 用 `SourceFileLoader` 在**启动时**把整个 `codex-rotate` 载进内存 ——
+改 `codex-rotate` 而不重启 quotad 等于什么都没改。而发版流程只部署 app bundle，**从不碰守护进程**。
+
+**决定性对照实验**：拿当时正在写的 rollout 分别喂给两版 `_find_rl` ——
+旧版取到 `codex_bengalfox`（模型专属，恒 `used_percent=0.0`）⇒ 画 100%；新版返回 `None` ⇒ 保留真实快照。
+同一条 rollout 里 `codex` 出现 **1057** 次、`codex_bengalfox` **240** 次，旧代码取哪个纯看遍历顺序 ——
+所以它表现为**毫无征兆地跳**，而不是随用量渐变。另一半是 quotad 每 300s 的 usage-api 扫描把真值写回来：
+100%（rollout）↔ 64%（usage-api），正是用户看到的那两个数。
+
+**修**：`kickstart` 两个服务。**但真正的交付物是闸** ——
+
+- 新增 `stale_daemon_gate()`（接在 `codex-rotate health`）：比对**进程启动时刻 vs 它加载的每个源文件 mtime**。
+  三态 ok / warn / unknown，warn 直接印出 kickstart 命令，且**排在所有输出最前面** ——
+  它一响，下面所有额度数字都可能是旧逻辑算出来的。
+- `DAEMON_SOURCES` 显式登记每个服务**实际会加载**的文件，`quotad` 那条**必须含 `codex-rotate`** ——
+  这正是本次事故的形态：改的是它，而 `quota_daemon.py` 一个字没动。
+- `unknown` 绝不并进 `ok`：拿不到进程信息时，闸恰好会在最该说话的时候闭嘴。
+- 闸在 `tests/test_stale_daemon_gate.py`（6 条）。4 次变异全部变红，含「清单里拿掉 codex-rotate」
+  与「unknown 合并成 ok」这两个正是要防的形态。三态另有真机实测：改完源文件 → warn；
+  `bootout quotad` → warn(没在跑)；重启后 → ok。
+
+★ 这条属于全局那条铁律的又一例：**写了规则却没有闸，规则就会被违反，包括被写规则的人违反。**
+`CLAUDE.md` §2 早就写着「改了 proxy.py/quota_daemon.py 必须 kickstart」，
+而它既漏掉了 `codex-rotate`，也从来没有任何东西去检查它有没有被执行。
+
+**测试**：165 → **171 条**。
+
+---
+
 ### v1.0.0 — 首个公开发布：开源、Windows 支持 — 2026-08-31
 
 **开源**
