@@ -1,6 +1,8 @@
 import { useState, useEffect } from "react";
 import { STATUS_COLORS, STATUS_TEXT, CARD_TYPE as Z, type Theme } from "../theme";
-import { type Account, fmtCd, maskId, winBarColor, winNumColor } from "../helpers";
+import StaleMark from "./StaleMark";
+import { type Account, fmtCd, fmtAgeSec, maskId, winBarColor, winNumColor,
+         QUOTA_STALE_SEC } from "../helpers";
 import Ring from "./Ring";
 import PlanBadge from "./PlanBadge";
 import CardBadge, { isCardExpiring } from "./CardBadge";
@@ -147,6 +149,18 @@ export default function AccountCard({ a, isCurrent, isBest, isSelected, shortcut
             <span style={{ fontSize: Z.status, fontWeight: 600, color: sc }}>
               {STATUS_TEXT[a.status]}{isCool && a.cooldownSec ? ` ${fmtCd(a.cooldownSec)}` : ""}
             </span>
+            {/* ★★ 额度快照陈旧的标记（2026-09-05 加）。此前 `StaleMark` **只接了 grok/agy，
+                codex 账号卡一个都没接** —— 于是一个 token 已失效、快照陈旧 3.8 天的号，
+                卡片上没有任何提示，而池级「上次刷新」取的是全池最大值、被每 300s 刷新的
+                活号盖成「刚刚」，**主动把这件事藏了起来**。
+                ★ 刻意用 muted 不用红：合盖休眠唤醒的那一瞬间全池都会陈旧，那是事实不是故障；
+                  把它染成告警色只会训练用户忽略所有告警。它只是一句可悬浮的事实陈述。 */}
+            {a.quotaStale && a.quotaAgeSec != null && (
+              <StaleMark t={t} tone="muted" size={10}
+                         note={`这个号的额度快照是 ${fmtAgeSec(a.quotaAgeSec)}前读到的（超过 ${Math.round(QUOTA_STALE_SEC / 60)} 分钟）。`
+                               + `条和百分比画的是那一刻的值，不是现在的值。`
+                               + `这不代表额度有问题——只代表我们有一阵子没读到它了。`} />
+            )}
             {isBest && <span style={{ fontSize: Z.useBadge, fontWeight: 700, color: t.accentText, background: t.accent, padding: "1px 5px", borderRadius: 4, flexShrink: 0 }}>USE</span>}
             {isCurrent
               ? <span style={{ marginLeft: "auto", flexShrink: 0, fontSize: Z.curBadge, fontWeight: 700, color: t.accent, border: `1px solid ${t.accentBorder}`, padding: "1px 7px", borderRadius: 999 }}>当前</span>

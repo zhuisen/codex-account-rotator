@@ -65,7 +65,7 @@ const IconEyeOff = () => <svg width="13" height="13" viewBox="0 0 24 24" fill="n
 const IconMoon = () => <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>;
 
 export default function App() {
-  const { accounts, hero, currentNode, slots, counts, tokens, lastRefreshAt, loadingAction, toast, refresh, run, showToast } = useStore();
+  const { accounts, hero, currentNode, slots, counts, tokens, lastRefreshAt, freshness, loadingAction, toast, refresh, run, showToast } = useStore();
   const [theme, setTheme] = useState<"dark" | "light">("dark");
   // 版本号运行期从 tauri 取,别再写死(发版时漏改前端字符串是老毛病)
   const [ver, setVer] = useState("");
@@ -351,7 +351,25 @@ export default function App() {
                   <GhostButton t={t} onClick={() => run("uncool", ["uncool", "all"], "已清除所有冷却")} loading={loadingAction === "uncool"} loadingText="解冻中…">清除冷却</GhostButton>
                 </div>
                 <span style={{ fontSize: 10, color: t.muted, fontFamily: "'JetBrains Mono'" }}>
-                  {lastRefreshAt ? `上次全池刷新 ${fmtAgo(lastRefreshAt)}` : "尚未刷新过全池"}
+                  {/* ★★ 原文是「上次全池刷新 X 前」,而它取的是**全池最大值** —— 那句话本身就是假的:
+                      只要有一个号刚被刷新,它就显示「刚刚」,哪怕另一个号的快照已经陈旧 3.8 天。
+                      现在如实说覆盖度(三方评审一致:max/min 单值都证明不了「全池刷新成功」)。 */}
+                  {/* ★★ `unknown`（没有 captured_at，从没读到过）**必须进分母、必须显示**
+                      （2026-09-06 评审抓出）。第一版只算 fresh/stale，于是
+                      `{fresh:1, stale:0, unknown:1}` 会显示成「全池 1 个都是新的」——
+                      把一个从没读到过的号说成新的，正是这条链路一路在防的那种谎。
+                      分母 = 全部账号，不是「我算得出来的那部分账号」。 */}
+                  {lastRefreshAt
+                    ? (() => {
+                        const total = freshness.fresh + freshness.stale + freshness.unknown;
+                        const bad: string[] = [];
+                        if (freshness.stale) bad.push(`${freshness.stale} 个陈旧`);
+                        if (freshness.unknown) bad.push(`${freshness.unknown} 个从未读到`);
+                        return bad.length
+                          ? `最近刷新 ${fmtAgo(lastRefreshAt)} · ${freshness.fresh}/${total} 新鲜，${bad.join("，")}`
+                          : `全池 ${total} 个都是新的 · ${fmtAgo(lastRefreshAt)}`;
+                      })()
+                    : "尚未刷新过全池"}
                 </span>
                 </div>
               </div>

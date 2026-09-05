@@ -59,6 +59,11 @@ export interface Account {
   /** 套餐(plus/pro/…),来自 id_token,**权威**。label 只是昵称:老号从 Plus 升 Pro 时 label 不变,
    *  所以任何"这是不是 Pro"的判断都必须看这里,不能看 node 名以 pro 开头。 */
   plan: string;
+  /** 这份额度快照的年龄（秒）；`null` = 没有 `captured_at`（未知，不是 0）。 */
+  quotaAgeSec: number | null;
+  /** 快照是否已陈旧（> `QUOTA_STALE_SEC`）。★ 陈旧**不等于**额度是错的，
+   *  它只说「这个数是多久以前读到的」—— 卡片如实标注，不上红、不参与选号否决。 */
+  quotaStale: boolean;
   /** Reset credits held. Count comes free with every usage probe. */
   cards: number;
   /** Days until the soonest still-available credit expires — needs the detail fetch, so it stays
@@ -270,9 +275,61 @@ export function fmtAgo(ts?: number): string {
   return h < 24 ? `${hhmm} · ${h} 小时前` : `${hhmm} · ${Math.floor(h / 24)} 天前`;
 }
 
+/**
+ * 额度快照多旧才算**陈旧**。
+ *
+ * ★★ **锚定采集心跳，不锚定窗口长度**（三方评审一致）。曾考虑按窗口比例算
+ * （「周窗口陈旧 1 小时无所谓」），但那个前提是错的：周额度也可能几小时烧光，
+ * 而一个 token 已失效 10 小时的号会因为「相对周窗口不算久」被判新鲜，
+ * 调度器继续往黑洞里打请求。**窗口长度决定的是预算周期，不是观测有效期。**
+ *
+ * quotad 的全池扫描周期是 300s。取 **6 个周期 = 30 分钟**：够宽，不会被一两次
+ * 网络抖动或单次扫描失败触发；又远短于「一个号已经死了好几天」那种真问题。
+ *
+ * ⚠️ **已知边界（agy 提出）**：Mac 合盖休眠数小时后唤醒的那一瞬间，全池 age 会同时突增，
+ * 于是所有号一起标陈旧。这**不是误报** —— 那一刻的数据确实全是旧的；quotad 会在一个
+ * 扫描周期内补齐。所以这里刻意**不上红色**、不参与选号否决，只做一个可悬浮的事实陈述，
+ * 避免把「一次正常的唤醒」训练成用户忽略所有告警的理由。
+ */
+export const QUOTA_STALE_SEC = 30 * 60;
+
+/** 秒数 → 「N 分钟 / N 小时 / N 天」。★ 与 `fmtAgo` 分工:那个吃时间戳,这个吃**已经算好的年龄**
+ *  —— 让调用方各自再减一次 `now()`,就等于把「现在是几点」这个知识复制出去好几份。 */
+export function fmtAgeSec(sec: number): string {
+  if (sec < 3600) return `${Math.max(1, Math.round(sec / 60))} 分钟`;
+  if (sec < 86400) return `${Math.round(sec / 3600)} 小时`;
+  return `${Math.round(sec / 86400)} 天`;
+}
+
+/** 这份额度快照的年龄（秒）。没有 `captured_at` ⇒ `null`（未知，不是 0）。 */
+export function quotaAgeSec(slot: Slot, atNow = now()): number | null {
+  const cap = slot.quota?.captured_at;
+  return cap == null ? null : Math.max(0, atNow - cap);
+}
+
+/**
+ * 池级新鲜度。★★ **不返回单个 max/min** —— 三方一致指出那是个假两难：
+ *   · `max`（现状）被每 300s 刷新的活号盖成「刚刚」，**主动藏住**一个陈旧 3.8 天的号；
+ *   · `min` 又会被一个弃用号永久拉垮，天天谎报全池故障。
+ * 两者都证明不了「上次全池刷新成功」。所以给**覆盖度**：几个新鲜、几个陈旧、最旧多旧。
+ */
+export function poolFreshness(slots: Record<string, Slot>, atNow = now()):
+  { fresh: number; stale: number; unknown: number; oldestAgeSec: number | null } {
+  let fresh = 0, stale = 0, unknown = 0, oldest: number | null = null;
+  for (const sl of Object.values(slots)) {
+    const age = quotaAgeSec(sl, atNow);
+    if (age == null) { unknown++; continue; }
+    if (age > QUOTA_STALE_SEC) stale++; else fresh++;
+    if (oldest == null || age > oldest) oldest = age;
+  }
+  return { fresh, stale, unknown, oldestAgeSec: oldest };
+}
+
 /** When the pool was last read FROM THE SERVER. Deliberately derived from the snapshots rather than
  *  stored separately: a rollout-derived snapshot is a local echo, not a pool refresh, so counting it
- *  would report the pool as fresher than it is. */
+ *  would report the pool as fresher than it is.
+ *  ⚠️ 它只回答「**最近有账号被刷新过**」，**不能**读成「全池都是新的」——
+ *  那个问题要用 `poolFreshness()`。 */
 export function poolRefreshedAt(slots: Record<string, Slot>): number | undefined {
   let newest: number | undefined;
   for (const sl of Object.values(slots)) {
@@ -283,6 +340,35 @@ export function poolRefreshedAt(slots: Record<string, Slot>): number | undefined
   return newest;
 }
 
+/**
+ * `resets_at` 是不是**浮动占位值**（窗口还没被使用过，服务端每次都回「此刻 + 整窗」）。
+ *
+ * ★★ 实测（2026-09-05，5h 窗口 = 300 分钟）：
+ *
+ *     plus4  used=0%    resets_at − captured_at = 17999.5s   整窗 18000s   差 −0.5s
+ *     plus6  used=0%    resets_at − captured_at = 17999.4s   整窗 18000s   差 −0.6s
+ *     plus3  used=55%   resets_at − captured_at =  3588s     整窗 18000s   差 −14411s
+ *     plus5  used=100%  resets_at − captured_at =  2943s     整窗 18000s   差 −15057s
+ *
+ * 用过的号有真实锚点；**没用过的号每轮轮询都把 `resets_at` 往前滑一整个轮询周期**。
+ * 于是倒计时永远停在 ~4h55m —— 用户报的「5h 没有继续计时」就是这个。
+ * （同族现象：Antigravity 的额度接口也是闲置桶的 resetTime 跟着 now 滑动，用过才锚定。）
+ *
+ * ★★ **必须拿 `capturedAt` 比，不能拿 `now()`**（这条是决定性的）：
+ * 闲置轮询周期正好 300s，真钟会从 5h00 走到 4h55 再被下一轮占位写回去。用 `now()` 做判据，
+ * 会在两次写入之间误判成「已启动」，轮询一到又跳回「未启动」—— 每 5 分钟闪一次。
+ *
+ * ★ 阈值 90s：观测到的滑动误差 < 1s，而最短的真实锚点（plus3）也差了 14411s，
+ * 两者相隔三个数量级，阈值取在哪都不敏感；90s 只是给 RPC 往返和时钟抖动留余量。
+ */
+const FLOATING_RESET_TOL_SEC = 90;
+
+export function resetAnchorUnknown(w?: Win, capturedAt?: number): boolean {
+  const wm = w?.window_minutes, ra = w?.resets_at;
+  if (!wm || !ra || !capturedAt) return false;
+  return Math.abs((ra - capturedAt) - wm * 60) < FLOATING_RESET_TOL_SEC;
+}
+
 function buildWindow(w: Win | undefined, capturedAt?: number): QuotaWindow | null {
   // 只丢**空槽**(window_minutes 为 0/缺失)。5h(300) 是合法窗口,别再按量级丢。
   if (!w || (w.window_minutes ?? 0) < REAL_WINDOW_MIN) return null;
@@ -290,12 +376,20 @@ function buildWindow(w: Win | undefined, capturedAt?: number): QuotaWindow | nul
   //   少传这一个参数,判据就退化回"过期即 100%"而且**不会报错**。
   const pctRaw = winRem(w, capturedAt);
   if (pctRaw == null) return null;
+  // ★★ 锚点不可信时**只把倒计时换掉**，条和百分比照画。
+  //    · 窗口**不能**从 `windows` 里丢掉 —— 丢了 Plus 的 5h 行会整行消失，卡片看起来像 Pro，
+  //      而槽位对齐是按行数走的（那套对齐规则刚在 v1.1.0 修过一次）。
+  //    · 水位本身是可信的：油箱确实是满的，**假的是钟不是水位**。所以 pct 不动，
+  //      选号器也不动 —— 0% 排最前正是负载均衡要的。
+  //    · 文案用「待确认」而不是「未启动」：刚首次使用、用量被取整成 0% 的**真**窗口
+  //      也会命中这个判据，此时断言「未启动」就是在编一个我们证不了的事实。
+  const anchorUnknown = resetAnchorUnknown(w, capturedAt);
   return {
     label: winLabel(w),
     mins: w.window_minutes ?? 0,
     pct: clamp(pctRaw),
-    reset: fmtEta(w.resets_at),
-    resetAt: fmtResetTime(w.resets_at),
+    reset: anchorUnknown ? "待确认" : fmtEta(w.resets_at),
+    resetAt: anchorUnknown ? "重置时间待确认" : fmtResetTime(w.resets_at),
   };
 }
 
@@ -331,6 +425,7 @@ export function slotToAccount(aid: string, slot: Slot, tokens: Record<string, To
   // no dates yet. Only `status === "available"` counts: a redeemed card is still in the list.
   const plan = (slot.quota?.plan_type || slot.plan || "").toLowerCase();
 
+  const qAge = quotaAgeSec(slot, n);
   const cards = slot.credits?.available ?? 0;
   let cardDays: number | undefined;
   let cardExp: string | undefined;
@@ -369,6 +464,10 @@ export function slotToAccount(aid: string, slot: Slot, tokens: Record<string, To
     cooldownSec: Math.round(coolSec),
     tok: tokH != null ? `${tokH}h` : "—",
     plan,
+    // ★ 快照年龄如实带出来。`null` = 没有 `captured_at`（未知，**不是 0**）——
+    //   0 会被读成「刚刚读到的」，正好把最坏的情况显示成最好的。
+    quotaAgeSec: qAge,
+    quotaStale: qAge != null && qAge > QUOTA_STALE_SEC,
     cards, cardDays, cardExp,
     // The two numbers come from different fetches at different times: the count is refreshed on every
     // usage probe, the detail only when `credits` runs. So the cached detail can legitimately still

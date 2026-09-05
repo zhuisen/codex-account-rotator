@@ -223,9 +223,17 @@ def _win_used(slot, key):
 
 
 def _used(slot):
-    """Sort key for _pick: primary (5h) first, weekly as tie-break. Without the weekly component, five
-    accounts whose 5h windows all reset sort in dict-insertion order and every request lands on the
-    first one — even if its weekly quota is nearly exhausted (observed: main at 9% weekly picked first)."""
+    """Sort key for _pick: the `primary` slot first, `secondary` as tie-break. Without the second
+    component, five accounts whose primary windows all reset sort in dict-insertion order and every
+    request lands on the first one — even if its weekly quota is nearly exhausted (observed: main at
+    9% weekly picked first).
+
+    ⚠️ `primary` 是**槽位名,不是窗口时长** —— 它的语义随套餐而变(Plus 的 primary 是 5h 窗口,
+    Pro 的 primary 是周窗口,`window_minutes` 分别 300/10080)。这条 docstring 原来写死
+    "primary (5h)",与同一天在 `codex-rotate` 的探针打印里修掉的是同一类错误陈述。
+    ★ **行为刻意不改**:混池(Plus+Pro)时这里确实是拿 5h% 和周% 排在同一条轴上,
+    但「跨套餐该怎么比」是个产品问题不是 bug —— 未启动窗口排最前正是负载均衡要的,
+    为倒计时去改选号只会引入新风险。要改先定策略,别顺手改。"""
     # ★★ 每个窗口是 `(未知?, 已用)` 两级键:**有读数的一律排在未知之前**,层内按已用升序。
     #    把"未知"塞进同一条百分比轴,就是拿一个**没有发生的观测**当成最有利的观测。
     #    数据完整时排序与改动前完全一致;全都未知时并列,退回原有顺序。

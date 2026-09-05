@@ -391,6 +391,34 @@ STUB = """
         // ★ 溢出探针会把**本来就可滚动**的容器算进去(每个页面都有自己的滚动容器,那是项目规则)。
         //   过滤掉 overflow:auto/scroll 的元素,否则每次扫描都带一堆无意义的 DIV。
         overflow: (over || []).filter(function (x) { return true; }),
+        // ★ 可滚容器的实测几何。加它是因为「内容放不下时到底是**滚动**还是**裁切**」
+        //   在别的探针里分不出来:两种情况的 `overflow` 都是 0(裁切根本不算溢出)。
+        //   而裁切比太高更糟 —— 下面的内容直接看不见,还没有滚动条提示。
+        geom: (function () {
+          var out = {};
+          ['mb-root', 'mb-list'].forEach(function (c) {
+            var el = document.querySelector('.' + c);
+            if (!el) { out[c] = 'missing'; return; }
+            var cs = getComputedStyle(el);
+            out[c] = { h: Math.round(el.getBoundingClientRect().height),
+                       scrollH: el.scrollHeight, clientH: el.clientHeight,
+                       maxH: cs.maxHeight, flex: cs.flex, minH: cs.minHeight,
+                       ovY: cs.overflowY, parent: el.parentElement ? el.parentElement.className : '?' };
+          });
+          return out;
+        })(),
+        scrollables: (function () {
+          var out = [];
+          document.querySelectorAll('*').forEach(function (el) {
+            var cs = getComputedStyle(el);
+            if (cs.overflowY !== 'auto' && cs.overflowY !== 'scroll') return;
+            if (el.scrollHeight <= el.clientHeight + 1) return;   // 装得下,不是可滚状态
+            out.push({ sel: el.className || el.tagName,
+                       scrollH: el.scrollHeight, clientH: el.clientHeight,
+                       hidden: el.scrollHeight - el.clientHeight });
+          });
+          return out;
+        })(),
         // ★★ **被 flex 压扁的元素** —— 既有的 `overflow` 探针对它完全是瞎的:
         //   flex 布局在空间不够时**压缩子项**而不是溢出,所以 `scrollWidth > clientWidth` 永远不成立,
         //   元素还在 DOM 里、文本也还在,只是渲染宽被压到接近 0 ⇒ 肉眼看是"这个字段没了"。
@@ -607,6 +635,21 @@ def redacted_state():
                 w = q.get(k)
                 if isinstance(w, dict) and w.get("window_minutes"):
                     w["used_percent"] = used
+    # ★★ `CODEXBAR_STALE_QUOTA=1` 把**第二个活号**的快照做旧(3.8 天前)。
+    #    这是**唯一能验证陈旧标记的夹具**:真实数据里唯一陈旧的号是 Pro1,而它是死号、
+    #    只在折叠的「失效账号」区渲染、根本没有卡片 —— 于是那个标记**永远截不到**,
+    #    只能得到一个「看起来没问题、实际从未被验证过」的结论(本仓刚为同类问题栽过一次)。
+    if os.environ.get("CODEXBAR_STALE_QUOTA"):
+        # ★ 必须挑**活号**。第一版挑的是 `values()[1:2]`,而那恰好是死号 —— 死号只在折叠的
+        #   「失效账号」区渲染、**根本没有卡片**,于是标记 0 次,夹具白造。
+        #   (这也正是真实数据验不了这条的原因:线上唯一陈旧的号就是那个死号。)
+        for sl in out_slots.values():
+            q = sl.get("quota")
+            if sl.get("auth_dead") or not isinstance(q, dict) or not q.get("captured_at"):
+                continue
+            q["captured_at"] -= int(3.8 * 86400)
+            break
+
     # ★★ `?cardexp=1` 只给**第一个**号一张快到期的重置卡 ⇒ 它的徽章文案变长
     #    （「重置卡 ×1 · 剩1天」），另一个号仍是短文案。
     #    这是**唯一能证伪"卡片已对齐"的夹具**：页脚一旦因文案长短而折行高度就不同，

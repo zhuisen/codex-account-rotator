@@ -1071,7 +1071,21 @@ fn format_tray_title() -> String {
                 let ra = w["resets_at"].as_f64().unwrap_or(0.0);
                 // ★ 不再有「过期 → 100」这一支:未确认的窗口在上面的过滤里就出局了。
                 let rem = (100.0 - used).max(0.0) as u32;
-                let eta = if ra > 0.0 && ra > now_ts {
+                // ★★ 与 `helpers.ts::resetAnchorUnknown` **同一条判据**(跨语言没法共用,只能同步改)。
+                //    窗口没被使用过时,服务端每轮都回「此刻 + 整窗」,`resets_at` 跟着滑,
+                //    倒计时于是永远停在 ~4h55m —— 用户报的「5h 没有继续计时」就是这个。
+                //    实测(2026-09-05):未启动的号 `ra - cap` = 17999.5s vs 整窗 18000s(差 0.5s);
+                //    用过的号差着 14411~15057s,两者隔三个数量级。
+                //    ★ 必须拿 `cap` 比而不是 `now_ts`:闲置轮询周期正好等于一个 tick,
+                //      用 now 会在两次写入之间误判成已启动、轮询一到又跳回去,每 5 分钟闪一次。
+                //    ★ 只吞掉 `eta`,`rem` 照画 —— 假的是钟,不是水位。
+                let anchor_unknown = match (cap, w["window_minutes"].as_f64()) {
+                    (Some(c), Some(wm2)) if wm2 > 0.0 && ra > 0.0 => ((ra - c) - wm2 * 60.0).abs() < 90.0,
+                    _ => false,
+                };
+                let eta = if anchor_unknown {
+                    " ↻?".to_string()
+                } else if ra > 0.0 && ra > now_ts {
                     let secs = (ra - now_ts) as u64;
                     let h = secs / 3600;
                     let m = (secs % 3600) / 60;

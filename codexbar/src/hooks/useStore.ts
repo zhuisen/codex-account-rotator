@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { type AppState, type TokenInfo, type Account, type Slot, slotToAccount, recommended, poolRefreshedAt, CARD_WARN_DAYS } from "../helpers";
+import { type AppState, type TokenInfo, type Account, type Slot, slotToAccount, recommended, poolRefreshedAt, poolFreshness, CARD_WARN_DAYS } from "../helpers";
 
 export interface StoreCounts {
   total: number; live: number; cool: number; dead: number;
@@ -106,12 +106,17 @@ export function useStore() {
 
   // Relative time re-renders for free: refresh() replaces `state` every 30s, so no extra timer.
   const lastRefreshAt = poolRefreshedAt(slots);
+  // ★★ `lastRefreshAt` 取的是**全池最大值**,它只能回答「最近有账号被刷新过」——
+  //    **不能**读成「全池都是新的」。实测踩过:一个 token 已失效、快照陈旧 3.8 天的号,
+  //    被每 300s 刷新的活号盖成「刚刚」,于是那件事在 UI 上完全看不见。
+  //    覆盖度才回答「有几个是新的」。两个都下发,让消费方各取所需。
+  const freshness = poolFreshness(slots);
 
   // Pool-wide banner subject = the single most urgent expiring card (design handoff §4).
   const cardAlert = accounts
     .filter(a => a.status !== "dead" && a.cards > 0 && a.cardDays != null && a.cardDays <= CARD_WARN_DAYS)
     .sort((x, y) => (x.cardDays ?? 0) - (y.cardDays ?? 0))[0] ?? null;
 
-  return { state, tokens, accounts, hero, currentNode, slots, counts, lastRefreshAt, cardAlert,
+  return { state, tokens, accounts, hero, currentNode, slots, counts, lastRefreshAt, freshness, cardAlert,
            loadingAction, toast, refresh, run, showToast };
 }

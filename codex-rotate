@@ -628,8 +628,16 @@ def _win_real(w):
     return bool(w) and (w.get("window_minutes") or 0) >= REAL_WINDOW_MIN
 
 def _win_tag(w):
-    """窗口名按**实际时长**算,不写死那几个已知值 —— 上游加新窗口时不至于全标成「周」。"""
+    """窗口名按**实际时长**算,不写死那几个已知值 —— 上游加新窗口时不至于全标成「周」。
+
+    ★ 缺 `window_minutes` 时返回 `?` 而不是 `0h`。「0 小时窗口」是个不存在的东西,
+    把「不知道多长」印成它,就是拿一个编出来的事实去顶替未知 —— 与本仓那条
+    「读不到 ≠ 确实没有」同族。前端在 `helpers.ts` 里对这种窗口是直接丢弃的,
+    Python 这边没有那道守卫,所以必须在这里兜住。
+    """
     m = (w or {}).get("window_minutes") or 0
+    if not m:
+        return "?"
     if m >= 40000:
         return "月"
     if m >= 10000:
@@ -1369,7 +1377,51 @@ def _resolve_slot(s, key):
 # gpt-5.4-mini / codex-auto-review。默认取 gpt-5.4 + effort=low:够小,又是真正在用的主力档位,
 # 比 mini 更能代表"日常真能不能干活"。实测单次探测没能让 used_percent 的整数位动(Δ+0%),
 # 即成本 < 1% —— 这是上界不是点估计,别当"几乎免费"用。
-PROBE_MODEL = "gpt-5.4"
+# ★★ **2026-09-06 事故:探针整体失效,而且是静默的。**
+#    默认模型写死 `gpt-5.4`,而它已不再被 ChatGPT 账号支持:
+#        HTTP 400 {"detail":"The 'gpt-5.4' model is not supported when using Codex with a ChatGPT account."}
+#    于是**每一次探针都 400**、一个请求都没成功 ⇒ 5h 窗口永远锚定不了 ⇒
+#    用户报「我探针了,额度还是没刷新」。而在 `last_probe` 落地之前,这件事**事后无从查证**。
+#    ★ 教训:把上游的模型名写死在一个「必须长期能用」的工具里,等于预约一次故障 ——
+#      而且它坏得没有声音。所以默认值改成**从本机权威清单里现挑**,写死的只是兜底。
+def _probe_model_default():
+    """从 codex 自己的模型缓存里挑一个探针用的模型。→ 模型 id。
+
+    ★ **不猜模型名**(全局规则):`<CODEX_HOME>/models_cache.json` 是 codex 自己维护的权威清单,
+      `codex models` 是个 TUI、拿不到,`~/.local/bin/codex` 只是包装脚本、不含模型名。
+    ★ 偏好顺序 = **便宜优先**:探针是计费的,只要能证明「这个号能干活」就够了。
+      实测(CHANGELOG D1)同代里 luna $0.038/M vs sol $0.840/M,差 22 倍。
+
+    ★★ **只认 `models[*].slug`,不做递归遍历**(2026-09-06 评审抓出)。
+       第一版是「递归找 id/slug/model 键」,而每条模型记录里还有个 `upgrade` 字段
+       指向**推荐升级到的另一个模型**。实测夹具:清单里只有 `gpt-5.4-mini`、
+       而 `luna` 只出现在 `mini.upgrade` 里 —— 递归版**照样选中 luna**,
+       尽管它根本不在这台机器的可用清单里。
+       递归还有第二个毛病:深层 JSON 会 `RecursionError`,而那句遍历在 try 之外,
+       足以打死整个 CLI。改成一层取值,两个问题一起没了。
+    ★★ **跳过 `visibility == "hide"`**:`gpt-reserve` / `codex-auto-review` 是顶层模型记录,
+       但不是给人聊天用的。选中它们同样会 400,而症状与本次事故一模一样。
+    ★★ **用 `CODEX_HOME` 而不是 `Path.home()/.codex`**:文件顶部早就解析好了它
+       (凭证、sessions 都用的它)。写死 home 会在隔离环境/多 home 下读到**另一台号池的清单**,
+       挑出一个这台机器上不可用的模型 —— 又是一次静默的探针全失效。
+    """
+    prefer = ("gpt-5.6-luna", "gpt-5.4-mini", "gpt-5.5", "gpt-5.6-terra", "gpt-5.6-sol")
+    try:
+        raw = json.loads((CODEX_HOME / "models_cache.json").read_text())
+        avail = {m["slug"] for m in (raw.get("models") or [])
+                 if isinstance(m, dict) and isinstance(m.get("slug"), str)
+                 and m.get("visibility") != "hide"}
+    except Exception:                      # noqa: BLE001 — 读不到就用兜底,不能让 CLI 起不来
+        return prefer[0]
+    for m in prefer:
+        if m in avail:
+            return m
+    # 偏好序一个都不在 ⇒ 上游整代换名了。从**清单内**挑,别回落到一个已知不存在的名字。
+    # ★ 不再排除 `mini`:清单只剩新一代 mini 时,排除它反而会返回清单外的旧默认值。
+    return sorted(x for x in avail if x.startswith("gpt-"))[0] if any(
+        x.startswith("gpt-") for x in avail) else prefer[0]
+
+PROBE_MODEL = _probe_model_default()
 PROBE_EFFORT = "low"
 PROBE_PROMPT = "hi"
 PROBE_EXPECT = "ok"      # instructions 要求原样回这两个字母;拿它核对"真的答出话"
@@ -1456,6 +1508,15 @@ def _billed_probe(aid, slot, is_active, model=PROBE_MODEL, effort=PROBE_EFFORT):
         return None, "HTTP 401 (token 被作废 — codex-rotate login 重登)", ""
     if status != 200:
         detail = raw[:120].decode(errors="replace").replace("\n", " ")
+        # ★★ 「这个模型不被支持」要单独说,而且要给出**可执行的下一步**。
+        #    2026-09-06 踩过:默认模型 `gpt-5.4` 被上游下架,每次探针都 400,
+        #    而报出来的只是一串原始 JSON —— 用户看到的是「探针失败」,
+        #    完全看不出是模型的问题,更看不出该怎么办。
+        #    (同族反例:erp-v3 那条让用户「重试」的提示,而重试修不了它指的那个状态。)
+        if status == 400 and "not supported" in detail:
+            return None, (f"HTTP 400 模型 `{model}` 已不被这个 ChatGPT 账号支持。"
+                          f"本机可用清单见 ~/.codex/models_cache.json;"
+                          f"临时可用 `--model <别的>` 覆盖,长期请改 `_probe_model_default()` 的偏好序。"), ""
         return None, f"HTTP {status} {detail}", ""
 
     answer = _sse_answer(raw)
@@ -1480,6 +1541,30 @@ def _billed_probe(aid, slot, is_active, model=PROBE_MODEL, effort=PROBE_EFFORT):
         "captured_at": time.time(), "source": "probe",
     }
     return q, "HTTP 200", answer
+
+
+def _write_last_probe(aid, **fields):
+    """把**一次探针运行的结果**记进 `slot["last_probe"]`(独立兄弟键)。
+
+    ★★ **为什么不写进 `quota`**:探针写回的 `quota` 会在 20~300 秒内被 quotad 的 usage-api
+    **整体替换**(`slot["quota"] = qq`,后写者赢),于是 `state.json` 里永远找不到一条
+    `source == "probe"` —— 事后无法回答「我刚才那次探针到底跑成没有」。
+    这与代理那批额外响应头踩的是同一个坑,当时的解法也是独立兄弟键(`slot["codex_headers"]`)。
+    额度是**水位**、探针结果是**事件**,两类事实各带自己的时间戳,互不覆盖。
+
+    ★★ **成功、失败、跳过都要写。** 只记成功的话,「没跑过」和「跑了但失败」在
+    `state.json` 里长得一模一样(都是没有这个键)—— 又一次把「读不到」和「确实没有」
+    折叠成同一个值。
+
+    ★ **刻意不存 used%。** stdout 已经打了 before→after;再存一份,20 秒后就会和
+    usage-api 的读数分叉,而 UI 一不小心就会拿这个**事件里的陈旧数**当现值。
+    一份事实只能有一个家。
+    """
+    def f(st, a=aid, kv=fields):
+        sl = st.get("slots", {}).get(a)
+        if sl is not None:
+            sl["last_probe"] = kv
+    _mutate_state(f)
 
 
 def cmd_probe(args):
@@ -1514,6 +1599,15 @@ def cmd_probe(args):
     s = _state()
     if take_all:
         targets = [aid for aid, sl in s["slots"].items() if not sl.get("auth_dead")]
+        # ★★ 被跳过的死号也要留痕。否则「这个号没探过」和「这个号被跳过了」在
+        #    `state.json` 里长得一模一样(都是没有 last_probe),而用户点的是「探针全池」——
+        #    他有理由以为每个号都测了。静默跳过 = 又一次把两种"没有"折叠成一个。
+        for aid_, sl_ in s["slots"].items():
+            if sl_.get("auth_dead"):
+                _write_last_probe(aid_, at=int(time.time()), started_at=int(time.time()),
+                                  model=model, effort=effort, completion_ok=False,
+                                  quota_ok=False, status="skipped_dead",
+                                  detail="token 已失效,probe --all 跳过", answer="")
     elif labels:
         targets = []
         for key in labels:
@@ -1536,6 +1630,7 @@ def cmd_probe(args):
         if i:
             time.sleep(2.0)          # 端点对突发有脾气,同 refresh-all 的节流思路
 
+        started = int(time.time())
         before = None
         pre, _ = _probe_quota(aid, slot, aid == active)   # 免费 GET,拿探测前基线
         if pre:
@@ -1548,19 +1643,50 @@ def cmd_probe(args):
             time.sleep(3)
             q, msg2, answer = _billed_probe(aid, slot, aid == active, model, effort)
             msg = msg2 if q else f"{msg}(重试后:{msg2})"
-        if not q:
+        # ★★ **「模型答了」和「额度读到了」是两件事,不能合并成一个成败。**
+        #    `_billed_probe` 在「HTTP 200 + 模型正常吐字 + 但响应头里没有额度字段」时
+        #    也返回 q=None,于是这里原来一律打 ✗ 并且不计入可用数 ——
+        #    **一个真能用的号被报成坏的,而那次计费请求已经花掉了**。
+        #    探针存在的意义就是回答「这个号还能不能干活」,额度是顺带的副产品;
+        #    拿副产品的缺失去否定主判据,正好把这个工具的目的搞反了。
+        completion_ok = bool(answer)
+        if not q and not completion_ok:
             print(f"  [{label:<8}] ✗ {msg}")
+            _write_last_probe(aid, at=int(time.time()), started_at=started,
+                              model=model, effort=effort, completion_ok=False,
+                              quota_ok=False, status="failed", detail=msg, answer="")
             continue
         ok_n += 1
-        after = (q.get("primary") or {}).get("used_percent")
-        _mutate_state(lambda st, a=aid, qq=q: st["slots"].setdefault(a, {}).update(
-            {"quota": qq, "quota_status": "ok"}))
+        after = (q.get("primary") or {}).get("used_percent") if q else None
+        if q:
+            _mutate_state(lambda st, a=aid, qq=q: st["slots"].setdefault(a, {}).update(
+                {"quota": qq, "quota_status": "ok"}))
         delta = "" if before is None or after is None else f"  (Δ{after - before:+.0f}%)"
         # 把模型的原话打出来 —— 这才是"能答"的证据。答非所问(不含期望词)标 ⚠️ 但不算失败:
         # 模型偶尔加标点/换措辞,那不代表账号有问题,只是不该被静默当成完美通过。
         odd = "" if PROBE_EXPECT in answer.lower() else " ⚠️答非所问"
-        print(f"  [{label:<8}] ✓ 答「{answer[:40]}」{odd} · "
-              f"周已用 {before if before is not None else '?'}% → {after:.0f}%{delta}")
+        # ★★ 标签必须**现算**,不能写死。`primary` 这个槽位的语义**随套餐而变**:
+        #    Plus 号的 primary 是 5h 窗口(window_minutes=300),Pro 号的 primary 是周窗口(10080)。
+        #    这里原来写死「周已用」,于是 5h 窗口回归(2026-08-25)之后,Plus 号打印出来的
+        #    **5h 数字被标成了「周」** —— 用户照着它判断额度,必然判错。
+        #    `_win_tag()` 早就存在(按 window_minutes 分档),前端与 Rust 托盘也都是这个口径,
+        #    只有这条 CLI 打印路径漏了。
+        # ★ `after` 可能是 None:`_billed_probe` 只要 primary/secondary **任一**有值就返回 q,
+        #   所以 Pro 号那种只有 secondary 的情形会让 `after` 为空 —— 直接 `:.0f` 会 TypeError。
+        wl = _win_tag(q.get("primary")) if q else None
+        fmt = lambda v: "?" if v is None else f"{v:.0f}"
+        _write_last_probe(aid, at=int(time.time()), started_at=started,
+                          model=model, effort=effort, completion_ok=completion_ok,
+                          quota_ok=bool(q),
+                          status="ok" if q else "ok_no_quota_headers",
+                          detail=msg, answer=answer[:60])
+        if q:
+            print(f"  [{label:<8}] ✓ 答「{answer[:40]}」{odd} · "
+                  f"{wl}已用 {fmt(before)}% → {fmt(after)}%{delta}")
+        else:
+            # ★ 账号可用(模型答了),只是这次响应没带额度头 —— 如实分开说,
+            #   既不谎报失败,也不假装读到了额度。
+            print(f"  [{label:<8}] ✓ 答「{answer[:40]}」{odd} · 额度未读到({msg})")
     print(f"probe {ok_n}/{len(targets)} 可用")
 
 

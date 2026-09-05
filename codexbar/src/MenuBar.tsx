@@ -20,8 +20,21 @@ import "./App.css";
 import "./menubar.css";
 
 const PANEL_W = 352;          // ★ 三处必须一致，由 tests/test_menubar_width_sync.py 守着
-const PANEL_H_MIN = 220;
-const PANEL_H_MAX = 760;
+/**
+ * 弹窗高度上限。★★ **这是账号 Tab 与「今日」Tab 共用的唯一高度真源**（用户 2026-09-06:
+ * 「菜单栏的账号太多，高度太高了，要跟 AI 用量的高度一致」）。
+ *
+ * 实测(账号池 4 活号 + 1 死号 + grok + agy):账号 Tab 自然高 **731px**、今日 Tab **580px**,
+ * 差 151px;而 731 已经逼近旧上限 760 —— 再多一个号就顶死,而且**切 Tab 时弹窗会跳高**。
+ * 取 580 = 今日 Tab 的自然高度,两个 Tab 从此等高、切换不跳。
+ *
+ * ★ 只钳 `setSize` 是不够的:内容仍然 731 高,窗口 580 就变成**裁切**(比太高更糟,
+ *   下面的号直接看不见且没有滚动条)。所以这个值同时通过 CSS 变量喂给 `.mb-root` 的
+ *   `max-height`,让 `.mb-list` 作为 flex 子项吸收溢出、自己滚 —— **一个数管两处**,
+ *   分开写两个常量迟早漂移(本仓已有多起同规则多副本漂移的账)。
+ * ★ 闸在 `tests/test_menubar_tab_heights_match.py`:两个 Tab 的 setSize 必须相等。
+ */
+const PANEL_H_MAX = 580;
 
 function loadTheme(): "dark" | "light" {
   try {
@@ -121,9 +134,29 @@ export default function MenuBar() {
   useEffect(() => {
     const el = rootRef.current;
     if (!el) return;
+    // ★ 把上限喂给 CSS,让 `.mb-root` 的 max-height 与 `setSize` 的钳位**同源**。
+    //   写死在 CSS 里就成了第二个真源,改一处忘一处 = 裁切或留白。
+    el.style.setProperty("--mb-max-h", `${PANEL_H_MAX}px`);
     let last = 0;
     const apply = () => {
-      const h = Math.min(PANEL_H_MAX, Math.max(PANEL_H_MIN, Math.ceil(el.scrollHeight)));
+      // ★★ **固定高度,不再按各页内容算**(2026-09-06 评审抓出)。
+      //    只把上限降到 580 是不够的:`setSize` 仍按**当前那一页**的 scrollHeight 算,
+      //    所以两页只是「恰好都顶到上限」才相等。评审用现成的 `plat=demo` 停掉 Kimi,
+      //    今日页立刻变成 **545px** 而账号页仍是 580 —— 切 Tab 照样跳,
+      //    而我的测试只证明了「默认夹具下恰好相等」。
+      //
+      //    用户的要求是「跟 AI 用量的高度一致」,而**唯一能保证一致的做法是不让它随内容变**:
+      //    另一页没渲染,它的高度量不到,任何「取两页较大值」的方案都得先渲染两页。
+      //    两页现在都能内部滚动(`.mb-list` / `.mb-today`),所以固定高度不会藏内容。
+      //
+      //    ★ 副作用(已知、可接受):账号很少时面板会留白。本机 5 号 + grok + agy 的内容
+      //      本来就超过 580,留白只在小池出现;而**切页跳高**是每次都发生的。
+      //    ★ 顺带根治了 220 那个老 bug:高度不再依赖「测量时刻内容有没有到齐」。
+      //    ★ `PANEL_H_MIN`(=220)**已删**:它存在的意义是「内容还没到齐时别缩成一条缝」,
+      //      而固定高度之后不存在这个状态了。留着会是 `noUnusedLocals` 下的死代码 ——
+      //      顺带一提,`tsc --noEmit` **不报**这个错,只有 `npm run build`(走 `tsc -b`)才报;
+      //      本仓为这条差异栽过,别拿 `--noEmit` 当发版闸。
+      const h = PANEL_H_MAX;
       if (Math.abs(h - last) < 2) return;
       // ★ **成功之后才记账**。原来是先 `last = h` 再 `setSize(...).catch(() => {})` ——
       //   一旦这次 setSize 没生效(隐藏窗口/时序),`last` 已经写成新值,而内容之后不再变化
