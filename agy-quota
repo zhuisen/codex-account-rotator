@@ -1,0 +1,349 @@
+#!/usr/bin/env python3
+"""Antigravity(agy) 额度只读抓取器 —— 打一份 JSON 到 stdout,自己不落盘。
+
+## 这份东西推翻了一条项目定稿,先说清楚为什么
+
+2026-08-24 的旧结论是「agy CLI 模式**结构性**拿不到额度」,依据是本地 RPC 返回
+500 `error getting token source: You are not logged into Antigravity`,外加 agy 自己的
+`Login` RPC 说 `interactive auth is only supported in antigravity-hub mode`。
+
+**那个结论是错的,错在外推而不在测量。** 2026-09-04 判别实验(同一个 print 模式进程,
+按时间多次采样):
+
+    起后  0s  →  HTTP 500  error getting token source: You are not logged into Antigravity
+    起后 10s  →  HTTP 200  {"response":{"groups":[...]}}      ← 同一个进程、同一个端口
+
+即那 500 是**启动预热窗口**,不是「拿不到」。当时我在端口一出现就立刻调,撞进了那个窗口,
+然后把「这一枪没打中」外推成了「确实没有」—— 正是本仓反复吃亏的那一类
+(vochub 的铁律原话:「这一枪没打中」绝不能和「确实没有」返回同一个值)。
+
+★ 本机验证环境:**没装 Antigravity IDE**(`/Applications` 下无),只有 agy CLI。
+所以「必须 IDE 在跑」那半也是错的。
+
+## 端点
+
+    POST http://127.0.0.1:<port>/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary
+    Content-Type: application/json     body: {}     **无鉴权、无 csrf_token**
+
+返回 2 组 × 2 窗口 = 4 个桶(Gemini / 3P × 5h / weekly),带 `remainingFraction` 与 `resetTime`。
+
+## 四个实测坑(改这个文件前先读)
+
+1. ★★ **启动后约 10 秒内必然 500**。端口一开就调必然失败。500 要落成
+   `not_ready`(**还没就绪**),不能落成「读不到」—— 两者对用户的含义完全不同。
+2. ★★ **端口随进程消失**。没有 agy 在跑就没有额度。此时必须落 `no_process`,
+   **绝不能渲染成满额** —— `remainingFraction` 缺省值就是 1.0,这里是全项目最容易
+   写出「假满额」的地方,直接撞上仓库既有的「不许编造满额」不变量。
+3. ★ `lsof` 必须带 `-a`:`lsof -nP -a -p <pid> -iTCP -sTCP:LISTEN`。
+   漏掉 `-a` 会把该进程**所有** fd(日志、锁、字体缓存)一起列出来,当端口试会跑出一屏垃圾。
+4. ★ **低位端口是 HTTPS(gRPC)、高位是明文 HTTP**,实测连号但**那是 5 次观测的归纳、
+   不是文档保证** —— 两个端口都探,别硬编 N+1。
+
+## 关于「回环被代理黑洞」那条潜伏型规则:本脚本结构上免疫,但别改坏它
+
+本仓 CLAUDE.md 记着一条:系统代理开着时,发往 loopback 的请求会被 Clash 受理却永不响应
+⇒ 静默黑洞、零输出。**这条对本脚本不成立** —— 实测(把 `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`
+三个都指向黑洞端口 9,依然 `available: true`):`http.client.HTTPConnection` 压根不做代理解析,
+它按给定的 host/port 直连。所以这里**不需要** `NO_PROXY`,写上也只是无害的安慰。
+
+★ 但这份免疫来自「用了 `http.client` + 显式 host」这个实现选择,不是环境保证。
+**若把这里改成 `urllib.request` / `requests` / 任何 reqwest 系的东西,黑洞立刻回来**,
+而症状是"agy 没反应"(实际 agy 好得很),极难定位。要换库就得同时补 `NO_PROXY`。
+
+用法:  agy-quota [--prev <上一份 .agy-quota.json>]
+"""
+import json
+import os
+import re
+import shutil
+import ssl
+import subprocess
+import sys
+import time
+from http.client import HTTPConnection, HTTPSConnection
+
+SCHEMA = 1
+RPC = "/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary"
+TIMEOUT = 4
+# 最坏情况是「明文打到 HTTPS 口」—— 对端收到垃圾字节可能既不回也不断,只能靠超时收场。
+# 2 端口 × 2 协议 = 4 次,所以要有一道总闸,免得 UI 那边干等。
+HARD_DEADLINE = 15
+
+# ★ 闭集。前端 `codexbar/src/agy.ts` 的 `agyReasonNote` 必须逐个覆盖,
+#   闸在 `tests/test_agy_reason_copy.py`(两边都从源解析,只改一边就红)。
+REASONS = (
+    "not_installed",
+    "no_process",
+    "not_ready",
+    "no_ports",
+    "bad_payload",
+    "rpc_error",
+    "network_error",
+)
+
+# ★★ `not_installed` 与 `no_process` 必须分开,这是本文件里最容易被合并掉的一处语义:
+#
+#   not_installed = 这台机器根本没有 agy    → **确定的否定**,UI 该完全隐藏(藏得诚实)
+#   no_process    = 装了,但此刻没在跑       → 额度真实存在,只是这一刻测不到
+#
+# 合并的后果是双向的坏:全按"隐藏"处理,装了 agy 的人就永远看不到卡(而 agy 不常驻,
+# **没在跑才是常态**);全按"显示"处理,没装的人会得到一盏永远亮着又无从消除的灯 ——
+# 后者正是本仓判过死刑的形态(长亮的灯会训练人忽略所有告警)。
+AGY_BIN_FALLBACKS = ("~/.local/bin/agy", "/opt/homebrew/bin/agy", "/usr/local/bin/agy")
+
+# 「还没就绪」的判据 —— 这句话来自 agy 自己,不是我们编的
+NOT_READY_MARK = "not logged into antigravity"
+
+
+def int_list_env(name):
+    """→ 该环境变量给出的整数列表,或 None 表示「没设,走真实发现」。
+
+    ★ 只为测试注入而存在,和 `grok-quota` 的 `GROK_AUTH_PATH` 同一纪律:让降级分支能在
+    不依赖本机真有/真没有 agy 的前提下被验证。**空串是有意义的值** —— 表示「显式的零个」,
+    与「没设」必须分开,否则 `no_process` 这条路径根本没法测。
+    """
+    raw = os.environ.get(name)
+    if raw is None:
+        return None
+    return [int(x) for x in raw.replace(",", " ").split() if x.strip().isdigit()]
+
+
+def agy_installed():
+    """→ 这台机器上有没有 agy 这个可执行文件。
+
+    ★ 只用来区分 `not_installed` / `no_process`,**不**用来判断能不能取额度 ——
+    额度永远只来自活着的进程。装了但没跑,这里是 True 而额度仍是 None,这是对的。
+
+    `AGY_BIN_OVERRIDE` 供测试注入:`"0"` = 就当没装。
+    """
+    inj = os.environ.get("AGY_BIN_OVERRIDE")
+    if inj is not None:
+        return inj not in ("", "0")
+    if shutil.which("agy"):
+        return True
+    # PATH 里没有不等于没装:launchd / GUI app 起的进程 PATH 极窄(本仓已有 launchd
+    # 默认 PATH 踩坑记录),而 CodexBar 正是以 GUI app 身份来跑这个脚本的。
+    return any(os.path.exists(os.path.expanduser(p)) for p in AGY_BIN_FALLBACKS)
+
+
+def agy_pids():
+    """→ 正在跑的 agy 进程 pid 列表。
+
+    ★ 用 `ps` + 精确匹配可执行名,**不用 `pgrep -f agy`** —— 本仓已记录 `pgrep -f`
+    自匹配恒真的坑(会匹配到查询命令自己)。
+    """
+    injected = int_list_env("AGY_PIDS_OVERRIDE")
+    if injected is not None:
+        return injected
+    out = subprocess.run(["ps", "-ax", "-o", "pid=,comm="],
+                         capture_output=True, text=True, timeout=15).stdout
+    pids = []
+    for line in out.splitlines():
+        parts = line.split(None, 1)
+        if len(parts) == 2 and re.search(r"(^|/)agy$", parts[1].strip()):
+            try:
+                pids.append(int(parts[0]))
+            except ValueError:
+                pass
+    return pids
+
+
+def listen_ports(pid):
+    """→ 该进程监听的 TCP 端口。★ `-a` 不能省(见文件头坑 3)。"""
+    injected = int_list_env("AGY_PORTS_OVERRIDE")
+    if injected is not None:
+        return injected
+    out = subprocess.run(
+        ["lsof", "-nP", "-a", "-p", str(pid), "-iTCP", "-sTCP:LISTEN"],
+        capture_output=True, text=True, timeout=15).stdout
+    ports = []
+    for line in out.splitlines()[1:]:
+        f = line.split()
+        if len(f) >= 9 and ":" in f[8]:
+            tail = f[8].rsplit(":", 1)[1]
+            if tail.isdigit():
+                ports.append(int(tail))
+    return sorted(set(ports))
+
+
+def rpc(port, path, tls):
+    """→ (status|None, body|错误串)。`status is None` = 请求没发出去。"""
+    conn = None
+    try:
+        if tls:
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE     # 本地自签,只连 127.0.0.1
+            conn = HTTPSConnection("127.0.0.1", port, context=ctx, timeout=TIMEOUT)
+        else:
+            conn = HTTPConnection("127.0.0.1", port, timeout=TIMEOUT)
+        conn.request("POST", path, body=b"{}",
+                     headers={"Content-Type": "application/json"})
+        r = conn.getresponse()
+        return r.status, r.read(1 << 20)
+    except Exception as exc:                    # noqa: BLE001 — 任何异常都要落成可展示的降级
+        return None, "{}: {}".format(type(exc).__name__, exc)[:200].encode()
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:                   # noqa: BLE001 — 关闭失败不影响已取到的数据
+                pass
+
+
+def parse_quota(payload):
+    """上游 JSON → 我们的 schema。逐字段显式映射,不整个 dict 透传。
+
+    ★ `remainingFraction` 缺失时**返回 None**,绝不默认 1.0 —— 那正是「假满额」的来源。
+    """
+    resp = (payload or {}).get("response") or {}
+    groups_in = resp.get("groups")
+    if not isinstance(groups_in, list) or not groups_in:
+        return None
+    groups = []
+    for g in groups_in:
+        if not isinstance(g, dict):
+            continue
+        buckets = []
+        for b in g.get("buckets") or []:
+            if not isinstance(b, dict):
+                continue
+            rf = b.get("remainingFraction")
+            if not isinstance(rf, (int, float)):
+                continue                        # ★ 没有数就跳过,不补默认值
+            buckets.append({
+                "bucket_id": b.get("bucketId"),
+                "window": b.get("window"),
+                "remaining_percent": round(float(rf) * 100, 2),
+                "reset_at": iso_epoch(b.get("resetTime")),
+            })
+        if buckets:
+            groups.append({"name": g.get("displayName"), "buckets": buckets})
+    return {"groups": groups} if groups else None
+
+
+def iso_epoch(s):
+    if not isinstance(s, str) or not s:
+        return None
+    try:
+        import datetime
+        return int(datetime.datetime.fromisoformat(
+            s.replace("Z", "+00:00")).timestamp())
+    except ValueError:
+        return None
+
+
+def probe(pid, deadline):
+    """在一个 agy 进程的所有监听口上找额度。→ (quota|None, reason|None, detail)。"""
+    ports = listen_ports(pid)
+    if not ports:
+        return None, "no_ports", "进程在但没有监听端口"
+    saw_not_ready = False
+    last = None
+    # 高位端口通常是明文 HTTP;两种都试,别硬编(见文件头坑 4)
+    for port in sorted(ports, reverse=True):
+        for tls in (False, True):
+            if time.monotonic() >= deadline:
+                # 超时**不是**「确实没有」。落成可重试的网络态,别让它长得像结论。
+                return None, "network_error", "探测超时（{}s 内没有端口应答）".format(HARD_DEADLINE)
+            status, body = rpc(port, RPC, tls)
+            if status is None:
+                continue
+            text = body.decode("utf-8", "replace") if isinstance(body, bytes) else str(body)
+            if status == 200:
+                try:
+                    q = parse_quota(json.loads(text))
+                except ValueError:
+                    last = ("bad_payload", "响应不是合法 JSON")
+                    continue
+                if q:
+                    return q, None, None
+                last = ("bad_payload", "200 但响应里没有 groups/remainingFraction")
+                continue
+            if NOT_READY_MARK in text.lower():
+                saw_not_ready = True             # ★ 预热窗口,不是「拿不到」
+                continue
+            last = ("rpc_error", "HTTP {}".format(status))
+    if saw_not_ready:
+        return None, "not_ready", "agy 刚起,额度服务还在预热（实测约 10 秒）"
+    if last:
+        return None, last[0], last[1]
+    return None, "network_error", "所有端口都连不上"
+
+
+def prev_index(path):
+    """上一份 sidecar 的 last_good。读不到就空 —— 这是纯增益,不该让它失败。"""
+    if not path:
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            old = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    if old.get("available") and isinstance(old.get("quota"), dict):
+        return {"quota": old["quota"], "fetched_at": old.get("fetched_at")}
+    lg = old.get("last_good")
+    return lg if isinstance(lg, dict) else None
+
+
+def main(argv):
+    prev = None
+    args = argv[1:]
+    while args:
+        a = args.pop(0)
+        if a == "--prev" and args:
+            prev = args.pop(0)
+        elif a in ("-h", "--help"):
+            print(__doc__)
+            return 0
+        else:
+            print("用法: agy-quota [--prev <path>]", file=sys.stderr)
+            return 2
+
+    carried = prev_index(prev)
+    out = {
+        "schema": SCHEMA,
+        "fetched_at": int(time.time()),
+        "available": False,
+        "reason": None,
+        "detail": None,
+        "pid": None,
+        "quota": None,          # ★ 失败态恒 None,绝不写 0 也绝不写满额
+        "last_good": None,
+    }
+
+    pids = agy_pids()
+    if not pids:
+        # 两种「没有」,含义天差地别 —— 见 REASONS 上方那段。
+        if agy_installed():
+            out["reason"] = "no_process"
+            out["detail"] = "agy 没在运行 —— 额度服务随进程存在,起一次 agy 就能读到"
+        else:
+            out["reason"] = "not_installed"
+            out["detail"] = "本机没有 agy"
+    else:
+        quota = reason = detail = None
+        deadline = time.monotonic() + HARD_DEADLINE
+        for pid in pids:
+            quota, reason, detail = probe(pid, deadline)
+            if quota:
+                out["pid"] = pid
+                break
+        if quota:
+            out["available"] = True
+            out["quota"] = quota
+        else:
+            out["reason"] = reason
+            out["detail"] = detail
+            out["pid"] = pids[0]
+
+    if not out["available"]:
+        out["last_good"] = carried
+
+    json.dump(out, sys.stdout, ensure_ascii=False)
+    sys.stdout.write("\n")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

@@ -5,7 +5,8 @@ import StackedArea, { type Layer } from "../components/StackedArea";
 import Seg from "../components/Seg";
 import type { TrafficData, Range, CacheMode, Bucket, Coverage } from "../traffic";
 import { RANGES, rangeLabel, bucketsFor, sumBuckets, costOfBucket, savingOfBucket, fmtTok,
-         countsCacheRead, countsCacheWrite, countedClasses, mixParts, colorOf, coveragePct, coverageNote } from "../traffic";
+         countsCacheRead, countsCacheWrite, countedClasses, mixParts, colorOf, coveragePct, coverageNote,
+         agyQuotaNote, type AgyQuotaSeries } from "../traffic";
 import KpiStrip, { type Kpi, UP, DOWN } from "../components/KpiStrip";
 import { useIntro, introEnabled } from "../hooks/useIntro";
 import CacheChip from "../components/CacheChip";
@@ -25,6 +26,62 @@ const SRC: Record<string, string> = {
  *
  *  壳走 `DisclosureBanner`(与 grok 额度那条共用同一套像素),**文案仍留在 `coverageNote`** ——
  *  两处共用视觉、各自拥有措辞。把文案也搬进通用件会让它变成第二个文案真源。 */
+/**
+ * agy 的**额度消耗**条 —— 第二本账。
+ *
+ * ★★ 与上面的 token 图**刻意长得不一样**（横条，不是面积图）：两者单位不同
+ * （额度% vs token）、覆盖率不同（100% vs 15.9%），画成同一种图会引诱人去比较、
+ * 甚至相减。形状上的差异就是"这是另一本账"的第一道提示。
+ *
+ * ★ `null`（样本不足）必须显示成「观测还不够」，**不能画成 0** —— 0 会被读成"没用过"，
+ * 而真相是"还没看到"。这是本仓贯穿始终的那条铁律。
+ */
+function AgyQuotaBars({ t, q, color }: {
+  t: Theme; q: AgyQuotaSeries | null | undefined; color: string;
+}): React.ReactElement {
+  const MONO = "'JetBrains Mono'";
+  const rows = q ? Object.entries(q.buckets)
+    .filter(([, b]) => b.consumed_pct > 0 || b.anomalies > 0)
+    .sort((a, b) => b[1].consumed_pct - a[1].consumed_pct) : [];
+  // 条长按最大值归一化 —— 消耗量通常远小于 100%，按 100 画会全是看不见的细线。
+  const max = Math.max(...rows.map(([, b]) => b.consumed_pct), 0.01);
+  return (
+    <div style={{ marginTop: 14, padding: "11px 13px", background: t.cardBg,
+                  border: `1px solid ${t.cardBorder}`, borderRadius: 10 }}>
+      <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 9 }}>
+        <span style={{ fontSize: 12, fontWeight: 700, color: t.text }}>额度消耗</span>
+        <span style={{ fontSize: 9.5, fontFamily: MONO, color, letterSpacing: ".03em" }}>
+          第二本账 · 单位 额度%
+        </span>
+      </div>
+      {!q || !rows.length ? (
+        <div style={{ fontSize: 11, color: t.muted, lineHeight: 1.6 }}>
+          {q ? "观测期内没有测到额度变化。" : "观测还不够（至少要两个采样点）。"}
+        </div>
+      ) : rows.map(([bid, b]) => (
+        <div key={bid} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 5 }}>
+          <span style={{ fontSize: 10, fontFamily: MONO, color: t.text2, width: 108,
+                         overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                title={`${b.group ?? "?"} · ${b.window ?? "?"}`}>{bid}</span>
+          <div style={{ flex: 1, height: 6, borderRadius: 2, background: t.barTrack, overflow: "hidden" }}>
+            <div style={{ height: "100%", width: `${Math.max(2, 100 * b.consumed_pct / max)}%`,
+                          background: color, borderRadius: 2 }} />
+          </div>
+          <span style={{ fontSize: 10.5, fontWeight: 600, fontFamily: MONO, color: t.text,
+                         fontVariantNumeric: "tabular-nums" }}>
+            {/* ★ 下界必须标出来，且用「≥」而不是脚注 —— 脚注等于没写。 */}
+            {b.lower_bound ? "≥" : ""}{b.consumed_pct.toFixed(2)}%
+          </span>
+        </div>
+      ))}
+      <div style={{ fontSize: 10, color: t.muted, lineHeight: 1.65, marginTop: 8,
+                    paddingTop: 7, borderTop: `1px solid ${t.divider}` }}>
+        {agyQuotaNote(q).replace(/\*\*/g, "")}
+      </div>
+    </div>
+  );
+}
+
 function CoverageBanner({ t, coverage }: {
   t: Theme; coverage?: Coverage;
 }): React.ReactElement | null {
@@ -274,6 +331,9 @@ export default function PlatformPage({ t, data, raw, cacheMode, pk, range, setRa
           等于没写（前车之鉴：两条「利润被高估」的警告在 tooltip 里躺了几个月没人看见）。
           只有带 coverage 字段的平台才渲染，其余平台一个像素都不多。 */}
       <CoverageBanner t={t} coverage={data?.platforms[pk]?.coverage} />
+      {/* ★ 只有 agy 有第二本账。紧跟覆盖率横幅 —— 那条说"这个数只有 15.9%",
+          这块紧接着回答"那剩下的怎么办"，两者必须相邻，隔开就成了两条各说各话的信息。 */}
+      {pk === "agy" && <AgyQuotaBars t={t} q={data?.agy_quota} color={colorOf(data, "agy")} />}
 
 
       <KpiStrip t={t} items={kpis} intro={intro} />

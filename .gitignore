@@ -32,6 +32,9 @@ app/**/.build_number
 .traffic-latest.json
 # grok 周额度 sidecar:含 email + user_id + account_key,与 state.json 同级敏感
 .grok-quota.json
+# agy 额度 sidecar。★ 与上面那条不同,它**不含凭证** —— agy 的额度接口无鉴权,
+# 响应里只有 bucket id / 窗口 / 剩余比例 / 重置时间。忽略它纯粹因为它是运行时产物。
+.agy-quota.json
 *.bak
 # UI 验证 harness 的一次性夹具(含脱敏后的账号池快照,仍不入库)
 codexbar/src/_*_probe.json
@@ -44,6 +47,9 @@ codexbar/uishot/app/
 traffic/sources.local.json
 # agy 用量账本:运行期产物,含会话 id
 traffic/agy-ledger/
+# agy 额度水位样本 + 采样器锁。运行时产物,且**含本机使用节奏**(什么时候在跑 agy),
+# 与 agy-ledger 同级 —— 不含凭证,但也没有入库的理由。
+traffic/agy-quota-ledger/
 # SLM 适配器落的本机工具产物,不属于本仓库
 .agent/
 .cursor/

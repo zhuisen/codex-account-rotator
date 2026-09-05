@@ -50,7 +50,15 @@ clone 到哪个目录都行 —— `deploy.sh` 会把仓库路径烧进二进制
 
 覆盖的 CLI:**Claude Code · Codex · Grok · Kimi · Antigravity(agy) · OpenClaw · Reasonix · DeepSeek Harness**。加一家 = 在 `traffic/scan.py` 写个解析器 + 注册表加一行,前端自动跟上。
 
-⚠️ **agy 只覆盖 print 模式**(`agy -p`,即 `omc ask` / `omc team` 走的那条)。它自己**不落用量**,数据是 `bin/agy` wrapper 从 `--output-format json` 抄下来的;**交互式会话拿不到**,页面上有覆盖率徽章标注。装这一家需要一步额外配置，见 [docs/INSTALL.md §5](docs/INSTALL.md#5-构建桌面应用)。
+除了 token 用量,总览页还显示**订阅额度**(与账号池的 Codex 余量并列,同款圆环+细条,标「只读」不参与切号):
+**Grok** 周额度(xAI 账单接口)· **Antigravity** 4 个桶(Gemini / Claude+GPT × 5h / 周,读本机 agy 进程的
+loopback RPC,**不联网、不消耗配额**)。没装那家 CLI 的机器上**零像素**,不会留一张写着"你没装"的空卡。
+
+⚠️ **agy 的 token 用量只覆盖 print 模式**(`agy -p`,即 `omc ask` / `omc team` 走的那条)。它自己**不落用量**,数据是 `bin/agy` wrapper 从 `--output-format json` 抄下来的;**交互式会话的 token 拿不到**,页面上有覆盖率徽章标注。装这一家需要一步额外配置，见 [docs/INSTALL.md §5](docs/INSTALL.md#5-构建桌面应用)。
+
+★ **但 agy 的「额度」是完整的(v1.1.0 起)** —— 那是另一本账:按额度水位差分,**含交互式会话**,覆盖 100%。
+两者**不同源、不可相加**:用量的单位是 token(可折算成钱),额度的单位是百分比(不能)。
+页面上并列显示并各自标注,别拿账本去解释额度掉了多少。
 
 ---
 

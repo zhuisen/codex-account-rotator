@@ -750,6 +750,75 @@ def _agy_coverage(days, ledger_rows):
             "since": int(since) if since is not None else None}
 
 
+# agy 额度差分序列的账本(采样器 `traffic/agy_quota_sampler.py` 写,这里只读)。
+AGY_QUOTA_LEDGER = Path(os.environ.get(
+    "AGY_QUOTA_LEDGER_DIR",
+    str(_STORE / "traffic" / "agy-quota-ledger"))) / "samples.jsonl"
+
+
+def _agy_quota_series(days):
+    """agy 的**额度消耗**序列 -> dict 或 None。
+
+    ★★ **这是与 `platforms` 完全不同的一本账,所以它是快照的独立顶层键,绝不进 platforms。**
+      · `platforms[*]` 的单位是 token,可求和、可乘单价得出费用;
+      · 这里的单位是**额度百分比**,不可与 token 相加、不可换算成钱。
+      混进 platforms 的后果不是报错,是下游 30+ 处读 `b.total` 的地方悄悄把百分比当 token 加进总数。
+
+    ★ 它补的正是 `_agy_coverage` 报出来的那 84% 缺口:账本只有 print 模式(近 90 天 15.9%),
+      而额度是服务端真值,交互式会话照样会掉。**覆盖率 100%,代价是换了量纲。**
+
+    ★★ **整个函数 fail-open,任何异常都只让这一条序列消失,绝不影响主扫描。**
+      2026-09-05 真踩过:`agy_quota_series.py` 没进 `tauri.conf.json` 的打包资源,
+      于是安装包里的 `scan.py` 一 import 就抛 —— **整个 `--json` 退出码 1、stdout 空**,
+      用户点「刷新」毫无反应,而症状里没有任何东西指向 agy。
+      **一个纯附加的次要功能,绝不能有能力搞挂主用量统计。**这条约束由
+      `tests/test_scan_optional_extras.py` 守着(把模块藏起来仍须正常出数)。
+    """
+    try:
+        return _agy_quota_series_inner(days)
+    except Exception:                       # noqa: BLE001 — 见上:宁可没有这条序列,也不能挂掉主扫描
+        return None
+
+
+def _agy_quota_series_inner(days):
+    import importlib.util
+    # ★ 只按**文件路径**加载,不试相对 import:`scan.py` 永远是被当脚本按路径执行的
+    #   (`python3 .../traffic/scan.py`),没有父包,`from . import` 必然抛 ImportError。
+    #   第一版写了那个 fallback,结果它成了崩溃的第一现场。
+    mod_path = Path(__file__).resolve().parent / "agy_quota_series.py"
+    if not mod_path.is_file():
+        return None                          # 打包时没带上 ⇒ 安静地没有这条序列
+    spec = importlib.util.spec_from_file_location("agy_quota_series", mod_path)
+    if spec is None or spec.loader is None:
+        return None
+    _aqs = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(_aqs)
+
+    samples = _aqs.read_samples(AGY_QUOTA_LEDGER)
+    if len(samples) < 2:
+        # ★ 一个样本推不出任何消耗。返回 None 让 UI 说「观测还不够」,
+        #   而不是画一条 0 —— 0 会被读成"没用过"。
+        return None
+    cut = time.time() - days * 86400
+    buckets = _aqs.derive(samples, since=cut)
+    if not buckets:
+        return None
+    return {
+        "unit": "quota_pct",
+        "days": days,
+        "buckets": {k: {"group": v["group"], "window": v["window"],
+                        "consumed_pct": v["consumed_pct"],
+                        # ★ 恢复与消耗**分开下发,不相抵**:滚动窗口下旧消耗会老化退出,
+                        #   相抵会让"用了多少"凭空变小。两者是不同的量。
+                        "recovered_pct": v["recovered_pct"],
+                        "lower_bound": v["lower_bound"],
+                        "anomalies": len(v["anomalies"])}
+                    for k, v in buckets.items()},
+        "daily": _aqs.daily(samples),
+        "coverage": _aqs.coverage(samples),
+    }
+
+
 # ---------------------------------------------------------------- 增量解析
 
 _INCR_WIN = 1 << 16          # 守卫窗口 64 KiB:够抓住改写,又不至于把"省下的读盘"再花回去
@@ -1140,6 +1209,8 @@ def main(argv):
 
     if as_json:
         print(json.dumps({"platforms": platforms, "scan": stat,
+                          # ★ 独立顶层键。单位是额度%,不是 token —— 见 `_agy_quota_series`。
+                          "agy_quota": _agy_quota_series(days),
                           "generated_at": int(time.time())}, ensure_ascii=False))
         return 0
 

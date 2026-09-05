@@ -420,15 +420,44 @@ static GROK_LOCK: Mutex<()> = Mutex::new(());
 /// 拿到锁后若 sidecar 比这个还新,就认为刚有人取过,直接复用,不起 python、不发外网请求。
 const GROK_COALESCE_SECS: u64 = 300;
 
-fn grok_snapshot_path() -> String {
-    format!("{}/{}", data_dir(), GROK_SNAPSHOT)
+/// agy(Antigravity)额度的 sidecar。不进 `state.json` 的理由同 `GROK_SNAPSHOT`,
+/// 但 agy 这边更简单:它的额度接口**无鉴权**,我们手上根本没有 agy 的凭证可泄。
+/// 仍然单独落盘,是因为它和 grok 一样不是账号池成员,进 `slots` 就会被轮换器遍历。
+const AGY_SNAPSHOT: &str = ".agy-quota.json";
+
+/// 独立于 `GROK_LOCK`:两条额度链路互不相干,共用一把锁只会让一边等另一边。
+static AGY_LOCK: Mutex<()> = Mutex::new(());
+/// ★ 比 grok 的 300s 短得多。agy 的额度是**本机进程**里的实时数,取一次只是一个 loopback
+/// 往返(实测毫秒级),没有外网成本也没有配额成本;而它的 5h 窗口跳得比 grok 的周窗口快。
+const AGY_COALESCE_SECS: u64 = 60;
+
+// ---- sidecar 的三件套。参数化而不是每条链路抄一份 ----
+// 在 agy 之前这套就已经有两份(traffic / grok),第三份落地时才合并 —— 到这里
+// 「同一段代码的三个副本」已经是实打实的成本,而不是预支的抽象。
+
+fn sidecar_path(name: &str) -> String {
+    format!("{}/{}", data_dir(), name)
 }
 
-/// sidecar 若比 `max_age_secs` 还新就返回它。`fetched_at` 成败都会写,所以过期判断对降级态同样成立。
-fn fresh_grok(max_age_secs: u64) -> Option<String> {
-    let body = fs::read_to_string(grok_snapshot_path()).ok()?;
+/// 原子落盘:先写 `.tmp<pid>` 再 rename。带 pid 是因为多个实例可能同时写同一份 sidecar,
+/// 共用一个临时名会互相截断。rename 失败要收拾临时文件,否则 data_dir 里会积垃圾。
+fn write_sidecar(name: &str, body: &str) {
+    let path = sidecar_path(name);
+    let tmp = format!("{}.tmp{}", path, std::process::id());
+    if fs::write(&tmp, body).is_ok() && fs::rename(&tmp, &path).is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+}
+
+/// sidecar 若比 `max_age_secs` 还新就返回它。
+///
+/// `ts_key` 各链路不同(traffic 是 `generated_at`,额度类是 `fetched_at`),所以要传进来 ——
+/// ★ 写死一个 key 会让另一条链路**永远判定为过期**,表现是"每次都重新取",不报错、只是慢,
+/// 是那种能潜伏很久的错。
+fn fresh_sidecar(name: &str, ts_key: &str, max_age_secs: u64) -> Option<String> {
+    let body = fs::read_to_string(sidecar_path(name)).ok()?;
     let v: Value = serde_json::from_str(&body).ok()?;
-    let at = v.get("fetched_at")?.as_u64()?;
+    let at = v.get(ts_key)?.as_u64()?;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .ok()?
@@ -440,23 +469,90 @@ fn fresh_grok(max_age_secs: u64) -> Option<String> {
     }
 }
 
-/// 原子落盘,理由同 `write_traffic_snapshot`。
-fn write_grok_snapshot(body: &str) {
-    let path = grok_snapshot_path();
-    let tmp = format!("{}.tmp{}", path, std::process::id());
-    if fs::write(&tmp, body).is_ok() && fs::rename(&tmp, &path).is_err() {
-        let _ = fs::remove_file(&tmp);
+/// 只读 sidecar 内容。`Ok(None)` = 从未取过 —— 前端据此显示「未探测」而不是 0%/满额。
+fn read_sidecar(name: &str) -> Result<Option<String>, String> {
+    match fs::read_to_string(sidecar_path(name)) {
+        Ok(s) if !s.trim().is_empty() => Ok(Some(s)),
+        Ok(_) => Ok(None),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("read {}: {}", name, e)),
     }
+}
+
+fn grok_snapshot_path() -> String {
+    sidecar_path(GROK_SNAPSHOT)
+}
+
+/// `fetched_at` 成败都会写,所以过期判断对降级态同样成立。
+fn fresh_grok(max_age_secs: u64) -> Option<String> {
+    fresh_sidecar(GROK_SNAPSHOT, "fetched_at", max_age_secs)
+}
+
+fn write_grok_snapshot(body: &str) {
+    write_sidecar(GROK_SNAPSHOT, body);
 }
 
 /// 读 grok 额度 sidecar。`Ok(None)` = 从未取过(前端据此显示「未探测 · 点 ↻」而不是 0%)。
 #[tauri::command]
 fn read_grok_quota() -> Result<Option<String>, String> {
-    match fs::read_to_string(grok_snapshot_path()) {
-        Ok(s) if !s.trim().is_empty() => Ok(Some(s)),
-        Ok(_) => Ok(None),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(format!("read grok snapshot: {}", e)),
+    read_sidecar(GROK_SNAPSHOT)
+}
+
+/// 读 agy 额度 sidecar。`Ok(None)` = 从未取过。
+///
+/// ★ 这里的 `None` 与「agy 没在跑」是**两件事**:前者是我们没测过,后者是测过且确定没有
+/// (`available:false, reason:"no_process"`)。前端必须分开显示 —— 合并了就等于把
+/// 「不知道」讲成「确实没有」。
+#[tauri::command]
+fn read_agy_quota() -> Result<Option<String>, String> {
+    read_sidecar(AGY_SNAPSHOT)
+}
+
+/// 取一次 agy 额度。
+///
+/// 和 `run_grok_quota` 同构,但有一处**本质差别**:这条路径**不联网** ——
+/// agy 的额度来自本机 agy 进程监听的 loopback 端口。所以它既不消耗任何配额,
+/// 也不受外网状况影响;它唯一的失败源是"本机此刻有没有一个就绪的 agy"。
+///
+/// ★★ 退出码恒 0 的约定同 grok:失败必须作为**有内容的降级数据**(`available:false` + reason)
+/// 送到前端,而不是 `Err`。agy 这边尤其要紧 —— 上游 `remainingFraction` 缺省是 1.0,
+/// 任何一层把失败折叠成"空数据"都极容易在 UI 上长成**满格额度**。
+///
+/// ★ 不 `emit("state-changed")`、不 `refresh_tray()`:agy 不在账号池里,发了是噪音。
+#[tauri::command]
+async fn run_agy_quota() -> Result<String, String> {
+    let script = format!("{}/agy-quota", script_dir());
+    let prev = sidecar_path(AGY_SNAPSHOT);
+    let out = tauri::async_runtime::spawn_blocking(move || {
+        let _guard = AGY_LOCK.lock();
+        // 双检:两个 webview 同时判定要取时,只有第一个真的起 python。
+        if let Some(fresh) = fresh_sidecar(AGY_SNAPSHOT, "fetched_at", AGY_COALESCE_SECS) {
+            return Ok(Err(fresh));
+        }
+        py_cmd()
+            .arg(&script)
+            .arg("--prev") // 只读上一份,用来搬运 last_good(降级时保留陈旧读数)
+            .arg(&prev)
+            .output()
+            .map(Ok)
+    })
+    .await
+    .map_err(|e| format!("join: {}", e))?
+    .map_err(|e: std::io::Error| format!("exec: {}", e))?;
+    let out = match out {
+        Ok(o) => o,
+        Err(cached) => return Ok(cached),
+    };
+    if out.status.success() {
+        let body = String::from_utf8_lossy(&out.stdout).to_string();
+        write_sidecar(AGY_SNAPSHOT, &body);
+        Ok(body)
+    } else {
+        Err(format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        ))
     }
 }
 
@@ -508,33 +604,16 @@ async fn run_grok_quota() -> Result<String, String> {
 }
 
 /// 快照若比 `max_age_secs` 还新就返回它,否则 None。用于扫描前的合并判断。
+/// ★ 时间戳字段是 `generated_at`,不是额度链路那个 `fetched_at` —— 传错的话这里会
+/// 恒判过期,于是每次都重扫,不报错、只是慢。
 fn fresh_snapshot(max_age_secs: u64) -> Option<String> {
-    let body = fs::read_to_string(snapshot_path()).ok()?;
-    let v: Value = serde_json::from_str(&body).ok()?;
-    let gen = v.get("generated_at")?.as_u64()?;
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()?
-        .as_secs();
-    if now.saturating_sub(gen) <= max_age_secs {
-        Some(body)
-    } else {
-        None
-    }
-}
-
-fn snapshot_path() -> String {
-    format!("{}/{}", data_dir(), SNAPSHOT)
+    fresh_sidecar(SNAPSHOT, "generated_at", max_age_secs)
 }
 
 /// 原子落盘:先写同目录临时文件再 `rename`。直接覆写会让并发的读者读到半截 JSON —— 主窗口在扫描、
 /// 用户同时点开菜单栏,是每天都会发生的时序。
 fn write_traffic_snapshot(body: &str) {
-    let path = snapshot_path();
-    let tmp = format!("{}.tmp{}", path, std::process::id());
-    if fs::write(&tmp, body).is_ok() && fs::rename(&tmp, &path).is_err() {
-        let _ = fs::remove_file(&tmp);
-    }
+    write_sidecar(SNAPSHOT, body);
 }
 
 /// 读快照。返回 `null` 表示"还没有任何一次成功扫描",调用方据此显示首扫提示而不是空图。
@@ -543,12 +622,7 @@ fn write_traffic_snapshot(body: &str) {
 /// 数字、主窗口进页面就该顺手刷新),放在这里会把两种策略焊死成一种。
 #[tauri::command]
 fn read_traffic_snapshot() -> Result<Option<String>, String> {
-    match fs::read_to_string(snapshot_path()) {
-        Ok(s) if !s.trim().is_empty() => Ok(Some(s)),
-        Ok(_) => Ok(None),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(format!("read snapshot: {}", e)),
-    }
+    read_sidecar(SNAPSHOT)
 }
 
 /// 查远端最新的 `vX.Y.Z` tag。
@@ -1470,6 +1544,8 @@ pub fn run() {
             read_traffic_snapshot,
             read_grok_quota,
             run_grok_quota,
+            read_agy_quota,
+            run_agy_quota,
             check_update,
             set_dock_visible,
             set_main_visible,

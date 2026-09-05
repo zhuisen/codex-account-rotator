@@ -57,10 +57,68 @@ export function coverageNote(c: Coverage | undefined): string {
     + (since ? `，采集自 ${since} 起。` : "。")
     + `所以这个数字是下界，不是 Antigravity 的全部消耗。`;
 }
+/**
+ * agy 的**额度消耗**序列（`scan.py` 的 `_agy_quota_series`）。
+ *
+ * ★★ **这是与 `platforms` 完全不同的一本账,所以它是独立顶层键、独立类型。**
+ *   · `platforms[*]` 的单位是 token,可求和、可乘单价得出费用;
+ *   · 这里的单位是 `quota_pct`（额度百分比），**不可与 token 相加、不可换算成钱**。
+ *
+ * 存在的理由：token 账本只覆盖 print 模式（近 90 天 15.9%），交互式会话一个字都进不来；
+ * 而额度是服务端真值，交互态照样会掉。所以这条**覆盖 100%，代价是换了量纲**。
+ */
+export interface AgyQuotaSeries {
+  unit: "quota_pct";
+  days: number;
+  buckets: Record<string, {
+    group: string | null;
+    window: string | null;
+    consumed_pct: number;
+    /** 额度**恢复**量（滚动窗口把旧消耗老化掉）。★ 与 `consumed_pct` **不相抵**：
+     *  两者是不同的量，相减会让"用了多少"凭空变小。 */
+    recovered_pct: number;
+    /** ★ 采样间隔相对窗口太长 ⇒ 中间的消耗可能已经完全老化、永远看不到了。
+     *  这个数是**下界**，UI 必须如实标注（用「≥」，不是脚注）。 */
+    lower_bound: boolean;
+    /** 解释不了的现象计数。滚动窗口模型下正常应为 0。 */
+    anomalies: number;
+  }>;
+  daily: Record<string, Record<string, number>>;
+  /** 观测窗口。★ 与 token 那条「采集自 08/19 起」同理：不给起始时间，
+   *  一个偏小的数会被读成"用得少"而不是"还没看到那么早"。 */
+  coverage: { first: number; last: number; n: number } | null;
+}
+
 export interface TrafficData {
   platforms: Record<string, Platform>;
   scan: { scanned: number; reused: number; files: number; elapsed_ms?: number };
+  /** ★ 只有 agy 有；`null` = 样本还不足两个，推不出任何消耗。
+   *  **`null` 必须显示成「观测还不够」，不能画成 0** —— 0 会被读成"没用过"。 */
+  agy_quota?: AgyQuotaSeries | null;
   generated_at: number;
+}
+
+/** agy 额度序列的披露文案（**唯一出处**，同 `coverageNote` 的纪律）。 */
+export function agyQuotaNote(q: AgyQuotaSeries | null | undefined): string {
+  if (!q) {
+    return `额度消耗序列还没有足够观测（至少要两个采样点才能差分）。`
+      + `这不是「没有消耗」——跑一次 agy 就会开始累积。`;
+  }
+  const anom = Object.values(q.buckets).reduce((n, b) => n + b.anomalies, 0);
+  const lb = Object.values(q.buckets).some(b => b.lower_bound);
+  const since = q.coverage
+    ? new Date(q.coverage.first * 1000).toLocaleDateString("zh-CN", { month: "2-digit", day: "2-digit" })
+    : null;
+  const rec = Object.values(q.buckets).reduce((n, b) => n + b.recovered_pct, 0);
+  return `按额度水位差分得出，覆盖**全部** agy 用量（含交互式会话），`
+    + `与上面的 token 统计是两本账：单位是额度百分比，不可相加、不可折算成钱。`
+    + (since ? `采样自 ${since} 起，${q.coverage!.n} 个点。` : "")
+    // ★ agy 是**滚动窗口**（实测：resetTime 不变时 remaining 会上涨），旧消耗会老化退出，
+    //   所以"恢复"是常态而不是异常，要说明它、且说明它没有和消耗相抵。
+    + (rec > 0.01 ? `期间额度恢复了 ${rec.toFixed(2)}%（滚动窗口把旧消耗老化掉了），`
+                  + `已单独计数、未与消耗相抵。` : "")
+    + (lb ? `标「≥」的是下界——采样间隔相对窗口偏长时，中间的消耗可能已经老化掉、看不到了。` : "")
+    + (anom ? `另有 ${anom} 处解释不了的水位变化，未计入消耗。` : "");
 }
 
 /** 取平台色:优先用 scan.py 下发的,拿不到才回落到 `theme.ts` 的兜底表。 */

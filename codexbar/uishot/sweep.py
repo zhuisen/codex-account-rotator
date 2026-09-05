@@ -55,12 +55,21 @@ VIEWS = [
     #   「一张折行、另一张不折」，两头（1000 与 1160）都是干净的。只挑整百宽度截图必漏。
     ("总览·侧栏展开",    "/harness.html?nav=home&rail=open&grok=ok",                  [1200, 1120, 1080, 1040, 1000, 960]),
     ("总览·侧栏折叠",    "/harness.html?nav=home&grok=ok",                            [940, 900, 860]),
-    # ★★ `~2` 不能少：账号名在 **hero 卡里也有一份**，不带序号点的是 hero，
-    #    而 hero 没有 onSelect ⇒ 动作条根本不展开，这一行会**恒绿且什么都没测**
-    #    （2026-08-26 发现，这个视图自 08-24 加进来起就是空的）。
-    #    make_harness 的 click 探针本来就报了「命中2个,点第1」，只是没人看。
-    ("总览·动作条",      "/harness.html?nav=home&rail=open&grok=ok&click=Pro1~2",     [1200, 1000, 960]),
+    # ★★ 这一行被改过两次,两次都是因为**它在假装测东西**:
+    #    · 2026-08-26:点的是 hero 卡(名字有两份),hero 没有 onSelect ⇒ 动作条不展开 ⇒ 恒绿空测;
+    #    · 2026-09-05:`Pro1` 已变成死号 —— 死号只在折叠的「失效账号」区渲染,同样没有 onSelect
+    #      ⇒ `click` 恒匹配 0 个 ⇒ **恒红**,而要验的布局仍然没被验过。
+    #    现在点**活号**、序号 1(名字在当前布局里只出现一次,`~2` 那条理由已过时)。
+    #    ★ 定这个目标前**正面验过它真的展开**:点击后动作词从 14 处涨到 22 处。
+    #      「点中了」≠「展开了」—— 只看 click 不报错,就会退回上面那两种假装。
+    ("总览·动作条",      "/harness.html?nav=home&rail=open&grok=ok&click=plus3~1",    [1200, 1000, 960]),
     ("总览·grok降级",    "/harness.html?nav=home&rail=open&grok=stale",               [1000, 960]),
+    # ★ agy 卡让总览的格子从 4 张变 5 张 —— 换行位置整个变了,所以这几行不是"再验一遍",
+    #   而是验一个**新的**布局。`agy=tight` 让数字进红区(位数与颜色都变),
+    #   `agy=noproc` 验"没在跑"仍然显示上次读数且**不染警告色**(它是常态不是故障)。
+    ("总览·agy低额度",   "/harness.html?nav=home&rail=open&grok=ok&agy=tight",        [1200, 1080, 1000, 960]),
+    ("总览·agy没在跑",   "/harness.html?nav=home&rail=open&grok=ok&agy=noproc",       [1000, 960]),
+    ("总览·agy折叠",     "/harness.html?nav=home&grok=ok&agy=tight",                  [940, 900, 860]),
     # ★ 需要 `CODEXBAR_UNPROBED=1` 生成的 harness 才有第 3 个号（见 make_harness 同名夹具）。
     #   没有它时这一行等价于「总览·侧栏展开」,不会假红,只是少测两件事。
     ("总览·未探测号",    "/harness.html?nav=home&rail=open&grok=ok",                  [1200, 1000, 960]),
@@ -72,10 +81,16 @@ VIEWS = [
     ("用量总览",         "/harness.html?nav=traffic&rail=open",                       [1200, 1037, 1000, 960]),
     ("用量总览·谷底",     "/harness.html?nav=traffic",                                 [940, 913, 880]),
     ("平台详情",         "/harness.html?nav=platform:claude&rail=open",               [1200, 1000, 900]),
+    # ★ agy 详情页是唯一有**两本账**的页面（token 图 + 额度消耗条）。它比 claude 那页多一整块，
+    #   窄宽下是新的换行风险；而且那块里有「≥」前缀和一段较长的披露文案，都是折行的常见诱因。
+    ("平台详情·agy",     "/harness.html?nav=platform:agy&rail=open",                  [1200, 1000, 900]),
+    ("平台详情·agy折叠",  "/harness.html?nav=platform:agy",                            [940, 860]),
     ("设置",            "/harness.html?nav=settings&rail=open",                      [1200, 1000, 900]),
     ("菜单栏·账号",      "/harness-menubar.html?w=352&grok=ok",                       [520]),
     ("菜单栏·今日",      "/harness-menubar.html?w=352&tab=today&grok=ok",             [520]),
     ("菜单栏·grok降级",  "/harness-menubar.html?w=352&grok=stale",                    [520]),
+    ("菜单栏·agy",       "/harness-menubar.html?w=352&grok=ok&agy=tight",             [520]),
+    ("菜单栏·agy没在跑", "/harness-menubar.html?w=352&grok=ok&agy=noproc",            [520]),
 ]
 
 

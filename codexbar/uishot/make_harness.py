@@ -26,6 +26,29 @@ APP = HERE / "app"
 REPO = HERE.parent.parent                       # 仓库根:state.json 夹具的来源,**与快照路径解耦**
 SNAP = pathlib.Path(os.environ.get("CODEXBAR_SNAPSHOT") or (REPO / ".traffic-latest.json"))
 
+# ★★ **陈旧产物闸。** 2026-09-05 实测踩到:`uishot/app/` 的 bundle 停在 5 天前,
+#    而我以为 `npm run build` 会喂给它 —— 那个命令只写 `dist/`,harness 读的是 `app/`。
+#    后果不是报错,是**假绿**:sweep 把 8 个新视图全判成"干净",而那些页面里
+#    新组件一个都没渲染。页面照常渲染、零报错,看着完全像通过。
+#    正确姿势:`vite build --outDir uishot/app` 然后跑本脚本(顺序不能反,build 会清空 outDir)。
+def _assert_fresh_bundle():
+    src = HERE.parent / "src"
+    if not src.is_dir() or not APP.is_dir():
+        return
+    newest_src = max((f.stat().st_mtime for f in src.rglob("*")
+                      if f.is_file() and f.suffix in (".ts", ".tsx", ".css")), default=0)
+    newest_app = max((f.stat().st_mtime for f in (APP / "assets").glob("*.js")), default=0)
+    if newest_app and newest_src > newest_app + 1:
+        import datetime
+        fmt = lambda t: datetime.datetime.fromtimestamp(t).strftime("%m-%d %H:%M")
+        raise SystemExit(
+            "✗ uishot/app 的 bundle 比源码旧（bundle {} < 源码 {}）。\n"
+            "  直接生成 harness 会得到**假绿**：sweep 测的是旧代码，新组件根本没渲染。\n"
+            "  先跑：cd codexbar && ./node_modules/.bin/vite build --outDir uishot/app"
+            .format(fmt(newest_app), fmt(newest_src)))
+
+
+_assert_fresh_bundle()
 index = (APP / "index.html").read_text()
 snapshot = SNAP.read_text()          # 只传递,不打印
 
@@ -54,6 +77,12 @@ STUB = """
       localStorage.setItem('codexbar_platform_prefs', JSON.stringify({
         order: ['grok', 'claude', 'codex', 'kimi'],
         by: { kimi: { off: true }, grok: { name: 'DeepSeek', color: '#7fd1ff' } },
+      }));
+    } else if (p.get('plat') === 'agyoff') {
+      // 验「设置页停用 agy ⇒ 额度卡零像素」。与 grokoff 分开:两个开关各管各的,
+      // 合成一个就验不出"关了 grok 顺手把 agy 也关了"这类串台。
+      localStorage.setItem('codexbar_platform_prefs', JSON.stringify({
+        order: [], by: { agy: { off: true } },
       }));
     } else if (p.get('plat') === 'grokoff') {
       // ★ 专门用来验「设置页停用 grok ⇒ 额度卡零像素」。`plat=demo` 停的是 kimi 不是 grok,
@@ -140,6 +169,39 @@ STUB = """
                                  last_good: { used_percent: 35.0, fetched_at: _NOW - 10800,
                                               period_end: _NOW + 259200 } })] },
   };
+  // agy 额度夹具。★ 与 grok 不同,agy 的响应里**没有任何身份信息**(接口无鉴权),
+  // 所以这里无需脱敏 —— 但形状必须真实:2 组 × 2 窗口,`remaining_percent` 是**剩余**。
+  function _bkt(id, win, rem, dt) {
+    return { bucket_id: id, window: win, remaining_percent: rem, reset_at: _NOW + dt };
+  }
+  function _groups(gw, g5, tw, t5) {
+    return { groups: [
+      { name: 'Gemini Models', buckets: [_bkt('gemini-weekly', 'weekly', gw, 604800),
+                                         _bkt('gemini-5h', '5h', g5, 18000)] },
+      { name: 'Claude and GPT models', buckets: [_bkt('3p-weekly', 'weekly', tw, 604800),
+                                                 _bkt('3p-5h', '5h', t5, 18000)] } ] };
+  }
+  function _agy(o) {
+    var base = { schema: 1, fetched_at: _NOW - 30, available: false, reason: null,
+                 detail: null, pid: 45366, quota: null, last_good: null };
+    for (var k in o) base[k] = o[k];
+    return base;
+  }
+  var AGY = {
+    // 实测形状(2026-09-04,本机 agy 1.1.26)。
+    ok:      _agy({ available: true, quota: _groups(99.56, 97.34, 100, 100) }),
+    // 低水位:验数字的阈值色与 glow。最紧的是 3p-5h = 7% ⇒ 环上应显示 7、数字红。
+    tight:   _agy({ available: true, quota: _groups(62.0, 41.0, 88.0, 7.0) }),
+    // ★★ agy 没在跑 —— **常态,不是故障**。必须仍然显示(带上次读数 + 一个 `!`),
+    //    且不得染成警告色。这条夹具就是为了截出"藏了"或"染红了"这两种回归。
+    noproc:  _agy({ reason: 'no_process', detail: 'agy 没在运行',
+                    last_good: { quota: _groups(99.56, 97.34, 100, 100),
+                                 fetched_at: _NOW - 10800 } }),
+    // 预热窗口(起后 ~10s 内),会自愈 ⇒ 琥珀。
+    warm:    _agy({ reason: 'not_ready', detail: 'agy 刚起,额度服务还在预热' }),
+    // ★ 本机没装 agy ⇒ **零像素**。截出来若还有卡就是回归。
+    notinst: _agy({ reason: 'not_installed', detail: '本机没有 agy' }),
+  };
   var ipc = {}, sizes = [], emitted = [];
   function invoke(cmd, args) {
     ipc[cmd] = (ipc[cmd] || 0) + 1;
@@ -199,6 +261,16 @@ STUB = """
         var g = p.get('grok') || 'ok';
         if (g === 'never') return Promise.resolve(null);
         return Promise.resolve(JSON.stringify(GROK[g] || GROK.ok));
+      }
+      // ★ agy 额度。**不打桩就是假绿** —— 落到 default 返回 null ⇒ `agyQuotaVisible` 判 false
+      //   ⇒ 整张卡 `return null`,于是 sweep 一张 agy 卡都没渲染却报"干净"。
+      //   与 grok 那条同族的坑,这里再踩一次的代价是新加的卡从未被任何一次布局验证覆盖过。
+      //   `?agy=ok|tight|noproc|warm|notinst|never`。
+      case 'read_agy_quota':
+      case 'run_agy_quota': {
+        var ag = p.get('agy') || 'ok';
+        if (ag === 'never') return Promise.resolve(null);
+        return Promise.resolve(JSON.stringify(AGY[ag] || AGY.ok));
       }
       case 'plugin:autostart|is_enabled':
         return Promise.resolve(false);

@@ -6,11 +6,13 @@ import { THEMES, STATUS_COLORS } from "./theme";
 import Toast from "./components/Toast";
 import AccountRow from "./components/AccountRow";
 import GrokRow from "./components/GrokRow";
+import AgyRow from "./components/AgyRow";
 import ProbeButton from "./components/ProbeButton";
 import MenuBarToday from "./components/MenuBarToday";
 import { useStore } from "./hooks/useStore";
 import { useTraffic } from "./hooks/useTraffic";
 import { useGrokQuota } from "./hooks/useGrokQuota";
+import { useAgyQuota } from "./hooks/useAgyQuota";
 import { fmtAgo } from "./helpers";
 import { usePrivacy } from "./hooks/usePrivacy";
 import { todayView, fmtTok, colorOf } from "./traffic";
@@ -155,6 +157,9 @@ export default function MenuBar() {
   //   探针全池的号数、自动切号。混进去 ⌘3 会"切"到一个切不了的东西上,且不报错。
   //   视觉复用账号卡,数据走独立通路 —— 闸在 tests/test_grok_not_in_pool_ui.py。
   const { snap: grokSnap, busy: grokBusy } = useGrokQuota();
+  // ★ agy 同样不进 `accounts`/`alive`,理由与 grok 完全一致。
+  //   与 grok 的差别:这条**不联网**(本机 loopback),所以菜单栏常开也不产生外部请求。
+  const { snap: agySnap, busy: agyBusy } = useAgyQuota();
   const alive = accounts.filter(a => a.status !== "dead");
   const dead = accounts.filter(a => a.status === "dead");
   const bestPct = alive.reduce((m, a) => Math.max(m, a.windows[0]?.pct ?? -1), -1);
@@ -279,6 +284,10 @@ export default function MenuBar() {
         <GrokRow t={t} color={colorOf(traffic, "grok")} disabled={!!prefs.by?.grok?.off}
                  snap={grokSnap} privacy={privacy} busy={grokBusy}
                  onOpen={() => void openMain("navigate-platform", "grok")} />
+        {/* agy:同款卡片、无「切换」按钮。★ 没有 privacy —— agy 的额度响应里没有身份信息。 */}
+        <AgyRow t={t} color={colorOf(traffic, "agy")} disabled={!!prefs.by?.agy?.off}
+                snap={agySnap} busy={agyBusy}
+                onOpen={() => void openMain("navigate-platform", "agy")} />
 
         {dead.length > 0 && (
           <details className="mb-dead-fold">

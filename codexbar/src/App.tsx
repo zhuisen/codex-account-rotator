@@ -26,6 +26,8 @@ import { usePrivacy } from "./hooks/usePrivacy";
 import { useTraffic } from "./hooks/useTraffic";
 import { useGrokQuota } from "./hooks/useGrokQuota";
 import GrokCard from "./components/GrokCard";
+import { useAgyQuota } from "./hooks/useAgyQuota";
+import AgyCard from "./components/AgyCard";
 import { IconTicket } from "./components/CardBadge";
 import ProbeButton from "./components/ProbeButton";
 import PlanBadge from "./components/PlanBadge";
@@ -175,6 +177,19 @@ export default function App() {
    */
   const { snap: grokSnap, busy: grokBusy, err: grokErr, refresh: refreshGrok } =
     useGrokQuota({ enabled: page === "overview" });
+  /**
+   * ★ agy 额度。**与上面那条最大的区别:它不联网。**
+   *   数据来自本机 agy 进程监听的 loopback 端口,不消耗任何配额、不碰凭证(接口无鉴权),
+   *   实测毫秒级。所以上面那段"唯一一条主动联网路径"的说法**只指 grok**,别把这条也算进去。
+   *
+   *   位置同样**只在总览** —— 沿用用户 2026-08-24 对 grok 的定稿:额度归总览,
+   *   用量页只放本机盘扫出来的 token 消耗。两者不同源,混在一页会让人以为可以相减。
+   *
+   *   新鲜度 2min(不是 grok 的 10min):agy 最紧的窗口是 5h,每 1% ≈ 3 分钟,
+   *   10 分钟粒度会让用户看到一个落后三个百分点的数。理由详见 `useAgyQuota`。
+   */
+  const { snap: agySnap, busy: agyBusy, err: agyErr, refresh: refreshAgy } =
+    useAgyQuota({ enabled: page === "overview" });
 
   // ★ `name` 是展开态显示的中文名，`tip` 只在**折叠态**当悬浮提示 —— 展开后标签已经在那儿，
   //   再挂一个 title 是重复。原来 traffic 的 tip 写死「Claude / Codex / Grok」三家，
@@ -451,6 +466,16 @@ export default function App() {
                                 privacy={privacy} busy={grokBusy} err={grokErr}
                                 onRefresh={refreshGrok}
                                 onOpen={() => { setDrill("grok"); setPage("traffic"); }} />
+                      {/* ★ agy 卡。同样**不进 `alive` 数组**,理由与 grok 完全一致
+                          (⌘1~⌘9 会"切"到一个切不了的东西上,且不报错)。
+                          闸在 tests/test_agy_not_in_pool_ui.py。
+                          ★ 没有 `privacy` prop:agy 的额度响应里**没有任何身份信息**
+                          (接口无鉴权、不返回账号),没有可遮的东西。 */}
+                      <AgyCard t={t} color={colorOf(traffic, "agy")} snap={agySnap}
+                               disabled={!!platPrefs.by?.agy?.off} winSlots={winSlots}
+                               busy={agyBusy} err={agyErr}
+                               onRefresh={refreshAgy}
+                               onOpen={() => { setDrill("agy"); setPage("traffic"); }} />
                     </div>
                     {dead.length > 0 && (
                       <details style={{ marginTop: 12 }}>

@@ -86,6 +86,36 @@ def passthrough() -> None:
     os.execv(str(REAL), [str(REAL)] + sys.argv[1:])
 
 
+SAMPLER = Path(__file__).resolve().parent.parent / "traffic" / "agy_quota_sampler.py"
+
+
+def start_quota_sampler() -> None:
+    """拉起额度采样器(独立进程,自我终结)。★ 任何异常都必须被吞掉。
+
+    ★★ **为什么必须在这里、而且必须是独立进程**:交互态走 `os.execv`,wrapper 进程
+    会被真身**整个替换掉** —— 没有"之后"可言,也没有任何回调点。所以采样只能在
+    拉起 agy **之前**交给一个不属于本进程生命周期的东西。
+
+    ★★ **这条路径覆盖交互式会话,而 token 账本覆盖不了。** 用量只存在于 print 模式的
+    stdout 里(近 90 天覆盖 15.9%),而额度是服务端真值,交互态照样会掉 ——
+    所以采样器补的正是账本永远补不上的那 84%。两者单位不同、是两本账,别相加。
+
+    ★ 不用 launchd 常驻:额度只在 agy 活着时才动,常驻一个 24×7 的进程去看一个
+    大部分时间不动的数,既浪费又多一个要维护的服务。采样器自己会在没有 agy 时退出。
+    ★ `start_new_session=True` + devnull 三件套:不继承 TTY、不往用户终端吐字、
+    不随 wrapper/agy 的进程组一起被信号带走。
+    """
+    try:
+        if os.environ.get("AGY_SAMPLER_OFF") or not SAMPLER.exists():
+            return
+        subprocess.Popen(
+            [sys.executable, str(SAMPLER)],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, start_new_session=True)
+    except Exception:                    # noqa: BLE001 — 采集不到是小事,弄坏 agy 是大事
+        pass
+
+
 def arg_value(argv: list, name: str):
     """取 `--name value` / `--name=value` 的值，取不到返回 None。"""
     for i, a in enumerate(argv):
@@ -145,6 +175,9 @@ def main() -> None:
     if not REAL.exists():
         sys.stderr.write(f"agy-wrap: 真身不存在: {REAL}\n")
         sys.exit(127)
+
+    # ★ 必须在分支**之前** —— 交互态那条走 execv,过了那行就没有本进程了。
+    start_quota_sampler()
 
     is_print = any(a in PRINT_FLAGS or a.startswith("--print=") or a.startswith("--prompt=")
                    for a in argv)

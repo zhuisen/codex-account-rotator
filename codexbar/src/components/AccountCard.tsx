@@ -137,7 +137,16 @@ export default function AccountCard({ a, isCurrent, isBest, isSelected, shortcut
                          fontFamily: "'JetBrains Mono'" }} />
             )}
             <PlanBadge plan={a.plan} t={t} size={Z.planBadge} />
-            <span style={{ fontSize: Z.status, fontWeight: 600, color: sc }}>{STATUS_TEXT[a.status]}</span>
+            {/* ★★ 冷却倒计时**并进状态字,不另起一行**(2026-09-05 修)。
+                原来它在窗口行之后单独占一行,于是冷却中的卡比兄弟卡高一行,
+                页脚被推下、细条被推上 —— 实测跨卡错开 **21px**,所有总览宽度全中。
+                ★ 这个缺陷 memory.md 里**预测过**:「冷却态多一行 ⇒ 理论上破对齐,
+                但这是推理不是实测,没有夹具能造出冷却态」。今天真实数据造出了冷却号,
+                对齐闸如期抓到 —— 预测、判据、修法三样当初就都写对了,只差一个触发条件。
+                ★ 名字行本来就有「冷却」两个字,那一行**只多了个倒计时**,所以合并零信息损失。 */}
+            <span style={{ fontSize: Z.status, fontWeight: 600, color: sc }}>
+              {STATUS_TEXT[a.status]}{isCool && a.cooldownSec ? ` ${fmtCd(a.cooldownSec)}` : ""}
+            </span>
             {isBest && <span style={{ fontSize: Z.useBadge, fontWeight: 700, color: t.accentText, background: t.accent, padding: "1px 5px", borderRadius: 4, flexShrink: 0 }}>USE</span>}
             {isCurrent
               ? <span style={{ marginLeft: "auto", flexShrink: 0, fontSize: Z.curBadge, fontWeight: 700, color: t.accent, border: `1px solid ${t.accentBorder}`, padding: "1px 7px", borderRadius: 999 }}>当前</span>
@@ -190,7 +199,9 @@ export default function AccountCard({ a, isCurrent, isBest, isSelected, shortcut
             );
           })}
           {isDead && <span style={{ fontSize: Z.note, color: "#E0524D", fontWeight: 600 }}>token 失效 · 需重登</span>}
-          {isCool && <span style={{ fontSize: Z.note, color: "#2BA0C0", fontWeight: 600 }}>❄ 冷却 {fmtCd(a.cooldownSec)}</span>}
+          {/* ★ 冷却那一行已并进名字行的状态字(见上面 STATUS_TEXT 处的说明)。
+              **别再在这里加任何独立行** —— 窗口行与页脚之间每多一行,这张卡就比兄弟卡高一行,
+              而细条是从页脚往上推的,整排就会错开。死号不受影响:它只在折叠区渲染,不进网格。 */}
 
           {/* ★★ 页脚**固定两行**（日期一行、徽章一行右对齐），不再靠 `flex-wrap` 自己决定。
               原来是 wrap：徽章长了就自己掉到第二行，避免把 "到期 2026-08-10" 从中间折断。

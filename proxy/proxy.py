@@ -343,6 +343,104 @@ def _mark_dead(aid, token_fp=None):
     _mutate_state(f)
 
 
+# ★ 具名附加限额的头形如 `x-codex-bengalfox-primary-used-percent`。
+#   中间那段是**上游控制的短名**,所以:① 必须有界(见 _MAX_ADDL);② 只收白名单后缀;
+#   ③ 短名本身要过滤控制字符 —— 它会进 state.json,而那个文件被轮换器和 UI 读。
+_ADDL_RE = re.compile(
+    r"^x-codex-(?P<name>[a-z0-9][a-z0-9-]*?)-(?P<win>primary|secondary)"
+    r"-(?P<field>used-percent|window-minutes|reset-at)$")
+# 上游一次能塞多少个具名限额没有契约。不设上界的话,`state.json` 每个请求都写一次,
+# 一个异常上游就能把它撑爆 —— 而那是轮换器的活文件。CLIProxyAPI 同样取 8。
+_MAX_ADDL = 8
+
+
+def _codex_bool(v):
+    """→ True/False/None。★ 取不到就是 `None`,**不默认 False** ——
+
+    「上游没说」和「上游说不允许」是两件事,折叠成一个值,UI 就没法把
+    「不知道能不能用」和「确定用不了」分开(本仓贯穿始终的那条铁律)。
+    """
+    if v is None:
+        return None
+    s = str(v).strip().lower()
+    if s in ("true", "1", "yes"):
+        return True
+    if s in ("false", "0", "no"):
+        return False
+    return None
+
+
+def _codex_credits(h, num):
+    """订阅之外的付费余额。→ dict,一个字段都没有时 None(而不是空壳)。
+
+    ★ `unlimited` 为真时 `balance` 没有意义(上游可能回 0 或干脆不发)。
+      调用方**不许**在 unlimited 时把 balance 画成"余额为 0" —— 那正是把
+      「不适用」显示成「用光了」。
+    """
+    out = {
+        "balance": num("x-codex-credits-balance"),
+        "has_credits": _codex_bool(h.get("x-codex-credits-has-credits")),
+        "unlimited": _codex_bool(h.get("x-codex-credits-unlimited")),
+    }
+    return out if any(v is not None for v in out.values()) else None
+
+
+def _codex_additional(h):
+    """具名附加限额 → {短名: {primary/secondary: {...}, "limit_name": str}},没有则 None。
+
+    ★★ **`bengalfox` 就是这一族。** 本仓 v0.12.9 那次「Pro 号上冒出 5h 窗口」正是
+    这类具名限额被混进了 primary/secondary 主窗口。所以它们在这里**单独成键**,
+    绝不并入 `primary`/`secondary` —— 主窗口是套餐的,具名限额是某个模型的,
+    混在一起会让 UI 画出一个该账号根本没有的窗口。
+    """
+    out = {}
+    for k, v in h.items():
+        m = _ADDL_RE.match(k)
+        if not m:
+            continue
+        name = m.group("name")
+        # `code-review` 是官方的具名限额,与 bengalfox 同族,一起收。
+        if name in out or len(out) < _MAX_ADDL:
+            try:
+                val = float(v)
+            except (TypeError, ValueError):
+                continue
+            slot = out.setdefault(name, {})
+            slot.setdefault(m.group("win"), {})[m.group("field").replace("-", "_")] = val
+    for k, v in h.items():
+        m = re.match(r"^x-codex-([a-z0-9][a-z0-9-]*?)-limit-name$", k)
+        if m and m.group(1) in out:
+            s = str(v)
+            # 上游控制的文本会进 state.json 并被日志/UI 读到,控制字符一律丢弃。
+            printable = all(0x20 <= ord(c) and ord(c) != 0x7F for c in s)
+            if s and printable and len(s) <= 64:
+                out[m.group(1)]["limit_name"] = s
+    return out or None
+
+
+# 上一次见到的 `x-codex-*` 头名集合。★ 只在**集合变化时**记一行 —— 每请求一行会把
+# proxy.log 淹掉(现已 67k 行),而变化点才是有信息量的那一刻。
+_seen_codex_hdrs = set()
+
+
+def _log_codex_header_set(h):
+    """服务端**实际发了哪些** `x-codex-*` 头,集合一变就记一行。
+
+    ★★ 这条存在的理由是本仓记了很久的一笔债:`proxy.log` 对额度写入**零留痕**,
+    于是事后无法回答「当时到底写进去了什么」。更要命的是它让另一个问题也无解 ——
+    某个字段读不到时,**分不清是「服务端没发」还是「我的解析没打中」**,
+    而这两者在本仓是必须分开的两件事。
+    记下来之后,下次只要看一眼日志就能判定,不用再猜。
+    """
+    global _seen_codex_hdrs
+    names = {k for k in h if k.startswith("x-codex-")}
+    if names and names != _seen_codex_hdrs:
+        added = sorted(names - _seen_codex_hdrs)
+        gone = sorted(_seen_codex_hdrs - names)
+        _seen_codex_hdrs = names
+        _plog("x-codex 头集合变化 +{} -{} (共{})".format(added or "无", gone or "无", len(names)))
+
+
 def _record_quota(aid, headers, status=None):
     # ★★ 默认值必须是**安全**的那一侧，不是最宽松的那一侧。
     #    第一版写 `status=200` —— 调用点一旦漏传，就默认落进「完整清单」档、
@@ -354,6 +452,9 @@ def _record_quota(aid, headers, status=None):
     SERVED account's real quota to its slot — accurate, since the proxy knows exactly which account
     served this request (no rollout time-window guessing). Also records last_aid for the UI."""
     h = {k.lower(): v for k, v in headers}
+    # ★ 放在下面那个早退**之前** —— 没有窗口头的响应同样值得记:
+    #   「这次一个 x-codex 头都没有」本身就是要回答的问题之一。
+    _log_codex_header_set(h)
 
     def num(key):
         try:
@@ -371,6 +472,41 @@ def _record_quota(aid, headers, status=None):
         "secondary": {"used_percent": su, "window_minutes": num("x-codex-secondary-window-minutes"),
                       "resets_at": num("x-codex-secondary-reset-at")},
         "plan_type": h.get("x-codex-plan-type"),
+        "captured_at": time.time(),
+        "source": "proxy",
+    }
+    # ★★ **代理独有的那些头单独成键,不并进 `quota`** —— 这是实测逼出来的结构(2026-09-05)。
+    #    第一版把它们塞进 `q`,真机上活不过几分钟:`quota_daemon` 走 `/backend-api/codex/usage`
+    #    **整体替换** `slot["quota"]`(codex-rotate:1321),而那条路径拿不到这些响应头,
+    #    于是每轮轮询都把它们抹掉。测试全绿、字段也确实写进去了 —— 只是转瞬即逝。
+    #
+    #    两条来源就该是两个对象,各带自己的时间戳:
+    #      · `quota`         窗口水位,proxy 与 usage-api 都能给,谁新用谁;
+    #      · `codex_headers` **只有代理路径能看到**的响应头,usage-api 不覆盖它。
+    #    合并是不行的:`captured_at` 挂在对象上,混源会让陈旧值蹭到新时间戳被认成现值 ——
+    #    与 agy 那两本账不可相加是同一条理由。
+    #
+    #    ⚠️ **命名避让**:`slot["credits"]` 已被 usage-api 占用,存的是 `rate_limit_reset_credits`
+    #    (重置限流用的额度数);这里的 `credits_balance` 是**付费余额**,完全不同的东西。
+    #    同名会让两个概念在 UI 上混成一个,所以这里刻意不叫 credits。
+    extra = {
+        "active_limit": h.get("x-codex-active-limit"),
+        "credits_balance": _codex_credits(h, num),
+        # 布尔三态:上游明说「这次允许/已触顶」。与 used_percent 是两回事 ——
+        # 100% 已用不等于被拒,limit_reached 是上游的结论而不是我们的推断。
+        # 实测(2026-09-05):本机这几个号的响应里**根本没有**这两个头,所以恒 None。
+        "allowed": _codex_bool(h.get("x-codex-allowed")),
+        "limit_reached": _codex_bool(h.get("x-codex-limit-reached")),
+        # 具名附加限额(`x-codex-bengalfox-*` 那一族)+ code-review。实测本机也没有。
+        "additional": _codex_additional(h),
+        # ★ 相对重置秒数。与 `resets_at` **性质不同**:后者是绝对纪元、依赖两边对"现在"的共识,
+        #   时钟一偏就错;前者免疫。本仓在"窗口是否已重置"上栽过(v0.12.9),两个量并存可互校:
+        #   `resets_at - captured_at` 与它大幅不符 = 有一边不可信。
+        #   ⚠️ 目前**只采集不判定** —— 没有跨时钟样本前,不拿它去改选号逻辑。
+        "primary_reset_after_seconds": num("x-codex-primary-reset-after-seconds"),
+        "secondary_reset_after_seconds": num("x-codex-secondary-reset-after-seconds"),
+        # 服务端算好的两窗口关系,我们原来只能自己推。
+        "primary_over_secondary_limit_percent": num("x-codex-primary-over-secondary-limit-percent"),
         "captured_at": time.time(),
         "source": "proxy",
     }
@@ -392,6 +528,8 @@ def _record_quota(aid, headers, status=None):
             if complete:
                 s["slots"][aid]["quota"] = q
                 s["slots"][aid]["quota_status"] = "ok"
+                # 同样只在 2xx 替换:非 2xx 可能只带一部分头,整体替换会把已知的写成 null。
+                s["slots"][aid]["codex_headers"] = extra
             s["last_aid"] = aid
             s["last_proxy_ts"] = time.time()  # lets codex-rotate/plugin tell "via cxp" from "plain codex"
             # ★ 只在**跨过整数百分点**时记一行:服务端只回整数,所以这就是能拿到的最细粒度。
