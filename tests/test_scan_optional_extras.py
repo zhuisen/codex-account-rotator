@@ -17,7 +17,11 @@
 
 ## 两条断言，各堵一层
 
-① **藏掉可选模块,主扫描仍须正常出数**(退出码 0 + platforms 非空)。
+① **藏掉可选模块,主扫描仍须正常出数**。
+   ★ 判据是**对照实验**(模块在 vs 不在,主数据必须逐字节一致),不是"platforms 非空" ——
+   第一版就是那么写的,在本机绿、在 CI 上**红**:干净 runner 没有任何 AI CLI 数据,
+   `platforms` 本来就是 `{}`,而那是**正确行为**不是故障。
+   **断言依赖了跑测试那台机器上恰好有什么**,等于把环境写进了不变量。
    只堵第 ② 层就够让事故不再发生 —— 这是"深度防御"里更靠内的那道。
 ② **`scan.py` 运行时按路径加载的每个同目录模块,都必须在打包资源里**。
    这道堵的是第 ① 层,让功能在安装包里真的可用,而不只是"不崩"。
@@ -66,14 +70,20 @@ class MainScanSurvivesMissingExtras(unittest.TestCase):
             return p
 
     def test_scan_works_without_agy_quota_series(self):
-        """★★ 事故本体:藏掉 `agy_quota_series.py`,扫描**必须**仍然成功。"""
+        """★★ 事故本体:藏掉 `agy_quota_series.py`,扫描**必须**仍然成功。
+
+        判据是与**对照组**(模块在)比 —— 见模块头 ①。不比"有没有数据"。
+        """
+        control = self._run_isolated(keep=["agy_quota_series.py"])
         p = self._run_isolated(keep=[])
         self.assertEqual(p.returncode, 0,
                          "少一个可选模块就整个挂掉了 —— 用户会看到「刷新没反应」\n"
                          + p.stderr[-800:])
         self.assertTrue(p.stdout.strip(), "stdout 是空的,调用方拿不到任何数据")
-        d = json.loads(p.stdout)
-        self.assertTrue(d.get("platforms"), "主数据(platforms)没了")
+        d, c = json.loads(p.stdout), json.loads(control.stdout)
+        self.assertIn("platforms", d, "连 platforms 这个键都没了")
+        self.assertEqual(d["platforms"], c["platforms"],
+                         "可选模块的有无改变了主数据 —— 它本该完全不相干")
         self.assertIsNone(d.get("agy_quota"),
                           "模块都不在了却给出了额度序列 —— 那只能是编的")
 
@@ -101,7 +111,10 @@ class MainScanSurvivesMissingExtras(unittest.TestCase):
                          "可选模块自己炸了,却把主扫描一起带走 —— 用户看到「刷新没反应」\n"
                          + p.stderr[-800:])
         d2 = json.loads(p.stdout)
-        self.assertTrue(d2.get("platforms"), "主数据没了")
+        control = json.loads(self._run_isolated(keep=["agy_quota_series.py"]).stdout)
+        self.assertIn("platforms", d2, "连 platforms 这个键都没了")
+        self.assertEqual(d2["platforms"], control["platforms"],
+                         "可选模块炸掉改变了主数据 —— 它本该完全不相干")
         self.assertIsNone(d2.get("agy_quota"))
 
     def test_scan_still_produces_the_series_when_module_is_present(self):
