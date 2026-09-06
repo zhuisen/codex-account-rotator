@@ -4,9 +4,9 @@ import { CardBadgeGhost } from "./CardBadge";
 import { CARD_TYPE as Z, type Theme } from "../theme";
 import type { AgySnapshot } from "../agy";
 import {
-  agyShown, agyTightest, agyWinRows, agyQuotaVisible, agyReasonNote, agyReasonTone,
+  agyShown, agyTightest, agyWinRows, agyQuotaVisible, agyReasonNote, agyReasonTone, agyResetText,
 } from "../agy";
-import { fmtEta, fmtAgo, winNumColor } from "../helpers";
+import { fmtAgo, winNumColor } from "../helpers";
 
 const MONO = "'JetBrains Mono'";
 
@@ -143,8 +143,9 @@ export default function AgyCard({ t, color, snap, busy, err, disabled, winSlots,
                                fontFamily: MONO, fontVariantNumeric: "tabular-nums" }}>
                   {Math.round(row.remaining)}%
                 </span>
-                <span style={{ fontSize: Z.eta, color: t.muted, fontFamily: MONO }}>
-                  ↻{fmtEta(row.reset_at ?? undefined)}
+                <span title={agyResetText(row).title || undefined}
+                      style={{ fontSize: Z.eta, color: t.muted, fontFamily: MONO }}>
+                  ↻{agyResetText(row).text}
                 </span>
               </div>
             );

@@ -70,6 +70,10 @@ VIEWS = [
     ("总览·agy低额度",   "/harness.html?nav=home&rail=open&grok=ok&agy=tight",        [1200, 1080, 1000, 960]),
     ("总览·agy没在跑",   "/harness.html?nav=home&rail=open&grok=ok&agy=noproc",       [1000, 960]),
     ("总览·agy折叠",     "/harness.html?nav=home&grok=ok&agy=tight",                  [940, 900, 860]),
+    # ★ `agy=idle`(四桶全满)是唯一会把倒计时渲染成**「未启动」**的 agy 夹具。
+    #   `tight`/`noproc` 都走不到那条分支 —— 卡上只取每个窗口**最紧**的桶,而 100% 的桶
+    #   永远不是最紧的(`--dump-dom` 实测,2026-09-06)。少了这一行,那个分支的排版没人扫。
+    ("总览·agy未启动",   "/harness.html?nav=home&rail=open&grok=ok&agy=idle",         [1200, 1000, 960]),
     # ★ 需要 `CODEXBAR_UNPROBED=1` 生成的 harness 才有第 3 个号（见 make_harness 同名夹具）。
     #   没有它时这一行等价于「总览·侧栏展开」,不会假红,只是少测两件事。
     ("总览·未探测号",    "/harness.html?nav=home&rail=open&grok=ok",                  [1200, 1000, 960]),
@@ -91,6 +95,12 @@ VIEWS = [
     ("菜单栏·grok降级",  "/harness-menubar.html?w=352&grok=stale",                    [520]),
     ("菜单栏·agy",       "/harness-menubar.html?w=352&grok=ok&agy=tight",             [520]),
     ("菜单栏·agy没在跑", "/harness-menubar.html?w=352&grok=ok&agy=noproc",            [520]),
+    ("菜单栏·agy未启动", "/harness-menubar.html?w=352&grok=ok&agy=idle",              [520]),
+    # ★ `plat=few`(今日只剩 4 家平台)是**矮弹窗**态:窗口从 580 收到 477,账号列表要藏起
+    #   更多内容。矮窗口下最容易出的是「底栏被内容压住」,而重叠不算溢出、探针会沉默 ——
+    #   所以这两行必须扫,不能只扫默认的 7 家。
+    ("菜单栏·短今日",   "/harness-menubar.html?w=352&grok=ok&tab=today&plat=few",    [520]),
+    ("菜单栏·矮账号页", "/harness-menubar.html?w=352&grok=ok&plat=few&h=477",        [520]),
 ]
 
 

@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
 import { open as openExternal } from "@tauri-apps/plugin-shell";
@@ -76,7 +76,43 @@ export function patchSettings(patch: Partial<Settings>): Settings {
   return next;
 }
 
+
+/** `state.json` 里 `dawn_probe` 的形状（由 `codex-rotate dawn-probe --status` 吐出）。 */
+interface DawnStatus {
+  enabled?: boolean; date?: string; at?: number; ok?: number | null; total?: number;
+  state?: string; note?: string; targets_today?: string[];
+}
+
+/**
+ * 这一行的说明文字 —— ★ **它同时是「定时到底跑没跑」的唯一可见证据**。
+ * 本项目的 launchd 日历定时被外力改写丢过 `StartCalendarInterval`，`runs = 0`、从未运行过，
+ * 而没有任何一处会为此报红。所以这里必须把**上次运行时刻**说出来，而不是只说功能开着。
+ */
+function dawnDesc(d: DawnStatus | null): string {
+  const who = d?.targets_today?.length ? `${d.targets_today.length} 个 Plus 号` : "无存活 Plus 号";
+  if (!d) return "读取中…";
+  if (!d.enabled) return `关闭中。开启后每天 06:00 给${who}各发一次最小计费请求，把 5h 窗口锚定上（会花钱）`;
+  if (!d.date) return `已开启，${who}，但**还没有任何一次运行记录** —— 若明天此处仍是空的，说明定时没生效`;
+  const when = d.at ? new Date(d.at * 1000).toLocaleString() : d.date;
+  const res = d.ok == null ? "进行中/未完成" : `${d.ok}/${d.total} 可用`;
+  return `已开启，${who}。上次运行 ${when} · ${res}`;
+}
+
 export default function SettingsPage({ t }: { t: Theme }) {
+  const [dawn, setDawn] = useState<DawnStatus | null>(null);
+  const loadDawn = useCallback(async () => {
+    try {
+      const raw = await invoke<string>("run_rotate", { args: ["dawn-probe", "--status"] });
+      setDawn(JSON.parse(raw.trim().split("\n").pop() || "{}") as DawnStatus);
+    } catch { setDawn({}); }   // 读不到就当"未开启"，不编造一个"已开启"
+  }, []);
+  useEffect(() => { void loadDawn(); }, [loadDawn]);
+  const toggleDawn = useCallback(async () => {
+    const next = !dawn?.enabled;
+    try {
+      await invoke("run_rotate", { args: ["dawn-probe", next ? "--enable" : "--disable"] });
+    } finally { void loadDawn(); }   // ★ 无论成败都回读：不拿"我打算设成什么"冒充"它现在是什么"
+  }, [dawn, loadDawn]);
   const [s, setS] = useState(load);
   const update = (patch: Partial<Settings>) => {
     const next = { ...s, ...patch }; setS(next); save(next);
@@ -219,6 +255,21 @@ export default function SettingsPage({ t }: { t: Theme }) {
           <NumInput value={s.autoSwitchThreshold} onChange={v => update({ autoSwitchThreshold: v })} min={5} max={50} suffix="%" />
         </Row>
       )}
+      {/* ★★ 每日清晨探针。**状态与开关都存在 `state.json`,不在 localStorage** ——
+          launchd 的 06:00 定时在 app 没开的时候也要读这个开关,两个真源迟早分叉。
+          所以这一格走 CLI(`dawn-probe --status/--enable/--disable`),不走 `update()`。
+          ★ 「上次运行」必须显示:本项目的日历定时有静默不运行的前科
+          (keepalive/refreshquota 的 StartCalendarInterval 被外力改写丢掉,runs = 0),
+          而那件事**没有任何一处会报红** —— 这行字就是那道闸。 */}
+      <Row label="每日清晨探针 (06:00)"
+           desc={dawnDesc(dawn)}>
+        <div onClick={() => void toggleDawn()} style={{
+          width: 38, height: 22, borderRadius: 11, padding: 2, cursor: "pointer",
+          background: dawn?.enabled ? t.accent : t.barTrack, transition: "background .2s",
+        }}>
+          <div style={{ width: 18, height: 18, borderRadius: 9, background: "#fff", transform: dawn?.enabled ? "translateX(16px)" : "translateX(0)", transition: "transform .2s" }} />
+        </div>
+      </Row>
       <Row label="订阅到期预警" desc="订阅剩余天数 ≤ 此值时在卡片和通知中提醒">
         <NumInput value={s.subExpiryWarnDays} onChange={v => update({ subExpiryWarnDays: v })} min={1} max={30} suffix="天" />
       </Row>

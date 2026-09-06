@@ -207,7 +207,10 @@ export default function AccountCard({ a, isCurrent, isBest, isSelected, shortcut
                               // ★ 提示行里这两段只借**高度**：`visibility:hidden` 仍占宽度，
                               //   在 168px 的窄卡里把整行撑到 177 溢出。加 `width:0` 只留行盒。
                               ...(notice ? { visibility: "hidden" as const, width: 0, overflow: "hidden" as const } : null) }}>{real && w ? `${w.pct}%` : "00%"}</span>
-                <span style={{ fontSize: Z.eta, color: t.muted, fontFamily: "'JetBrains Mono'",
+                {/* ★ `title` 是「未启动 / 待确认」这三个字的**证据出口** —— 行内只放得下结论，
+                    凭什么这么说必须能问得到（`buildWindow` 的 `resetAt` 带着观测次数）。 */}
+                <span title={real && w ? w.resetAt : undefined}
+                      style={{ fontSize: Z.eta, color: t.muted, fontFamily: "'JetBrains Mono'",
                               ...(notice ? { visibility: "hidden" as const, width: 0, overflow: "hidden" as const } : null) }}>↻{real && w ? w.reset : "0d00h"}</span>
               </div>
             );

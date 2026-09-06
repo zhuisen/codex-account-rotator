@@ -100,9 +100,25 @@ emit proxy \
   <key>EnvironmentVariables</key><dict><key>CRP_PORT</key><string>8011</string></dict>' \
     "$REPO/proxy/proxy.py"
 
+# ★★ 每日清晨探针(06:00)。给 **Plus 号**各发一次最小计费补全,把 5h 窗口**锚定**上 ——
+#    没被用过的 5h 窗口服务端每轮都回「此刻 + 整窗」,倒计时永远停在 ~4h55m,那 5 小时等于没在走。
+#
+#    ⚠️ **这是本仓唯一一个会自动花钱的定时器**,所以命令侧有三条护栏(见 `cmd_dawn_probe`):
+#      ① `enabled` 默认**假** —— 装了这个 plist 也不会自己跑,要 `dawn-probe --enable`;
+#      ② **当天幂等** —— app 内还有一条补跑路径,两条都调它,没有幂等就是双重计费;
+#      ③ 每次运行落痕到 `state.json` 的 `dawn_probe`,UI 读它。
+#
+#    ★★ **为什么还要 app 内补跑**:本项目的日历定时有前科 —— keepalive/refreshquota 的
+#      `StartCalendarInterval` 曾被本脚本以外的东西改写掉,`runs = 0`、**从未运行过**,
+#      而没有任何一处会为此报红(改写者至今未查明)。所以这个 plist**不能是唯一的触发路径**。
+#      发现定时不跑时先比对 plist 形态(单行 vs 逐行美化 + 空 EnvironmentVariables),别先怀疑脚本。
+emit dawnprobe \
+    '  <key>StartCalendarInterval</key><dict><key>Hour</key><integer>6</integer><key>Minute</key><integer>0</integer></dict>' \
+    "$ROT" dawn-probe
+
 echo
 echo "==> loaded:"
-for n in autosync quotad proxy; do
+for n in autosync quotad proxy dawnprobe; do
     printf '  %-13s %s\n' "$n" \
         "$(launchctl print "gui/$UID_NUM/$PREFIX.$n" 2>/dev/null | awk '/^\tstate = /{print $3; exit}' || echo '?')"
 done

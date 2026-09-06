@@ -99,15 +99,42 @@ class SingleSourceOfHeight(unittest.TestCase):
         self.assertIn("min-height: 0", body)
         self.assertIn("overflow-y: auto", body, "今日页不能滚 ⇒ 内容会压到底部按钮上")
 
-    def test_height_is_fixed_not_content_driven(self):
-        """★★ 评审抓出:只降上限不够,`setSize` 仍按当前页内容算 ⇒ 两页只是"恰好"相等。
-        停掉一个平台后今日页就变 545px 而账号页仍顶上限。必须是固定值。"""
+    def test_only_the_today_tab_may_drive_the_height(self):
+        """★★ **这条替代了原来的「必须是固定值」**（2026-09-06 当晚推翻,理由见下）。
+
+        原规则:`setSize` 不许按内容算,写死 580。它挡住的是「两页只是恰好相等」那个缺陷,
+        但它自己引入了一个更直接的:**580 是拿当时的数据标定出来的常量**。
+        今日页高度 ≈ 固定头部 + 图例行数 × 35px,而图例只列今天有流量的平台;
+        标定那天本机 7 家恰好 580,用户当晚只剩 4 家 ⇒ 今日页自然高 477,窗口仍 580,
+        **底部 103px 死白**(用户截图,harness `plat=few` 已复现)。
+
+        新规则保留原意（两页等高、不跳）但换了实现:**今日页量出来,账号页用记住的值**。
+        所以判据变成「只有 today 分支能改高度」:
+          · 测量代码必须被 `tab === "today"` 守着 —— 账号页一旦也去量,就会按它自己的
+            656px 内容把窗口撑回 731,正是最初要修的那个问题;
+          · 必须同时要求今日页**有数据**,否则快照晚到时会量到 190px 的骨架,
+            把窗口钉在下限上(2026-08-22「重启后只剩半截」的复活路径)。
+        """
         src = TSX.read_text(encoding="utf-8")
         i = src.index("const apply = () => {")
         body = re.sub(r"//[^\n]*", "", src[i:src.index("if (Math.abs", i)])
-        self.assertNotIn("scrollHeight", body,
-                         "高度仍按内容算 —— 两页只会在夹具恰好相等时通过")
+        self.assertIn("scrollHeight", body, "不再测量了 —— 高度又变回写死的常量")
+        self.assertRegex(body, r'tab\s*===\s*"today"',
+                         "测量没有被 today 分支守着 —— 账号页会把窗口撑回自己的高度")
+        self.assertRegex(body, r'&&\s*today\b',
+                         "没有等今日页数据到齐就测量 —— 快照晚到时窗口会钉在下限上")
+
+    def test_remembered_height_is_persisted_and_bounded(self):
+        """★ 记住的值必须**持久化**（冷启动停在账号页时今日页量不到）且**有界**。
+        无界的话一次异常测量就能把窗口写成 5px 或 5000px,而它会被记住、每次开机复现。"""
+        src = TSX.read_text(encoding="utf-8")
+        self.assertIn("localStorage.setItem(H_KEY", src, "量出来的高度没有持久化")
+        i = src.index("function loadPanelH")
+        body = src[i:src.index("\n}", i)]
+        self.assertIn("PANEL_H_MIN", body)
         self.assertIn("PANEL_H_MAX", body)
+        self.assertIn("Number.isFinite", body,
+                      "没挡住 NaN —— localStorage 里是字符串,坏值会一路传到 setSize")
 
     def test_list_shrinks_instead_of_a_fixed_max_height(self):
         """★ 必须**先剥注释**再查。
@@ -159,6 +186,71 @@ class BothTabsRenderAtTheSameHeight(unittest.TestCase):
         self.assertLessEqual(g["scrollH"] - g["clientH"], 2,
                              "mb-root 溢出 %spx 且它是 overflow:hidden ⇒ 正在裁切内容"
                              % (g["scrollH"] - g["clientH"]))
+
+
+class ShortTodayLeavesNoDeadSpace(unittest.TestCase):
+    """★★ **用户 2026-09-06 报的那个缺陷的回归闸。**
+
+    截图:今日 Tab 下方大片死白。真因是 `PANEL_H_MAX = 580` —— 一个**拿当时数据标定出来的
+    常量**。今日页高 ≈ 固定头部 + 图例行数 × 35px,图例只列今天有流量的平台;
+    标定那天 7 家恰好 580,用户当晚 4 家 ⇒ 自然高 477、窗口仍 580、**死白 103px**。
+
+    ⚠️ **默认夹具证不了这个** —— 本机快照就是 7 家,今日页恰好填满。上面那组
+    `BothTabsRenderAtTheSameHeight` 全绿,却对这个缺陷完全沉默,而它自己的 docstring
+    正批评过「只会在夹具恰好相等时通过」。所以这里必须用 `plat=few`(停 kimi/mimo/deepseek
+    ⇒ 4 家,与用户截图一致)。
+    """
+
+    FEW = BASE + "&plat=few"
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            cls.today = probe(cls.FEW + "&tab=today")
+            # 账号页用**记住的**高度,所以必须把今日页量到的那个值预置进去 ——
+            # 不预置的话它落到兜底 580,验出来的"相等"与真实行为无关。
+            h = final_height(cls.today)
+            cls.acc = probe(cls.FEW + "&h=%d" % h) if h else None
+        except Exception as e:                      # noqa: BLE001
+            raise unittest.SkipTest("harness 不可达: %s" % e)
+        if cls.today.get("_fatal"):
+            raise unittest.SkipTest("harness 报错，跳过")
+
+    def test_window_follows_the_short_today_page(self):
+        g = (self.today.get("geom") or {}).get("mb-root") or {}
+        h = final_height(self.today)
+        self.assertIsNotNone(h, "今日页一次 setSize 都没发")
+        self.assertTrue(g, "geom 探针不可用")
+        self.assertLessEqual(abs(h - g["h"]), 4,
+                             "窗口 %spx 而今日页内容只有 %spx ⇒ 底部死白 %spx"
+                             % (h, g["h"], h - g["h"]))
+
+    def test_the_fixture_really_is_shorter(self):
+        """★ 先证明夹具确实制造了「今日页变矮」这个前提,否则上面那条在
+        「plat=few 根本没生效」时也会绿 —— 空守卫。"""
+        full = probe(BASE + "&tab=today")
+        a = ((full.get("geom") or {}).get("mb-root") or {}).get("h")
+        b = ((self.today.get("geom") or {}).get("mb-root") or {}).get("h")
+        self.assertTrue(a and b, "geom 探针不可用")
+        self.assertLess(b, a - 40,
+                        "plat=few 没让今日页变矮(%s vs %s) —— 这条闸在空转" % (b, a))
+
+    def test_account_tab_matches_the_remembered_height(self):
+        """★ 切回账号页不许跳:它用的是记住的那个数,而不是自己的 656px 内容。"""
+        if self.acc is None:
+            self.skipTest("今日页没量到高度")
+        a, t = final_height(self.acc), final_height(self.today)
+        self.assertLessEqual(abs(a - t), 2,
+                             "短今日页下两个 Tab 又不等高了(账号 %s vs 今日 %s)" % (a, t))
+
+    def test_account_tab_still_scrolls_at_that_height(self):
+        """★ 窗口变矮之后账号列表必须**更该滚**,不是被裁。"""
+        if self.acc is None:
+            self.skipTest("今日页没量到高度")
+        sc = self.acc.get("scrollables") or []
+        self.assertTrue(any("mb-list" in str(x.get("sel")) for x in sc),
+                        "账号列表没在滚 —— 矮窗口下内容被裁掉了: %s"
+                        % [x.get("sel") for x in sc])
 
 
 if __name__ == "__main__":

@@ -646,6 +646,67 @@ def _win_tag(w):
         return "%d天" % round(m / 1440)
     return "%dh" % round(m / 60)
 
+def _quota_anchors_mod():
+    """锚点账本模块,按路径加载。取不到就返回 None —— **不抛**。
+
+    ★ 与 `scan.py::_agy_quota_series_inner` 同一范式,理由也同一个:本脚本永远是被当**脚本**
+      按路径执行的(以及被 `quota_daemon.py` 用 `SourceFileLoader` 整个载进内存),没有父包,
+      `from traffic import ...` 必然 ImportError。
+    ★ 打包后布局不变(`scripts/codex-rotate` + `scripts/traffic/quota_anchors.py`),
+      但**没带上**也必须能正常跑 —— 2026-09-05 的事故就是一个漏进包的附加模块把主路径搞挂。
+    """
+    import importlib.util
+    mod_path = Path(__file__).resolve().parent / "traffic" / "quota_anchors.py"
+    if not mod_path.is_file():
+        return None
+    spec = importlib.util.spec_from_file_location("quota_anchors", mod_path)
+    if spec is None or spec.loader is None:
+        return None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _note_quota_anchors(aid, q):
+    """把这次 `/usage` 读数的两个窗口记进锚点账本 -> `slot["quota_anchor"]` 该有的值(或 None)。
+
+    ★★ **`quota_anchor` 是 `slot` 的独立兄弟键,不进 `quota`。** 与 `credits` / `codex_headers`
+      同一条理由,而且这里更硬:`slot["quota"]` 会被 rollout tail 和 proxy **整体替换**,
+      塞进去的判定活不过下一个 15s tick,而单测**根本看不到这个**(它只在真机上转瞬即逝)。
+
+    ★★ **只在 `/usage` 这条路径上记。** rollout tail 与 proxy 的读数是同一笔账的本地回声,
+      `captured_at` 语义也不同;混进来会让「reset 有没有跟着时间挪」这个判据的时间轴变脏。
+      少记几个样本只是慢一点确认,记错样本是**判定直接反过来**。
+
+    ★ 整体 fail-open:账本是纯附加功能。
+    """
+    try:
+        mod = _quota_anchors_mod()
+        if mod is None or not q:
+            return None
+        out = {}
+        now = q.get("captured_at") or time.time()
+        for wkey in ("primary", "secondary"):
+            w = q.get(wkey) or {}
+            mins = w.get("window_minutes") or 0
+            used = w.get("used_percent")
+            if not _win_real(w) or used is None or not w.get("resets_at"):
+                continue
+            # key 里带 aid:每个账号的窗口各有各的重置时刻,合起来记等于把 N 条时间线搅成一条。
+            v = mod.note("codex", "%s/%d" % (aid, int(mins)), w["resets_at"], used, now=now)
+            # ★★ 判定必须**自带它所描述的那个 reset**。`slot["quota"]` 会被 rollout tail 和 proxy
+            #   整体替换而 `quota_anchor` 不跟着换 —— 不带身份的话,前端会拿一个描述**旧窗口**的
+            #   判定去解释**新窗口**的倒计时,而两者长得一模一样。同「同名前缀 ≠ 同一标识符」一族。
+            v["reset"] = int(w["resets_at"])
+            out[str(int(mins))] = v
+        if not out:
+            return None
+        out["at"] = now
+        return out
+    except Exception:       # noqa: BLE001 — 见 docstring:纯附加,绝不冒泡
+        return None
+
+
 def _qfmt(q):
     """★ Prints USED percent — the opposite of what refresh-all and the GUI show (they show REMAINING).
     The bare `周:0%` was ambiguous enough to be misread as "no quota left" when it means "none used",
@@ -1328,6 +1389,17 @@ def _probe_quota(aid, slot, is_active):
         "secondary": sw or {"used_percent": None, "window_minutes": None, "resets_at": None},
         "plan_type": d.get("plan_type"), "captured_at": time.time(), "source": "usage-api",
     }
+    # ★ 锚点判定与 `credits` 同样是**兄弟键**,在这里写死(调用方只负责 `quota` 本身)。
+    #   放这里而不是调用方:六个写 `slot["quota"]` 的地方里,只有这一条是服务端权威读数,
+    #   而账本要的正是**同一条来源、稳定节拍**的时间序列(见 `_note_quota_anchors`)。
+    anchor = _note_quota_anchors(aid, q)
+    if anchor:
+        def _anch(st, a=aid, v=anchor):
+            sl = st.get("slots", {}).get(a)
+            if sl is not None:
+                sl["quota_anchor"] = v
+        _mutate_state(_anch)
+        slot["quota_anchor"] = anchor
     return q, f"HTTP {status}"
 
 
@@ -1688,6 +1760,129 @@ def cmd_probe(args):
             #   既不谎报失败,也不假装读到了额度。
             print(f"  [{label:<8}] ✓ 答「{answer[:40]}」{odd} · 额度未读到({msg})")
     print(f"probe {ok_n}/{len(targets)} 可用")
+    return ok_n, len(targets)
+
+
+# ── 每日清晨探针 ───────────────────────────────────────────────────────────────
+DAWN_KEY = "dawn_probe"
+
+def _dawn_targets(s):
+    """今天该探哪些号 → [aid]。
+
+    ★ **按 `plan` 判 Plus,绝不按 label。** label 只是昵称,而**老号从 Plus 升级到 Pro 时
+      label 一个字都不会变**(本仓既有铁律)。按名字挑号会在升级那天悄悄开始给 Pro 号花钱,
+      而 Pro 根本没有 5h 窗口 —— 钱花了,目的一点没达到,且没有任何症状。
+    ★ `plan` 源自 id_token,加号时本地就解得出,不依赖联网。
+    """
+    out = []
+    for aid, sl in (s.get("slots") or {}).items():
+        if sl.get("auth_dead"):
+            continue
+        plan = (sl.get("plan") or (sl.get("quota") or {}).get("plan_type") or "").lower()
+        if plan == "plus":
+            out.append(aid)
+    return out
+
+
+def cmd_dawn_probe(args):
+    """每天清晨给 **Plus 号**各发一次最小计费补全,把 5h 窗口**锚定**上,让它开始走动。
+
+    ## 为什么需要它
+
+    Codex 的 5h 窗口是**用过才锚定**的:一次都没用过时服务端每轮都回「此刻 + 整窗」,
+    `resets_at` 跟着 now 滑动,倒计时永远停在 ~4h55m,那 5 小时额度**等于没在走**。
+    (这就是本仓 `traffic/quota_anchors.py` 那本账在判的 `floating` 态。)
+    发一次真实请求即可锚定 —— 已用 6 样本判别实验证过。
+
+    ## ⚠️ 这是本仓**唯一**会自动花钱的东西,所以三条护栏一个都不能省
+
+    ① ★★ **当天幂等**。launchd 定时和 app 内补跑**两条路都会调它**(用户 2026-09-06 选的
+       「两条都要」,因为本项目的 launchd 日历定时有静默不运行的前科)。没有幂等就是双重计费。
+       判据是 `state[DAWN_KEY]["date"] == 今天`,`--force` 可绕过(手动重跑用)。
+    ② **默认关闭**(`enabled` 缺省为假)。仓库已公开,一个默认开启的自动计费定时器
+       会在别人机器上悄悄花钱。用 `--enable` 显式打开。
+    ③ **每次运行都落痕**,成功失败都写。`runs = 0、从未运行过` 正是本项目
+       keepalive/refreshquota 的真实结局(plist 被外力改写丢了 StartCalendarInterval),
+       而那件事**没有任何一处会报红** —— 所以运行记录必须存在且可被 UI 读到。
+
+    模型与 effort 走 `PROBE_MODEL`/`PROBE_EFFORT`(现为 gpt-5.6-luna / low)。
+    ★ **不写死模型名**:2026-09-06 刚因为写死 `gpt-5.4` 被上游下架而每次探针都 400,
+      且坏得没有声音。默认值从 codex 自己的 `models_cache.json` 现挑。
+
+    用法:
+        codex-rotate dawn-probe            # 定时器/补跑调用:未启用或今天跑过则空转
+        codex-rotate dawn-probe --force    # 手动立刻跑一次,忽略"今天已跑"
+        codex-rotate dawn-probe --enable   # 打开每日探针
+        codex-rotate dawn-probe --disable
+        codex-rotate dawn-probe --status   # 打印 JSON 现状(给 UI 读)
+    """
+    s = _state()
+    rec = dict(s.get(DAWN_KEY) or {})
+    today = datetime.date.today().isoformat()
+
+    def _save(patch):
+        def f(st, p=patch):
+            cur = dict(st.get(DAWN_KEY) or {})
+            cur.update(p)
+            st[DAWN_KEY] = cur
+        _mutate_state(f)
+
+    if "--enable" in args or "--disable" in args:
+        on = "--enable" in args
+        _save({"enabled": on})
+        print(f"每日清晨探针已{'启用' if on else '停用'}")
+        return
+    if "--status" in args:
+        rec.setdefault("enabled", False)
+        rec["targets_today"] = [(s["slots"][a].get("label") or a[:8]) for a in _dawn_targets(s)]
+        print(json.dumps(rec, ensure_ascii=False))
+        return
+
+    force = "--force" in args
+    if not force and not rec.get("enabled"):
+        print("dawn-probe 未启用(codex-rotate dawn-probe --enable)")
+        return
+    if not force and rec.get("date") == today:
+        print(f"dawn-probe 今天({today})已跑过:{rec.get('ok', 0)}/{rec.get('total', 0)} 可用")
+        return
+
+    targets = _dawn_targets(s)
+    if not targets:
+        # ★ 一个 Plus 号都没有,是**事实**不是故障 —— 照样落痕,否则明天分不出
+        #   「跑了但没号可探」和「压根没跑」。
+        _save({"date": today, "at": int(time.time()), "ok": 0, "total": 0,
+               "note": "池中没有存活的 Plus 号"})
+        print("没有可探的 Plus 号(全是 Pro 或已失效)")
+        return
+
+    labels = [s["slots"][a].get("label") or a for a in targets]
+
+    # ★★ **先占天,再探。** 标记写在探测**之前**,不是之后。
+    #    launchd 与 app 内补跑两条路可能几乎同时触发(甚至两个 webview 各一次);
+    #    若等探完才写 `date`,那段窗口里第二个进程看到的仍是昨天的日期 ⇒ **双重计费**。
+    #    `_mutate_state` 持跨进程互斥锁,所以这个「占坑」是原子的。
+    #    ⚠️ 代价是显式的:探测中途崩了,今天这一次就**不会**重试(日期已占)。
+    #      在"少跑一次"和"可能多花一次钱"之间,这个工具一律选前者。
+    claimed = {"n": 0}
+
+    def _claim(st):
+        cur = dict(st.get(DAWN_KEY) or {})
+        if cur.get("date") == today:
+            claimed["n"] = 1           # 别人已经占了
+            return
+        cur.update({"date": today, "at": int(time.time()), "state": "running",
+                    "ok": None, "total": len(labels), "note": ""})
+        st[DAWN_KEY] = cur
+    _mutate_state(_claim)
+    if claimed["n"] and not force:
+        print(f"dawn-probe 今天({today})已被另一个进程认领,本次跳过(防双重计费)")
+        return
+
+    print(f"每日清晨探针 · {len(labels)} 个 Plus 号:{' '.join(labels)}")
+    ok_n, total = cmd_probe(labels)
+    _save({"date": today, "at": int(time.time()), "state": "done",
+           "ok": ok_n, "total": total,
+           "model": PROBE_MODEL, "effort": PROBE_EFFORT, "note": ""})
 
 
 def _credit_days_left(c, now=None):
@@ -2252,6 +2447,7 @@ CMDS = {"add": cmd_add, "login": cmd_login, "list": cmd_list, "switch": cmd_swit
         "sync": cmd_sync, "rename": cmd_rename, "keepalive": cmd_keepalive, "refresh": cmd_refresh,
         "refresh-all": cmd_refresh_all, "health": cmd_health, "remove": cmd_remove,
         "ensure-live": cmd_ensure_live, "credits": cmd_credits, "probe": cmd_probe,
+        "dawn-probe": cmd_dawn_probe,
         "tokens": cmd_tokens}
 
 

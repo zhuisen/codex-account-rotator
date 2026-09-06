@@ -35,6 +35,10 @@ app/**/.build_number
 # agy 额度 sidecar。★ 与上面那条不同,它**不含凭证** —— agy 的额度接口无鉴权,
 # 响应里只有 bucket id / 窗口 / 剩余比例 / 重置时间。忽略它纯粹因为它是运行时产物。
 .agy-quota.json
+# 额度窗口的锚点账本(traffic/quota_anchors.py)。与 state.json 同目录,
+# key 里带 account_id / grok account_key —— 敏感度同 .grok-quota.json,不入库。
+.quota-anchors.json
+.quota-anchors.json.tmp*
 *.bak
 # UI 验证 harness 的一次性夹具(含脱敏后的账号池快照,仍不入库)
 codexbar/src/_*_probe.json

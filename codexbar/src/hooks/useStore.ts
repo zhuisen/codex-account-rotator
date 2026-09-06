@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { type AppState, type TokenInfo, type Account, type Slot, slotToAccount, recommended, poolRefreshedAt, poolFreshness, CARD_WARN_DAYS } from "../helpers";
+import { useBusyMirror } from "./useBusyMirror";
 
 export interface StoreCounts {
   total: number; live: number; cool: number; dead: number;
@@ -12,6 +13,7 @@ export function useStore() {
   const [tokens, setTokens] = useState<Record<string, TokenInfo>>({});
   const [cooldowns, setCooldowns] = useState<Record<string, number>>({});
   const [loadingAction, setLoadingAction] = useState<string | null>(null);
+  const { remote: remoteAction, announce } = useBusyMirror();
   const [toast, setToast] = useState<string | null>(null);
   const toastRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -69,6 +71,10 @@ export function useStore() {
 
   const run = useCallback(async (actionId: string, args: string[], msg: string) => {
     setLoadingAction(actionId);
+    // ★ 告诉另一个 webview「我开始跑了」。此前两边只在**结束**时靠 `state-changed` 同步,
+    //   于是在菜单栏点刷新、再打开主界面,主界面整个执行期间看起来什么都没发生
+    //   (用户 2026-09-06 报的就是这个)。
+    announce(actionId);
     showToast(`${msg}…`);
     try {
       await invoke("run_rotate", { args });
@@ -77,9 +83,13 @@ export function useStore() {
     } catch (e) {
       const errMsg = String(e).slice(0, 80);
       showToast(`✗ 失败: ${errMsg}`);
+    } finally {
+      // ★★ **必须在 `finally`** —— 上面 `catch` 之后还有 `showToast`,任何一处再抛,
+      //    不在 finally 里的熄灯就漏了,对方会一直转圈。
+      setLoadingAction(null);
+      announce(null);
     }
-    setLoadingAction(null);
-  }, [refresh, showToast]);
+  }, [refresh, showToast, announce]);
 
   const slots: Record<string, Slot> = state.slots ?? {};
   const accounts: Account[] = Object.entries(slots)
@@ -118,5 +128,12 @@ export function useStore() {
     .sort((x, y) => (x.cardDays ?? 0) - (y.cardDays ?? 0))[0] ?? null;
 
   return { state, tokens, accounts, hero, currentNode, slots, counts, lastRefreshAt, freshness, cardAlert,
-           loadingAction, toast, refresh, run, showToast };
+           // ★ 本地优先:自己发起的动作永远比镜像来的可信(镜像可能已经过期,见 `useBusyMirror`)。
+           //   两个 surface 因此显示同一个动作 id,按钮文案/转圈逻辑一行都不用改。
+           // ★ 过滤掉流量扫描:它走 `useTraffic` 的 `busy`,不是账号池动作。
+           //   两个 hook 共用同一条广播通道,不筛就会把 `traffic-scan` 塞进 `loadingAction`——
+           //   眼下没有按钮匹配它所以看不见,但那是"碰巧无害",下一个按钮 id 撞上就变成乱转圈。
+           loadingAction: loadingAction ?? (remoteAction === "traffic-scan" ? null : remoteAction),
+           /** ★ 这个动作是**别的窗口**发起的。UI 可据此弱化措辞(是"正在刷新"不是"你点的那个")。 */
+           remoteAction, toast, refresh, run, showToast };
 }

@@ -166,10 +166,22 @@ $PollTrigger = @"
     </TimeTrigger>
 "@
 
+# dawnprobe：每天 06:00 给 Plus 号各发一次最小计费请求，把 5h 窗口锚定上。
+# ★ 与 macOS 的 StartCalendarInterval 等价；命令侧默认关闭 + 当天幂等，
+#   所以注册了这个任务本身不会花钱，要 `codex-rotate dawn-probe --enable`。
+$DawnTrigger = @"
+    <CalendarTrigger>
+      <StartBoundary>2026-01-01T06:00:00</StartBoundary>
+      <Enabled>true</Enabled>
+      <ScheduleByDay><DaysInterval>1</DaysInterval></ScheduleByDay>
+    </CalendarTrigger>
+"@
+
 $tasks = @(
     @{ Name = "proxy";    Args = @((Join-Path $Repo "proxy\proxy.py"));        Trig = $PersistentTrigger; Env = @{ CRP_PORT = "8011" } },
     @{ Name = "quotad";   Args = @((Join-Path $Repo "daemon\quota_daemon.py")); Trig = $PersistentTrigger; Env = @{} },
-    @{ Name = "autosync"; Args = @((Join-Path $Repo "codex-rotate"), "sync");   Trig = $PollTrigger;       Env = @{} }
+    @{ Name = "autosync"; Args = @((Join-Path $Repo "codex-rotate"), "sync");   Trig = $PollTrigger;       Env = @{} },
+    @{ Name = "dawnprobe"; Args = @((Join-Path $Repo "codex-rotate"), "dawn-probe"); Trig = $DawnTrigger;  Env = @{} }
 )
 
 foreach ($t in $tasks) {
@@ -180,7 +192,9 @@ foreach ($t in $tasks) {
     schtasks /Delete /TN "$Prefix.$($t.Name)" /F 2>$null | Out-Null
     schtasks /Create /TN "$Prefix.$($t.Name)" /XML $tmp | Out-Null
     Remove-Item $tmp -Force
-    schtasks /Run /TN "$Prefix.$($t.Name)" 2>$null | Out-Null
+    # ★ 常驻服务装完立刻拉起；**计费类定时任务不 /Run** —— 装 ≠ 现在就跑一次。
+    #   （它默认关闭、当天幂等，即使跑了也是空转，但"装完就触发计费任务"不该是默认语义。）
+    if ($t.Name -ne "dawnprobe") { schtasks /Run /TN "$Prefix.$($t.Name)" 2>$null | Out-Null }
     Write-Host "  + $($t.Name)"
 }
 

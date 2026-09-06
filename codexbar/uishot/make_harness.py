@@ -72,6 +72,11 @@ STUB = """
     localStorage.setItem('codexbar_privacy', p.get('privacy') === '1' ? '1' : '0');
     // 菜单栏停留页:`?tab=today` 直接渲染今日 Tab(默认账号页)
     localStorage.setItem('codexbar_mb_tab', p.get('tab') === 'today' ? 'today' : 'acc');
+    // ★★ `?h=<n>` 预置**记住的弹窗高度**。账号 Tab 用的就是这个数(今日页没渲染,量不到),
+    //    所以「两个 Tab 等高」这条闸**必须能预置它** —— 否则每次加载 localStorage 都是空的,
+    //    账号页永远落到兜底值,验出来的"相等"只是两个兜底值相等,与真实行为无关。
+    if (p.get('h')) localStorage.setItem('codexbar_mb_h', p.get('h'));
+    else localStorage.removeItem('codexbar_mb_h');
     // 平台偏好:`?plat=demo` 套一组示范偏好(停用一家 + 改名改色 + 换顺序),用来验设置面板与总览
     if (p.get('plat') === 'demo') {
       localStorage.setItem('codexbar_platform_prefs', JSON.stringify({
@@ -83,6 +88,15 @@ STUB = """
       // 合成一个就验不出"关了 grok 顺手把 agy 也关了"这类串台。
       localStorage.setItem('codexbar_platform_prefs', JSON.stringify({
         order: [], by: { agy: { off: true } },
+      }));
+    } else if (p.get('plat') === 'few') {
+      // ★★ **今日 Tab 只剩 4 家平台** —— 复现用户 2026-09-06 报的「菜单栏下方大片空白」。
+      //    今日页的高度 ≈ 固定头部 + 图例行数 × 35px,而图例只列**今天有流量**的平台。
+      //    本机快照有 7 家,所以默认夹具下今日页恰好填满 580 —— 那个"恰好"正是
+      //    `PANEL_H_MAX = 580` 这个常量的来源,它把一个**随数据变化的量**写死成了常量。
+      //    停掉 kimi/mimo/deepseek 得到 claude+codex+grok+agy = 4 家,与用户截图一致。
+      localStorage.setItem('codexbar_platform_prefs', JSON.stringify({
+        order: [], by: { kimi: { off: true }, mimo: { off: true }, deepseek: { off: true } },
       }));
     } else if (p.get('plat') === 'grokoff') {
       // ★ 专门用来验「设置页停用 grok ⇒ 额度卡零像素」。`plat=demo` 停的是 kimi 不是 grok,
@@ -171,8 +185,23 @@ STUB = """
   };
   // agy 额度夹具。★ 与 grok 不同,agy 的响应里**没有任何身份信息**(接口无鉴权),
   // 所以这里无需脱敏 —— 但形状必须真实:2 组 × 2 窗口,`remaining_percent` 是**剩余**。
+  // ★★ `rem === 100` 的桶**一定**是浮动锚点:一次都没用过 ⇒ 服务端每轮回「此刻 + 整窗」,
+  //    倒计时永远停在 4h5xm。这里按剩余量**推导**判定,不另加开关。
+  //    用过的桶不带 anchor ⇒ 前端回落到既有行为,与改动前逐像素相同。
+  //
+  // ⚠️ **`?agy=ok` 走不到「未启动」分支,别以为它覆盖了。** 我一开始就是这么以为的,
+  //    `--dump-dom` 当场证伪:卡上与菜单栏行都只取**每个窗口最紧**的那个桶
+  //    (`agyWinRows` / `agyTightest`),而 100% 的桶按定义永远不是最紧的 ⇒ 带 anchor 的桶
+  //    一个都渲染不到。要验那条分支必须用 `?agy=idle`(四个桶全 100%,即"装了但一直没用")。
+  //    ★ 这正是本仓那条「报干净之前先正面证明它渲染了」的又一个实例 ——
+  //      推理说覆盖到了,DOM 说没有。
   function _bkt(id, win, rem, dt) {
-    return { bucket_id: id, window: win, remaining_percent: rem, reset_at: _NOW + dt };
+    var b = { bucket_id: id, window: win, remaining_percent: rem, reset_at: _NOW + dt };
+    if (rem >= 100) {
+      b.anchor = { state: 'floating', held_secs: 0, samples: 1, slides: 3,
+                   used_max: 0.0, reset: b.reset_at };
+    }
+    return b;
   }
   function _groups(gw, g5, tw, t5) {
     return { groups: [
@@ -192,6 +221,11 @@ STUB = """
     ok:      _agy({ available: true, quota: _groups(99.56, 97.34, 100, 100) }),
     // 低水位:验数字的阈值色与 glow。最紧的是 3p-5h = 7% ⇒ 环上应显示 7、数字红。
     tight:   _agy({ available: true, quota: _groups(62.0, 41.0, 88.0, 7.0) }),
+    // ★★ **装了 agy 但一直没用** —— 四个桶全满,于是最紧的那个也是浮动锚点,
+    //    卡与菜单栏行都应渲染「↻未启动」而不是一个永远停在 4h5xm 的假倒计时。
+    //    这是**唯一能证明那条分支真的渲染出来**的 agy 夹具(`ok` 证不了:100% 的桶
+    //    永远不是最紧的,带 anchor 的桶一个都进不了渲染 —— `--dump-dom` 实测)。
+    idle:    _agy({ available: true, quota: _groups(100, 100, 100, 100) }),
     // ★★ agy 没在跑 —— **常态,不是故障**。必须仍然显示(带上次读数 + 一个 `!`),
     //    且不得染成警告色。这条夹具就是为了截出"藏了"或"染红了"这两种回归。
     noproc:  _agy({ reason: 'no_process', detail: 'agy 没在运行',
@@ -311,6 +345,30 @@ STUB = """
       //   所以要验那条路径,必须能在 harness 里模拟"用户点了托盘"。
       var mbs = parseInt(p.get('mbshow') || '0', 10);
       if (mbs) setTimeout(function () { fire('menubar-shown'); }, mbs);
+
+      // ★★ `?busyfrom=<actionId>` 模拟**另一个 webview** 正在跑某个动作。
+      //    harness 只渲染一个 webview,所以"跨窗口同步"这条路径**只能这样验**:
+      //    `useBusyMirror` 的接收端不关心事件从哪来,只看 `from` 是不是自己 ——
+      //    这里发 `from: 'other-window'`,正是真机上另一个窗口发来的形状。
+      //    ⚠️ 没有这个开关,「两端同步」的改动在 harness 里**一个像素都验不到**,
+      //      而截图会正常渲染、探针会报干净 —— 本仓点名过的那种假绿。
+      if (p.get('busyfrom')) {
+        setTimeout(function () {
+          fire('action-busy', { action: p.get('busyfrom'), at: Date.now() / 1000,
+                                from: 'other-window' });
+        }, 200);
+      }
+      // `?busyself=<actionId>` 是它的**反向对照**:`from` 写成本窗口标签,
+      // 接收端必须**忽略**它。少了这条,自过滤那行删掉也不会有测试变红。
+      if (p.get('busyself')) {
+        setTimeout(function () {
+          fire('action-busy', { action: p.get('busyself'), at: Date.now() / 1000,
+                                from: (window.__TAURI_INTERNALS__ &&
+                                       window.__TAURI_INTERNALS__.metadata &&
+                                       window.__TAURI_INTERNALS__.metadata.currentWindow &&
+                                       window.__TAURI_INTERNALS__.metadata.currentWindow.label) || 'main' });
+        }, 200);
+      }
     }, 500);
 
     // `?click=a,b` —— 按**文本**依次点击(全站 45 处是 div/span+onClick,没有 button 可选)。
@@ -396,7 +454,9 @@ STUB = """
         //   而裁切比太高更糟 —— 下面的内容直接看不见,还没有滚动条提示。
         geom: (function () {
           var out = {};
-          ['mb-root', 'mb-list'].forEach(function (c) {
+          // ★ `mb-today` / `mb-pane` 是 2026-09-06 加的:面板固定高之后,**空白**成了新缺陷,
+          //   而空白量 = 窗口高 − 内容自然高,少量一个就算不出来。
+          ['mb-root', 'mb-pane', 'mb-list', 'mb-today'].forEach(function (c) {
             var el = document.querySelector('.' + c);
             if (!el) { out[c] = 'missing'; return; }
             var cs = getComputedStyle(el);
@@ -649,6 +709,29 @@ def redacted_state():
                 continue
             q["captured_at"] -= int(3.8 * 86400)
             break
+
+    # ★★ `CODEXBAR_FLOATING_ANCHOR=1` 给**第一个活号的每个窗口**造一份账本判定
+    #    `floating`，于是倒计时渲染成「未启动」。
+    #    这是**唯一能证明那条分支真的渲染出来的夹具**：真实 `state.json` 里 `quota_anchor`
+    #    要 quotad 连观测三轮才会出现 `floating`，而截图当下多半是 `unknown`（回落成「待确认」）
+    #    —— 只用真数据截图，只能证明回落路径没坏，**证不了新分支存在**。
+    #    本仓 2026-09-05 刚为同类问题栽过：8 个新视图全判「干净」，而那些组件一个都没渲染。
+    if os.environ.get("CODEXBAR_FLOATING_ANCHOR"):
+        for sl in out_slots.values():
+            q = sl.get("quota")
+            if sl.get("auth_dead") or not isinstance(q, dict):
+                continue
+            anchor = {"at": q.get("captured_at")}
+            for k in ("primary", "secondary"):
+                w = q.get(k)
+                if isinstance(w, dict) and w.get("window_minutes") and w.get("resets_at"):
+                    # `reset` 必须与窗口现值对得上 —— 前端要核身份,对不上就回落。
+                    anchor[str(int(w["window_minutes"]))] = {
+                        "state": "floating", "held_secs": 0, "samples": 1,
+                        "slides": 3, "used_max": 0.0, "reset": int(w["resets_at"])}
+            if len(anchor) > 1:
+                sl["quota_anchor"] = anchor
+                break
 
     # ★★ `?cardexp=1` 只给**第一个**号一张快到期的重置卡 ⇒ 它的徽章文案变长
     #    （「重置卡 ×1 · 剩1天」），另一个号仍是短文案。

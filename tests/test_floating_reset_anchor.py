@@ -28,10 +28,23 @@
 ③ ★★ **文案是「待确认」不是「未启动」**(codex 的反例):刚首次使用、用量被取整成 0% 的
    **真**窗口也会命中这个判据,此时断言「未启动」就是在编一个我们证不了的事实。
 
+   ⚠️ **口径③ 2026-09-06 被有条件推翻,新边界见本文件下方那两条测试。**
+   推翻的不是「不许编事实」,而是它的**前提**:「拿不到证据」。
+   点估计确实拿不到 —— 一个样本里没有那个信息,这一半永远成立。
+   但锚点账本(`traffic/quota_anchors.py`)看的是**时间序列**:闲置窗口的 `resets_at`
+   每轮跟着 `now` 挪,锚定的一动不动。连续观测到位移之后,「未启动」就有了观测支撑。
+   ⇒ 判据从「禁用这个词」改成「**这个词只能由账本判定 `floating` 开口**」,
+     账本给 `unknown`(样本不够)时一律回落到点估计、说「待确认」。
+
 ## 三份副本
 
 判据在 `helpers.ts::resetAnchorUnknown` 与 `lib.rs` 托盘各一份(跨语言没法共用)。
 本文件同时守住两份 —— 本仓反复出现「同一规则的 N 个副本漂移」。
+
+⚠️ **托盘那份至今只有点估计,没有接账本。** 那不是漏改:账本的判定写在
+`state.json` 的 `slot["quota_anchor"]` 里,托盘读得到,但托盘只画一个百分比、
+不画倒计时,所以「钟准不准」对它没有渲染后果。**哪天托盘要画倒计时了,
+这里得跟着接**;在那之前两边不一致是有意的,不要"顺手对齐"。
 """
 import re
 import unittest
@@ -150,29 +163,60 @@ class BothCopiesImplementIt(unittest.TestCase):
         self.assertIn("FLOATING_RESET_TOL_SEC", body, "没有用那个阈值常量")
         self.assertRegex(body, r"wm\s*\*\s*60", "没有拿整窗长度去比")
 
+    def _build_window_body(self):
+        """`buildWindow` 里消费判定的那一段。2026-09-06 起锚点是 `anchorStateOf` ——
+        它先看账本、账本没话说时才回落到 `resetAnchorUnknown`。"""
+        i = self.ts.index("const st = anchorStateOf")
+        return self.ts[i:self.ts.index("};", i)]
+
     def test_pct_is_not_touched(self):
         """★★ 口径②:只换倒计时。pct 被动过就说明把「水位」也当成不可信了。"""
-        i = self.ts.index("const anchorUnknown = resetAnchorUnknown")
-        body = self.ts[i:self.ts.index("};", i)]
-        self.assertRegex(body, r"pct:\s*clamp\(pctRaw\)",
+        self.assertRegex(self._build_window_body(), r"pct:\s*clamp\(pctRaw\)",
                          "pct 不再是原值 —— 假的是钟不是水位")
 
     def test_window_is_not_dropped(self):
         """口径②:不许因为锚点不可信就 return null（整行会消失、槽位对齐会破）。"""
-        i = self.ts.index("const anchorUnknown = resetAnchorUnknown")
-        body = self.ts[i:self.ts.index("};", i)]
-        self.assertNotIn("return null", body)
+        self.assertNotIn("return null", self._build_window_body())
 
-    def test_wording_is_pending_not_not_started(self):
-        """★★ 口径③:不许断言「未启动」——那是我们证不了的事实。"""
-        i = self.ts.index("const anchorUnknown = resetAnchorUnknown")
-        body = self.ts[i:self.ts.index("};", i)]
-        self.assertIn("待确认", body)
-        for forbidden in ("未启动", "未使用", "从未"):
-            with self.subTest(word=forbidden):
-                self.assertNotIn(forbidden, body,
-                                 "断言了「%s」—— 刚首次使用、取整成 0%% 的真窗口也会命中判据"
-                                 % forbidden)
+    def test_pending_wording_survives_as_the_fallback(self):
+        """★★ 口径③的**仍然成立**的那一半:点估计单独判定时只能说「待确认」。
+
+        账本给 `unknown`(样本不够)或压根没有账本时,`anchorStateOf` 回落到点估计,
+        而点估计**结构性地**分不出「闲置浮动」和「刚锚定」—— 两者的
+        `resets_at − captured_at` 都等于整窗。此时断言「未启动」就是编事实。
+        """
+        self.assertIn("待确认", self._build_window_body(),
+                      "回落文案没了 —— 账本没数据时会退化成一个证不了的断言")
+
+    def test_not_started_is_only_claimable_from_the_ledger(self):
+        """★★ 口径③在 2026-09-06 **有条件地被推翻**,这条记录新的边界。
+
+        推翻的不是「不许编事实」,而是「拿不到证据」这个前提:锚点账本
+        (`traffic/quota_anchors.py`)连续观测到 `resets_at` 跟着 `now` 挪之后,
+        「未启动」就成了一句**有观测支撑**的话,不再是猜测。
+        所以判据从「禁用这个词」改成「**这个词只能由 `floating` 开口**」。
+
+        断言核的是**它的守卫**:helpers.ts 里每一处「未启动」,往前 400 字符内
+        必须出现 `"floating"`。★ 源码已剥掉注释(`strip_ts`),否则解释这条规则的
+        注释本身就能让断言恒绿 —— 本仓点名过的空守卫形态④。
+        """
+        hits = [m.start() for m in re.finditer("未启动", self.ts)]
+        self.assertTrue(hits, "「未启动」整个消失了 —— 断言可能打空了")
+        for pos in hits:
+            guard = self.ts[max(0, pos - 400):pos]
+            with self.subTest(at=self.ts[pos - 40:pos + 20].replace("\n", "⏎")):
+                self.assertIn('"floating"', guard,
+                              "这处「未启动」前面 400 字符里没有 floating 守卫 —— "
+                              "它会在账本还没看够的时候也说出口")
+
+    def test_ledger_verdict_is_preferred_over_the_point_estimate(self):
+        """★ 顺序也是判据:必须**先**问账本,拿不到结论才回落。反过来写的话,
+        点估计会先把所有闲置窗口吃成「待确认」,账本永远没机会说话。"""
+        i = self.ts.index("export function anchorStateOf")
+        body = self.ts[i:self.ts.index("\n}", i)]
+        self.assertLess(body.index('v?.state === "anchored"'),
+                        body.index("resetAnchorUnknown"),
+                        "点估计排在账本前面 —— 账本的结论永远用不上")
 
 
 if __name__ == "__main__":

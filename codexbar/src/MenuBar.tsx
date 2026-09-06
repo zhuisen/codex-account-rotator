@@ -10,6 +10,7 @@ import AgyRow from "./components/AgyRow";
 import ProbeButton from "./components/ProbeButton";
 import MenuBarToday from "./components/MenuBarToday";
 import { useStore } from "./hooks/useStore";
+import { useDawnProbe } from "./hooks/useDawnProbe";
 import { useTraffic } from "./hooks/useTraffic";
 import { useGrokQuota } from "./hooks/useGrokQuota";
 import { useAgyQuota } from "./hooks/useAgyQuota";
@@ -21,20 +22,50 @@ import "./menubar.css";
 
 const PANEL_W = 352;          // ★ 三处必须一致，由 tests/test_menubar_width_sync.py 守着
 /**
- * 弹窗高度上限。★★ **这是账号 Tab 与「今日」Tab 共用的唯一高度真源**（用户 2026-09-06:
- * 「菜单栏的账号太多，高度太高了，要跟 AI 用量的高度一致」）。
+ * 弹窗高度。★★ **规则是「跟今日 Tab 一致」**（用户 2026-09-06），而这条规则的实现
+ * 换过一次，换的原因值得记：
  *
- * 实测(账号池 4 活号 + 1 死号 + grok + agy):账号 Tab 自然高 **731px**、今日 Tab **580px**,
- * 差 151px;而 731 已经逼近旧上限 760 —— 再多一个号就顶死,而且**切 Tab 时弹窗会跳高**。
- * 取 580 = 今日 Tab 的自然高度,两个 Tab 从此等高、切换不跳。
+ * **v1（2026-09-06 上午）：写死 `PANEL_H_MAX = 580`。**
+ * 580 是当时量到的今日 Tab 自然高度。它错在**把一个随数据变化的量写死成了常量** ——
+ * 今日页的高度 ≈ 固定头部 + 图例行数 × 35px，而图例只列**今天有流量**的平台。
+ * 那天本机有 7 家，今日页恰好 580；用户当晚只剩 4 家，今日页自然高变成 **477**，
+ * 而窗口仍被钉在 580 ⇒ **底部 103px 死白**（用户截图，实测 `.mb-root` h=477 vs 窗口 580，
+ * 差值与截图里量出的空白逐像素吻合）。
+ * ⚠️ 当时的注释甚至预判了「账号很少时会留白」，却**没想到今日页自己也会变矮** ——
+ * 因为我是拿"当前这一刻的数据"去标定一个常量的，而那一刻恰好是最高的那种状态。
  *
- * ★ 只钳 `setSize` 是不够的:内容仍然 731 高,窗口 580 就变成**裁切**(比太高更糟,
- *   下面的号直接看不见且没有滚动条)。所以这个值同时通过 CSS 变量喂给 `.mb-root` 的
- *   `max-height`,让 `.mb-list` 作为 flex 子项吸收溢出、自己滚 —— **一个数管两处**,
- *   分开写两个常量迟早漂移(本仓已有多起同规则多副本漂移的账)。
- * ★ 闸在 `tests/test_menubar_tab_heights_match.py`:两个 Tab 的 setSize 必须相等。
+ * **v2（现在）：高度是量出来的，不是写死的。**
+ * 今日 Tab 可见时量它的自然高度 → `setSize` → 记进 localStorage；
+ * 账号 Tab 用记住的那个数（它渲染时今日页不存在，量不到），并靠 `--mb-max-h` 钳到同一个值，
+ * 超出部分由 `.mb-list` 自己滚。**两个 Tab 仍然等高，切换仍然不跳**，但那个「高」现在
+ * 跟着今日页的真实内容走。
+ *
+ * ★ 为什么以今日页为基准而不是取两页较大值：用户的原话就是「跟 AI 用量的高度一致」；
+ *   取较大值会让账号多时又回到 731，正是最初要修的那个问题。
+ * ★ 已知取舍：账号池很小时账号页仍会留白。那是「不跳」的代价，而切页跳高是每次都发生的。
+ * ★★ **只在今日页有数据时才采信测量**（`today != null`）。数据没到齐时今日页只有
+ *   「头部+Tab+摘要」≈190px，量了就会把窗口钉在下限上 —— 那正是 2026-08-22 那个
+ *   「重启后弹窗只剩半截」的老 bug 的复活路径。
+ * ★ 闸在 `tests/test_menubar_panel_height.py`：两个 Tab 的 setSize 必须相等，且
+ *   `ShortTodayLeavesNoDeadSpace` 用 `?plat=few`（4 家平台）专门守这次的死白。
+ *   ⚠️ 上一版注释写的是 `tests/test_menubar_tab_heights_match.py`——**那个文件根本不存在**。
+ *   一个指向幽灵闸的注释比没有注释更糟：它让人以为这条规则有人守着。
  */
-const PANEL_H_MAX = 580;
+const PANEL_H_MAX = 640;
+/** 下限。低于此值 Tab 条 + 摘要 + 底栏就开始互相挤,而那种状态只会出现在数据还没到齐时。 */
+const PANEL_H_MIN = 320;
+/** 上次量到的「今日」Tab 高度。★ 必须持久化 —— 冷启动停在账号页时那一页量不到。 */
+const H_KEY = "codexbar_mb_h";
+/** 首次运行、还没量过时用的值。就是 2026-09-06 之前写死的那个常量。 */
+const PANEL_H_FALLBACK = 580;
+
+function loadPanelH(): number {
+  try {
+    const v = Number(localStorage.getItem(H_KEY));
+    if (Number.isFinite(v) && v >= PANEL_H_MIN && v <= PANEL_H_MAX) return v;
+  } catch { /* ignore */ }
+  return PANEL_H_FALLBACK;
+}
 
 function loadTheme(): "dark" | "light" {
   try {
@@ -65,6 +96,10 @@ export default function MenuBar() {
   const rootRef = useRef<HTMLDivElement>(null);
   const { privacy, toggle: togglePrivacy } = usePrivacy();
   const t = THEMES[theme];
+
+  // ★ 清晨探针的**补跑**路径。挂在菜单栏而不是主窗:这个 webview 在 app 启动时创建、
+  //   从不卸载,是更稳的宿主。hook 内部还会再核一次窗口标签(见 `useDawnProbe`)。
+  useDawnProbe();
 
   // 交接稿 §5「弹窗只读缓存,不重复解析」。数据与主窗口共用同一份快照和同一条新鲜度规则,
   // 谁扫完都会广播给对方 —— 所以这里不会和主窗口各扫一遍。要立刻要准数就点摘要行那个 ↻。
@@ -134,9 +169,10 @@ export default function MenuBar() {
   useEffect(() => {
     const el = rootRef.current;
     if (!el) return;
-    // ★ 把上限喂给 CSS,让 `.mb-root` 的 max-height 与 `setSize` 的钳位**同源**。
+    let h = loadPanelH();
+    // ★ 把当前高度喂给 CSS,让 `.mb-root` 的 max-height 与 `setSize` 的钳位**同源**。
     //   写死在 CSS 里就成了第二个真源,改一处忘一处 = 裁切或留白。
-    el.style.setProperty("--mb-max-h", `${PANEL_H_MAX}px`);
+    el.style.setProperty("--mb-max-h", `${h}px`);
     let last = 0;
     const apply = () => {
       // ★★ **固定高度,不再按各页内容算**(2026-09-06 评审抓出)。
@@ -156,7 +192,21 @@ export default function MenuBar() {
       //      而固定高度之后不存在这个状态了。留着会是 `noUnusedLocals` 下的死代码 ——
       //      顺带一提,`tsc --noEmit` **不报**这个错,只有 `npm run build`(走 `tsc -b`)才报;
       //      本仓为这条差异栽过,别拿 `--noEmit` 当发版闸。
-      const h = PANEL_H_MAX;
+      // ★★ **今日页是唯一的高度基准,而且必须它有数据时才算数。**
+      //    `.mb-root` 在内容装得下时会自己收缩到自然高(实测 4 家平台 = 477),
+      //    装不下时被 `--mb-max-h` 钳住、由 `.mb-today` 自己滚 —— 所以
+      //    `自然高 = root 当前高 + 今日页溢出的那一截`,两种情形一个式子。
+      const inner = el.querySelector<HTMLElement>(".mb-today");
+      if (tab === "today" && today && inner) {
+        const overflow = Math.max(0, inner.scrollHeight - inner.clientHeight);
+        const want = Math.round(el.getBoundingClientRect().height) + overflow;
+        const clamped = Math.max(PANEL_H_MIN, Math.min(PANEL_H_MAX, want));
+        if (Math.abs(clamped - h) >= 4) {        // 死区:躲开亚像素抖动造成的来回缩放
+          h = clamped;
+          el.style.setProperty("--mb-max-h", `${h}px`);
+          try { localStorage.setItem(H_KEY, String(h)); } catch { /* ignore */ }
+        }
+      }
       if (Math.abs(h - last) < 2) return;
       // ★ **成功之后才记账**。原来是先 `last = h` 再 `setSize(...).catch(() => {})` ——
       //   一旦这次 setSize 没生效(隐藏窗口/时序),`last` 已经写成新值,而内容之后不再变化
@@ -174,7 +224,10 @@ export default function MenuBar() {
     //   `menubar-shown` 是 Rust 在 `win.show()` 之后发的(见 lib.rs 的 `toggle_menubar`)。
     const un = listen("menubar-shown", () => { apply(); });
     return () => { ro.disconnect(); void un.then((f) => f()); };
-  }, []);
+    // ★ 依赖里必须有 `tab` 与 `today`:前者决定这一轮该不该采信测量,
+    //   后者是「今日页数据到齐了没」的判据 —— 少了它,快照晚到时这个 effect
+    //   不会重跑,窗口就停在冷启动那个高度上(2026-08-22 那个老 bug 的同族路径)。
+  }, [tab, today]);
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {

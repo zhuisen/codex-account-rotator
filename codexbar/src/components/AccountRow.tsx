@@ -88,7 +88,7 @@ export default function AccountRow({ a, isCurrent, isBest, bestPct, privacy, t, 
                       <div style={{ height: "100%", width: `${w.pct}%`, background: wc, borderRadius: 2, transition: "width .55s cubic-bezier(.4,0,.2,1)" }} />
                     </div>
                     <span style={{ fontSize: 9.5, fontWeight: 600, color: winNumColor(w.pct, t), fontVariantNumeric: "tabular-nums", width: 30, textAlign: "right" }}>{w.pct}%</span>
-                    <span style={{ fontSize: 9, color: t.muted, fontFamily: "'JetBrains Mono'", whiteSpace: "nowrap" }}>↻{w.reset}</span>
+                    <span title={w.resetAt} style={{ fontSize: 9, color: t.muted, fontFamily: "'JetBrains Mono'", whiteSpace: "nowrap" }}>↻{w.reset}</span>
                   </div>
                 );
               })}

@@ -14,6 +14,12 @@
   3. usage API sweep (every USAGE_SECS)  — `refresh-all` reads GET /backend-api/codex/usage for EVERY
      account. Authoritative, covers non-active accounts, 401 identifies revoked tokens. Also the floor
      that keeps things correct if every activity signal somehow misses.
+     ★ 它还有第二个触发口:**窗口跨过重置时刻立刻扫一次**(`_reset_crossed`)。旧读数在那一刻
+     语义上就作废了,而 UI 会如实显示"未知"—— 固定节拍下那段未知最长要挂 300s,
+     偏偏又是用户最想看到新数的时候。
+
+★ 三条循环的到点判断一律走 `_due()`,不是裸的 `now - last >= T`:墙钟回拨会让后者
+  **静默地**把下一次执行推迟一个回拨的量。见 `_due` 的注释。
 
 ★ Why loop 3 still exists under loop 1: the activity signals are heuristics about a third party's
 files. Loop 3 does not care why a signal was missed — it re-establishes truth on a fixed cadence.
@@ -50,7 +56,59 @@ RESCAN_SECS = 60    # how often to re-find the newest rollout file
 # stale until the next trigger, which may be a long way off. Retry on a short ladder instead of waiting.
 RETRY_BACKOFF = (8, 20, 45)
 
+# 墙钟回拨多少秒以内算"抖动",照常等待;超过就判到点、重新对时。见 `_due`。
+CLOCK_BACK_TOL_SECS = 300
+# 重置驱动的扫描之间的地板。扫描失败(/usage 的 bot challenge)时不至于每秒重试。
+RESET_SWEEP_MIN_GAP = 60
+
 HISTORY = Path.home() / ".codex/history.jsonl"
+
+
+def _due(now, last, period):
+    """到点了吗 —— **兼容墙钟被改动**。
+
+    `now - last` 正常是正数,但**它可以是负的**:NTP 校正、用户改系统时间、
+    VM/容器恢复快照,都会让"上次"落在"现在"之后。朴素的 `>= period` 在那之后会把
+    下一次扫描**推迟整整一个回拨的量**(可能是几小时),而这件事**没有任何症状** ——
+    日志里只是安静地少了几行,额度数字停在旧值,看上去和"没人用 codex"一模一样。
+
+    ★ 为什么不干脆换 `time.monotonic()`:macOS 的 monotonic **不含睡眠时间**
+      (`CLOCK_UPTIME_RAW`)。合盖三小时再打开,墙钟走了 3h 而 monotonic 几乎没动 ⇒
+      唤醒后还要再等一个完整周期才刷新,而"合盖唤醒"恰恰是全池数据最旧、
+      用户最想立刻看到新数的那一刻。所以留在墙钟上,只把负数这一侧补齐。
+    """
+    d = now - last
+    return d >= period or d < -CLOCK_BACK_TOL_SECS
+
+
+def _reset_crossed(state, now):
+    """有没有哪个账号的额度窗口,在**上次读数之后**跨过了重置时刻。
+
+    跨过的那一刻,旧读数在语义上就作废了(`helpers.ts::winRem` 会把它显示成"未知",
+    而不是编一个"满额"出来),可全池扫描最坏还要等 300s —— 窗口重置正是用户
+    最想立刻看到新数的那一刻,却偏偏是显示"未知"最久的一段。
+
+    ★★ 判据必须是「**快照拍摄于重置之前**」,不能只是「重置时刻已过」。
+      后者在服务端迟迟不更新 `resets_at` 时会**恒为真**,把兜底节拍变成每 60s 一扫,
+      在 /usage 的 bot challenge 面前就是自找 403。这样写还顺带**自我清零**:
+      扫描成功后 `captured_at > resets_at`,条件自动不再成立,不需要额外记"已触发过"。
+
+    ★ 这是「`captured_at` vs `resets_at`」这条判据的又一份副本(另外三份:
+      `helpers.ts::winRem` · `lib.rs` 托盘 · `proxy.py::_win_used`)。它们回答
+      "这个读数还能不能信",这里回答"该不该现在就去拿新的" —— 同一条线上的两个问题。
+    """
+    for slot in (state.get("slots") or {}).values():
+        if not isinstance(slot, dict) or slot.get("auth_dead"):
+            continue
+        q = slot.get("quota") or {}
+        cap = q.get("captured_at") or 0
+        if not cap:
+            continue
+        for wkey in ("primary", "secondary"):
+            ra = ((q.get(wkey) or {}) if isinstance(q.get(wkey), dict) else {}).get("resets_at")
+            if ra and cap < ra <= now:
+                return True
+    return False
 
 
 def log(msg):
@@ -91,7 +149,7 @@ class ActivityWatch:
         self.fp = None
 
     def _newest_rollout_path(self, now):
-        if self.rollout is None or now - self.rollout_scanned >= RESCAN_SECS or not self.rollout.exists():
+        if self.rollout is None or _due(now, self.rollout_scanned, RESCAN_SECS) or not self.rollout.exists():
             self.rollout_scanned = now
             self.rollout = cli._newest_rollout()   # Path | None
         return self.rollout
@@ -170,7 +228,7 @@ def main():
         f"rollout={TICK_SECS}s · sweep={USAGE_SECS}s (all GET, zero quota)")
 
     watch = ActivityWatch()
-    last_usage = last_tick = last_event_refresh = 0.0
+    last_usage = last_tick = last_event_refresh = last_reset_sweep = 0.0
     pending_since = None
     retry_at, retry_n = None, 0
 
@@ -189,8 +247,8 @@ def main():
                 pending_since = now              # keep pushing the deadline out while activity continues
                 retry_at, retry_n = None, 0      # newer activity supersedes an in-flight retry ladder
 
-            due = (pending_since is not None and now - pending_since >= DEBOUNCE_SECS
-                   and now - last_event_refresh >= MIN_GAP_SECS)
+            due = (pending_since is not None and _due(now, pending_since, DEBOUNCE_SECS)
+                   and _due(now, last_event_refresh, MIN_GAP_SECS))
             # The retry ladder ignores MIN_GAP: a challenged read produced NO data, so retrying it is
             # not "another poll of a thing we already know", it is the first successful poll.
             due = due or (retry_at is not None and now >= retry_at)
@@ -209,7 +267,7 @@ def main():
             log(f"activity err: {e}")
 
         # --- 2. rollout tail ----------------------------------------------------
-        if now - last_tick >= TICK_SECS:
+        if _due(now, last_tick, TICK_SECS):
             last_tick = now
             try:
                 tick_rollout()
@@ -217,7 +275,14 @@ def main():
                 log(f"rollout err: {e}")
 
         # --- 3. full-pool sweep -------------------------------------------------
-        if now - last_usage >= USAGE_SECS:
+        # 两个触发口。固定节拍是**兜底**;窗口刚跨过重置点则是**即时失效** ——
+        # 那一刻旧读数已经作废,而它偏偏是显示"未知"最久的一段(最坏 300s)。
+        reset_due = (_due(now, last_reset_sweep, RESET_SWEEP_MIN_GAP)
+                     and _reset_crossed(state, now))
+        if _due(now, last_usage, USAGE_SECS) or reset_due:
+            if reset_due:
+                last_reset_sweep = now
+                log("window reset crossed → sweep now (not waiting for the 300s tick)")
             last_usage = now
             try:
                 tick_usage()

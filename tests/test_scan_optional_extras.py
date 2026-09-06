@@ -51,6 +51,51 @@ def _seed_store(d):
         shutil.copy(CACHE, Path(d) / ".traffic-cache.json")
 
 
+def _frozen_sources(root):
+    """把**所有会变的数据源**钉到一份不动的夹具上,返回要注入的环境变量。
+
+    ★★ **为什么必须冻结**(2026-09-06,12 轮复现 2 次):
+    本类的判据是「跑两次 `scan.py`,一次可选模块坏掉、一次正常,`platforms` 必须逐字段相等」。
+    但两次扫描相隔几秒,而它们读的是**活的** `~/.claude/projects/**`——
+    Claude Code 每完成一次工具调用就往里追加。实测失败时的差值正是本会话自己的计数:
+
+        响应数 11274 → 11276   cache_read 503,984,255 → 504,419,389
+
+    与"可选模块"毫无关系,而断言消息却写着「可选模块炸掉改变了主数据」——
+    **一条会说谎的红灯**,比没有灯更糟:它会把人引到完全错误的方向。
+
+    ⚠️ 这个 flake 在 **CI 上永远不出现**(干净 runner 的 `~/.claude` 是空的,两次都扫到 0
+    ⇒ 恒等 ⇒ 恒绿),只在本机开着会话时炸。所以它既不会被 CI 发现,又会持续毒化本地的绿灯。
+
+    ★ 夹具是**合成**的,不复制真实 transcript:一来那是几十 MB,二来里面有对话内容。
+      合成三条就够 —— 判据要的是「两次结果相同且非空」,不是数据像不像真的。
+    """
+    src = Path(root) / "frozen"
+    proj = src / "claude" / "projects" / "fixture"
+    proj.mkdir(parents=True, exist_ok=True)
+    rows = []
+    for n in range(3):
+        rows.append(json.dumps({
+            "type": "assistant",
+            "timestamp": "2026-09-06T0%d:00:00.000Z" % n,
+            "message": {"id": "msg_frozen_%d" % n, "model": "claude-opus-5",
+                        "usage": {"input_tokens": 100 + n, "output_tokens": 200 + n,
+                                  "cache_read_input_tokens": 300 + n,
+                                  "cache_creation_input_tokens": 400 + n}},
+        }))
+    (proj / "frozen.jsonl").write_text("\n".join(rows) + "\n", encoding="utf-8")
+    for name in ("codex", "grok", "kimi", "openclaw"):
+        (src / name).mkdir(parents=True, exist_ok=True)
+    return {
+        "CLAUDE_CONFIG_DIR": str(src / "claude"),
+        "CODEX_HOME": str(src / "codex"),
+        "GROK_HOME": str(src / "grok"),
+        "KIMI_HOME": str(src / "kimi"),
+        "OPENCLAW_HOME": str(src / "openclaw"),
+        "AGY_LEDGER_DIR": str(src / "agy-ledger"),
+    }
+
+
 class MainScanSurvivesMissingExtras(unittest.TestCase):
     """① 可选模块缺席 ⇒ 主扫描照常出数。"""
 
@@ -65,6 +110,7 @@ class MainScanSurvivesMissingExtras(unittest.TestCase):
             _seed_store(d)
             env = dict(os.environ)
             env["CODEX_ROTATE_STORE"] = d
+            env.update(_frozen_sources(d))     # ★ 见 `_frozen_sources`:不冻结就是在比两个活数
             p = subprocess.run([sys.executable, str(t / "scan.py"), "--days", "7", "--json"],
                                capture_output=True, text=True, timeout=600, env=env)
             return p
@@ -105,6 +151,7 @@ class MainScanSurvivesMissingExtras(unittest.TestCase):
             _seed_store(d)
             env = dict(os.environ)
             env["CODEX_ROTATE_STORE"] = d
+            env.update(_frozen_sources(d))     # ★ 同上:对照组也必须读同一份不动的输入
             p = subprocess.run([sys.executable, str(t / "scan.py"), "--days", "7", "--json"],
                                capture_output=True, text=True, timeout=600, env=env)
         self.assertEqual(p.returncode, 0,
@@ -113,6 +160,13 @@ class MainScanSurvivesMissingExtras(unittest.TestCase):
         d2 = json.loads(p.stdout)
         control = json.loads(self._run_isolated(keep=["agy_quota_series.py"]).stdout)
         self.assertIn("platforms", d2, "连 platforms 这个键都没了")
+        # ★★ 冻结输入之后必须**证明夹具真的产出了数据**:两边都空的话下面那条相等
+        #    是恒真的,整条闸变成空守卫 —— 而"空"正是夹具路径写错时最可能的结果。
+        self.assertIn("claude", d2["platforms"],
+                      "冻结夹具没被解析出来 —— 下面的相等断言会变成恒真")
+        # 桶在 `days` / `hours` 里,平台条目本身没有 `total`（我第一版猜了这个键，当场 KeyError）。
+        self.assertTrue(d2["platforms"]["claude"].get("days"),
+                        "夹具解析出了 claude 却没有任何日桶 —— 相等断言仍会是恒真")
         self.assertEqual(d2["platforms"], control["platforms"],
                          "可选模块炸掉改变了主数据 —— 它本该完全不相干")
         self.assertIsNone(d2.get("agy_quota"))

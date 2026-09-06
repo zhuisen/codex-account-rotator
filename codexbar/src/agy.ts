@@ -18,6 +18,8 @@
  * 且不导出裸数字 —— 同 `grok.ts` 的纪律，理由见那份文件里那段「颜色完全反相且不报错」。
  */
 
+import { fmtEta, type AnchorVerdict } from "./helpers";
+
 /** ★ 闭集，必须与 `agy-quota` 里的 `REASONS` 逐字相等。
  *  闸在 `tests/test_agy_reason_copy.py`：两边都从源解析，新增一个只改一边就红。 */
 export type AgyReason =
@@ -36,6 +38,10 @@ export interface AgyBucket {
   /** ★★ 0–100 的**剩余**百分比。与 grok 的 `used_percent` 方向相反。 */
   remaining_percent: number;
   reset_at: number | null;
+  /** 锚点账本对这个桶的判定（`traffic/quota_anchors.py`，由 `agy-quota` 写）。
+   *  ★ agy 是「闲置桶的 `resetTime` 跟着 now 滑」最典型的那个：没有它，这里渲染的
+   *  是一个**永远停在 4h5xm** 的倒计时，而且没有任何标记说它是假的。 */
+  anchor?: AnchorVerdict;
 }
 
 export interface AgyGroup {
@@ -106,19 +112,51 @@ export function agyTightest(q: AgyQuota | null | undefined): { group: string | n
  * 行上显示的是"这个窗口最紧的是谁、剩多少"，具体哪一组写在 `group` 里由调用点放进 title。
  * 全 4 行铺开会把卡片撑高，破坏九宫格里与账号卡的对齐（那个对齐是像素级调过的）。
  */
-export function agyWinRows(q: AgyQuota | null | undefined):
-  { label: string; remaining: number; group: string | null; reset_at: number | null }[] {
-  const byWin = new Map<string, { label: string; remaining: number; group: string | null; reset_at: number | null }>();
+export interface AgyWinRow {
+  label: string; remaining: number; group: string | null; reset_at: number | null;
+  anchor?: AnchorVerdict;
+}
+
+export function agyWinRows(q: AgyQuota | null | undefined): AgyWinRow[] {
+  const byWin = new Map<string, AgyWinRow>();
   for (const { group, b } of agyBuckets(q)) {
     const label = agyWinLabel(b.window);
     const cur = byWin.get(label);
     if (!cur || b.remaining_percent < cur.remaining) {
-      byWin.set(label, { label, remaining: b.remaining_percent, group, reset_at: b.reset_at });
+      // ★ `anchor` 必须跟着桶一起带下来。丢了它，行上渲染的就还是那个
+      //   永远停在 4h5xm 的倒计时 —— 后端算了、前端没接，正是本仓点名的孤儿字段。
+      byWin.set(label, { label, remaining: b.remaining_percent, group, reset_at: b.reset_at,
+                         anchor: b.anchor });
     }
   }
   // 短窗在前（5h 比周更常变），与账号卡的行序一致。
   return [...byWin.values()].sort((a, b) => (a.label === "5h" ? -1 : b.label === "5h" ? 1 : 0));
 }
+
+/**
+ * 倒计时该显示什么 —— **两个 surface 的单一真源**（AgyCard 与 AgyRow）。
+ *
+ * ★★ 本仓在 grok 上栽过一次「同一状态两个 surface 两种画法」，靠截图才发现。
+ *    所以这里从一开始就只写一份。
+ * ★ 只有账本判定 `floating` **且**该窗口零消耗时才敢说「未启动」；
+ *   `unknown` 一律照旧渲染倒计时 —— 拿「还没看够」冒充「确定没启动」是本仓的老毛病。
+ * ★ 判定必须核身份（`anchor.reset` 对得上当前 `reset_at`），否则会拿旧窗口的
+ *   结论去解释新窗口，而两者渲染出来一模一样。
+ */
+export function agyResetText(b: { reset_at: number | null; anchor?: AnchorVerdict }):
+  { text: string; title: string } {
+  const a = b.anchor;
+  const sameWindow = a?.reset != null && b.reset_at != null
+    && Math.abs(a.reset - b.reset_at) <= AGY_ANCHOR_ID_TOL_SEC;
+  if (sameWindow && a?.state === "floating" && (a.used_max ?? 0) < 2) {
+    return { text: "未启动",
+             title: `窗口未启动 · 连续 ${(a.slides ?? 0) + 1} 次读数里重置时间都在跟着「现在」滑动` };
+  }
+  return { text: fmtEta(b.reset_at ?? undefined), title: "" };
+}
+
+/** 与 Python 侧 `quota_anchors.JITTER_SECS` 同值。 */
+const AGY_ANCHOR_ID_TOL_SEC = 60;
 
 export type AgyTone = "amber" | "red" | "muted";
 

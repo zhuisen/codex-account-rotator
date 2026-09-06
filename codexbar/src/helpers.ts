@@ -3,12 +3,30 @@ import type { Theme } from "./theme";
 
 export interface Win { used_percent?: number; resets_at?: number; window_minutes?: number }
 export interface Quota { primary?: Win; secondary?: Win; captured_at?: number; source?: string; plan_type?: string }
+/**
+ * 锚点账本对某个窗口的判定（`traffic/quota_anchors.py` 产出，由 `codex-rotate` 写进
+ * `slot["quota_anchor"]`）。**三态**：
+ *   · `anchored` — `resets_at` 静止了 ≥15 分钟而 `now` 在走 ⇒ 它锚的是真实窗口起点
+ *   · `floating` — 连续两个锚点都跟着时间挪 ⇒ 服务端在回「此刻 + 整窗」，窗口还没启动
+ *   · `unknown`  — 还没看够。★ **必须回落到点估计，不能当成 `floating`**
+ *
+ * `reset` 是这条判定**所描述的那个** `resets_at`。带着它是因为 `slot["quota"]` 会被
+ * rollout tail / proxy 整体替换而这个兄弟键不跟着换 —— 不核身份就会拿旧窗口的判定
+ * 去解释新窗口的倒计时，而两者渲染出来一模一样。
+ */
+export interface AnchorVerdict {
+  state?: "anchored" | "floating" | "unknown";
+  held_secs?: number; samples?: number; slides?: number; used_max?: number; reset?: number;
+}
+/** 按 `window_minutes` 索引，外加一个 `at` 时间戳。 */
+export type QuotaAnchor = Record<string, AnchorVerdict | number | undefined> & { at?: number };
 /** One reset credit ("重置卡") as returned by /backend-api/codex/rate-limit-reset-credits. */
 export interface CreditDetail {
   id?: string; status?: string; granted_at?: string; expires_at?: string; title?: string;
 }
 export interface Slot {
-  label?: string; email?: string; quota?: Quota; auth_dead?: boolean; auth_dead_at?: number;
+  label?: string; email?: string; quota?: Quota; quota_anchor?: QuotaAnchor;
+  auth_dead?: boolean; auth_dead_at?: number;
   cooling_until?: number; sub_until?: string; file?: string; plan?: string;
   /**
    * OpenAI **上次向计费系统复核订阅**的时刻（id_token 的 `chatgpt_subscription_last_checked`）。
@@ -32,8 +50,13 @@ export interface QuotaWindow {
    *  那是 `winLabel()` 现算的展示文本，上游多一个窗口就会全落进兜底。 */
   mins: number;
   pct: number;
+  /** 行内短文本：倒计时 / `未启动` / `待确认`。三者等宽，切换不改排版。 */
   reset: string;
+  /** 悬浮解释（`title`）。★ 它同时是 `reset` 那三个字的**证据**——
+   *  「未启动」必须能说出凭什么，否则和「待确认」一样是个不可证的断言。 */
   resetAt: string;
+  /** 锚点三态，供样式/测试使用。 */
+  anchorState: AnchorState;
 }
 
 export interface Account {
@@ -369,7 +392,54 @@ export function resetAnchorUnknown(w?: Win, capturedAt?: number): boolean {
   return Math.abs((ra - capturedAt) - wm * 60) < FLOATING_RESET_TOL_SEC;
 }
 
-function buildWindow(w: Win | undefined, capturedAt?: number): QuotaWindow | null {
+/** 判定与它所描述的 `resets_at` 差多少秒之内才算同一个窗口。与 Python 侧 `JITTER_SECS` 同值。 */
+const ANCHOR_ID_TOL_SEC = 60;
+
+/** 这个窗口的锚点状态。**三态**，且 `unknown` 一律回落到上面那个点估计。 */
+export type AnchorState = "anchored" | "floating" | "unsure";
+
+/**
+ * 锚点状态 —— **账本优先，点估计兜底**。
+ *
+ * ★★ 点估计有一条**结构性的天花板**，不是精度问题：一个**刚刚**首次使用的真窗口，
+ * 它的 `resets_at − captured_at` 也恰好等于整窗。所以单样本永远分不出
+ * 「闲置浮动」和「刚锚定」，只能说「待确认」，而且**永远确认不了** ——
+ * 闲置的号会一直挂着「待确认」，用户拿不到任何解释。
+ * 判别信息在**时间序列**里：浮动的 reset 每轮跟着 `now` 挪，锚定的一动不动。
+ * 那本账在 `traffic/quota_anchors.py`，由 quotad 每 300s 的全池扫描喂。
+ *
+ * ★ 账本给 `unknown`（样本还不够）时**必须回落**，不能当成 `floating` ——
+ *   那是拿「还没看够」冒充「确定没启动」，正是本仓反复栽的那一类。
+ * ★ 判定必须**核身份**：`slot["quota"]` 会被 rollout tail / proxy 整体替换而
+ *   `quota_anchor` 不跟着换，不核就会拿旧窗口的判定解释新窗口的倒计时。
+ */
+export function anchorStateOf(w?: Win, capturedAt?: number, anchor?: QuotaAnchor): AnchorState {
+  const wm = w?.window_minutes, ra = w?.resets_at;
+  const v = wm && anchor ? (anchor[String(Math.round(wm))] as AnchorVerdict | undefined) : undefined;
+  const sameWindow = v?.reset != null && ra != null
+    && Math.abs(v.reset - ra) <= ANCHOR_ID_TOL_SEC;
+  if (sameWindow && v?.state === "anchored") return "anchored";
+  // ★ 有真实消耗却仍在漂 ⇒ 发生的是别的事，此时不下「未启动」这个断言。
+  if (sameWindow && v?.state === "floating" && (v.used_max ?? 0) < 2) return "floating";
+  return resetAnchorUnknown(w, capturedAt) ? "unsure" : "anchored";
+}
+
+/** 悬浮解释。★ 不只说结论，把**观测次数**一起给出来 —— 断言变成引证。 */
+function anchorNote(state: AnchorState, w: Win | undefined, anchor?: QuotaAnchor): string {
+  if (state === "unsure") return "重置时间待确认";
+  if (state === "anchored") return fmtResetTime(w?.resets_at) ? `重置 ${fmtResetTime(w?.resets_at)}` : "";
+  // ★ 「未启动」这四个字**只在这个分支里出现**。写成显式条件而不是靠"排除法落到这里",
+  //   是为了让「这句断言凭什么开口」在源码里就能一眼核到（闸会逐行核对）。
+  if (state === "floating") {
+    const wm = w?.window_minutes;
+    const v = wm && anchor ? (anchor[String(Math.round(wm))] as AnchorVerdict | undefined) : undefined;
+    const n = (v?.slides ?? 0) + 1;
+    return `窗口未启动 · 连续 ${n} 次读数里重置时间都在跟着「现在」滑动`;
+  }
+  return "";
+}
+
+function buildWindow(w: Win | undefined, capturedAt?: number, anchor?: QuotaAnchor): QuotaWindow | null {
   // 只丢**空槽**(window_minutes 为 0/缺失)。5h(300) 是合法窗口,别再按量级丢。
   if (!w || (w.window_minutes ?? 0) < REAL_WINDOW_MIN) return null;
   // ★ `capturedAt` 挂在 quota 对象上、不在窗口里,必须显式传进来 ——
@@ -381,15 +451,17 @@ function buildWindow(w: Win | undefined, capturedAt?: number): QuotaWindow | nul
   //      而槽位对齐是按行数走的（那套对齐规则刚在 v1.1.0 修过一次）。
   //    · 水位本身是可信的：油箱确实是满的，**假的是钟不是水位**。所以 pct 不动，
   //      选号器也不动 —— 0% 排最前正是负载均衡要的。
-  //    · 文案用「待确认」而不是「未启动」：刚首次使用、用量被取整成 0% 的**真**窗口
-  //      也会命中这个判据，此时断言「未启动」就是在编一个我们证不了的事实。
-  const anchorUnknown = resetAnchorUnknown(w, capturedAt);
+  //    · 「未启动」这句断言**只有账本能开**（连续观测到 reset 跟着 now 滑）。点估计单独判定时
+  //      仍然只能说「待确认」—— 刚首次使用、用量被取整成 0% 的**真**窗口也会命中那个判据，
+  //      此时断言「未启动」就是在编一个我们证不了的事实。
+  const st = anchorStateOf(w, capturedAt, anchor);
   return {
     label: winLabel(w),
     mins: w.window_minutes ?? 0,
     pct: clamp(pctRaw),
-    reset: anchorUnknown ? "待确认" : fmtEta(w.resets_at),
-    resetAt: anchorUnknown ? "重置时间待确认" : fmtResetTime(w.resets_at),
+    reset: st === "anchored" ? fmtEta(w.resets_at) : st === "floating" ? "未启动" : "待确认",
+    resetAt: anchorNote(st, w, anchor),
+    anchorState: st,
   };
 }
 
@@ -399,9 +471,9 @@ export function slotToAccount(aid: string, slot: Slot, tokens: Record<string, To
   const coolSec = (slot.cooling_until ?? 0) > n ? Math.max(0, (slot.cooling_until ?? 0) - n) : 0;
 
   const windows: QuotaWindow[] = [];
-  const w1 = buildWindow(q?.primary, q?.captured_at);
+  const w1 = buildWindow(q?.primary, q?.captured_at, slot.quota_anchor);
   if (w1) windows.push(w1);
-  const w2 = buildWindow(q?.secondary, q?.captured_at);
+  const w2 = buildWindow(q?.secondary, q?.captured_at, slot.quota_anchor);
   if (w2) windows.push(w2);
 
   // ★★ 不只算最小值,还要记住**是哪一个窗口** —— hero 环的数字取 `tightest`,标签却取

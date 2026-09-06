@@ -269,6 +269,56 @@ def scan_account(key, entry, carried):
     return acc
 
 
+def _quota_anchors_mod():
+    """锚点账本模块,按路径加载;取不到返回 None。**纯附加,绝不抛。**
+
+    ⚠️ 这个 try/except 会把**接线错误也一起吞掉**(第一版就漏了 `Path` 的 import,
+    表现是账本"静默地从不工作")。所以有一道闸真的去加载它:
+    `tests/test_quota_anchor_wiring.py`。
+    """
+    try:
+        import importlib.util
+        p = os.path.join(os.path.dirname(os.path.realpath(__file__)),
+                         "traffic", "quota_anchors.py")
+        if not os.path.isfile(p):
+            return None
+        spec = importlib.util.spec_from_file_location("quota_anchors", p)
+        if spec is None or spec.loader is None:
+            return None
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+        return m
+    except Exception:
+        return None
+
+
+def _note_anchors(payload):
+    """给每个账号的额度挂上锚点判定 `quota["anchor"]`。
+
+    ★ 口径:grok 接口给的是**已用**百分比,账本吃的也是已用 —— **无需转换**。
+      与 agy 恰好相反(那边给剩余),所以两边各自转换、不在公共函数里猜方向。
+    ★ grok 的 `period_end` 来自订阅计费周期,本来就是真锚点,判定预期恒 `anchored`。
+      记它不是为了纠错,是为了**峰值保持**(周窗口跨周期的已用高水位)与口径统一。
+    """
+    try:
+        mod = _quota_anchors_mod()
+        if mod is None:
+            return
+        now = payload.get("fetched_at") or time.time()
+        for acc in payload.get("accounts") or []:
+            q = acc.get("quota")
+            key = acc.get("account_key")
+            if not isinstance(q, dict) or not key:
+                continue
+            reset, used = q.get("period_end"), q.get("used_percent")
+            if not reset or used is None:
+                continue
+            q["anchor"] = mod.note("grok", str(key), reset, float(used), now=now)
+            q["anchor"]["reset"] = int(reset)
+    except Exception:       # noqa: BLE001 — 纯附加
+        return
+
+
 def main(argv):
     prev = None
     args = argv[1:]
@@ -323,12 +373,14 @@ def main(argv):
     except (ValueError, AttributeError):
         pass
 
-    json.dump({
+    payload = {
         "schema": SCHEMA,
         "fetched_at": int(time.time()),
         "auth_path": auth_path(),
         "accounts": accounts,
-    }, sys.stdout, ensure_ascii=False)
+    }
+    _note_anchors(payload)
+    json.dump(payload, sys.stdout, ensure_ascii=False)
     sys.stdout.write("\n")
     return 0
 

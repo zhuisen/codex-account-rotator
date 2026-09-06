@@ -5,6 +5,7 @@ import type { TrafficData, CacheMode, PlatformPrefs } from "../traffic";
 import { applyCacheMode, applyPlatformPrefs } from "../traffic";
 import { useCacheMode } from "./useCacheMode";
 import { usePlatformPrefs } from "./usePlatformPrefs";
+import { useBusyMirror } from "./useBusyMirror";
 import { getSettings } from "../pages/SettingsPage";
 
 /**
@@ -64,7 +65,9 @@ export function useTraffic(opts: { enabled?: boolean } = {}): {
   /** 平台呈现偏好(改名/改色/停用/顺序)。`data` 与 `raw` 都**已经**套过它,这里返回它只是给
    *  设置页和"按用户顺序排列表"用 —— 别拿它再过滤一次数据。 */
   prefs: PlatformPrefs;
-  /** 正在后台扫描。**有快照时不该拿它挡 UI** —— 那样就白做快照了。 */
+  /** 正在后台扫描。**有快照时不该拿它挡 UI** —— 那样就白做快照了。
+   *  ★ 包含**另一个 webview** 正在扫的情况：两个窗口读的是同一份快照，
+   *  只有一边转圈就等于在说"这边没事发生"，而事实是数据马上要变。 */
   busy: boolean;
   err: string | null;
   /** 手动重扫(两处 `↻ 上次刷新 HH:MM` 按钮) */
@@ -75,6 +78,7 @@ export function useTraffic(opts: { enabled?: boolean } = {}): {
   const { enabled = true } = opts;
   const [data, setData] = useState<TrafficData | null>(null);
   const [busy, setBusy] = useState(false);
+  const { remote: remoteBusy, announce } = useBusyMirror();
   const [err, setErr] = useState<string | null>(null);
   const running = useRef(false);
 
@@ -97,6 +101,9 @@ export function useTraffic(opts: { enabled?: boolean } = {}): {
     if (running.current) return;
     running.current = true;
     setBusy(true);
+    // ★ 与账号池动作同一条纪律:进行态也要广播,否则另一个窗口在整个扫描期间
+    //   (冷路径 ~23s)看起来什么都没发生。用户 2026-09-06 在「刷新全池」上报过同款。
+    announce("traffic-scan");
     setErr(null);
     try {
       if (!force) {
@@ -113,8 +120,9 @@ export function useTraffic(opts: { enabled?: boolean } = {}): {
     } finally {
       running.current = false;
       setBusy(false);
+      announce(null);
     }
-  }, [adopt]);
+  }, [adopt, announce]);
 
   // 对方扫完 → 读盘采纳。一次 ~1ms 的文件读,不起 python。
   useEffect(() => {
@@ -213,6 +221,8 @@ export function useTraffic(opts: { enabled?: boolean } = {}): {
     () => applyPlatformPrefs(applyCacheMode(data, cacheMode), prefs), [data, cacheMode, prefs]);
   const shapedRaw = useMemo(() => applyPlatformPrefs(data, prefs), [data, prefs]);
 
-  return { data: shaped, raw: shapedRaw, cacheMode, prefs, busy, err,
+    // ★ 对方在扫也算 busy —— 见 `busy` 字段上的说明。
+  return { data: shaped, raw: shapedRaw, cacheMode, prefs,
+           busy: busy || remoteBusy === "traffic-scan", err,
            refresh: () => void scan(true), refreshIfStale };
 }

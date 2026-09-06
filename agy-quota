@@ -286,6 +286,56 @@ def prev_index(path):
     return lg if isinstance(lg, dict) else None
 
 
+def _quota_anchors_mod():
+    """锚点账本模块,按路径加载;取不到返回 None。**纯附加,绝不抛** ——
+    详见 `codex-rotate::_quota_anchors_mod` 与 2026-09-05 那次"附加功能搞挂主路径"的事故。"""
+    try:
+        import importlib.util
+        p = os.path.join(os.path.dirname(os.path.realpath(__file__)),
+                         "traffic", "quota_anchors.py")
+        if not os.path.isfile(p):
+            return None
+        spec = importlib.util.spec_from_file_location("quota_anchors", p)
+        if spec is None or spec.loader is None:
+            return None
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+        return m
+    except Exception:
+        return None
+
+
+def _note_anchors(out):
+    """给每个桶挂上锚点判定 `bucket["anchor"]`。
+
+    ★★ **agy 正是"闲置窗口的 resetTime 跟着 now 滑"最典型的那个**(CLAUDE.md 已记),
+      而 UI 此前直接渲染 `fmtEta(reset_at)` —— 一个永远停在 4h5xm 的倒计时,
+      没有任何标记。账本给的是**能拿出观测次数**的判定,不是又一次单样本猜测。
+
+    ★ 口径转换在这里做,不在账本里:上游给的是**剩余**(`remaining_percent`),
+      账本一律吃**已用**。让公共函数去猜方向,就等于把一个能静默算反的判断
+      藏进一个没有上下文的地方(grok 给已用、agy 给剩余,方向刚好相反)。
+    """
+    try:
+        mod = _quota_anchors_mod()
+        q = out.get("quota")
+        if mod is None or not isinstance(q, dict):
+            return
+        now = out.get("fetched_at") or time.time()
+        for g in q.get("groups") or []:
+            gname = g.get("name") or "?"
+            for b in g.get("buckets") or []:
+                reset, rem = b.get("reset_at"), b.get("remaining_percent")
+                if not reset or rem is None:
+                    continue
+                b["anchor"] = mod.note(
+                    "agy", "%s/%s" % (gname, b.get("window") or "?"),
+                    reset, 100.0 - float(rem), now=now)
+                b["anchor"]["reset"] = int(reset)
+    except Exception:       # noqa: BLE001 — 纯附加
+        return
+
+
 def main(argv):
     prev = None
     args = argv[1:]
@@ -340,6 +390,7 @@ def main(argv):
     if not out["available"]:
         out["last_good"] = carried
 
+    _note_anchors(out)
     json.dump(out, sys.stdout, ensure_ascii=False)
     sys.stdout.write("\n")
     return 0

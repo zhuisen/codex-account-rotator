@@ -3,9 +3,8 @@ import StaleMark from "./StaleMark";
 import type { Theme } from "../theme";
 import type { AgySnapshot } from "../agy";
 import {
-  agyShown, agyTightest, agyWinLabel, agyQuotaVisible, agyReasonNote, agyReasonTone,
+  agyShown, agyTightest, agyWinLabel, agyQuotaVisible, agyReasonNote, agyReasonTone, agyResetText,
 } from "../agy";
-import { fmtEta } from "../helpers";
 
 const MONO = "'JetBrains Mono'";
 
@@ -94,8 +93,9 @@ export default function AgyRow({ t, color, snap, busy, disabled, onOpen }: {
           </div>
           <span style={{ fontSize: 9.5, fontWeight: 600, color: alarmed ? "#E0901C" : numColor,
                          fontVariantNumeric: "tabular-nums" }}>{rem.toFixed(0)}%</span>
-          <span style={{ fontSize: 9, color: t.muted, fontFamily: MONO }}>
-            ↻{fmtEta(tight.b.reset_at ?? undefined)}
+          <span title={agyResetText(tight.b).title || undefined}
+                style={{ fontSize: 9, color: t.muted, fontFamily: MONO }}>
+            ↻{agyResetText(tight.b).text}
           </span>
         </div>
       </div>
