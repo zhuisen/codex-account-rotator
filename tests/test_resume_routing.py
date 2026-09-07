@@ -149,9 +149,18 @@ class PickBest(unittest.TestCase):
         self.assertIsNone(CR._pick_best(s))
 
 
+@unittest.skipUnless(sys.platform == "darwin", "cxp 是 macOS 专用入口；见类 docstring")
 class CxpRouting(unittest.TestCase):
     """★ 行为闸:打桩一个假 codex,看真实的 `cxp` 把参数路由到哪。
-    判据是**它实际执行了什么**,不是源码里有没有那几个字。"""
+    判据是**它实际执行了什么**,不是源码里有没有那几个字。
+
+    ⚠️ **只在 macOS 上跑。** `cxp` 用 `exec command codex …`,而 `command` 是 shell 内建:
+    macOS 的 bash 3.2 允许 `exec` 走内建,**Linux 的 bash 5.x 会去 PATH 找一个叫 `command`
+    的可执行文件**并报 `exec: command: not found`(2026-09-07 CI 实测,8 条 subTest 全红)。
+    这不是产品缺陷 —— `cxp` 是 macOS 专用入口(Windows 走 `install-windows.ps1`,没有 cxp),
+    但**测试必须如实标注平台**,否则 CI 上的红灯会被当成真缺陷追一轮。
+    ★ 静态断言(`test_no_leftover_exception_branch`)不受影响,继续全平台跑 ——
+      「例外分支有没有回来」这件事和平台无关。"""
 
     @classmethod
     def setUpClass(cls):
@@ -180,9 +189,12 @@ class CxpRouting(unittest.TestCase):
                 self.assertIn("--profile rotateproxy", self.route(*args),
                               "%s 没走代理 —— 那条会话拿不到轮换,且 WS 会绕开代理" % (args,))
 
-    def test_no_leftover_exception_branch(self):
-        """★ 源码里不许再出现「resume 直连」那条分支。剥注释后查 ——
-        注释里正解释着这段历史,对着原文匹配会恒绿。"""
+
+
+class NoLeftoverExceptionBranch(unittest.TestCase):
+    """★ 全平台都跑:「例外分支有没有回来」与平台无关,不该被上面那个 macOS 门连带跳过。"""
+
+    def test_source_has_a_single_exec_path(self):
         src = "\n".join(l for l in CXP.read_text(encoding="utf-8").splitlines()
                          if not l.lstrip().startswith("#"))
         self.assertNotIn("resume|fork", src, "例外分支还在")
