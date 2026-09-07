@@ -222,25 +222,42 @@ def _win_used(slot, key):
     return u
 
 
-def _used(slot):
-    """Sort key for _pick: the `primary` slot first, `secondary` as tie-break. Without the second
-    component, five accounts whose primary windows all reset sort in dict-insertion order and every
-    request lands on the first one — even if its weekly quota is nearly exhausted (observed: main at
-    9% weekly picked first).
+def _plan_tier(slot):
+    """选号的**第一优先级**:Plus 排在 Pro 前面(用户 2026-09-07 定策略 C)。
 
-    ⚠️ `primary` 是**槽位名,不是窗口时长** —— 它的语义随套餐而变(Plus 的 primary 是 5h 窗口,
-    Pro 的 primary 是周窗口,`window_minutes` 分别 300/10080)。这条 docstring 原来写死
-    "primary (5h)",与同一天在 `codex-rotate` 的探针打印里修掉的是同一类错误陈述。
-    ★ **行为刻意不改**:混池(Plus+Pro)时这里确实是拿 5h% 和周% 排在同一条轴上,
-    但「跨套餐该怎么比」是个产品问题不是 bug —— 未启动窗口排最前正是负载均衡要的,
-    为倒计时去改选号只会引入新风险。要改先定策略,别顺手改。"""
-    # ★★ 每个窗口是 `(未知?, 已用)` 两级键:**有读数的一律排在未知之前**,层内按已用升序。
-    #    把"未知"塞进同一条百分比轴,就是拿一个**没有发生的观测**当成最有利的观测。
-    #    数据完整时排序与改动前完全一致;全都未知时并列,退回原有顺序。
-    def k(key):
+    ★★ **这是产品策略,不是排序 bug 的修复**,两者这次一起做:
+      · 策略:Plus 号平时承担轮换,**Pro 号保底** —— 只在没有任何可用 Plus 时才动它。
+      · 顺带修掉的 bug 见 `_tightest_used`。
+
+    ★ 按 `plan` 判,不按 label —— **老号从 Plus 升级到 Pro 时 label 一个字都不会变**。
+    ★ 读不到 plan 的号归到 Plus 档:它**大概率就是 Plus**(本池 6 个号 5 个是),
+      而把未知归到保底档会让一个刚加进来、还没解出 plan 的号永远排在最后、拿不到流量。
+    """
+    plan = (slot.get("plan") or (slot.get("quota") or {}).get("plan_type") or "").lower()
+    return 1 if plan == "pro" else 0
+
+
+def _tightest_used(slot):
+    """这个号**最紧**窗口的已用百分比;读不到返回 `(1, 0.0)` 排在有读数的之后。
+
+    ★★ **替掉了原来的 `_used()`**(已删,`git show v1.3.0:proxy/proxy.py` 可查)。
+      它按 `(primary, secondary)` 字典序排,
+      而 `primary` 是**槽位名不是窗口时长** —— Plus 的 primary 是 5h、Pro 的是周。
+      于是一个「周额度 100% 烧光、但 5h 窗口刚重置回 0%」的号,按 primary 看是**全池最空的**。
+      2026-09-07 用实况跑生产函数确认:plus3(周 100%)被排到**全池第一**,
+      每次 5h 窗口重置都会重新排第一、白撞一次 429。
+    ★ 本仓 8 月已在 UI 层定过这条(`helpers.ts`「单个汇总数字一律取最紧的窗口」);
+      `codex-rotate::_headroom` 也是同一口径。这里是第三处,三处终于一致。
+    ★ 「未知」仍排在「有读数」之后 —— 拿没发生的观测当成最有利的观测,是本仓反复栽的那类。
+    """
+    worst = None
+    for key in ("primary", "secondary"):
         u = _win_used(slot, key)
-        return (1, 0.0) if u is None else (0, u)
-    return (k("primary"), k("secondary"))
+        if u is None:
+            continue
+        if worst is None or u > worst:
+            worst = u
+    return (1, 0.0) if worst is None else (0, worst)
 
 
 # ★ 选号迟滞(百分点)。0 = 旧行为「谁低选谁」。
@@ -279,8 +296,19 @@ def _pick(prev_id, exclude=None, conv=None):
         ra = ((sl.get("quota") or {}).get("primary") or {}).get("resets_at")
         return not (ra and ra <= now)  # window already reset → stale cooldown, treat as free
 
+    # ★★ 用户手动停用轮换的号(`codex-rotate rotate <label> --off`,总览页那个开关)。
+    #    用户 2026-09-07:「A 账号我不想轮换,就禁掉」。
+    #    ★ 存的是 `rotate_off` 而不是 `rotate_enabled` —— **缺省必须等于「参与轮换」**:
+    #      autosync 新入池的号和所有存量号都没有这个键,用正向命名就得写迁移,
+    #      而漏迁移的号会**静默退出轮换池**(症状:代理只用那两三个号,零报错)。
+    #    ⚠️ 会话粘性(`conv`/`affinity`)**也要过这道闸** —— 否则一段已经粘在 A 上的对话
+    #      会在 A 被停用之后继续用 A,而用户以为自己已经把它摘出去了。
+    def rotatable(sl):
+        return not sl.get("rotate_off")
+
     def ok(aid, sl):
-        return aid not in exclude and not sl.get("auth_dead") and not cooling(sl)
+        return (aid not in exclude and not sl.get("auth_dead")
+                and not cooling(sl) and rotatable(sl))
 
     with _lock:
         # ★ 会话粘性优先:同一个 prompt_cache_key = 同一段对话 = 同一份 prompt cache。
@@ -296,10 +324,23 @@ def _pick(prev_id, exclude=None, conv=None):
     avail = [(aid, sl) for aid, sl in slots.items() if ok(aid, sl)]
     if not avail:  # nothing cleanly available → relax cooling, but never a dead or already-tried one
         avail = [(aid, sl) for aid, sl in slots.items()
-                 if aid not in exclude and not sl.get("auth_dead")]
+                 if aid not in exclude and not sl.get("auth_dead") and rotatable(sl)]
+    if not avail:
+        # ★★ **最后一层兜底:全被停用时忽略这个开关,并把它记进日志。**
+        #    CLI 已经拒绝关掉最后一个,所以走到这里只可能是手改 state.json 或多进程竞态。
+        #    在「codex 整个不能用」与「多用了一个用户不想用的号」之间选后者 ——
+        #    前者会让每个请求都失败,而 502 实测会被 codex 重试 30 次,越修越糟。
+        #    ⚠️ 但**绝不能静默**:这一行是用户唯一能看出"设置被绕过了"的地方,
+        #    而日志页的轮换事件流会把它显示出来。
+        relaxed = [(aid, sl) for aid, sl in slots.items()
+                   if aid not in exclude and not sl.get("auth_dead")]
+        if relaxed:
+            _plog("⚠️ 所有号都被停用了自动轮换 —— 本次忽略该设置,否则无号可用。"
+                  "用 `codex-rotate rotate <label> --on` 恢复至少一个。")
+            avail = relaxed
     if not avail:
         return None, None, "exhausted"
-    avail.sort(key=lambda kv: _used(kv[1]))
+    avail.sort(key=lambda kv: (_plan_tier(kv[1]), _tightest_used(kv[1])))
 
     # ★ 迟滞:上一次真正服务过的号(`last_aid` 由 _record_quota 在成功响应后写入 —— 用它而不是
     # 「上次被挑中的号」,因为挑中但 401/429 失败的那个不该被粘住)如果仍可用、且没比最省的号贵出
@@ -310,9 +351,13 @@ def _pick(prev_id, exclude=None, conv=None):
         if last and last not in exclude and last in slots and ok(last, slots[last]):
             # ★ 任一侧未知就**不粘**。迟滞的意思是"贵不了多少就继续用它",
             #   而"贵多少"在缺少读数时**无从谈起** —— 拿 None 当 0 正是上面刚修掉的那个错。
-            lu = _win_used(slots[last], "primary")
-            bu = _win_used(avail[0][1], "primary")
-            if lu is not None and bu is not None and lu <= bu + PICK_HYSTERESIS:
+            # ★★ **迟滞不得跨套餐档**(2026-09-07 策略 C)。原来这里只比 `primary` 百分比,
+            #    于是一个粘在 Pro 上的会话会因为"Pro 没比最省的 Plus 贵多少"而**一直粘在 Pro 上**,
+            #    把「Pro 保底」直接绕过去。档位不同就不粘,让它回到上面那个 Plus 优先的排序。
+            # ★ 口径同样换成**最紧窗口**:拿 Pro 的周% 和 Plus 的 5h% 比大小本就不成立。
+            lt, lu = _plan_tier(slots[last]), _tightest_used(slots[last])
+            bt, bu = _plan_tier(avail[0][1]), _tightest_used(avail[0][1])
+            if lt == bt and lu[0] == 0 and bu[0] == 0 and lu[1] <= bu[1] + PICK_HYSTERESIS:
                 return last, slots[last], "sticky"
 
     return avail[0][0], avail[0][1], "new"

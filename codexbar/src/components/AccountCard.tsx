@@ -23,7 +23,44 @@ function DeltaChip({ delta, t }: { delta: number; t: Theme }) {
   );
 }
 
-export default function AccountCard({ a, isCurrent, isBest, isSelected, shortcut, bestPct, probing, privacy, t, onSelect, onSwitch, onShowDetail, onRemove, onProbe, onRename, winSlots }: {
+/** 动作条图标。★ **不用 emoji** —— 全局 `ui-design.md` 的「禁忌」里明写「emoji 做图标」,
+ *  而且 emoji 在不同系统/字体下会变彩色、变宽窄,与等宽仪表风格直接冲突。
+ *  用户给了两个选项(emoji / 一两个字符),这里取后者的等价物:**单色描边 SVG**,
+ *  与侧栏图标同族,尺寸与颜色都可控。全名走 `title` 悬浮。 */
+const IcRotate = ({ off }: { off: boolean }): React.ReactElement => (
+  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M3 12a9 9 0 0 1 15.5-6.2M21 12a9 9 0 0 1-15.5 6.2"/><path d="M18 3v4h-4M6 21v-4h4"/>
+    {/* 停用态额外画一道斜杠 —— **只靠颜色区分是不够的**:红绿色盲下两态会同色 */}
+    {off && <path d="M4 20 20 4" stroke="currentColor" strokeWidth="2.2"/>}
+  </svg>
+);
+const IcPen = (): React.ReactElement => (
+  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M4 20h4L19 9a2.1 2.1 0 0 0-3-3L5 17v3z"/></svg>
+);
+const IcInfo = (): React.ReactElement => (
+  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 7.6v.2"/></svg>
+);
+const IcTrash = (): React.ReactElement => (
+  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M4 7h16M9 7V5h6v2M6 7l1 13h10l1-13"/></svg>
+);
+
+/** 动作条上的图标按钮。**全名只在 `title` 里** —— 用户 2026-09-07:「精简成一两个字符,
+ *  鼠标悬浮才展示完整的名字」。★ 一律 34×26 定宽:图标宽度不一时按钮会参差,
+ *  而参差的按钮行看着就像没对齐。 */
+function IconBtn({ title, onClick, color, border, bg, children }: {
+  title: string; onClick: () => void; color: string; border: string; bg?: string;
+  children: React.ReactNode;
+}): React.ReactElement {
+  return (
+    <span onClick={onClick} title={title} aria-label={title}
+          style={{ width: 34, height: 26, flexShrink: 0, display: "grid", placeItems: "center",
+                   borderRadius: 6, cursor: "pointer", color,
+                   border: `1px solid ${border}`, background: bg ?? "transparent",
+                   transition: "background .15s, color .15s" }}>{children}</span>
+  );
+}
+
+export default function AccountCard({ a, isCurrent, isBest, isSelected, shortcut, bestPct, probing, privacy, t, onSelect, onSwitch, onShowDetail, onRemove, onProbe, onRename, onToggleRotate, reserveActions, winSlots }: {
   a: Account; isCurrent: boolean; isBest: boolean; isSelected: boolean; shortcut?: number;
   /** Highest remaining quota in the pool — the baseline the delta chip compares against. */
   bestPct: number;
@@ -41,6 +78,14 @@ export default function AccountCard({ a, isCurrent, isBest, isSelected, shortcut
    */
   winSlots: string[]; /** 该号正在探测中 */ probing: boolean; /** 打码模式 */ privacy: boolean; t: Theme;
   onSelect: () => void; onSwitch: () => void; onShowDetail: (aid: string) => void; onRemove: (label: string) => void; onProbe: (label: string) => void;
+  /** 把这个号移出/放回自动轮换池。真源是 `state.json` 的 `rotate_off`（**不是 localStorage**）——
+   *  代理在 app 没开时也要读它，两个真源迟早分叉成「界面说停用了、代理还在用」。 */
+  onToggleRotate: (label: string, on: boolean) => void;
+  /** 同排**有别的卡展开着**。此时本卡要预留一条等高的空位，否则它的细条与「到期」
+   *  会比那张展开的卡低整整一个动作条的高度（sweep 实测 **79px**，三个宽度全中）。
+   *  ★ 这不是"再加一个像素常量"：占位复用**同一份动作条外壳**，高度由构造保证一致 ——
+   *    写死一个数字会在下次改按钮尺寸时静默失准（同 `CardBadgeGhost` 的理由）。 */
+  reserveActions?: boolean;
   /** 改名。空名/含空格/重名的校验在 `codex-rotate rename`(唯一真源)——那三种都会让按 label
    *  查找的 switch/probe 静默操作到错的号上。这里只挡「没改」。 */
   onRename: (next: string) => void;
@@ -220,47 +265,94 @@ export default function AccountCard({ a, isCurrent, isBest, isSelected, shortcut
               **别再在这里加任何独立行** —— 窗口行与页脚之间每多一行,这张卡就比兄弟卡高一行,
               而细条是从页脚往上推的,整排就会错开。死号不受影响:它只在折叠区渲染,不进网格。 */}
 
-          {/* ★★ 页脚**固定两行**（日期一行、徽章一行右对齐），不再靠 `flex-wrap` 自己决定。
-              原来是 wrap：徽章长了就自己掉到第二行，避免把 "到期 2026-08-10" 从中间折断。
-              问题是**折不折行取决于文案长短**，于是「有一张卡的重置卡快到期、另一张不快」时，
-              两张卡的页脚一个 48px 一个 29px —— 而条形区是从页脚往上推的，
-              **上面那些细条就整体错开 19px**（实测 1040~1120px 这一段，用 `?cardexp=1` 夹具复现）。
+          {/* ★★ 页脚**恒为一行**：日期左、重置卡徽章右（用户 2026-09-07：「重置卡和日期应该齐平，
+              因此重置卡大小应该缩小即可」）。
 
-              固定两行 = 页脚高度与文案无关 ⇒ 那条水平线在任何宽度、任何徽章文案下都成立。
-              代价是宽屏下比单行高约 19px；换来的是这条对齐**不再有会破的宽度区间**。
-              ★ 别改回 wrap 去省这 19px：那正是上面那个 bug。 */}
-          <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 5, paddingTop: 7, borderTop: `1px solid ${t.divider}` }}>
-            <span title={a.expStale ? "OpenAI 上次复核订阅早于这个日期,所以「已过期」是拿陈旧快照下的结论 —— 续费不在它视野里。刷新 token 也拉不到新状态,要等 OpenAI 自己复核。" : undefined} style={{ fontSize: Z.exp, color: t.muted, fontFamily: "'JetBrains Mono'", whiteSpace: "nowrap" }}>到期 {a.exp}{a.expStale && <span style={{ color: "#E0901C" }}>*</span>}</span>
-            <span style={{ alignSelf: "flex-end" }}><CardBadge a={a} t={t} /></span>
+              ⚠️ 这里**不是**回退到从前那个 bug。原来的写法是 `flex-wrap`：**折不折行取决于文案长短**，
+              于是「一张卡的重置卡快到期、另一张不快」时两张卡的页脚一个 48px、一个 29px，
+              而条形区是从页脚往上推的 ⇒ 上面那些细条整排错开 **19px**（实测 1040~1120px 区间）。
+              当时的修法是"固定两行"，用高度换掉那个可变性。
+
+              现在换成"固定一行"，可变性用**另一种方式**消掉，而且更硬：
+                ① `flexWrap: nowrap` —— 结构上就不可能折行，不再取决于文案；
+                ② 徽章可收缩 + 省略号 —— 放不下时**截断**而不是换行；
+                ③ 日期 `flexShrink: 0` —— 让位者只有一个，且是信息量最低的那个（张数尾巴）。
+              高度因此恒等于「一行」，与文案、与徽章有没有到期后缀全都无关。
+              ★ 别改回 `flexWrap: wrap` 去省几像素 —— 那才是原来的 bug。 */}
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between",
+                        gap: 8, flexWrap: "nowrap", minWidth: 0,
+                        marginTop: 5, paddingTop: 7, borderTop: `1px solid ${t.divider}` }}>
+            <span title={a.expStale ? "OpenAI 上次复核订阅早于这个日期,所以「已过期」是拿陈旧快照下的结论 —— 续费不在它视野里。刷新 token 也拉不到新状态,要等 OpenAI 自己复核。" : undefined}
+                  style={{ fontSize: Z.exp, color: t.muted, fontFamily: "'JetBrains Mono'",
+                           whiteSpace: "nowrap", flexShrink: 0 }}>到期 {a.exp}{a.expStale && <span style={{ color: "#E0901C" }}>*</span>}</span>
+            <span style={{ minWidth: 0, overflow: "hidden", display: "flex", justifyContent: "flex-end" }}><CardBadge a={a} t={t} /></span>
           </div>
         </div>
       </div>
 
-      {isSelected && (
-        <div onClick={(e) => e.stopPropagation()} style={{ display: "flex", gap: 6, marginTop: 10, paddingTop: 8, borderTop: `1px solid ${t.divider}`,
+      {/* ★★ 同排有别的卡展开时,本卡渲染**同一条动作条**但整条隐形 —— 不是画一个
+          "差不多高"的占位。第一版占位手算了 45px,而真动作条 79px(ProbeButton 比图标钮高),
+          sweep 当场量出还差 **34px**。★ 高度必须**由构造保证**,不能由我心算:
+          按钮尺寸一改,占位自动跟上;写死或另搭一套就会静默失准(同 `CardBadgeGhost` 的理由)。
+          ★ 隐形那份必须 `pointerEvents: none` + `aria-hidden`,否则会出现看不见却点得到的按钮。 */}
+      {(isSelected || reserveActions) && (
+        <div onClick={(e) => e.stopPropagation()}
+             aria-hidden={!isSelected}
+             style={{ display: "flex", gap: 6, marginTop: 10, paddingTop: 8,
+                      borderTop: `1px solid ${isSelected ? t.divider : "transparent"}`,
+                      ...(isSelected ? null : { visibility: "hidden" as const, pointerEvents: "none" as const }),
                      // ★ 6 个按钮塞在三列网格的一张 ~300px 卡里放不下。不换行时 flex 会把每个
                      //   压到 ~20px ⇒「切换到此号」变成一列竖排的单字(用户 2026-08-24 截图)。
                      //   探针实测:内容高 80px / 行高 13px = 六行。
                      flexWrap: "wrap", rowGap: 6 }}>
+          {/* ★★ 压成**一行**(用户 2026-09-07:「都是出现换行问题」)。
+              两行动作条不只是难看:卡片高度差 ~80px,而同排兄弟卡的环是**垂直居中**的,
+              于是邻卡一展开,兄弟卡的邮箱与环之间就裂开一道大洞(用户截图圈出的正是它)。
+              所以这里每压缩一格,都同时在修那个排版问题。
+              ★ 主操作(切换/当前)保留文字 —— 它是这张卡存在的理由,压成图标会让人找不到。
+                其余全部图标 + `title` 悬浮出全名。 */}
           {!isCurrent && !isDead && (
-            <span onClick={onSwitch} style={{ flex: "1 1 auto", minWidth: 84, textAlign: "center", fontSize: 11, fontWeight: 700, whiteSpace: "nowrap", color: t.accentText, background: t.accent, padding: "5px 8px", borderRadius: 6, cursor: "pointer" }}>切换到此号</span>
+            <span onClick={onSwitch} title={`把当前号切到 ${a.node}`}
+                  style={{ flex: "1 1 auto", minWidth: 62, textAlign: "center", fontSize: 11, fontWeight: 700, whiteSpace: "nowrap", color: t.accentText, background: t.accent, padding: "5px 8px", borderRadius: 6, cursor: "pointer" }}>切换</span>
           )}
           {isCurrent && (
-            <span style={{ flex: "1 1 auto", minWidth: 84, textAlign: "center", fontSize: 11, fontWeight: 600, whiteSpace: "nowrap", color: t.accent, padding: "5px 0" }}>✓ 当前使用中</span>
+            <span style={{ flex: "1 1 auto", minWidth: 62, textAlign: "center", fontSize: 11, fontWeight: 600, whiteSpace: "nowrap", color: t.accent, padding: "5px 0" }}>✓ 当前</span>
           )}
           {!isDead && (
+            /* ★ 探针**不压成图标**:它是全 app 唯一花钱的控件,必须与旁边免费的按钮
+               一眼可分(琥珀 + ⚡ + 两段确认)。把它做成一个 34px 的灰图标,
+               正好抹掉那条区分 —— 那比多占 20px 危险得多。 */
             <ProbeButton t={t} variant="inline" label="探针"
               hint={`对 ${a.node} 发一次真实补全,验它是否真能干活。⚠️ 消耗周额度(实测单次 <1%)`}
               loading={probing} onConfirm={() => onProbe(a.node)} loadingText="探测…" />
           )}
-          <span onClick={() => setEditing(a.node)}
-                title="改这个号的显示名。菜单栏标题、弹窗、卡片会一起变（label 只是昵称，不影响套餐判定）"
-                style={{ fontSize: 11, color: t.muted, padding: "5px 10px", borderRadius: 6, cursor: "pointer", whiteSpace: "nowrap", flexShrink: 0, border: `1px solid ${t.ghostBorder}` }}>重命名</span>
-          <span onClick={() => onShowDetail(a.aid)} style={{ fontSize: 11, color: t.muted, padding: "5px 10px", borderRadius: 6, cursor: "pointer", whiteSpace: "nowrap", flexShrink: 0, border: `1px solid ${t.ghostBorder}` }}>详情</span>
+          {!isDead && (
+            <IconBtn title={a.rotates
+                       ? `${a.node} 正参与自动轮换。点一下移出轮换池 —— 代理不再挑它`
+                       : `${a.node} 已停用自动轮换,代理不会挑它。点一下放回轮换池`}
+                     onClick={() => onToggleRotate(a.node, !a.rotates)}
+                     color={a.rotates ? t.muted : "#E0901C"}
+                     border={a.rotates ? t.ghostBorder : "#E0901C55"}
+                     bg={a.rotates ? undefined : "rgba(224,144,28,.10)"}>
+              <IcRotate off={!a.rotates} />
+            </IconBtn>
+          )}
+          <IconBtn title="重命名 —— 改显示名。菜单栏标题、弹窗、卡片会一起变（label 只是昵称，不影响套餐判定）"
+                   onClick={() => setEditing(a.node)} color={t.muted} border={t.ghostBorder}>
+            <IcPen />
+          </IconBtn>
+          <IconBtn title="详情 —— 查看 account_id、token 到期、订阅复核时间"
+                   onClick={() => onShowDetail(a.aid)} color={t.muted} border={t.ghostBorder}>
+            <IcInfo />
+          </IconBtn>
           {!confirmDelete ? (
-            <span onClick={() => setConfirmDelete(true)} style={{ fontSize: 11, color: "#E0524D", padding: "5px 10px", borderRadius: 6, cursor: "pointer", whiteSpace: "nowrap", flexShrink: 0, border: "1px solid #E0524D40" }}>删除</span>
+            <IconBtn title={`删除 ${a.node}（会先要一次确认）`}
+                     onClick={() => setConfirmDelete(true)} color="#E0524D" border="#E0524D40">
+              <IcTrash />
+            </IconBtn>
           ) : (
             <>
+              {/* ★ 确认态**保留文字**:删除不可逆,把「确认删除」也压成图标等于让人凭记忆点。 */}
               <span onClick={() => { setConfirmDelete(false); onRemove(a.node); }} style={{ fontSize: 11, fontWeight: 700, color: "#fff", background: "#E0524D", padding: "5px 10px", borderRadius: 6, cursor: "pointer", whiteSpace: "nowrap", flexShrink: 0 }}>确认删除</span>
               <span onClick={() => setConfirmDelete(false)} style={{ fontSize: 11, color: t.muted, padding: "5px 10px", cursor: "pointer" }}>取消</span>
             </>

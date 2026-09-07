@@ -90,6 +90,17 @@ VIEWS = [
     ("平台详情·agy",     "/harness.html?nav=platform:agy&rail=open",                  [1200, 1000, 900]),
     ("平台详情·agy折叠",  "/harness.html?nav=platform:agy",                            [940, 860]),
     ("设置",            "/harness.html?nav=settings&rail=open",                      [1200, 1000, 900]),
+    # ★★ 日志页(2026-09-07 起分两个区)。**这一页此前完全不在 sweep 里** ——
+    #   加进来的当天就靠它抓到两处真缺陷:四种角标齐全时账号行溢出 3px、
+    #   `billed-unknown`(最长的 kind)在 78px 列里折行。
+    # ★ `rot=busy` 是**唯一**能同时渲染出四种角标的夹具:`ok` 只有一种,
+    #   角标数量由数据决定,拿常态夹具扫等于永远扫不到最挤的那一行。
+    # ★ 用 `nav=logs`(按位置点侧栏)而不是 `click=日志`:窗口 <860 时侧栏只剩图标,
+    #   文字压根不渲染 ⇒ 命中 0 个 ⇒ 那三档会**静默**扫一个空页面并报干净。
+    ("日志·满角标",      "/harness.html?nav=logs&rail=open&rot=busy",                 [1200, 1000, 960]),
+    ("日志·折叠",        "/harness.html?nav=logs&rot=busy",                           [940, 900, 860]),
+    # 诚实度脚注那一行(「N 行旧格式无时间戳、未计入 · 仅统计日志尾部」)最长,单独扫。
+    ("日志·未计入提示",   "/harness.html?nav=logs&rail=open&rot=undated",              [1000, 960]),
     ("菜单栏·账号",      "/harness-menubar.html?w=352&grok=ok",                       [520]),
     ("菜单栏·今日",      "/harness-menubar.html?w=352&tab=today&grok=ok",             [520]),
     ("菜单栏·grok降级",  "/harness-menubar.html?w=352&grok=stale",                    [520]),

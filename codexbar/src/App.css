@@ -9,7 +9,11 @@
 @font-face { font-family: 'JetBrains Mono'; src: url('/fonts/jetbrains-mono-latin-700-normal.woff2') format('woff2'); font-weight: 700; font-display: swap; }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
-body { background: #0e1117; font-family: 'Space Grotesk', system-ui, sans-serif; -webkit-font-smoothing: antialiased; overflow: hidden; }
+/* ★★ `background: transparent` 不是可选的美化 —— 窗口开了 `transparent: true` 之后,
+   body 若仍刷一层不透明底色,它会**盖住**根节点圆角外的那一圈,四个黑角原样回来,
+   而窗口确实是透明的、配置也确实生效了。三处缺一不可:tauri.conf 的 `transparent`
+   + `macOSPrivateApi` + 这里。深浅主题的真实底色由根节点的 `t.appBg` 画。 */
+body { background: transparent; font-family: 'Space Grotesk', system-ui, sans-serif; -webkit-font-smoothing: antialiased; overflow: hidden; }
 @keyframes cbSpin { to { transform: rotate(360deg); } }
 @keyframes cbToast { from { opacity:0; transform:translate(-50%,12px) scale(.96); } to { opacity:1; transform:translate(-50%,0) scale(1); } }
 @keyframes cbShimmer { 0% { background-position: -200px 0; } 100% { background-position: 200px 0; } }

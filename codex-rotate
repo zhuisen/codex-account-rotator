@@ -1032,6 +1032,63 @@ def cmd_rename(args):
     print(f"renamed → {new}")
 
 
+def cmd_rotate(args):
+    """把某个号**移出/放回**自动轮换池(用户 2026-09-07:「A 账号我不想轮换,就禁掉」)。
+
+    用法:`codex-rotate rotate <label|aid> --off|--on` · `rotate --status`
+
+    ## 为什么存的是 `rotate_off` 而不是 `rotate_enabled`
+
+    ★★ **缺省必须等于「参与轮换」**。autosync 新入池的号、以及所有存量号,槽位里都**没有**
+    这个键;用 `rotate_enabled` 就得写迁移,而漏迁移的那些号会**静默退出轮换池** ——
+    症状是"代理只用那两三个号",没有任何地方会报错。存 `rotate_off` 时"键不存在"天然
+    读成 False,零迁移。同一条理由也适用于以后任何"默认开启"的开关。
+
+    ## ★★ 不许关掉最后一个
+
+    全关 = 代理无号可挑 = codex 整个不能用。而这条路是**一步一步走到的**,每一步看着都合理,
+    直到最后一次 `--off` 把工具变砖。所以在动作发生的地方就拦住,并说清楚还剩几个。
+    ⚠️ 代理侧另有一层兜底(手改 state.json 绕过这里时 fail-open,见 `proxy.py::_pick`) ——
+    两层挡的是不同的入口,不是重复。
+    """
+    args = list(args or [])
+    if "--status" in args or not args:
+        s = _state()
+        rows = [(sl.get("label") or aid, bool(sl.get("rotate_off")))
+                for aid, sl in s["slots"].items()]
+        on = sum(1 for _l, off in rows if not off)
+        for label, off in sorted(rows):
+            print(f"  {label:10} {'✗ 已停用轮换' if off else '✓ 参与轮换'}")
+        print(f"参与轮换 {on}/{len(rows)} 个")
+        return
+    target_key = args[0]
+    if "--off" in args:
+        want_off = True
+    elif "--on" in args:
+        want_off = False
+    else:
+        sys.exit("usage: codex-rotate rotate <label|aid> --off|--on   (或 rotate --status)")
+
+    s = _state()
+    target = next((aid for aid, sl in s["slots"].items()
+                   if aid == target_key or sl.get("label") == target_key), None)
+    if not target:
+        sys.exit(f"no slot matching '{target_key}'")
+    if want_off:
+        others_on = [aid for aid, sl in s["slots"].items()
+                     if aid != target and not sl.get("rotate_off")]
+        if not others_on:
+            sys.exit("拒绝:这是最后一个参与轮换的号。全部停用后代理无号可挑,codex 会整个不可用。")
+    if want_off:
+        s["slots"][target]["rotate_off"] = True
+    else:
+        s["slots"][target].pop("rotate_off", None)   # 删键而不是写 False,保持"缺省=参与"
+    _save_state(s)
+    label = s["slots"][target].get("label") or target
+    left = sum(1 for sl in s["slots"].values() if not sl.get("rotate_off"))
+    print(f"{label} → {'已停用轮换' if want_off else '已恢复轮换'}(参与轮换 {left} 个)")
+
+
 def cmd_refresh(args):
     """Refresh one account (label/id) or 'all' via OAuth. Skips the ACTIVE account
     (codex owns its live token; refreshing it would rotate the token out from under codex).
@@ -2523,20 +2580,22 @@ CMDS = {"add": cmd_add, "login": cmd_login, "list": cmd_list, "switch": cmd_swit
         "sync": cmd_sync, "rename": cmd_rename, "keepalive": cmd_keepalive, "refresh": cmd_refresh,
         "refresh-all": cmd_refresh_all, "health": cmd_health, "remove": cmd_remove,
         "ensure-live": cmd_ensure_live, "credits": cmd_credits, "probe": cmd_probe,
-        "dawn-probe": cmd_dawn_probe,
+        "dawn-probe": cmd_dawn_probe, "rotate": cmd_rotate,
         "tokens": cmd_tokens}
 
 
 # Disk-only commands run their whole load→mutate→save under the cross-process state mutex (lost-update
 # guard). refresh/keepalive do network and write back via _mutate_state instead; health/current are
 # read-only. Lock order is always state → cred, never the reverse (no deadlock).
-STATE_LOCKED = {"add", "list", "switch", "cool", "uncool", "quota", "sync", "rename", "ensure", "remove"}
+STATE_LOCKED = {"add", "list", "switch", "cool", "uncool", "quota", "sync", "rename", "ensure", "remove",
+                # rotate 是纯 load→mutate→save:不进这个集合就会与 proxy/quotad 的并发写丢更新
+                "rotate"}
 
 
 def main():
     if len(sys.argv) < 2 or sys.argv[1] not in CMDS:
         print("usage: codex-rotate {add <label>|login|remove <label>|list|switch [label]|cool [min]|uncool [label]|"
-              "quota [--save]|sync|rename <old> <new>|refresh [label|all]|refresh-all|"
+              "quota [--save]|sync|rename <old> <new>|rotate <label> --on|--off|refresh [label|all]|refresh-all|"
               "keepalive [days] [--dry-run]|health|credits [--force] [--json]|"
               "probe <label…|--all> [--model M] [--effort low|medium|high]|"
               "tokens [--days N] [--json]|ensure|current}")

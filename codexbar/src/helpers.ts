@@ -27,6 +27,10 @@ export interface CreditDetail {
 export interface Slot {
   label?: string; email?: string; quota?: Quota; quota_anchor?: QuotaAnchor;
   auth_dead?: boolean; auth_dead_at?: number;
+  /** 用户手动把这个号**移出自动轮换池**（`codex-rotate rotate <label> --off`）。
+   *  ★ 存的是 `rotate_off` 而不是 `rotate_enabled`：**缺省必须等于「参与轮换」**——
+   *  autosync 新入池的号没有这个键，正向命名就得写迁移，漏迁移的号会静默退出轮换池。 */
+  rotate_off?: boolean;
   cooling_until?: number; sub_until?: string; file?: string; plan?: string;
   /**
    * OpenAI **上次向计费系统复核订阅**的时刻（id_token 的 `chatgpt_subscription_last_checked`）。
@@ -82,6 +86,9 @@ export interface Account {
   /** 套餐(plus/pro/…),来自 id_token,**权威**。label 只是昵称:老号从 Plus 升 Pro 时 label 不变,
    *  所以任何"这是不是 Pro"的判断都必须看这里,不能看 node 名以 pro 开头。 */
   plan: string;
+  /** 是否参与自动轮换（用户可在总览页逐号关闭）。★ `true` 是默认值 —— 后端存的是
+   *  反向的 `rotate_off`，这里翻成正向是因为 UI 上「开关打开 = 参与」才符合直觉。 */
+  rotates: boolean;
   /** 这份额度快照的年龄（秒）；`null` = 没有 `captured_at`（未知，不是 0）。 */
   quotaAgeSec: number | null;
   /** 快照是否已陈旧（> `QUOTA_STALE_SEC`）。★ 陈旧**不等于**额度是错的，
@@ -514,6 +521,7 @@ export function slotToAccount(aid: string, slot: Slot, tokens: Record<string, To
   return {
     aid, node: slot.label ?? "?", email: slot.email ?? "",
     status, windows, tightest, tightestWin, deadAt: slot.auth_dead_at,
+    rotates: !slot.rotate_off,
     exp: slot.sub_until?.slice(0, 10) ?? "—",
     /**
      * 这个到期日**是否已经不可信**。判据:到期日已过 **且** OpenAI 上次复核订阅早于该到期日 ——

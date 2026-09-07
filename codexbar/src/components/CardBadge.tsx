@@ -25,7 +25,12 @@ const SIZE = (compact?: boolean) => compact
 const shell = (compact?: boolean) => {
   const s = SIZE(compact);
   return {
-    display: "inline-flex", alignItems: "center", gap: s.gap, flexShrink: 0,
+    display: "inline-flex", alignItems: "center", gap: s.gap,
+    // ★ 主窗口那档改成**可收缩 + 截断**:页脚已恒为一行(见 AccountCard),放不下时
+    //   必须截断而不是把整行撑破。菜单栏那档保持 `flexShrink: 0` —— 那一行的让位者
+    //   是别的元素,徽章截了就读不出还剩几张。
+    ...(compact ? { flexShrink: 0 } : { flexShrink: 1, minWidth: 0, overflow: "hidden",
+                                        textOverflow: "ellipsis", whiteSpace: "nowrap" }),
     fontSize: s.font, fontWeight: 700, padding: s.pad, borderRadius: 999,
     fontVariantNumeric: "tabular-nums",
     // ★ 行高写死，让盒高与**字形**无关：中文「重置卡」的行盒比拉丁数字高 2px，

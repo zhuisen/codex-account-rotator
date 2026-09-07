@@ -205,7 +205,7 @@ export default function App() {
     // ★ `cb-light` 供 App.css 的滚动条规则按主题反色 —— 白色拇指在浅色底上等于隐形。
     //   加这个 class 之前那条规则是**死规则**(写完顺手核了一下才发现根节点没有它)。
     <div className={theme === "light" ? "cb-light" : undefined}
-         style={{ width: "100vw", height: "100vh", display: "flex", flexDirection: "column", background: t.appBg, color: t.text, fontFamily: "'Space Grotesk'", borderRadius: 12, overflow: "hidden", boxShadow: t.shadow, transition: "background-color .35s ease, color .35s ease" }}>
+         style={{ width: "100vw", height: "100vh", display: "flex", flexDirection: "column", background: t.appBg, color: t.text, fontFamily: "'Space Grotesk'", borderRadius: 14, overflow: "hidden", boxShadow: t.shadow, transition: "background-color .35s ease, color .35s ease" }}>
 
       {/* Title bar */}
       <div data-tauri-drag-region style={{ height: 38, flexShrink: 0, display: "flex", alignItems: "center", padding: "0 14px", gap: 8, borderBottom: `1px solid ${t.chromeBorder}`, background: t.chromeBg, position: "relative", transition: "background-color .35s ease" }}>
@@ -467,13 +467,23 @@ export default function App() {
                         const shortcutIdx = aliveByLabel.findIndex(x => x.aid === a.aid);
                         // 改名按 aid 不按 label:cmd_rename 两者都认,而 aid 唯一 —— 重名时不会改到别的号上
                         return (
-                        <AccountCard key={a.aid} a={a} isCurrent={a.aid === currentNode} isBest={hero?.aid === a.aid} isSelected={selectedCard === a.aid} shortcut={shortcutIdx >= 0 && shortcutIdx < 9 ? shortcutIdx + 1 : undefined} bestPct={bestPct} winSlots={winSlots} probing={loadingAction === `probe-${a.aid}`} privacy={privacy} t={t}
+                        <AccountCard key={a.aid} a={a} isCurrent={a.aid === currentNode} isBest={hero?.aid === a.aid} isSelected={selectedCard === a.aid} reserveActions={selectedCard !== null} shortcut={shortcutIdx >= 0 && shortcutIdx < 9 ? shortcutIdx + 1 : undefined} bestPct={bestPct} winSlots={winSlots} probing={loadingAction === `probe-${a.aid}`} privacy={privacy} t={t}
                           onSelect={() => setSelectedCard(selectedCard === a.aid ? null : a.aid)}
                           onSwitch={() => run(`switch-${a.aid}`, ["switch", a.node], `当前号 → ${a.node}`)}
                           onShowDetail={(aid) => { invoke<AccountDetail>("read_account_detail", { aid }).then(d => setDetailModal(d)).catch(() => {}); }}
                           onRemove={(label) => run(`remove-${label}`, ["remove", label], `已删除 ${label}`)}
                           onProbe={(label) => run(`probe-${a.aid}`, ["probe", label], `探针 ${label}`)}
-                          onRename={(next) => run(`rename-${a.aid}`, ["rename", a.aid, next], `${a.node} → ${next}`)} />
+                          onRename={(next) => run(`rename-${a.aid}`, ["rename", a.aid, next], `${a.node} → ${next}`)}
+                          // ★ 走 CLI 而不是写 localStorage:真源是 `state.json`,代理在 app 没开时
+                          //   也要读它 —— 两个真源迟早分叉成「界面说停用了、代理还在用」
+                          //   (与 dawn-probe 那个开关同一条理由)。
+                          // ★ 传 `a.aid` 不传 label:`cmd_rotate` 两者都认,而 aid 唯一,
+                          //   重名时不会操作到别的号上(同改名那条)。
+                          // ★ 「关掉最后一个」由 CLI 拒绝并回一句人话,这里**不复制**那条校验 ——
+                          //   前端再写一份迟早与 CLI 不一致,而 CLI 是所有入口的共同底座。
+                          onToggleRotate={(_label, on) =>
+                            run(`rotate-${a.aid}`, ["rotate", a.aid, on ? "--on" : "--off"],
+                                on ? `${a.node} 已恢复轮换` : `${a.node} 已停用轮换`)} />
                       );})}
                       {/* ★ grok 卡。**渲染在格子里,但绝不进 `alive` 数组** —— 那个数组同时驱动
                           ⌘1~⌘9 切号(`aliveByLabel[idx]` 直接 switch)、计数徽章、探针全池的号数、

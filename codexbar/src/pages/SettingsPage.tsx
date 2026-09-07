@@ -98,6 +98,63 @@ function dawnDesc(d: DawnStatus | null): string {
   return `已开启，${who}。上次运行 ${when} · ${res}`;
 }
 
+/**
+ * 数值设置：滑块（粗调）+ **可直接输入的数字框**（精调）。
+ *
+ * 用户 2026-09-07：「滑块滚动不太精准能滚到想要的数值」。
+ *
+ * ★★ **必须定义在模块作用域**，不能写在页面组件的 render 里。写在 render 里时它每次渲染
+ *   都是一个**新的组件类型**，React 会整个卸载重建 —— 对滑块只是掉帧（本仓 `Seg` 那条），
+ *   但对**输入框是致命的**：每敲一个字符就重建一次，焦点丢失、根本打不进字。
+ *   这个组件原本就在 render 里，所以加输入框的第一步是先把它搬出来。
+ *
+ * ★ 输入用**草稿态**而不是直接回写：边打边 clamp 的话，想输 "25" 会在打完 "2" 的瞬间
+ *   被钳到 min=5 变成 "5"，第二个字符就再也接不上了。所以打字期间不校验，
+ *   **失焦或回车才提交并 clamp**；非法输入直接丢弃、回落到当前值。
+ *
+ * ★★ `onKeyDown` 必须 `stopPropagation`：全局 ⌘1~⌘9 是切号快捷键，不拦的话
+ *   在框里打数字会**真的切号**（改名输入框上踩过同一个坑）。
+ */
+function NumInput({ value, onChange, min, max, suffix, t }: {
+  value: number; onChange: (v: number) => void; min: number; max: number; suffix: string; t: Theme;
+}): React.ReactElement {
+  const [draft, setDraft] = useState<string | null>(null);
+  const commit = (raw: string): void => {
+    const n = Number(raw.trim());
+    setDraft(null);
+    if (!raw.trim() || !Number.isFinite(n)) return;          // 非法 ⇒ 丢弃，回落当前值
+    onChange(Math.min(max, Math.max(min, Math.round(n))));
+  };
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+      <input type="range" min={min} max={max} value={value}
+             onChange={e => onChange(Number(e.target.value))}
+             style={{ width: 72, accentColor: t.accent }} />
+      <input
+        value={draft ?? String(value)}
+        title={`可直接输入（${min}–${max}${suffix}）；超出范围会被钳到边界`}
+        inputMode="numeric"
+        onChange={e => setDraft(e.target.value)}
+        onFocus={e => e.currentTarget.select()}
+        onBlur={e => commit(e.target.value)}
+        onKeyDown={e => {
+          e.stopPropagation();                                // ★ 别让 ⌘1~⌘9 切号
+          if (e.key === "Enter") e.currentTarget.blur();
+          if (e.key === "Escape") { setDraft(null); e.currentTarget.blur(); }
+        }}
+        style={{
+          width: 42, textAlign: "right", fontSize: 12, fontWeight: 600,
+          color: t.accent, background: t.ghostBg, fontFamily: "'JetBrains Mono'",
+          fontVariantNumeric: "tabular-nums",
+          border: `1px solid ${t.ghostBorder}`, borderRadius: 6, padding: "3px 5px",
+          outline: "none",
+        }} />
+      <span style={{ fontSize: 12, fontWeight: 600, color: t.accent,
+                     fontFamily: "'JetBrains Mono'", width: 14 }}>{suffix}</span>
+    </div>
+  );
+}
+
 export default function SettingsPage({ t }: { t: Theme }) {
   const [dawn, setDawn] = useState<DawnStatus | null>(null);
   const loadDawn = useCallback(async () => {
@@ -140,13 +197,6 @@ export default function SettingsPage({ t }: { t: Theme }) {
     </div>
   );
 
-  const NumInput = ({ value, onChange, min, max, suffix }: { value: number; onChange: (v: number) => void; min: number; max: number; suffix: string }) => (
-    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-      <input type="range" min={min} max={max} value={value} onChange={e => onChange(Number(e.target.value))}
-        style={{ width: 80, accentColor: t.accent }} />
-      <span style={{ fontSize: 12, fontWeight: 600, color: t.accent, fontFamily: "'JetBrains Mono'", minWidth: 40 }}>{value}{suffix}</span>
-    </div>
-  );
 
   return (
     // ★ 外层内容区是 `overflow: hidden`(App.tsx),**每个页面自带滚动容器**是本项目的约定 ——
@@ -252,7 +302,7 @@ export default function SettingsPage({ t }: { t: Theme }) {
       </Row>
       {s.autoSwitchEnabled && (
         <Row label="自动切号阈值" desc="当前号剩余额度低于此值(%)时触发">
-          <NumInput value={s.autoSwitchThreshold} onChange={v => update({ autoSwitchThreshold: v })} min={5} max={50} suffix="%" />
+          <NumInput value={s.autoSwitchThreshold} onChange={v => update({ autoSwitchThreshold: v })} min={5} max={50} suffix="%" t={t} />
         </Row>
       )}
       {/* ★★ 每日清晨探针。**状态与开关都存在 `state.json`,不在 localStorage** ——
@@ -271,10 +321,10 @@ export default function SettingsPage({ t }: { t: Theme }) {
         </div>
       </Row>
       <Row label="订阅到期预警" desc="订阅剩余天数 ≤ 此值时在卡片和通知中提醒">
-        <NumInput value={s.subExpiryWarnDays} onChange={v => update({ subExpiryWarnDays: v })} min={1} max={30} suffix="天" />
+        <NumInput value={s.subExpiryWarnDays} onChange={v => update({ subExpiryWarnDays: v })} min={1} max={30} suffix="天" t={t} />
       </Row>
       <Row label="Token 过期预警" desc="access token 剩余小时 ≤ 此值时提醒">
-        <NumInput value={s.tokenExpiryWarnHours} onChange={v => update({ tokenExpiryWarnHours: v })} min={6} max={120} suffix="h" />
+        <NumInput value={s.tokenExpiryWarnHours} onChange={v => update({ tokenExpiryWarnHours: v })} min={6} max={120} suffix="h" t={t} />
       </Row>
 
       {/* The tray no longer carries a native menu (both mouse buttons open the popover instead), so

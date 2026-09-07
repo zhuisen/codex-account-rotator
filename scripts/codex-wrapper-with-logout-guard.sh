@@ -141,7 +141,15 @@ WHERE archived = 0
   AND (thread_source = 'user' OR thread_source IS NULL)
   AND source IN ('cli', 'vscode', 'exec')
   AND first_user_message <> ''
-  AND EXISTS (SELECT 1 FROM history_ids WHERE history_ids.id = threads.id)
+  -- ★★ 2026-09-07：`history.jsonl` 这道闸放行得太少 —— 实测它只有 **183** 个 session_id，
+  -- 而库里符合"真实交互式会话"的有 239 条（cli 174 + vscode 65），于是 41 条真会话
+  -- 长期不可见，且**可见的那些反而多是垃圾**（`reusme`、`Error: Failed to resume session…`）。
+  -- 改成两条并联：在 history.jsonl 里 **或** 来自 `cli`/`vscode`（真人交互的两个入口）。
+  -- ⚠️ `exec` 仍然只能走 history.jsonl 那一支 —— 库里 `source='exec'` 有 **3460** 条，
+  --    全是 `codex exec` 一次性调用（omc ask / 各类 harness）。全放进 picker 会把
+  --    真会话彻底淹掉，那是把「看不见」换成「找不到」，不是修复。
+  AND (EXISTS (SELECT 1 FROM history_ids WHERE history_ids.id = threads.id)
+       OR source IN ('cli', 'vscode'))
   AND (has_user_event = 0 OR model_provider = 'rotateproxy');
 COMMIT;
 SQL

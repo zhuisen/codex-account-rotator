@@ -65,6 +65,10 @@ STUB = """
       autoRefresh: p.get('autorefresh') !== 'off',
       // `?nav=open` 展开侧栏。默认折叠 —— 与真实默认值一致。
       navOpen: p.get('rail') === 'open',
+      // ★ `?autoswitch=on` 打开「额度低自动切号」—— **阈值那一行只在它开着时才渲染**,
+      //   不给这个开关的话新加的可输入数字框在 harness 里一个像素都验不到,
+      //   而截图会正常渲染、探针会报干净(本仓反复踩的那种假绿)。
+      autoSwitchEnabled: p.get('autoswitch') === 'on',
     }));
     // ★ `?privacy=1` 打开打码模式(`usePrivacy` + `maskId`)。默认 0 —— 与真实默认值一致。
     //   给对外截图用:夹具已把邮箱/姓名/account_id 换成假的,打码是**第二层**,
@@ -236,6 +240,142 @@ STUB = """
     // ★ 本机没装 agy ⇒ **零像素**。截出来若还有卡就是回归。
     notinst: _agy({ reason: 'not_installed', detail: '本机没有 agy' }),
   };
+  // ── 代理轮换泳道夹具(2026-09-07 交接稿)───────────────────────────
+  // ★ 形状**逐字取自 `traffic/rotation.py` 的真实输出**,不是照着稿子想象编的 ——
+  //   字段名编错的话页面照样渲染(全是 undefined),而 undefined 渲染出来是空白,
+  //   看着就像"这段时间没数据"。
+  function _seg(acc, sMin, eMin, reqs, tok, models, why, cur) {
+    var st = _NOW - 24 * 3600 + sMin * 60;
+    return { acc: acc, start: st, end: _NOW - 24 * 3600 + eMin * 60, requests: reqs,
+             tokens: tok, by_model: models, enter_reason: why, current: !!cur };
+  }
+  function _M(a, b, c) {
+    var m = [{ model: 'gpt-6-astra', tokens: a }];
+    if (b) m.push({ model: 'gpt-5.6-luna', tokens: b });
+    if (c) m.push({ model: 'gpt-5-codex', tokens: c });
+    return m;
+  }
+  var ROT_SEGS = [
+    _seg('plus5', 0, 200, 38, 61e6, _M(43e6, 13e6, 5e6), 'window_start'),
+    _seg('plus4', 200, 330, 22, 31e6, _M(19e6, 9e6, 3e6), 'stream_err'),
+    _seg('plus5', 330, 520, 41, 78e6, _M(58e6, 14e6, 6e6), 'quota_rotate'),
+    _seg('Pro1', 520, 660, 30, 69e6, _M(56e6, 8e6, 5e6), 'pro_fallback'),
+    _seg('plus6', 660, 780, 24, 36e6, _M(24e6, 9e6, 3e6), 'quota_rotate'),
+    _seg('plus5', 780, 930, 41, 70e6, _M(48e6, 15e6, 7e6), 'quota_rotate'),
+    _seg('plus7', 930, 1040, 31, 62e6, _M(45e6, 12e6, 5e6), 'stream_err'),
+    _seg('plus4', 1040, 1160, 28, 42e6, _M(27e6, 12e6, 3e6), 'quota_rotate'),
+    _seg('Pro1', 1160, 1280, 37, 89e6, _M(74e6, 9e6, 6e6), 'pro_fallback'),
+    _seg('plus6', 1280, 1360, 26, 42e6, _M(28e6, 10e6, 4e6), 'quota_rotate'),
+    _seg('plus7', 1360, 1388, 21, 44e6, _M(32e6, 8e6, 4e6), 'stream_err'),
+    // ★ 极短段(4 分钟)+ **零 token**:验 `min-width:3px` 与"该时段无归属到的 token"分支。
+    //   零 token 不是编的 —— 真机上 429 掉的请求就是有请求、无响应、无 token 记录。
+    _seg('plus3', 1388, 1392, 2, 0, [], 'cool_429'),
+    _seg('plus4', 1392, 1440, 30, 57e6, _M(40e6, 13e6, 4e6), 'cool_429', true),
+  ];
+  function _mk(acc, mins, kind) { return mins.map(function (m) {
+    return { acc: acc, t: _NOW - 24 * 3600 + m * 60, kind: kind }; }); }
+  var ROT_MARKERS = [].concat(
+    _mk('plus5', [40, 95, 150, 360, 410, 470, 800, 840, 880, 910], 'stream_err'),
+    _mk('plus4', [230, 270, 300, 1080, 1120, 1400, 1430], 'stream_err'),
+    _mk('Pro1', [560, 620, 1200], 'stream_err'),
+    _mk('plus7', [980, 1375], 'stream_err'),
+    _mk('plus7', [1388], 'cool_429'), _mk('plus3', [1390, 1392], 'cool_429'));
+  function _rotAccounts() {
+    var by = {};
+    ROT_SEGS.forEach(function (s) {
+      var a = by[s.acc] || (by[s.acc] = { acc: s.acc, tokens: 0, requests: 0, models: {} });
+      a.tokens += s.tokens; a.requests += s.requests;
+      s.by_model.forEach(function (m) { a.models[m.model] = (a.models[m.model] || 0) + m.tokens; });
+    });
+    // 配色与线性探测口径同 rotation.py::assign_colors(此处直接给结果,夹具不复算)
+    var C = { plus5: '#4d9fff', plus4: '#2dd4bf', Pro1: '#8b7cf6', plus7: '#27B26B',
+              plus6: '#E0A21C', plus3: '#E0784F' };
+    var Q = { plus5: 100, plus4: 100, Pro1: 100, plus7: 98, plus6: 100, plus3: 0 };
+    return Object.keys(by).map(function (k) {
+      var a = by[k], top = null;
+      Object.keys(a.models).forEach(function (m) {
+        if (!top || a.models[m] > top[1]) top = [m, a.models[m]]; });
+      return { acc: k, plan: k.toLowerCase().indexOf('pro') === 0 ? 'pro' : 'plus',
+               color: C[k], tokens: a.tokens, requests: a.requests,
+               top_model: top ? { model: top[0], share: top[1] / a.tokens } : null,
+               quota_pct: Q[k] === undefined ? null : Q[k] };
+    }).sort(function (x, y) { return y.tokens - x.tokens; });
+  }
+  function _rotEvents() {
+    var out = [], R = { cool_429: '429 冷却 → 故障转移', stream_err: '断流 → 轮换',
+                        quota_rotate: '额度轮换', window_start: '窗口起点',
+                        pro_fallback: 'Plus 全部不可用 → Pro 保底接管' };
+    for (var i = 1; i < ROT_SEGS.length; i++) {
+      var s = ROT_SEGS[i], p = ROT_SEGS[i - 1], is429 = s.enter_reason === 'cool_429';
+      var ty = s.enter_reason === 'pro_fallback' ? 'pro_fallback' : (is429 ? 'failover' : 'switch');
+      out.push({ t: s.start, type: ty, from: p.acc, to: s.acc,
+                 reason: s.enter_reason, accs: [p.acc, s.acc],
+                 text: p.acc + ' → ' + s.acc + ' · ' + R[s.enter_reason] + ' · 上号 ' +
+                       Math.round((p.end - p.start) / 60) + 'm / ' +
+                       (p.tokens / 1e6).toFixed(1) + 'M / ' + p.requests + ' 次' });
+    }
+    ROT_MARKERS.forEach(function (m) {
+      out.push({ t: m.t, type: m.kind, from: m.acc, to: null, reason: m.kind, accs: [m.acc],
+                 text: m.kind === 'cool_429' ? '429 → cooled [' + m.acc + '], failing over'
+                                             : 'stream err [' + m.acc + ']' });
+    });
+    return out.sort(function (a, b) { return b.t - a.t; });
+  }
+  var ROT_LOG = [
+    { t: _NOW - 60, text: '[quotad] activity → plus4:HTTP 200 · 1.9M tok' },
+    { t: _NOW - 2600, text: "headers x-codex 头集合变化 -['x-codex-turn-state']" },
+    { t: _NOW - 3100, text: 'cooled 429 → cooled [plus7], failing over' },
+    { t: _NOW - 3300, text: '[quotad] window reset crossed → sweep now' },
+    { t: _NOW - 3600, text: 'stream err [plus5]: IncompleteRead(2280 bytes read)' },
+    { t: _NOW - 4000, text: 'switch plus6 → plus7 (stream-err x1)' },
+    { t: _NOW - 4600, text: '[quotad] refresh plus5 ok' },
+  ];
+  function _rot(o) {
+    var base = {
+      ok: true, generated_at: _NOW,
+      window: { start: _NOW - 24 * 3600, end: _NOW, hours: 24 },
+      accounts: _rotAccounts(), segments: ROT_SEGS, markers: ROT_MARKERS,
+      events: _rotEvents(), log: ROT_LOG,
+      kpi: { tokens: 682e6, requests: 371, avg_tokens: 1.84e6, rotations: 12,
+             avg_dwell: 6660, cool_429: 3, stream_err: 22,
+             // ★ 保底接管:两段共 260 分钟。夹具必须**真的有**,否则那格 KPI 与 PRO 徽章
+             //   一个像素都验不到,而截图会正常渲染、探针报干净。
+             pro_segs: 2, pro_secs: 260 * 60 },
+      coverage: { responses_seen: 371, responses_with_tokens: 346, responses_unplaced: 0,
+                  attributed_pct: 0.933, undated_lines: 0, in_window_lines: 4200,
+                  tail_truncated: false },
+    };
+    for (var k in o) base[k] = o[k];
+    return base;
+  }
+  var ROT = {
+    ok: _rot({}),
+    // ★★ `?rot=procur` —— **Pro 号正在当班**:同一条泳道上同时挂 `PRO` 和 `当前` 两个徽章。
+    //    这是名字列的**最坏情况**,也正是用户 2026-09-07 截图里被截成 `Pr…` 的那一种。
+    //    默认夹具的「当前」在 plus4 上 ⇒ 这个组合**一次都没被渲染过**,
+    //    所以那次截断在 harness 里完全看不见(缺陷探针对"没渲染"是沉默的)。
+    procur: (function () {
+      var segs = ROT_SEGS.map(function (x) {
+        var y = {}; for (var k in x) y[k] = x[k];
+        y.current = (x.acc === 'Pro1' && x.start === ROT_SEGS[8].start);
+        return y;
+      });
+      return _rot({ segments: segs });
+    })(),
+    // ★ 旧格式无时间戳 + 尾读截断 —— 专门截那行覆盖率脚注。没有它,诚实度提示一次都验不到。
+    undated: _rot({ coverage: { responses_seen: 371, responses_with_tokens: 214,
+                                responses_unplaced: 3, attributed_pct: 0.577,
+                                undated_lines: 21078, in_window_lines: 1372,
+                                tail_truncated: true } }),
+    // ★「这段时间代理没干活」——**不是**「读不到」。两者必须显示成不同的话。
+    empty: _rot({ accounts: [], segments: [], markers: [], events: [], log: [],
+                  kpi: { tokens: 0, requests: 0, avg_tokens: 0, rotations: 0,
+                         avg_dwell: 0, cool_429: 0, stream_err: 0, pro_segs: 0, pro_secs: 0 },
+                  coverage: { responses_seen: 0, responses_with_tokens: 0, responses_unplaced: 0,
+                              attributed_pct: null, undated_lines: 0, in_window_lines: 0,
+                              tail_truncated: false } }),
+  };
+
   var ipc = {}, sizes = [], emitted = [];
   function invoke(cmd, args) {
     ipc[cmd] = (ipc[cmd] || 0) + 1;
@@ -279,7 +419,31 @@ STUB = """
           return [k, { exp: Math.floor(Date.now() / 1000) + 7 * 86400 }];
         })));
       case 'read_logs':
-        return Promise.resolve('');
+        return Promise.resolve(LOGS_TXT);
+      // ★ 代理轮换台账。**不打桩就是假绿** —— 落到 default 返回 null ⇒ `rot` 恒 null ⇒
+      //   上半区永远画「读不到 proxy.log」,而页面照常渲染、零报错、零溢出,sweep 会报干净。
+      //   这是本仓第三次踩同一个坑(前两次:grok 卡、agy 卡),所以这次一并把降级态也做成开关。
+      //   `?rot=ok|busy|empty|undated|fail`
+      // ★ 快照即时读取。harness 里直接返回与全扫**同一份**数据 —— 真机上快照可能更旧,
+      //   但那条时序在 headless 里模拟不出来(两次调用之间没有真实时间流逝)。
+      //   这里要验的是"快照这条路被走到了、且能画出页面",不是新鲜度。
+      case 'read_rotation_snapshot': {
+        var rs = p.get('rot') || 'ok';
+        if (rs === 'fail' || rs === 'nosnap') return Promise.resolve(null);
+        if (rs === 'snaponly') return Promise.resolve(ROT.ok);
+        return Promise.resolve(ROT[rs] || ROT.ok);
+      }
+      case 'read_proxy_rotation': {
+        var rk = p.get('rot') || 'ok';
+        // ★★ `?rot=snaponly` —— **全扫永不返回**,只有快照能把页面画出来。
+        //    这是"快照那条路真的被走到了"的**唯一有判别力**的证据:两条路平时返回同一份
+        //    数据,页面画出来一模一样,光看截图分不出是哪条路画的
+        //    (harness 的 `ipc` 探针只统计 run_traffic/read_traffic_snapshot 两个白名单命令,
+        //     指望它也证不了)。
+        if (rk === 'snaponly') return new Promise(function () {});
+        if (rk === 'fail') return Promise.reject('读不到 proxy/proxy.log');
+        return Promise.resolve(ROT[rk] || ROT.ok);
+      }
       case 'set_dock_visible':
       case 'set_main_visible':
       case 'quit_app':
@@ -338,6 +502,20 @@ STUB = """
       if (nav.indexOf('platform:') === 0) fire('navigate-platform', nav.slice(9));
       else if (nav === 'settings') fire('navigate-settings');
       else if (nav === 'home') { /* 账号池是默认页,不发导航事件 */ }
+      // ★★ `?nav=logs` —— 日志页**没有** `navigate-logs` 事件(App.tsx 只监听 traffic/
+      //   settings/platform 三个,因为只有它们是 Rust/托盘会发的)。所以只能点侧栏。
+      //   ⚠️ **不能用 `?click=日志`**:窗口 <860 时侧栏自动折叠、只剩图标,文字压根不渲染
+      //   ⇒ 命中 0 个。sweep 要在 860/900/940 三档扫这一页,那三档全会静默漏掉。
+      //   按**位置**点(第 3 个 rail 项)在两种形态下都成立;图标恒在。
+      else if (nav === 'logs') {
+        setTimeout(function () {
+          var items = document.querySelectorAll('.cb-rail > div');
+          if (items[2]) items[2].dispatchEvent(new MouseEvent('click', { bubbles: true }));
+          // 命中数照样要报 —— 点错位置和没点中长得一模一样(本仓 `click` 探针同一条纪律)。
+          clicks.push('nav=logs →rail 共' + items.length + '项,点第3');
+          if (items.length < 4) errors.push('rail 项数异常: ' + items.length);
+        }, 500);
+      }
       else fire('navigate-traffic');
 
       // ★ `?mbshow=<ms>` 在指定时刻发 `menubar-shown` —— Rust 是在 `win.show()` 之后发它的
@@ -396,6 +574,44 @@ STUB = """
         else errors.push('click miss: ' + spec + ' (共' + all.length + '个)');
       }, 700 + i * 300);
     });
+
+    // ★★ `?focusacc=<号名>` 点泳道左侧的号名 → 聚焦(稿子 §3:其余泳道 opacity .28
+    //    且事件列表同步过滤)。★ **不能用通用的 `?click=`**:那个是**固定 700ms** 触发,
+    //    而泳道要等异步 IPC 回来才渲染 —— 实测它「命中 1 个、零报错」,而截图里
+    //    一条泳道都没变暗。命中的是**总览页**上同名的那个元素(切页之前还在)。
+    //    「点中了」和「点中了想点的那个」是两回事,这是本轮第三次栽在固定延时上。
+    if (p.get('focusacc')) {
+      (function pollLane(tries) {
+        var el = document.querySelector('[data-lane="' + p.get('focusacc') + '"]');
+        if (!el && tries > 0) { setTimeout(function () { pollLane(tries - 1); }, 120); return; }
+        clicks.push('focusacc=' + p.get('focusacc') + ' →' + (el ? '命中泳道' : '没找到泳道'));
+        if (el) el.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        else errors.push('focusacc miss: ' + p.get('focusacc'));
+      })(20);
+    }
+
+    // ★★ `?tipseg=<n>` 给**泳道色块**派发 mouseenter,把时段明细浮层逼出来(稿子 §2)。
+    //    与 `?mm=` 不是一回事:那个打的是 `svg rect[fill=transparent]`,而泳道是绝对定位的
+    //    div,选择器根本命不中。没有这个开关,浮层(段 token / 模型构成 / 切入原因)
+    //    **在 harness 里一个像素都验不到**,而截图会正常渲染、探针会报干净。
+    if (p.get('tipseg')) {
+      // ★ 必须**轮询等它出现**,不能定死一个延时:泳道要等 `read_proxy_rotation` 这个
+      //   异步 IPC 回来才渲染,而固定延时下第一版量到「0 个色块」——那看着像"选择器写错了",
+      //   实际只是发早了。同族教训:harness 里凡是等异步产物的驱动都别用固定延时。
+      (function pollSeg(tries) {
+        var segs = document.querySelectorAll('[data-seg]');
+        if (!segs.length && tries > 0) { setTimeout(function () { pollSeg(tries - 1); }, 120); return; }
+        var n = parseInt(p.get('tipseg'), 10);
+        clicks.push('tipseg →色块共' + segs.length + '个,悬第' + n);
+        // ★★ 必须派发 **`mouseover`(bubbles:true)**,不能派发 `mouseenter`。
+        //    React 的 `onMouseEnter` 是**合成事件**:它在根节点上监听 `mouseover`/`mouseout`
+        //    再自己算进出,原生 `mouseenter` 不冒泡、根本到不了它的委托监听器。
+        //    实测:派发 mouseenter → 13 个色块全命中、零报错、浮层**一个字都没出来**;
+        //    换成 mouseover 才真的渲染。这正是"命中了 ≠ 生效了"的又一例。
+        if (segs[n - 1]) segs[n - 1].dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+        else errors.push('tipseg miss: 只有 ' + segs.length + ' 个色块');
+      })(20);
+    }
 
     // `?mm=<0..100>` 在图表命中带上派发 mousemove,把 hover 浮层逼出来。
     // headless 里鼠标事件不会自己发生,而"悬浮才出现的读数"恰恰只能这样验。

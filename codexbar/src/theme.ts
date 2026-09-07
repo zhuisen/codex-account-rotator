@@ -41,7 +41,11 @@ export const CARD_TYPE = {
   name: 16.5, status: 12, planBadge: 10, useBadge: 10, curBadge: 10.5, delta: 11,
   email: 13, winLabel: 12, pct: 13, eta: 12, note: 12, exp: 12.5,
   ring: 58, ringR: 24, ringSw: 5, ringNum: 15, bar: 5, shortcut: 11,
-  badgeFont: 12, badgeIcon: 12, badgePad: "3px 9px",
+  // ★ 徽章缩一档（12→10.5 / 内边距与图标同步收），好与「到期」同行放得下 ——
+  //   用户 2026-09-07：「重置卡和日期应该齐平，因此重置卡大小应该缩小即可」。
+  //   ⚠️ 只缩尺寸**不够**：最长形态是 `重置卡 ×3 · 2张剩1天`，窄卡下仍放不下，
+  //   所以 AccountCard 那边同时上了 nowrap + 截断（见那里的说明）。两条缺一不可。
+  badgeFont: 10.5, badgeIcon: 10, badgePad: "2px 7px",
 } as const;
 
 /**

@@ -76,7 +76,10 @@ class PickerNeverInventsHeadroom(unittest.TestCase):
         cls.px = load("crp_proxy", ROOT / "proxy" / "proxy.py")
 
     def test_anchors_exist(self):
-        for fn in ("_win_used", "_used"):
+        # ★ `_used` 于 2026-09-07 被 `_tightest_used` 取代(策略 C:Plus 优先 Pro 保底,
+        #   档内按最紧窗口排)。**这条不变量本身没变**,只是换了承载它的函数 ——
+        #   所以改的是名字不是断言。策略那半的闸在 `tests/test_pick_policy.py`。
+        for fn in ("_win_used", "_tightest_used"):
             self.assertTrue(hasattr(self.px, fn), "{} 不见了 —— 断言可能打空了".format(fn))
 
     def test_missing_reading_is_not_reported_as_zero_used(self):
@@ -116,7 +119,7 @@ class PickerNeverInventsHeadroom(unittest.TestCase):
                                        "resets_at": FUTURE},
                            "captured_at": NOW}}
         unknown = {"quota": {"primary": {"window_minutes": 10080}, "captured_at": NOW}}
-        self.assertLess(self.px._used(known), self.px._used(unknown),
+        self.assertLess(self.px._tightest_used(known), self.px._tightest_used(unknown),
                         "额度未知的号排在了有真实读数的号前面")
 
     def test_ordering_among_known_accounts_is_unchanged(self):
@@ -125,14 +128,14 @@ class PickerNeverInventsHeadroom(unittest.TestCase):
             return {"quota": {"primary": {"used_percent": u, "window_minutes": 10080,
                                           "resets_at": FUTURE},
                               "captured_at": NOW}}
-        self.assertLess(self.px._used(acct(5.0)), self.px._used(acct(9.0)))
-        self.assertLess(self.px._used(acct(0.0)), self.px._used(acct(1.0)))
+        self.assertLess(self.px._tightest_used(acct(5.0)), self.px._tightest_used(acct(9.0)))
+        self.assertLess(self.px._tightest_used(acct(0.0)), self.px._tightest_used(acct(1.0)))
 
     def test_all_unknown_accounts_tie(self):
         """全都未知时并列 —— 退回原有顺序，不引入新的偏好。"""
         a = {"quota": {"primary": {"window_minutes": 10080}, "captured_at": NOW}}
         b = {"quota": {"primary": {"window_minutes": 300}, "captured_at": NOW}}
-        self.assertEqual(self.px._used(a), self.px._used(b))
+        self.assertEqual(self.px._tightest_used(a), self.px._tightest_used(b))
 
 
 class DisplayNeverFabricatesFullQuota(unittest.TestCase):

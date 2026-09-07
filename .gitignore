@@ -66,3 +66,8 @@ AGENTS.md
 memory.md
 RUNBOOK.md
 SETUP.md
+
+# 代理轮换的运行期产物（缓存 + 成品快照）。不入库：它们随本机会话文件重建，
+# 且带着本机的 response_id 与账号 label。
+.rotation-cache.json
+.rotation-latest.json

@@ -26,6 +26,11 @@
 | ![菜单栏账号](docs/screenshots/05-menubar-acc.png) | ![菜单栏今日](docs/screenshots/06-menubar-today.png) |
 | 当前号、建议切换目标、号间差值；点行尾「切换」不用开主窗口 | 今日总量 + 小时堆叠图 + 各平台明细，底栏直达流量总览 |
 
+| 代理轮换 · 泳道时间轴 | 代理轮换 · 时段明细 |
+|---|---|
+| ![代理轮换](docs/screenshots/07-rotation.png) | ![时段明细](docs/screenshots/08-rotation-tip.png) |
+| 一眼看出**什么时间哪个号在岗**；色块深浅 = token 密度，琥珀点 = 断流，蓝环 = 429 冷却 | 悬浮任一色块：该时段 token / 请求数 / **模型构成** / 为什么切进来 |
+
 > 截图用的是**真实数据形状**配**脱敏账号夹具**（邮箱/姓名/account_id 全部替换），并额外开了打码模式。
 
 ---
@@ -63,6 +68,49 @@ loopback RPC,**不联网、不消耗配额**)。没装那家 CLI 的机器上**�
 
 ---
 
+## 代理轮换：多账号管道图
+
+轮换代理平时是**看不见**的 —— 它在后台逐请求挑号，你只知道"没断"。出问题时反而抓瞎：
+额度是被谁烧掉的？为什么切走了？那次卡住是不是重复计费了？
+
+`日志 → 代理轮换` 把这条管道摊开成一张泳道时间轴：
+
+```
+                        每个请求独立挑号，不重启、不换会话
+                                    │
+   codex ──cxp──▶ ┌─────────────────▼──────────────────┐
+                  │  proxy.py  选号：Plus 优先 · Pro 保底 │──▶ chatgpt.com
+                  │  429 → 冷却换号 │ token 过期 → 续期  │
+                  └─────────────────┬──────────────────┘
+                                    │ 每个请求写一行日志
+                    ┌───────────────▼────────────────┐
+                    │  proxy.log  谁在岗 · 何时切 · 为什么 │
+                    └───────────────┬────────────────┘
+                                    │  ★ 按 response_id 精确 join
+                    ┌───────────────▼────────────────┐
+                    │  ~/.codex/sessions/rollout-*    │
+                    │  每次响应的 token 与模型          │
+                    └───────────────┬────────────────┘
+                                    ▼
+     账号  ├──00:00────06:00────12:00────18:00──┤ 现在   TOKEN  请求  主模型
+   ● plus5 │  ▓▓▓▓▓    ▓▓▓▓▓▓      ▓▓▓▓▓▓▓      │        209M   120  gpt-6-astra 71%
+   ● Pro1  │            ▓▓▓▓▓            ▓▓▓▓   │ PRO    158M    67  gpt-6-astra 82%
+   ● plus4 │     ▓▓▓▓▓          ▓▓▓▓▓        ▓  │ 当前   130M    80  gpt-6-astra 66%
+             ↑ 色块深浅 = token 密度   · 断流   ○ 429 冷却   │ 右缘竖线 = 现在
+```
+
+**它比"看日志"多给了什么**
+
+| | 好处 |
+|---|---|
+| **token 归属到号** | 不是按时间猜，是拿 `proxy.log` 的 `response_id` 和 codex rollout 里的**同一个 id** 精确对上。实测 942 条记录命中 727 条；**对照实验**：300 个随机同形 id 命中 **0** —— 这个 join 不是碰运气 |
+| **看得出"为什么切"** | 每一段在岗都带切入原因：额度轮换 / 断流 → 轮换 / 429 冷却 → 故障转移 / **Plus 全部不可用 → Pro 保底接管**。最后那条等价于「Plus 池干了」，是唯一需要你动手的信号 |
+| **分得清花没花钱** | 三类失败的计费含义完全不同，刻意不合并：`send err`＝没送完⇒**未计费** · `stream err`＝已 200 后断⇒**已计费** · `committed`＝**可能已计费**（唯一染红） |
+| **合计是下界，不装成总量** | 只有走过代理的响应能归属；直连 `codex` 的请求不经过这里。所以那一格写的是「**已归属** token」而不是「合计」 |
+| **点号名只看它** | 其余泳道淡出，轮换事件同步过滤 —— 排查"就这个号老出问题"时不用自己在日志里 grep |
+
+时间窗 `1h / 6h / 24h / 7d` 可切且**记住上次选择**；进页面先画上次快照（~1ms）再后台重扫，不阻塞。
+
 ## 它解决的 4 个痛点
 
 | 痛点 | 怎么解的 |
@@ -82,7 +130,7 @@ loopback RPC,**不联网、不消耗配额**)。没装那家 CLI 的机器上**�
                                    │ 复用同一个池
                     ┌─ 轮换代理层 (daily) ───────────────────────────┐
    cxp ──→ codex ──→│  proxy.py (127.0.0.1:8011, launchd 常驻)       │──→ chatgpt.com
-   (--profile        │   选号(用量最少+跳冷却) → 过期自动 OAuth 刷新   │    /backend-api/codex
+   (--profile        │   选号(Plus 优先·Pro 保底·跳冷却) → 过期自动续期 │    /backend-api/codex
     rotateproxy)     │   → 注入 token+account_id → 429 冷却 → 逐请求记账 │
                     └────────────────────────────────────────────────┘
                     ┌─ 展示层 ───────────────────────────────────────┐
@@ -111,6 +159,7 @@ loopback RPC,**不联网、不消耗配额**)。没装那家 CLI 的机器上**�
 | `.traffic-latest.json`(gitignored) | 最近一次扫描的**成品快照**(~91KB)。两个 webview 都先读它再后台重扫,所以进页面/点托盘不再等 1~3 秒。由 `run_traffic` 原子写入(`.tmp<pid>` → `rename`) |
 | `traffic/sources.local.json`(gitignored) | 本机停用哪些平台:`{"disabled": ["grok"]}`。等价 CLI:`--exclude grok` / `--only kimi` |
 | `traffic/scan.py` | **多 AI 流量总览扫描器**(`[--days N] [--json] [--no-cache]`)。读 Claude / Codex / Grok / Kimi / Antigravity 五家 + OpenClaw / Reasonix / DeepSeek Harness 三个宿主源(按模型名回流各家)（平台注册表在文件里，**加一家 = 写个解析器 + 加一行**，前端自动跟上）,**纯本地只读、不联网、不消耗任何额度**,与账号池无关。CodexBar「AI用量信息」页的数据源 |
+| `traffic/rotation.py` | **代理轮换泳道的数据引擎**。把 `proxy.log` 的在岗时间线与 codex rollout 的 token 记账按 `response_id` 精确 join。纯模块、不联网、不碰凭证；带文件级缓存与成品快照（`.rotation-cache.json` / `.rotation-latest.json`，均 gitignored） |
 | `traffic/discover.py` | **数据源体检**(`--json`):找本机还有哪些 AI 把用量落了盘,并现场验算它的 token 口径。纯本地只读、不联网、不碰凭证,SQLite 一律 `mode=ro`,**只出报告不自动启用**(接一家的实质是写解析器) |
 | `claude/claude_tokens.py` | ⚠️ 只统计 Claude 的旧扫描器,能力已被 `traffic/scan.py` 完全覆盖(v0.7.0 起 app 不再调用)。保留仅作 CLI |
 | `scripts/install-launchd.sh` | **生成并加载 3 个 launchd 服务**(autosync/quotad/proxy)。★ keepalive(04:30)与 refreshquota(07:00)已于 2026-08-29 按需取消 —— 前者职责由代理接手(覆盖面见上表①),后者与 quotad 的 300s 全池扫描重复。两个 CLI 子命令仍可手动跑。生成而非提交成文件:plist 内嵌绝对路径,提交的副本换台机器就是错的,且会静默漂移(旧的 `launchd/*.plist` 就漂到了写死 `/usr/bin/python3`)。★脚本会**解析并钉住 OpenSSL 版的 python3**,见「维护约定」 |

@@ -103,7 +103,7 @@ fn store_dir() -> String {
 // ★ `dawn-probe` 加进来是给「app 内补跑」用的:本项目的 launchd 日历定时有前科
 //   (keepalive/refreshquota 的 StartCalendarInterval 被外力改写丢掉,runs = 0、从未运行过),
 //   所以 06:00 那个 plist **不能是唯一触发路径**。命令侧当天幂等 + 先占天,重复调用不会双重计费。
-const ALLOWED_CMDS: &[&str] = &["switch", "cool", "uncool", "refresh-all", "health", "list", "quota", "remove", "credits", "probe", "dawn-probe", "tokens", "rename"];
+const ALLOWED_CMDS: &[&str] = &["switch", "cool", "uncool", "refresh-all", "health", "list", "quota", "remove", "credits", "probe", "dawn-probe", "tokens", "rename", "rotate"];
 
 /// Interpreter for codex-rotate. NOT a bare `python3`: Cloudflare fingerprints the TLS ClientHello,
 /// and macOS's `/usr/bin/python3` (LibreSSL 2.8.3) gets a hard 403 from /backend-api/codex/usage while
@@ -291,6 +291,10 @@ fn set_dock_visible(app: AppHandle, on: bool) {
 static SCAN_LOCK: Mutex<()> = Mutex::new(());
 /// 拿到锁后若快照比这个还新,就认为刚有人扫过,直接复用。比前端的窗口略紧一点。
 const SCAN_COALESCE_SECS: u64 = 90;
+
+/// 轮换泳道的串行闸。★ **独立于 `SCAN_LOCK`** —— 它遍历 rollout 文件、成本与用量扫描
+/// 不同(同 grok/agy 各自独立锁的理由);共用一把会让两件不相干的事互相阻塞。
+static ROTATION_LOCK: Mutex<()> = Mutex::new(());
 
 /// 扫描本机还有哪些地方存着 AI 用量(设置页「扫描新数据源」按钮)。
 ///
@@ -754,6 +758,56 @@ fn read_logs() -> Result<String, String> {
     }
     lines.truncate(300);
     Ok(lines.join("\n"))
+}
+
+// ---- proxy rotation ledger ----
+//
+// ★★ **解析在 Python(`traffic/rotation.py`),这里只负责起进程。**
+//    2026-09-07 的第一版把 proxy.log 的解析写在了 Rust 里,跑得很好 —— 直到用户的新设计稿
+//    要求「按请求把 token 与模型归属到当时在岗的账号」。那需要读 codex 的 rollout,
+//    而 rollout 解析(以及它那一堆口径坑:累计 vs 单次、去重键、时区)已经整套在
+//    `traffic/scan.py` 里。在 Rust 里再写一份 = 本仓 `CLAUDE.md` §5 明令禁止的
+//    「别再按平台各写一份扫描器」,两份迟早在边界上互相矛盾。
+//    所以旧的 Rust 解析器**整块删掉**,不是留着做快速路径 —— 同一件事留两份实现,
+//    就是在等下一次"两个页面显示不同的数"。
+/// 成品快照的即时读取(不起 python)。★ 用户 2026-09-07 报「代理轮换界面太卡」——
+/// 真因是每次进页面都**同步等一次全扫**:实测 1h 0.9s / 24h 1.7s / 7d 3.3s。
+/// 现在 UI 先画这个快照(读盘 ~1ms)再后台重扫,与 `.traffic-latest.json` 同一范式。
+/// ★ 读不到返回 `Null` 而不是报错 —— 首次运行本来就没有快照,那不是故障。
+#[tauri::command]
+fn read_rotation_snapshot(hours: Option<f64>) -> Result<Value, String> {
+    let key = format!("{}", hours.unwrap_or(24.0) as i64);
+    let path = format!("{}/.rotation-latest.json", data_dir());
+    let Ok(text) = fs::read_to_string(&path) else { return Ok(Value::Null) };
+    let all: Value = serde_json::from_str(&text).map_err(|e| format!("parse: {}", e))?;
+    Ok(all.get(&key).cloned().unwrap_or(Value::Null))
+}
+
+#[tauri::command]
+async fn read_proxy_rotation(hours: Option<f64>) -> Result<Value, String> {
+    let hours = hours.unwrap_or(24.0).max(0.1).min(24.0 * 31.0);
+    let script = format!("{}/traffic/rotation.py", script_dir());
+    let out = tauri::async_runtime::spawn_blocking(move || {
+        // ★ 独立锁:它要遍历 rollout 文件,与 `run_traffic` 是两种成本,共用一把会互相阻塞。
+        let _guard = ROTATION_LOCK.lock();
+        py_cmd()
+            .arg(&script)
+            .arg("--hours")
+            .arg(format!("{}", hours))
+            .output()
+    })
+    .await
+    .map_err(|e| format!("join: {}", e))?
+    .map_err(|e: std::io::Error| format!("exec: {}", e))?;
+    if !out.status.success() {
+        // ★ stderr 原样带出:静默失败会让前端只能显示"没数据",而那和"确实没流量"同形。
+        return Err(format!(
+            "rotation.py 退出码 {:?}: {}",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    serde_json::from_slice(&out.stdout).map_err(|e| format!("parse: {}", e))
 }
 
 // ---- read single account auth detail ----
@@ -1415,6 +1469,10 @@ pub fn run() {
             .title("CodexBar")
             .inner_size(352.0, 580.0)
             .decorations(false)
+            // ★ 与主窗同理:`.mb-root` 的 `border-radius: 16px` 一直都在,但窗口不透明时
+            //   半径外那一圈由窗口底色填掉 ⇒ 圆角变成四个黑角。透明之后才是真圆角。
+            //   前提是 `tauri.conf.json` 的 `app.macOSPrivateApi: true`(见那里的注释)。
+            .transparent(true)
             .always_on_top(true)
             .skip_taskbar(true)
             .visible(false)
@@ -1568,6 +1626,8 @@ pub fn run() {
             set_main_visible,
             read_auth_tokens,
             read_logs,
+            read_proxy_rotation,
+            read_rotation_snapshot,
             read_account_detail,
             quit_app,
             set_scan_source])
