@@ -901,18 +901,38 @@ def _headroom(slot):
     return best
 
 
+#: 最充裕的号也只剩这么点时,换过去没有意义 —— 宁可不动。
+BEST_MIN_HEADROOM = 5.0
+
+
 def _pick_best(s):
-    """额度最充裕的存活号 → aid。全都读不到额度时返回 None(**不猜**)。"""
+    """额度最充裕的**存活 Plus 号** → aid。没有合格候选时返回 None(**不猜、不动**)。
+
+    ★★ **只看 Plus,不看 Pro**(用户 2026-09-06:「pro 号用不着这样用」)。两个理由:
+      ① 产品意图:轮换池这套是给 Plus 号用的,Pro 不参与这种"开场挑一个"的调度;
+      ② ★ **跨套餐比大小本来就不成立** —— Pro 的 primary 是**周**窗口、Plus 的是 **5h**,
+         把 Pro 的周剩余% 和 Plus 的 5h 剩余% 排在同一条轴上是拿两把尺量同一根线。
+         限定 Plus 之后候选全是同一套餐,`_headroom` 的比较才有意义。
+         (`proxy.py::_used()` 至今仍在混着比,那处 docstring 明写「要改先定策略」,不在此列。)
+    ★ **按 `plan` 判,不按 label** —— 老号从 Plus 升 Pro 时 label 一个字都不变。
+    ★ 最好的那个也几乎见底时**不换**:从 Pro 或一个还有余量的号切到一个空号,比不动更糟。
+    """
     cands = []
     for aid, sl in (s.get("slots") or {}).items():
         if sl.get("auth_dead") or (sl.get("cooling_until") or 0) > time.time():
+            continue
+        plan = (sl.get("plan") or (sl.get("quota") or {}).get("plan_type") or "").lower()
+        if plan != "plus":
             continue
         h = _headroom(sl)
         if h is not None:
             cands.append((h, aid))
     if not cands:
         return None
-    return max(cands)[1]
+    top_h, top_aid = max(cands)
+    if top_h < BEST_MIN_HEADROOM:
+        return None
+    return top_aid
 
 
 def cmd_switch(args):
@@ -925,7 +945,9 @@ def cmd_switch(args):
         #   既然中途切不了,那就**开场挑最满的**,让它撑得久一些。
         target = _pick_best(s)
         if not target:
-            print("switch --best: 没有可读额度的存活号，保持当前号不变")
+            # ★ 三种情况都落到这里,而它们含义不同 —— 说清楚,别让用户以为"挑过了没更好的"。
+            #   （没有 Plus 号 / 都读不到额度 / 最好的那个也见底了）
+            print("switch --best: 没有额度充裕的存活 Plus 号（Pro 不参与），保持当前号不变")
             return
         if target == s.get("active"):
             lbl = s["slots"][target].get("label", "?")

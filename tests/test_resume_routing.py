@@ -56,9 +56,13 @@ def win(mins, used):
     return {"window_minutes": mins, "used_percent": used, "resets_at": None}
 
 
-def slot(label, primary=None, secondary=None, **kw):
+def slot(label, plan=None, primary=None, secondary=None, **kw):
+    """★ `plan` 显式传:`_pick_best` 按它筛 Plus,不按 label。"""
     q = {"primary": primary or {}, "secondary": secondary or {}}
-    return {"label": label, "quota": q, **kw}
+    out = {"label": label, "quota": q, **kw}
+    if plan:
+        out["plan"] = plan
+    return out
 
 
 class HeadroomUsesTheTightestWindow(unittest.TestCase):
@@ -92,31 +96,57 @@ class HeadroomUsesTheTightestWindow(unittest.TestCase):
 
 
 class PickBest(unittest.TestCase):
+    """★★ **只在 Plus 号里挑**（用户 2026-09-06:「pro 号用不着这样用」）。
+
+    除了产品意图,还有一条技术理由:**跨套餐比大小本来就不成立** ——
+    Pro 的 primary 是**周**窗口、Plus 的是 **5h**,把两者的剩余% 排在同一条轴上
+    是拿两把不同的尺量同一根线。限定 Plus 之后,`_headroom` 的比较才有意义。
+    """
+
     def _pool(self):
         return {"slots": {
-            "a": slot("plus3", primary=win(300, 0.0), secondary=win(10080, 100.0)),
-            "b": slot("plus6", primary=win(300, 44.0), secondary=win(10080, 50.0)),
-            "c": slot("Pro1", primary=win(10080, 34.0)),
-            "d": slot("dead", primary=win(300, 0.0), auth_dead=True),
+            "a": slot("plus3", "plus", primary=win(300, 0.0), secondary=win(10080, 100.0)),
+            "b": slot("plus6", "plus", primary=win(300, 44.0), secondary=win(10080, 50.0)),
+            "c": slot("Pro1", "pro", primary=win(10080, 34.0)),
+            "d": slot("dead", "plus", primary=win(300, 0.0), auth_dead=True),
         }}
 
-    def test_picks_the_most_headroom(self):
-        self.assertEqual(CR._pick_best(self._pool()), "c")   # Pro1 剩 66
+    def test_never_picks_a_pro_even_when_it_has_the_most_room(self):
+        """★★ Pro1 剩 66% 是全场最高,仍**不能**被选中。
+        改动前正是它被挑走的 —— 用户当场指出这不对。"""
+        self.assertEqual(CR._pick_best(self._pool()), "b",
+                         "挑到了 Pro 号 —— 轮换池这套是给 Plus 用的")
+
+    def test_plan_is_read_from_plan_not_label(self):
+        """老号从 Plus 升 Pro 时 label 一个字都不变,按名字挑会把 Pro 拉进来。"""
+        s = {"slots": {"x": slot("plusOld", "pro", primary=win(10080, 10.0))}}
+        self.assertIsNone(CR._pick_best(s))
 
     def test_never_picks_a_dead_account(self):
         s = self._pool()
-        s["slots"]["c"]["auth_dead"] = True
-        self.assertNotIn(CR._pick_best(s), ("c", "d"))
+        s["slots"]["b"]["auth_dead"] = True
+        self.assertIsNone(CR._pick_best(s))   # 只剩见底的 plus3/plus4
 
     def test_never_picks_a_cooling_account(self):
         import time
         s = self._pool()
-        s["slots"]["c"]["cooling_until"] = time.time() + 3600
-        self.assertEqual(CR._pick_best(s), "b")
+        s["slots"]["b"]["cooling_until"] = time.time() + 3600
+        self.assertIsNone(CR._pick_best(s))
 
     def test_returns_none_when_nothing_is_readable(self):
         """★ 全都读不到额度时**不猜** —— 调用方据此保持当前号不变。"""
-        self.assertIsNone(CR._pick_best({"slots": {"a": slot("x"), "b": slot("y")}}))
+        self.assertIsNone(CR._pick_best({"slots": {"a": slot("x", "plus"),
+                                                   "b": slot("y", "plus")}}))
+
+    def test_does_not_switch_to_an_account_that_is_also_empty(self):
+        """★★ 最好的 Plus 也几乎见底时**不换**。
+        从一个还有余量的号切到一个空号,比不动更糟 —— 而「挑了个最好的」
+        这句话会让人以为情况变好了。"""
+        s = {"slots": {
+            "a": slot("plus3", "plus", primary=win(300, 98.0)),
+            "b": slot("plus4", "plus", primary=win(300, 100.0)),
+        }}
+        self.assertIsNone(CR._pick_best(s))
 
 
 class CxpRouting(unittest.TestCase):
