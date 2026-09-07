@@ -205,7 +205,7 @@ export default function App() {
     // ★ `cb-light` 供 App.css 的滚动条规则按主题反色 —— 白色拇指在浅色底上等于隐形。
     //   加这个 class 之前那条规则是**死规则**(写完顺手核了一下才发现根节点没有它)。
     <div className={theme === "light" ? "cb-light" : undefined}
-         style={{ width: "100vw", height: "100vh", display: "flex", flexDirection: "column", background: t.appBg, color: t.text, fontFamily: "'Space Grotesk'", borderRadius: 14, overflow: "hidden", boxShadow: t.shadow, transition: "background-color .35s ease, color .35s ease" }}>
+         style={{ width: "100vw", height: "100vh", display: "flex", flexDirection: "column", background: t.appBg, color: t.text, fontFamily: "'Space Grotesk'", borderRadius: winUI ? 12 : 0, overflow: "hidden", boxShadow: t.shadow, transition: "background-color .35s ease, color .35s ease" }}>
 
       {/* Title bar */}
       <div data-tauri-drag-region style={{ height: 38, flexShrink: 0, display: "flex", alignItems: "center", padding: "0 14px", gap: 8, borderBottom: `1px solid ${t.chromeBorder}`, background: t.chromeBg, position: "relative", transition: "background-color .35s ease" }}>

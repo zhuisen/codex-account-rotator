@@ -10,6 +10,9 @@
   max-height: var(--mb-max-h, 580px);
   display: flex;
   flex-direction: column;
+  /* ★ macOS 上圆角由 AppKit 做（`round_corners`，抗锯齿 + 连续曲率）——
+     这里保留一个半径是给 Windows 用的；两边同值时 macOS 那层原生裁剪起决定作用。
+     ⚠️ 别把它调大到超过原生半径：那样 CSS 会先切一刀，锯齿又回来了。 */
   border-radius: 16px;
   overflow: hidden;
   position: relative;

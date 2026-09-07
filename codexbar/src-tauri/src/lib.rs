@@ -875,6 +875,52 @@ fn read_account_detail(aid: String) -> Result<Value, String> {
 /// 0 完整 `pro1 周 67% ↻5d21h` · 1 简 `pro1 67%` · 2 极简 `67%` · 3 今日 `67% 🔹 1.29B`
 static TRAY_STYLE: AtomicU8 = AtomicU8::new(0);
 
+/// 给窗口做**原生**圆角（用户 2026-09-08：「不够圆，并露桌面但边缘发毛」）。
+///
+/// ★★ 「露桌面」说明 `transparent: true` 已经生效了；「发毛」是 **CSS 裁剪没有抗锯齿** ——
+///   webview 用 `border-radius` 切出来的边缘直接压在桌面上，没有 AppKit 那层混合。
+///   所以圆角**必须交给 AppKit 做**，前端那边同时把 `borderRadius` 归零，
+///   否则先被 CSS 切一刀（带锯齿）再被原生切一刀，锯齿仍在。
+///
+/// ★ `cornerCurve = continuous` 才是**苹果的那种圆角**（squircle / 连续曲率）。
+///   普通 `cornerRadius` 是圆弧，在同样半径下看着更"方"——用户说的「不够圆」多半是这个，
+///   而不是半径不够大。两者一起改：半径给到 macOS 窗口的量级，曲率换成连续。
+///
+/// ★ 改完必须 `invalidateShadow()`：透明窗口的投影是 AppKit 按 alpha 形状算的，
+///   不通知它就还按旧形状画，表现为圆角外面挂着一圈方形的阴影残影。
+#[cfg(target_os = "macos")]
+fn round_corners(win: &tauri::WebviewWindow, radius: f64) {
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
+    use objc2_foundation::NSString;
+
+    let Ok(ptr) = win.ns_window() else { return };
+    if ptr.is_null() {
+        return;
+    }
+    unsafe {
+        let ns_window = ptr as *mut AnyObject;
+        let content: *mut AnyObject = msg_send![ns_window, contentView];
+        if content.is_null() {
+            return;
+        }
+        let _: () = msg_send![content, setWantsLayer: true];
+        let layer: *mut AnyObject = msg_send![content, layer];
+        if layer.is_null() {
+            return;
+        }
+        let _: () = msg_send![layer, setCornerRadius: radius];
+        // kCACornerCurveContinuous 的字面值就是 "continuous"（CoreAnimation 用字符串常量），
+        // 直接传字符串可以免掉引一个 objc2-quartz-core 依赖。
+        let curve = NSString::from_str("continuous");
+        let _: () = msg_send![layer, setCornerCurve: &*curve];
+        let _: () = msg_send![layer, setMasksToBounds: true];
+        // 有阴影才看得出这是一块悬浮的面板；透明窗口的阴影由 alpha 形状推出来。
+        let _: () = msg_send![ns_window, setHasShadow: true];
+        let _: () = msg_send![ns_window, invalidateShadow];
+    }
+}
+
 /// ★★ 给菜单栏标题的**百分比那一段**上色。
 ///
 /// macOS 本身完全支持(`NSStatusItem.button.attributedTitle` + `NSForegroundColorAttributeName`),
@@ -1460,6 +1506,14 @@ pub fn run() {
 
             let handle = app.handle();
 
+            // ★ 主窗的原生圆角。18 比之前 CSS 的 14 大 —— 用户说「不够圆」,而 macOS 自家窗口
+            //   在连续曲率下看着就是这个量级。半径与曲率一起改才对味:同样半径下,
+            //   圆弧角比连续曲率角显得方。
+            #[cfg(target_os = "macos")]
+            if let Some(w) = handle.get_webview_window("main") {
+                round_corners(&w, 18.0);
+            }
+
             // ---- create menubar popover window (hidden by default) ----
             let _menubar = WebviewWindowBuilder::new(
                 handle,
@@ -1478,6 +1532,10 @@ pub fn run() {
             .visible(false)
             .resizable(false)
             .build()?;
+
+            // ★ 原生圆角。菜单栏是弹层,半径比主窗大一档(与 `.mb-root` 原来的 16 同量级)。
+            #[cfg(target_os = "macos")]
+            round_corners(&_menubar, 16.0);
 
             // hide menubar on blur (click outside)
             let handle_blur = handle.clone();

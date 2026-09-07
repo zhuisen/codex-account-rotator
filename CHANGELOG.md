@@ -76,6 +76,44 @@
 
 ---
 
+### v1.4.1 — 窗口圆角改由 AppKit 裁（抗锯齿 + 连续曲率）— 2026-09-08
+
+**修复：圆角发毛、不够圆**
+
+用户反馈「不够圆，并**露桌面但边缘发毛**」。「露桌面」证明 v1.4.0 的 `transparent` 已经生效；
+「发毛」是 **CSS 裁剪没有抗锯齿** —— webview 用 `border-radius` 切出来的边直接压在桌面上，
+中间少了 AppKit 那层混合。
+
+- 圆角改由 **AppKit 原生裁**（`round_corners()`：`cornerRadius` + `masksToBounds`，
+  主窗 18 / 菜单栏 16），前端 macOS 那支 `borderRadius` **归零** ——
+  **先被 CSS 切一刀（带锯齿）再被原生切一刀，锯齿仍在**。Windows 没有等价 API，仍走 CSS。
+- ★ `cornerCurve = continuous`，也就是**苹果的 squircle**。同样半径下，普通圆弧角看着更方 ——
+  「不够圆」多半是曲率不是半径，所以两者一起改。
+- ★ 加 `invalidateShadow()`：透明窗口的投影由 AppKit 按 alpha 形状算，
+  不通知它就还按旧形状画，表现为圆角外挂着一圈方形阴影残影。
+- 闸在 `tests/test_window_corners.py`（8 条，把透明链五个环 + 原生裁剪一起钉住；9 次变异全红）。
+  ⚠️ **像素那半仍只能人看** —— 抓屏被 TCC 挡，原生窗口 harness 也模拟不了。
+
+**修复：截图印着旧版本号**
+
+★ `make_harness.py` 的 `VERSION` 是**生成时**从 `tauri.conf.json` 读进去烤死的，
+所以**提版之后拍的截图仍然印上一版号**，而这不报任何错。v1.4.0 随 README 发出去的两张新截图
+印的是 `v1.3.0`，用户据此以为「本机没更新」，而部署产物的 Info.plist 明明已经是 1.4.0。
+
+- 重新生成 `docs/screenshots/07-rotation.png` / `08-rotation-tip.png`（现印 v1.4.1）。
+- 发版铁律加一条 `CLAUDE.md` §3.5：**改完版本号必须重跑 `make_harness.py` 再拍截图**，
+  顺序是 改版本号 → `vite build --outDir uishot/app` → `make_harness.py` → 截图。
+
+**结论：`codex resume` 少条目不是本仓库的 bug**
+
+用户报「session 丢失严重…现在变成两条」。实测：全局可 resume 数仍是 **239**，一条没少 ——
+`codex resume` **默认只列当前目录的会话**。各目录：`~` 148 · `cluster-ui-harness` 28 ·
+`cc_test` 22 · **`erp-system-v3` 2**（与用户看到的对上）· **本仓库 0**。
+本仓库目录下 88 个 thread 全是 `exec`/subagent，**一个交互式会话都没有**（这里的 codex 调用
+都是 `omc ask codex` 这类一次性 exec，本就不该进 picker）。跨目录用 `codex resume --all`。
+
+---
+
 ### v1.4.0 — 代理轮换泳道 · Plus 优先 Pro 保底 · 按号开关轮换 — 2026-09-07
 
 > 本版合并了开发期的两次本地构建（v1.3.0+1 / +2），下面按主题重排；那两节的原文保留在后面。
