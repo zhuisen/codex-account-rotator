@@ -1,36 +1,36 @@
-"""`cxp resume/fork` 的路由与「开场挑最满的号」(2026-09-06)。
+"""`cxp` 的路由:**所有子命令一律走代理**(2026-09-07)。
 
-## 缺口
+## 来历
 
-用户:「我通过 `codex resume` 进去具体的任务，不是走代理的，而是连具体的号的，
-因此号额度没了就停任务了，没得自动切号。」
+用户报「`codex resume` 进去的任务号额度没了就停,没得自动切号」,然后一句话点破:
+「走的是代理的端口样式,代理的端口调用不同的号做到自动轮换的效果」——
+原来的设计本来就是对的,只是 `resume`/`fork` 被排除在外了。
 
-`cxp` **有意**让 resume/fork 绕过代理:codex 给每个会话盖 `model_provider` 戳记，
-而 resume 的 **picker 只列当前 provider 的会话** —— 走代理就看不到 `openai` 戳记的历史
-(实测最近 200 个会话:openai 54.5% / rotateproxy 45.5%,这个代价是真的)。
-代价是整段会话钉在一个号上,中途换不了(`AuthManager` 缓存凭证)。
+代理这条路一举解决两件事:
+  ① **逐请求轮换** —— 代理按额度挑号,烧完一个自动换下一个;
+  ② **关掉 WS 直连** —— codex 的 `responses_websocket` 硬编码 `wss://chatgpt.com`、
+     不认 `base_url`;`[model_providers.rotateproxy]` 设了 `supports_websockets = false`,
+     而**内置 provider 把它硬编码成 true 且不可覆盖**
+     (`merge_configured_model_providers` 对内置 id 用 `or_insert`)。
+     所以「不走代理」= WS 必开 = 单号烧到停。
 
-## 修法(两条,各自零代价)
+## 代价(已知、已量,不是 bug)
 
-★ **那条 picker 限制只在「不带 session id」时才付。** 带了 id,picker 根本不参与:
+resume picker 按 provider **逐字**过滤(`ProviderMatcher::matches`),`openai` 戳记的
+历史会话不出现在列表里 —— **不是消失**,`codex resume <id>` 照样能进。
+实测 2026-09-07(4179 个会话):最近 50 个里 rotateproxy 占 **76%**、最近 500 个占 64%,
+往后新会话全是 rotateproxy 戳记。
 
-    带 id  → 走代理,拿到逐请求轮换。**零代价**。
-    不带 id → 保持直连(picker 完整),但**开场先切到额度最充裕的号**。
+## ★★ 一条走过的弯路,别再试
 
-## ★★ 「最充裕」必须按**最紧的窗口**判
+曾新建 `openai-nows` provider 当默认、只关 WS 不走代理。它错在**没有任何存量会话
+带这个戳记**,于是 picker **直接空了**(不是变短)。provider 过滤是逐字相等的,
+换 id 就等于清空列表。已回滚。
 
-`primary` 是槽位名不是窗口时长(Plus 的 primary 是 5h、Pro 的是周)。于是一个
-**周额度 100% 烧光、但 5h 窗口刚重置回 0%** 的号,按 primary 看是全池最空的 ——
-本机 plus3 实测就是这样被 `proxy.py::_used()` 排到第一位的。
-本仓 8 月已在 UI 层定过这条(`helpers.ts`「单个汇总数字一律取最紧的窗口」)。
-⚠️ `proxy.py::_used()` **仍是旧口径**,那处 docstring 明写「要改先定策略」,不在本次范围。
+## `_headroom` / `_pick_best` 为什么还留着
 
-## 未做(依赖未决)
-
-「resume 全部走代理」要先确认 codex 的 WS 通道真被 `supports_websockets = false` 关掉了
-(`responses_websocket` 硬编码 `wss://chatgpt.com`、不认 `base_url`)。
-没确认之前全量改路由 = 轮换没拿到、picker 还白白变短。判定见
-`scratch/verify_ws_bypass_20260906.py`。
+`codex-rotate switch --best` 仍是有用的手动入口(按**最紧窗口**判、只看 Plus),
+只是不再由 `cxp` 自动调用 —— 走代理之后"开场挑一个号"已无必要,代理每个请求都在挑。
 """
 import importlib.machinery
 import importlib.util
@@ -171,40 +171,37 @@ class CxpRouting(unittest.TestCase):
         self.assertTrue(m, "cxp 没能走到 codex：%s / %s" % (p.stdout[-300:], p.stderr[-300:]))
         return m[-1][len("ROUTE: "):]
 
-    def test_picker_mode_stays_direct(self):
-        for args in (("resume",), ("fork",), ("resume", "--last"), ("resume", "--all")):
-            with self.subTest(args=args):
-                self.assertNotIn("--profile rotateproxy", self.route(*args),
-                                 "picker 模式走了代理 —— 会看不到 openai 戳记的历史会话")
-
-    def test_explicit_session_id_goes_through_the_proxy(self):
-        for args in (("resume", "01a0763a-f6f"), ("fork", "abc123"),
-                     ("resume", "--all", "01a0763a-f6f")):
+    def test_every_subcommand_goes_through_the_proxy(self):
+        """★★ **没有例外分支。** resume/fork 曾被排除在外,代价就是那条会话钉死在
+        一个号上、且 WS 必开(内置 provider 硬编码 supports_websockets=true 且不可覆盖)。"""
+        for args in (("resume",), ("fork",), ("resume", "--last"), ("resume", "--all"),
+                     ("resume", "01a0763a-f6f"), ("fork", "abc123"), ("exec", "hi"), ()):
             with self.subTest(args=args):
                 self.assertIn("--profile rotateproxy", self.route(*args),
-                              "带了 session id 却没走代理 —— 白白放弃了零代价的轮换")
+                              "%s 没走代理 —— 那条会话拿不到轮换,且 WS 会绕开代理" % (args,))
 
-    def test_everything_else_still_goes_through_the_proxy(self):
-        self.assertIn("--profile rotateproxy", self.route("exec", "hi"))
-
-    def test_switch_failure_does_not_block_resume(self):
-        """★★ 「开场挑最满的号」只是优化。store 不存在时它必然失败,
-        而 resume **仍须照常启动** —— 一个优化把主功能挡死是最糟的形态。"""
-        self.assertEqual(self.route("resume"), "resume")
-
-
-class SwitchBestIsWiredIn(unittest.TestCase):
-    def test_cxp_calls_switch_best_in_picker_mode(self):
+    def test_no_leftover_exception_branch(self):
+        """★ 源码里不许再出现「resume 直连」那条分支。剥注释后查 ——
+        注释里正解释着这段历史,对着原文匹配会恒绿。"""
         src = "\n".join(l for l in CXP.read_text(encoding="utf-8").splitlines()
-                        if not l.lstrip().startswith("#"))
-        self.assertIn("switch --best", src)
-        # ★ 必须容错:`|| true`,否则挑号失败会让 resume 起不来
-        i = src.index("switch --best")
-        self.assertIn("|| true", src[i:i + 120], "挑号失败没有兜底 —— 会挡住 resume")
+                         if not l.lstrip().startswith("#"))
+        self.assertNotIn("resume|fork", src, "例外分支还在")
+        self.assertEqual(src.count("exec command codex"), 1,
+                         "有多于一条 exec 路径 —— 说明还有分支")
+
+
+class SwitchBestStillWorksAsAManualEntry(unittest.TestCase):
+    """`switch --best` 不再被 cxp 自动调用,但仍是有用的手动入口 —— 保留并继续守它的口径。"""
 
     def test_cli_exposes_the_flag(self):
-        src = (ROOT / "codex-rotate").read_text(encoding="utf-8")
-        self.assertIn('"--best" in args', src)
+        self.assertIn('"--best" in args', (ROOT / "codex-rotate").read_text(encoding="utf-8"))
+
+    def test_cxp_no_longer_calls_it(self):
+        """★ 走代理之后「开场挑一个号」已无必要 —— 代理每个请求都在挑。
+        留着调用只会在每次 resume 前多起一个 python、还会改 active 号。"""
+        src = "\n".join(l for l in CXP.read_text(encoding="utf-8").splitlines()
+                         if not l.lstrip().startswith("#"))
+        self.assertNotIn("switch --best", src)
 
 
 if __name__ == "__main__":

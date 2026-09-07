@@ -28,38 +28,27 @@
 export NO_PROXY="127.0.0.1,localhost,::1${NO_PROXY:+,$NO_PROXY}"
 export no_proxy="$NO_PROXY"
 
-# ── resume / fork 的两条分支（2026-09-06，用户报「resume 进去的任务号额度没了就停，没得自动切号」）
+# ── resume / fork 也走代理（2026-09-07，用户：「走的是代理的端口样式，代理的端口调用不同的号
+#    做到自动轮换的效果」——原来的设计本来就是对的，只是 resume 被排除在外了）
 #
-# 上面那条 EXCEPTION 的代价是真的：整段 resume 会话钉在**一个**号上，中途换不了
-# （`AuthManager` 缓存凭证，改 auth.json 对已在跑的进程不保证生效）。
-# 但那条 picker 限制**只在不带 session id 时才付**——带了 id，picker 根本不参与。
+# 代理这条路一举解决两件事：
+#   ① **逐请求轮换** —— 代理按额度挑号，一个烧完自动换下一个。这正是 resume 缺的。
+#   ② **关掉 WS 直连** —— codex 的 `responses_websocket` 端点硬编码 `wss://chatgpt.com/...`、
+#      **不认 base_url**，走它的 turn 完全绕过代理、只烧 auth.json 那一个号。
+#      `~/.codex` 里 `[model_providers.rotateproxy]` 设了 `supports_websockets = false`
+#      （闸在 codex 源码 `client.rs::responses_websocket_enabled()`：
+#       `if !info().supports_websockets { return false }`），而**内置 provider 把它硬编码成 true
+#      且不可覆盖**（`merge_configured_model_providers` 对内置 id 用 `or_insert`）。
+#      所以「不走代理」= WS 必开 = 单号烧到停。
 #
-#   带 id  → 走代理，拿到逐请求轮换。**零代价**：没有 picker，就没有 provider 过滤问题。
-#   不带 id → 保持直连（picker 列全部历史），但**开场先切到额度最充裕的号**，
-#            按「最紧窗口」判而不是 primary（一个周额度烧光、5h 刚重置的号，
-#            按 primary 看是全池最空的——本机 plus3 实测就是这样）。
-#            中途仍然切不了，但从 66% 开场比从 5% 开场撑得久得多。
+# ⚠️ 代价（已知、已量）：resume picker 按 provider **逐字**过滤
+#    （`ProviderMatcher::matches`，filters = [当前 provider]），所以 `openai` 戳记的
+#    历史会话不出现在列表里。**不是消失** —— `codex resume <session-id>` 照样能进。
+#    实测本机（2026-09-07，4179 个会话）：最近 50 个里 rotateproxy 占 **76%**、
+#    最近 500 个占 64%，往后新会话全是 rotateproxy 戳记，比例只增不减。
 #
-# ⚠️ **为什么不干脆全部走代理**：那要先确认 codex 的 WS 通道
-# （`responses_websocket` 硬编码 wss://chatgpt.com、不认 base_url）真的被
-# `supports_websockets = false` 关掉了。没确认之前全量改路由，等于轮换一点没拿到、
-# picker 还白白变短。判定脚本：`scratch/verify_ws_bypass_20260906.py`。
-ROT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/codex-rotate"
-
-case "$1" in
-    resume|fork)
-        sub="$1"; shift
-        # 第一个非 `-` 开头的参数就是 SESSION_ID / 名字（见 `codex resume --help`）
-        has_id=0
-        for a in "$@"; do
-            case "$a" in -*) ;; *) has_id=1; break ;; esac
-        done
-        if [ "$has_id" = 1 ]; then
-            exec command codex --profile rotateproxy "$sub" "$@"
-        fi
-        # picker 模式：开场挑最满的号。★ 失败绝不能挡住 resume —— 这只是优化，不是前置条件。
-        python3 "$ROT" switch --best 2>/dev/null || true
-        exec command codex "$sub" "$@" ;;
-    *)
-        exec command codex --profile rotateproxy "$@" ;;
-esac
+# ★★ 曾经试过第三条路并**已回滚**：新建一个 `openai-nows` provider 当默认、只关 WS 不走代理。
+#    它错在**没有任何存量会话带这个戳记**，于是 picker 直接**空了**（不是变短）。
+#    provider 过滤是逐字相等的，换 id 就等于清空列表 —— 别再试这个方向。
+# 所有子命令一视同仁 —— 不再有例外分支。
+exec command codex --profile rotateproxy "$@"

@@ -76,6 +76,40 @@
 
 ---
 
+### v1.3.0 — resume 回到代理；一段过期三个月的注释把人带进沟里 — 2026-09-07
+
+**修复**
+
+- **`codex resume` 的会话烧完一个号就停**（B36）。真因是两层叠加：codex 的 WebSocket 通道
+  硬编码上游、不认 `base_url`，而关它的 `supports_websockets` 在**内置 provider 上硬编码 `true`
+  且不可覆盖**。⇒「不走代理」= 「WS 直连」= 「单号烧到停」是同一件事。
+  `cxp` 恢复成**所有子命令一律走代理**（即 2026-06-13 之前的原始形态），轮换与关 WS 一并解决。
+- 回滚了一条走错的路（B37）：新建 provider 当默认会让 `codex resume` 列表**直接清空**，
+  因为 picker 按 provider 逐字过滤而存量会话没有新戳记。
+
+**文档**
+
+- 新增 `docs/README.md`（索引 + 公开/内部两层的说明）· `docs/ARCHITECTURE.md`（两条互不相干的
+  链路、额度窗口的两个易混概念）· `docs/TROUBLESHOOTING.md`（症状 → 判据 → 处置，全部带实测证据）。
+- CHANGELOG 新增 **B36 / B37**，含四个被证据否掉的假设 —— 写出来是为了让人别再走一遍。
+
+**★ 这一版真正的教训**
+
+`cxp` 里那段解释「resume 为什么不走代理」的注释，被当成不可动的设计约束用了整整一轮。
+一条 `git log -S` 就能看到它是三个月前的权衡，**注释里还带着当时的实测数据（89 个 openai
+会话 vs 1 个 rotateproxy）**——而 2026-09-07 实测最近 50 个里 rotateproxy 已占 **76%**。
+同一个取舍，数据变了，答案早该翻。
+
+⇒ **看到解释性注释，先查它是什么时候、基于什么数据写的。** 本仓自己的优先级规则
+（代码 > 带实测数据的结论 > 文档）本就该防住这件事。
+
+**验证**：427 条测试 · `npm run build` · 文档链接含锚点全部可达 · 变异验证（把 resume 例外
+分支加回去）7 条断言变红。
+
+⚠️ **四方评审的 14 条发现（2 critical / 4 high）本版未修**，清单在 `memory.md` §0a。
+
+---
+
 ### v1.2.0 — 把三个「拿一次观测当成保证」的地方换成账本 — 2026-09-06
 
 这一版的五件事各自独立，但错法是同一种：**用某一刻的观测去替代一个会变的量**。
@@ -1752,6 +1786,54 @@ plus6 周已用 9.0% → 10.0%,captured_at=00:41:37
 **根因**：`StackedArea` 的 `key` 只有档位，不含数据身份。`useTraffic` 每 2 分钟**原地换 labels/layers 不换实例**，而日线档窗口是「截止今天的连续 N 天」，**一过午夜整窗滑一格**。组件内的钳位只防越界，滑动后索引仍在范围内，一个字都拦不住。
 
 **修法**：`key` 带 `labels[0]`。用它而不是 `labels.length` —— 今日档按小时**追加**，长度变但索引不移位，不该因此丢 hover。
+
+### B36 · `codex resume` 的会话烧完一个号就停，自动切号救不了 — 2026-09-07 ✅修
+
+**症状**：用户报「开了自动切号，CLI 跑一半还是额度过了，然后停止，我还得结束会话重新开启新的会话才能用」。
+
+**排查路上被证据否掉的四个假设**（都写出来，免得有人再走一遍）：
+
+1. 「池子耗尽、代理返 503」—— `no usable account` 日志里**零次**（`grep -c 503` 得 125 是 hex id 子串，假阳性）。
+2. 「用户在用 resume 绕过代理」—— 当天 280 轮里 272 轮走了代理（97%）。★ 这个论证**本身是错的**：全天总数比证明不了某个**具体会话**走没走代理，是 codex 评审指出来的。
+3. 「SSE 流内错误事件」—— 当天全部 rollout 里 `error/stream_error/turn_failed/...` **零条**。
+4. 「会话粘性钉死在耗尽的号」—— `_pick` 的 `conv` 分支确实先过 `ok()`。
+
+**真因（两层，缺一层都解释不通）**：
+
+① codex 有一条 **WebSocket 响应通道** `codex_api::endpoint::responses_websocket`，它**硬编码 `wss://chatgpt.com/backend-api/codex/responses`、不认 `base_url`**。实测 `~/.codex/logs_2.sqlite`：近 3 天 **124 次 WS 连接，124 次全部直连公网、0 次到 127.0.0.1:8011**；抽样 10 个 WS thread，**8 个 provider 写着 `rotateproxy`**。这些 turn 从没经过代理 ⇒ 没有轮换，只烧 `auth.json` 那一个号。近 7 天 `You've hit your usage limit` **29 次**。
+
+② 关掉它的开关是 provider 的 `supports_websockets`（闸在 `client.rs::responses_websocket_enabled()`：`if !info().supports_websockets { return false }`），但**内置 provider 把它硬编码成 `true` 且不可覆盖** —— `merge_configured_model_providers` 对非 Bedrock 的 key 用 `entry(key).or_insert(provider)`，内置 id（`openai`/`ollama`/`lmstudio`/`bedrock*`）配了也被忽略。
+
+⇒ **「不走代理」本身就等于「WS 必开」**。而 `cxp` 自 B37 那次改动起把 `resume`/`fork` 排除在代理之外，两者叠加就是「resume 会话钉死一个号、烧完即停」。
+
+**修法**：`cxp` 恢复成**所有子命令一律 `--profile rotateproxy`**（即 2026-06-13 之前的原始形态）。`[model_providers.rotateproxy]` 上的 `supports_websockets = false` 于是生效，轮换与关 WS 一并解决。
+
+**⚠️ 一个被自己的注释误导的教训**：`cxp` 里那段解释 resume 例外的注释被我当成了不可动的设计约束、反复引用。**一条 `git log -S 'resume|fork' -- proxy/cxp` 就能看到它是三个月前的一次权衡，附带当时的实测数据（89 个 openai 会话 vs 1 个 rotateproxy）**，而那个数据早已过期（2026-09-07 实测：最近 50 个里 rotateproxy 占 **76%**）。本仓自己的优先级规则是「代码 > 带实测数据的 CHANGELOG 结论 > 文档」，我没按它做。
+
+### B37 · 换默认 provider id 让 `codex resume` 列表**直接清空** — 2026-09-07 ✅已回滚
+
+**症状**：用户报「不是列表变短了，是直接没有了」。
+
+**根因**：为绕开上面那条「内置 provider 不可覆盖」，我新建了一个 `openai-nows` provider 当默认、只关 WS 不走代理。但 resume picker 按 provider **逐字**过滤：
+
+```rust
+fn matches(&self, session_provider: Option<&str>) -> bool {
+    match session_provider {
+        Some(provider) => self.filters.iter().any(|c| c == provider),
+        None => self.matches_default_provider,
+    }
+}
+```
+
+filters = `[当前默认 provider]`，而**存量会话没有一个带 `openai-nows` 戳记** ⇒ 匹配数必然 0 ⇒ 列表空。
+
+**⚠️ 教训**：我读到了正确的源码，却**没把它的后果算到底** —— 还把它说成「列表会变短」。换 provider id 就等于清空 picker，**别再试这个方向**。
+
+**已回滚**：`~/.codex/config.toml` 恢复（备份 `config.toml.bak-20260907-152043`）。改动留档 `/tmp/cfg-nows-keep.toml`。
+
+★ 顺带记下两个**验证**层面的坑：
+- 第一次「验证配置是否生效」我塞了个虚构键 `zzz_bogus_key_probe`，**codex 也不报错** ⇒ 它对未知配置键静默忽略，「没报错」什么都证明不了。真正有判别力的对照是**写一个不存在的 provider id**，那会报 `Model provider not found`。
+- 第二次用 `codex exec` 验「WS 是否还发生」，实验组 0 条 —— 但**对照组（内置 provider）也是 0** ⇒ `exec` 这条路本来就不用 WS，测试**两边都没有判别力**。WS 只在交互式会话里发生（331 条记录 / 69 个进程，其中 30 个有 TUI 日志，`exec` 一条都没有）。
 
 ## 已知待办 / cleanup
 - ~~`_run_codex_ping`/`_codex_running`/`CODEX_BIN`/`LOCK` dead code~~ → B21 已删。
