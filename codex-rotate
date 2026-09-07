@@ -874,10 +874,64 @@ def cmd_list(args):
         print(f"  [{slot.get('label', '?'):<8}] {who:<26} {' '.join(flags)}{_qfmt(slot.get('quota'))}{_credit_fmt(slot)}")
 
 
+def _headroom(slot):
+    """这个号还剩多少 —— 取它**最紧**窗口的剩余百分比。读不到返回 None。
+
+    ★★ **必须取最紧的窗口，不能只看 `primary`。** `primary` 是槽位名不是窗口时长：
+      Plus 的 primary 是 5h、Pro 的 primary 是周。于是一个「周额度 100% 烧光、但 5h 窗口
+      刚重置回 0%」的号，按 primary 看是全池最空的 —— 实测本机 plus3 就是这样被
+      `proxy.py::_used()` 排到第一位的。
+    ★ 本仓 8 月已在 UI 层定过这条（`helpers.ts`「单个汇总数字一律取最紧的窗口」，
+      用 `windows[0]` 等于把真正的约束藏起来）。这里是同一条规则的第三处实现。
+      ⚠️ `proxy.py::_used()` **仍是旧口径**，那处 docstring 明写「要改先定策略」，
+      不在本次范围内 —— 别以为改了这里那边就跟着好了。
+    """
+    q = slot.get("quota") or {}
+    best = None
+    for key in ("primary", "secondary"):
+        w = q.get(key) or {}
+        if not _win_real(w):
+            continue
+        used = w.get("used_percent")
+        if used is None:
+            continue
+        rem = 100.0 - float(used)
+        if best is None or rem < best:
+            best = rem
+    return best
+
+
+def _pick_best(s):
+    """额度最充裕的存活号 → aid。全都读不到额度时返回 None(**不猜**)。"""
+    cands = []
+    for aid, sl in (s.get("slots") or {}).items():
+        if sl.get("auth_dead") or (sl.get("cooling_until") or 0) > time.time():
+            continue
+        h = _headroom(sl)
+        if h is not None:
+            cands.append((h, aid))
+    if not cands:
+        return None
+    return max(cands)[1]
+
+
 def cmd_switch(args):
     s = _state()
     _syncback(s)
-    if args:
+    if "--best" in args:
+        # ★ 给 `cxp resume` 的开场用:resume **不走代理**(codex 的 picker 按 provider 过滤,
+        #   走代理就看不到 openai 戳记的历史会话),所以整段会话钉在**一个**号上,中途换不了
+        #   —— `AuthManager` 缓存凭证,改 auth.json 对已在跑的进程不保证生效。
+        #   既然中途切不了,那就**开场挑最满的**,让它撑得久一些。
+        target = _pick_best(s)
+        if not target:
+            print("switch --best: 没有可读额度的存活号，保持当前号不变")
+            return
+        if target == s.get("active"):
+            lbl = s["slots"][target].get("label", "?")
+            print(f"switch --best: 当前号 [{lbl}] 已是最充裕的（剩 {_headroom(s['slots'][target]):.0f}%），不动")
+            return
+    elif args:
         key = args[0]
         target = _resolve_slot(s, key)
         if not target:

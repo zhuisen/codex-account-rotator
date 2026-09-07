@@ -129,8 +129,17 @@ class RemoteBusyActuallyRenders(unittest.TestCase):
             cls.probe = dom(BASE + "/harness.html?nav=home&rail=open&grok=ok")
         except Exception as e:                      # noqa: BLE001
             raise unittest.SkipTest("harness 不可达: %s" % e)
+        # ★★ **「服务没起来」和「页面渲染不出东西」必须分开** —— 后者正是本仓
+        #    反复栽的那种假绿(页面零渲染,而零渲染量出来是"零溢出、零报错"),
+        #    跳过它等于把一个真缺陷当成环境问题放走。
+        #    判据:Chrome 拿不到页面时会渲染自己的错误页(`class="neterror"`)。
+        if 'class="neterror"' in cls.probe or "<title>__PROBE__" not in cls.probe:
+            raise unittest.SkipTest(
+                "harness 静态服务没在跑（devport codexbar 的 3304），跳过行为闸")
         if "刷新全池" not in cls.probe:
-            raise unittest.SkipTest("harness 没渲染出按钮，跳过")
+            raise AssertionError(
+                "harness 可达、探针也在，但页面里没有「刷新全池」按钮 —— "
+                "这是**渲染缺陷不是环境问题**，不许跳过")
 
     def test_baseline_is_idle(self):
         """★ 先证明基线是"没在转" —— 否则下面那条在"恒显示刷新中"时也会绿。"""
