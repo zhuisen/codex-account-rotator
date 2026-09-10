@@ -1029,7 +1029,18 @@ class Handler(BaseHTTPRequestHandler):
             return
         except Exception as e:
             if self._billable():
-                _bump("stream_aborts")
+                # ★★ **中转站泳道用自己的计数器**（2026-09-10 改）。
+                #    `stream_aborts` / `committed_aborts` 的**存在理由**是量化账号池那条
+                #    路径上的**双计费**风险：那条路有 failover，一次断流之后可能重试到
+                #    另一个号，于是同一次生成被两个号各计一次费。
+                #    中转站这条路**没有 failover**（单上游、`"NEXT"` 是终态），
+                #    一次断流的含义完全不同：钱已经从余额扣了、不会再扣第二次。
+                #    混进同一个键有两个后果，都不出声：
+                #      ① 账号池的双计费指标被中转站的噪音稀释，"这个月发生了多少次"不再可信；
+                #      ② 中转站自己的失败率没有任何地方汇总。
+                #    ⚠️ 键名带 `relay_` 前缀，**不要**改成嵌套结构 —— `state.json` 的
+                #      `proxy_counters` 是扁平表，嵌套会让既有读者拿到 dict 而不是 int。
+                _bump("relay_stream_aborts")
             _plog(f"relay stream err [{label}]: {e}", rid)
             if not streamed:
                 try:

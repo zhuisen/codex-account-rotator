@@ -81,7 +81,8 @@ CACHE = _STORE / ".traffic-cache.json"
 CACHE_V = 1
 # ★ 改任何 _scan_* 的解析逻辑(改变 rows 里存什么/怎么算)必须 +1,否则那些此生不再变 mtime 的文件
 #   会永远沿用旧结果,产出一份新旧混血、无法察觉的数据集。
-PARSER_V = 10         # +1 于 2026-09-09:agy 主源换成原生 SQLite(覆盖率 15.9% -> ~100%)
+PARSER_V = 11         # +1 于 2026-09-10:agy 时间戳改用 last_step_index 精确 join(4.4% 的记录换了日子)
+# PARSER_V = 10       # 2026-09-09:agy 主源换成原生 SQLite(覆盖率 15.9% -> ~100%)
 # PARSER_V = 9        # 2026-09-09:codex row 多第 8 位 = model_provider(账号池/中转站分账)
 #                       ★ 必须 +1:旧缓存里的 codex 行没有这一位,只有版本号能逼它重解析。
 #                       codex 无增量解析(整文件重跑),代价只是冷路径重解 ~3.6k 个 rollout,秒级。
@@ -899,25 +900,69 @@ def _scan_agy_db(path):
             if "no such table" in str(e).lower():
                 return rows
             raise ScanReadError("查不了 %s: %s: %s" % (path, type(e).__name__, e)) from e
-        # 第 k 个 `step_type=15` 的时间戳 ↔ 第 k 条 gen_metadata。
-        ts_list = []
-        for stype, meta in steps:
-            if stype != 15 or not meta:
-                continue
-            t = None
+        # ★ 某个 step 的时间戳（`metadata → f1.f1`，epoch 秒）。
+        def _step_ts(i):
+            if not (0 <= i < len(steps)) or not steps[i][1]:
+                return None
             try:
-                f1 = _pb(meta).get(1)
+                f1 = _pb(steps[i][1]).get(1)
                 if f1 and isinstance(f1[0], (bytes, bytearray)):
                     v = _pb(f1[0]).get(1)
-                    if v and isinstance(v[0], int):
-                        t = v[0]
+                    if v and isinstance(v[0], int) and 1.6e9 < v[0] < 4e9:
+                        return v[0]
             except Exception:
-                t = None
-            ts_list.append(t if isinstance(t, int) and 1.6e9 < t < 4e9 else None)
+                pass
+            return None
+
+        # ★★★ **时间戳靠 `last_step_index` 精确 join，不再按序数猜**（2026-09-10 改）。
+        #
+        #   原来是「第 k 个 `step_type=15` ↔ 第 k 条 gen_metadata」—— 一个**猜测**。
+        #   实测 263 个库 3758 条 gen：`gen.f1.f20` 里带一个 kv 列表，其中有
+        #   `last_step_index`，而 **`last_step_index + 1` 落在一个 `step_type=15` 上
+        #   的比例是 3758/3758 = 100%**，时间戳也 100% 解得出。
+        #   与序数猜测**有 164 条（4.4%）不一致** —— 那 4.4% 现在拿的是别人的时间戳，
+        #   足以把用量记到错的日子，而画出来完全正常。
+        #
+        #   ⚠️ 我为这条结论探错了两次，留档防再犯：
+        #     ① `inner.get(20)` 拿到的是 **bytes**（wire type 2）不是 int，
+        #        我用 `isinstance(v[0], int)` 过滤 ⇒ 数出来 0 条，差点判成"不存在"；
+        #     ② f20 是**重复字段**，一条 gen 有多个 kv，要遍历不是取 `[0]`。
+        #   判据：先把所有字段号统计出来证明自己在看正确的层（见 CLAUDE.md §7.-1 ①）。
+        #
+        #   序数猜测保留为兜底：`last_step_index` 缺失/畸形时行为与改动前逐字相同。
+        ts_list = [_step_ts(i) for i, (stype, _) in enumerate(steps) if stype == 15]
+
+        def _lsi(inner):
+            """`f1.f20` 的 kv 列表里的 `last_step_index`。拿不到返回 None。"""
+            for b in inner.get(20, []):
+                if not isinstance(b, (bytes, bytearray)):
+                    continue
+                try:
+                    d = _pb(bytes(b))
+                    k_, v_ = d.get(1, [b""])[0], d.get(2, [b""])[0]
+                except Exception:
+                    continue
+                if (isinstance(k_, (bytes, bytearray))
+                        and k_.decode("utf-8", "replace") == "last_step_index"
+                        and isinstance(v_, (bytes, bytearray))):
+                    t = v_.decode("utf-8", "replace")
+                    if t.lstrip("-").isdigit():
+                        return int(t)
+            return None
+
         for k, (blob,) in enumerate(gens):
             if not blob:
                 continue
-            ts = ts_list[k] if k < len(ts_list) else None
+            try:
+                _top = _pb(blob)
+                _inner = _pb(_top[1][0]) if 1 in _top else {}
+            except Exception:
+                _inner = {}
+            _i = _lsi(_inner)
+            ts = _step_ts(_i + 1) if _i is not None else None
+            if ts is None:
+                # 兜底：`last_step_index` 缺失时退回序数猜测（改动前的行为）。
+                ts = ts_list[k] if k < len(ts_list) else None
             if ts is None:
                 # ★ 拿不到时间戳的**整条丢掉**,不拿文件 mtime 顶替 ——
                 #   那会把一整段历史压进"今天",而它看起来完全正常。

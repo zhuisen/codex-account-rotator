@@ -153,6 +153,28 @@ export const MODEL_COLORS: Record<string, string> = {
   "kimi-code/k3":     "#f472b6",
   "kimi-code/k3-256k": "#f9a8d4",
   "kimi-code/k2":     "#c2557f",
+
+  // ★★ Antigravity(agy)。平台色是蓝 `#4d9fff`,同色系内按新旧深浅排开。
+  //
+  //    **必须手工登记,不能靠散列兜底** —— 实测本机 263 个会话库里 agy 用过 7 个模型 id,
+  //    散列到 10 色盘上**撞了 3 对**,而撞的恰好是最需要区分的那几对:
+  //      gemini-3.7-flash  与 gemini-3.7-flash-tiered   同 #f472b6
+  //      gemini-3.8-flash  与 gemini-3.6-flash-tiered   同 #e879f9
+  //      gemini-pro-c      与 gemini-3.1-pro-low        同 #facc15
+  //    两条同色的带子在堆叠图上是一条,**不会报任何错**（本仓 `assign_colors` 为泳道
+  //    加线性探测正是为了这个,而 `modelColor` 这一侧没有）。
+  //    ⚠️ 散列兜底本身没问题(它保证同名恒同色、且不含灰);问题是**同时在场**的模型
+  //    一多就必然撞 —— 生日悖论,7 个进 10 色盘撞车概率已接近 9 成。
+  //    agy 的模型集合是可枚举的,所以这里直接登记。
+  "gemini-3.8-flash":        "#4d9fff",
+  "gemini-3.7-flash":        "#7cb8ff",
+  "gemini-3.7-flash-tiered": "#2f7fd6",
+  "gemini-3.6-flash-tiered": "#1f5c9e",
+  // ★ pro 系另起一个色相（青绿），别用紫 —— 紫是 grok 家族的。
+  "gemini-pro-c":            "#3fd0c9",
+  "gemini-3.1-pro-low":      "#1d8f8a",
+  // agy 也会转发 Claude —— 用与 Claude 家族**同一枚**颜色,跨平台同模型同色。
+  "claude-opus-4-6-thinking": "#6E5138",
 };
 /** 平台品牌色(交接稿 §0/§10)。导航激活态、图层、图例、卡片描边统一走这里。 */
 /**
