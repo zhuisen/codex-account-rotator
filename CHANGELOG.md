@@ -2449,9 +2449,19 @@ Fable 评审 40 条 + 四方评审 9 条，全部处理完。17 个 commit 未�
   99.5% 是 cargo 构建产物、0.5% 是官方源码解包，**无独一无二信息**（补丁 + 34 个文件锚点哈希 +
   上游 commit 全在 `scripts/native-resume/`）。删除用点名 `rm -rf <dir>`、**不带通配符**，
   并做逐名比对确认只少目标一项。
-- ⏳ **17 个 commit 未发版**（`b75621c`…`6977fe0`，2026-09-10）。版本串仍是 `v1.4.1`。
-  按本仓发版规则这批该走 **`Y` 级（v1.5.0）**：架构级 UI 重做 + 两个安全修复 +
-  一个会改数字的解析器版本（PARSER_V 10→11）。**未推**，等用户发话。
+- ~~v1.5.0 的跨平台产物~~ → **已确认 success**（release workflow `34461451417`，7m27s，
+  macOS + Windows 两个 runner）。三个 SHA 一致只证明本地/远端/tag 对齐，
+  **不证明产物构建成功** —— 这条规则本身留着。
+- ⚠️ **`v1.5.0` 这个 tag 指向的 commit，其 `ci` 作业是红的**（`34461445099`）。修复在紧随其后的
+  `c22da6d`（CI 已绿）。**不重打 tag** —— 产物构建（`release` 作业）是成功的，红的是
+  三条 macOS-only 的测试假设 + 一条 `exec command` 的可移植性，对 macOS/Windows 用户零影响。
+  真正的教训见下一条。
+- ★★★ **CI 自 2026-09-08 起一直是红的，而没人看见** —— 因为那之后没发过版，
+  而我每次只在本机跑 pytest。两个叠加的原因：① CI 跑 `unittest discover`（856 条）而本地跑
+  pytest（879 条），**23 条从来没被 CI 守过**；② 三条测试携带 macOS-only 假设
+  （`plutil` / `/usr/bin/command` / 本机得有 codex rollout），在 ubuntu runner 上必红。
+  已改成**同一条命令**（CI 装 pytest 跑 `pytest tests/ -q`）。
+  **两条不同的命令 = 两个不同的门，而只有一个会红。**
 - ⏳ **`resume_provenance.mark_proxy_session` 全仓无调用者** —— marker 从来没人写，`.proxy-sessions-v1/` 是空的。
   归属判定实际全靠 `payload.model_provider == "rotateproxy"` 这条主判据。模块与 `codex-rotate:399` 的
   接线留着（无害、测试全绿），但**别当它在工作**。
