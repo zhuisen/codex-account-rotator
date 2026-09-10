@@ -63,7 +63,21 @@ def cmd_usage(_argv):
             prev = json.loads(snap.read_text(encoding="utf-8"))
     except Exception:
         prev = None
-    data = monitor.collect(prev=prev)
+    try:
+        data = monitor.collect(prev=prev)
+    except Exception as e:
+        # ★★★ **崩溃也不许烧掉历史。** 这个 payload 会被 Rust 原样写成
+        #    `.relay-usage.json`（lib.rs 只看「exit 0 且非空」），而 `out()` 恒 0 退出 ——
+        #    于是一次异常就把累积的用量历史整份换成一个没有 `relays` 的错误对象，
+        #    下一轮 `prev` 里已无任何中转站，滑出上游窗口的日子**永久消失**。
+        #    「读不到」绝不能覆盖「已读到」——本仓 CLAUDE.md §7.0b。
+        traceback.print_exc(file=sys.stderr)
+        keep = prev if isinstance(prev, dict) and prev.get("relays") else None
+        payload = dict(keep) if keep else {"relays": [], "route": store.route_status()}
+        payload.update(ok=False, state="crashed",
+                       detail=f"{type(e).__name__}: {e}",
+                       stale=bool(keep))
+        return out(payload)
     # ★ monitor 自己不写配置（读路径里写 = 与 UI 的 set 抢同一份文件、丢更新）。
     #   探到的计费端点在这里落盘 —— 单点、有序。
     for r in data.get("relays") or []:

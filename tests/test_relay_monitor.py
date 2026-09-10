@@ -357,3 +357,59 @@ class TheSnapshotOnlyGrows(unittest.TestCase):
             got = monitor.collect(prev={"relays": [{"id": "r1", "data": old}]})
         self.assertEqual(got["relays"][0]["state"], "disabled")
         self.assertEqual(got["relays"][0]["data"], old, "停用把历史抹掉了")
+
+
+class ACrashNeverBurnsTheHistory(unittest.TestCase):
+    """★★★ `relay-ctl` 的兜底把任何异常压成 `{"ok":false,"state":"crashed"}` 并**恒 0 退出**，
+    而 Rust 侧只看「exit 0 且非空」就把 stdout 原样写成 `.relay-usage.json`。
+
+    于是一次异常 = 整份「只增不减」的历史快照被一个没有 `relays` 的错误对象覆盖，
+    下一轮 `prev` 里已无任何中转站，滑出上游窗口的日子**永久消失**。
+    这正是 CLAUDE.md §7.0b「读不到绝不能覆盖已读到」的最贵形态 ——
+    那一节本来就是为这条链路写的，而这条路径自己违反了它。
+
+    已实证的触发点：中转站 `/usage` 回非对象 JSON（`[]` / `null` / 字符串）时
+    `normalize` 在 `raw.get(...)` 抛 AttributeError —— 而 `probe_billing_path`
+    明写「只认能解析成 JSON **对象**」，`fetch` 却没有同款校验。同一条规则两份实现。
+    """
+
+    def test_a_non_object_payload_is_bad_payload_not_a_crash(self):
+        """★ 先堵住触发点：非对象 JSON 必须落成 `bad_payload`（一个**正常的降级返回**），
+        而不是冒到兜底变成 crash。"""
+        relay = {"id": "r1", "base_url": "https://x.test/v1", "key": "sk-TESTONLY-1",
+                 "usage_path": "/usage"}
+        for body in ("[]", "null", '"nope"', "123"):
+            with mock.patch.object(monitor, "_get", return_value=(200, body)):
+                res = monitor.fetch(relay)
+            self.assertFalse(res["ok"], body)
+            self.assertEqual(res["state"], "bad_payload",
+                             f"{body} 没被挡住 —— 它会一路冒到兜底、烧掉历史快照")
+
+    def test_the_probe_and_the_fetch_agree_on_what_json_means(self):
+        """★★ 两份实现必须同判。`probe_billing_path` 一直要求 dict，`fetch` 以前不要求 ——
+        边界输入上的分叉，后果是整份历史消失。"""
+        import inspect
+        self.assertIn("isinstance(d, dict)", inspect.getsource(monitor.probe_billing_path))
+        self.assertIn("isinstance(raw, dict)", inspect.getsource(monitor.fetch))
+
+    def test_cmd_usage_keeps_the_previous_snapshot_when_it_crashes(self):
+        """★★★ 最后一道：`collect` 真的炸了，输出里也必须**带着旧快照**。
+
+        判据是 `relay-ctl` 的源码结构 —— 那是个可执行脚本不是模块，直接 import
+        会跑 main；这里读源码断言那条兜底存在且带 `prev`。
+        """
+        src = (Path(__file__).resolve().parents[1] / "relay-ctl").read_text(encoding="utf-8")
+        body = src[src.index("def cmd_usage"):src.index("def cmd_test")]
+        self.assertIn("except Exception", body, "collect 的异常没有被接住")
+        self.assertIn("prev if isinstance(prev, dict) and prev.get(\"relays\")", body,
+                      "★ 崩溃时没有带上旧快照 —— 会把历史整份烧掉")
+        self.assertIn('stale=bool(keep)', body, "带了旧数据却没标 stale")
+        # ★ 反向:正常路径**不能**恒标 stale,否则「陈旧」这个信号就废了。
+        self.assertIn("data = monitor.collect(prev=prev)", body)
+
+    def test_the_crash_payload_still_has_a_relays_key(self):
+        """★ 即使连旧快照都没有，也要给一个**形状正确**的空壳（`relays: []`）——
+        前端对缺键与空列表的处理不同，而缺键那条路会让 UI 画成"读配置失败"。"""
+        src = (Path(__file__).resolve().parents[1] / "relay-ctl").read_text(encoding="utf-8")
+        body = src[src.index("def cmd_usage"):src.index("def cmd_test")]
+        self.assertIn('{"relays": [], "route": store.route_status()}', body)

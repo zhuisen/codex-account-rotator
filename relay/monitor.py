@@ -286,6 +286,14 @@ def fetch(relay, remember_path=False, prev=None):
         raw = json.loads(body)
     except Exception as e:
         return {"ok": False, "state": "bad_payload", "detail": str(e)}
+    # ★★ **同一条规则的两份实现必须一致**：`probe_billing_path` 明写「只认 200 且能解析成
+    #    JSON **对象**」，这里却只 `json.loads` 就往下走。对方回 `[]` / `null` / 字符串时
+    #    `normalize` 会在 `raw.get(...)` 上抛 AttributeError —— 而那个异常一路冒到
+    #    `relay-ctl` 的兜底，被压成 `{"ok":false,"state":"crashed"}`，Rust 照样落盘，
+    #    **整份"只增不减"的历史快照被一个没有 relays 的 payload 覆盖掉**。
+    if not isinstance(raw, dict):
+        return {"ok": False, "state": "bad_payload",
+                "detail": f"对方返回的是 {type(raw).__name__} 不是 JSON 对象"}
     norm = normalize(raw)
     # ★ 逐日「按模型」明细。放在 runway 之前无所谓，但必须在返回之前 ——
     #   前端的图按模型分层就靠它。
