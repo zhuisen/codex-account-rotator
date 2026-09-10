@@ -164,7 +164,9 @@ export default function StackedArea({
             : tops[li - 1].map((v, i) => [x(i), y(v)] as [number, number]);
           const dim = dimmed && dimmed !== L.key ? 0.22 : 1;
           return (
-            <path key={L.key} d={bandPath(top, base)} fill={L.color} opacity={dim}
+            // ★ `data-layer` 让 harness 能**数出图里真有几层** —— 只看图例/表格
+            //   证明不了"图跟着变了"（隔离一个模型时表还在、图才该少一条带）。
+            <path key={L.key} data-layer={L.key} d={bandPath(top, base)} fill={L.color} opacity={dim}
                   style={{ cursor: onPick ? "pointer" : "default", transition: "opacity .18s" }}
                   onClick={() => onPick?.(L.key)} />
           );

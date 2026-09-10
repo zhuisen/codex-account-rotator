@@ -3,94 +3,29 @@ import { type Theme, modelColor, TABLE_TYPE as TZ } from "../theme";
 import { costOf, fmtUSD, priceOf, isPriced } from "../rates";
 import StackedArea, { type Layer } from "../components/StackedArea";
 import Seg from "../components/Seg";
-import type { TrafficData, Range, CacheMode, Bucket, Coverage } from "../traffic";
+import type { TrafficData, Range, CacheMode, Bucket, Platform } from "../traffic";
 import { RANGES, rangeLabel, bucketsFor, sumBuckets, costOfBucket, savingOfBucket, fmtTok,
-         countsCacheRead, countsCacheWrite, countedClasses, mixParts, colorOf, coveragePct, coverageNote,
-         agyQuotaNote, type AgyQuotaSeries } from "../traffic";
+         countsCacheRead, countsCacheWrite, countedClasses, mixParts, colorOf } from "../traffic";
 import KpiStrip, { type Kpi, UP, DOWN } from "../components/KpiStrip";
 import { useIntro, introEnabled } from "../hooks/useIntro";
 import CacheChip from "../components/CacheChip";
-import DisclosureBanner from "../components/DisclosureBanner";
 
 const AMBER = "#E0A21C";
 const SRC: Record<string, string> = {
   claude: "~/.claude/projects/**/*.jsonl",
   codex: "~/.codex/sessions/**/rollout-*.jsonl",
   grok: "~/.grok/sessions/*/*/updates.jsonl",
-  // ★ 唯一一个**不是**该 CLI 自己落的盘的源:agy 什么都不记,这份账本是 `bin/agy` wrapper
-  //   从 `--output-format json` 抄下来的。所以它旁边永远有一枚覆盖率徽章。
-  agy: "traffic/agy-ledger/usage.jsonl（wrapper 记账）",
+  // ★ agy 的主源是它**自己的会话库**（2026-09-09 起）：`gen_metadata` 里的 protobuf
+  //   带四类 token。wrapper 账本降级为并集兜底，只补库已经没了的那些会话。
+  //   覆盖率徽章保留 —— 缺口（被 agy 清理掉的旧会话）是真的补不回来。
+  agy: "~/.gemini/antigravity-cli/conversations/*.db",
 };
 
-/** 采集不完整的平台的横幅。`coverage` 缺席 = 全量采集,**不渲染任何东西**。
- *
- *  壳走 `DisclosureBanner`(与 grok 额度那条共用同一套像素),**文案仍留在 `coverageNote`** ——
- *  两处共用视觉、各自拥有措辞。把文案也搬进通用件会让它变成第二个文案真源。 */
-/**
- * agy 的**额度消耗**条 —— 第二本账。
- *
- * ★★ 与上面的 token 图**刻意长得不一样**（横条，不是面积图）：两者单位不同
- * （额度% vs token）、覆盖率不同（100% vs 15.9%），画成同一种图会引诱人去比较、
- * 甚至相减。形状上的差异就是"这是另一本账"的第一道提示。
- *
- * ★ `null`（样本不足）必须显示成「观测还不够」，**不能画成 0** —— 0 会被读成"没用过"，
- * 而真相是"还没看到"。这是本仓贯穿始终的那条铁律。
- */
-function AgyQuotaBars({ t, q, color }: {
-  t: Theme; q: AgyQuotaSeries | null | undefined; color: string;
-}): React.ReactElement {
-  const MONO = "'JetBrains Mono'";
-  const rows = q ? Object.entries(q.buckets)
-    .filter(([, b]) => b.consumed_pct > 0 || b.anomalies > 0)
-    .sort((a, b) => b[1].consumed_pct - a[1].consumed_pct) : [];
-  // 条长按最大值归一化 —— 消耗量通常远小于 100%，按 100 画会全是看不见的细线。
-  const max = Math.max(...rows.map(([, b]) => b.consumed_pct), 0.01);
-  return (
-    <div style={{ marginTop: 14, padding: "11px 13px", background: t.cardBg,
-                  border: `1px solid ${t.cardBorder}`, borderRadius: 10 }}>
-      <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 9 }}>
-        <span style={{ fontSize: 12, fontWeight: 700, color: t.text }}>额度消耗</span>
-        <span style={{ fontSize: 9.5, fontFamily: MONO, color, letterSpacing: ".03em" }}>
-          第二本账 · 单位 额度%
-        </span>
-      </div>
-      {!q || !rows.length ? (
-        <div style={{ fontSize: 11, color: t.muted, lineHeight: 1.6 }}>
-          {q ? "观测期内没有测到额度变化。" : "观测还不够（至少要两个采样点）。"}
-        </div>
-      ) : rows.map(([bid, b]) => (
-        <div key={bid} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 5 }}>
-          <span style={{ fontSize: 10, fontFamily: MONO, color: t.text2, width: 108,
-                         overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
-                title={`${b.group ?? "?"} · ${b.window ?? "?"}`}>{bid}</span>
-          <div style={{ flex: 1, height: 6, borderRadius: 2, background: t.barTrack, overflow: "hidden" }}>
-            <div style={{ height: "100%", width: `${Math.max(2, 100 * b.consumed_pct / max)}%`,
-                          background: color, borderRadius: 2 }} />
-          </div>
-          <span style={{ fontSize: 10.5, fontWeight: 600, fontFamily: MONO, color: t.text,
-                         fontVariantNumeric: "tabular-nums" }}>
-            {/* ★ 下界必须标出来，且用「≥」而不是脚注 —— 脚注等于没写。 */}
-            {b.lower_bound ? "≥" : ""}{b.consumed_pct.toFixed(2)}%
-          </span>
-        </div>
-      ))}
-      <div style={{ fontSize: 10, color: t.muted, lineHeight: 1.65, marginTop: 8,
-                    paddingTop: 7, borderTop: `1px solid ${t.divider}` }}>
-        {agyQuotaNote(q).replace(/\*\*/g, "")}
-      </div>
-    </div>
-  );
-}
-
-function CoverageBanner({ t, coverage }: {
-  t: Theme; coverage?: Coverage;
-}): React.ReactElement | null {
-  const pct = coveragePct(coverage);
-  if (pct == null || !coverage) return null;
-  return <DisclosureBanner t={t} tone="amber"
-                           badge={`覆盖 ${coverage.covered}/${coverage.total}`}
-                           note={coverageNote(coverage)} />;
-}
+// ★★ 这里原有 `AgyQuotaBars`（agy 额度条）与 `CoverageBanner`（覆盖率横幅），
+//    2026-09-09 用户拍板删除，**连同组件本体一起删**，不留骨架 ——
+//    留一份没人渲染的组件，下一个人会以为它还在页面上（本仓记过的死代码形态）。
+//    额度属于**账号**不属于**用量**，它的家在总览的额度卡。
+//    要恢复请从 git 历史取。
 
 /** 平台详情(交接稿 §5–§8)。 */
 /**
@@ -156,6 +91,76 @@ function mixHex(hex: string, to: string, amt: number): string {
   const [r1, g1, b1] = h(hex), [r2, g2, b2] = h(to);
   const m = (a: number, b: number) => Math.round(a + (b - a) * amt).toString(16).padStart(2, "0");
   return `#${m(r1, r2)}${m(g1, g2)}${m(b1, b2)}`;
+}
+
+
+/** 路由分账行。只有 scan 真的分出账的平台（目前只有 codex）才渲染。 */
+function RouteSplit({ t, p }: { t: Theme; p?: Platform }): React.ReactElement | null {
+  const bp = p?.by_provider;
+  if (!bp) return null;
+  const rows = Object.entries(bp).filter(([, b]) => b.total > 0)
+    .sort((a, b) => b[1].total - a[1].total);
+  if (rows.length === 0) return null;
+  const sum = rows.reduce((a, [, b]) => a + b.total, 0);
+  // 账号池的两个 id 是内部名 —— 前端自己给文案；中转站用用户起的显示名。
+  const nameOf = (id: string): string =>
+    id === "rotateproxy" ? "账号池（代理轮换）"
+      : id === "openai" ? "单号直连"
+      : id === "unknown" ? "未标注（旧 rollout）"
+      : (p?.provider_labels?.[id] ?? id + "（未登记）");
+  // ★★ **三分类,不是二分类。** 原来"不是账号池就算中转站" —— 而真实快照里已经有
+  //    第 4 个 provider `openai-nows`（38,627 token，09-07 那次 WS 实验的临时 provider，
+  //    config 里早就没有了）。它被算成"经中转站"、染上金额琥珀、还进了费用脚注 ——
+  //    而它一分钱中转站的账都没走过。
+  //    判据改成**是不是登记在册的中转站**（`provider_labels` 里有），
+  //    而不是"排除法"。排除法的清单永远追不上现实。
+  const isRelay = (id: string): boolean => Boolean(p?.provider_labels?.[id]);
+  const isPool = (id: string): boolean => id === "rotateproxy" || id === "openai";
+  const relayTok = rows.filter(([id]) => isRelay(id)).reduce((a, [, b]) => a + b.total, 0);
+  return (
+    // ★★ 2026-09-09 用户定稿：整块折叠进一个角标，**悬浮才展开**。
+    //    页面上常驻四行路由明细 + 一条费用免责，占了 KPI 之前最贵的一段版面，
+    //    而它一天看一次就够。★ 但内容**仍留在 DOM 里**（CSS 控制可见性）——
+    //    条件渲染会让本仓所有基于 `--dump-dom` 的行为闸静默失效。
+    <div data-route-split className="cb-hoverwrap"
+         style={{ margin: "2px 0 10px", fontSize: 11.5 }}>
+      <span data-route-badge title="路由分账（近 90 天）· 悬浮展开"
+            style={{ display: "inline-flex", alignItems: "center", gap: 5,
+                     padding: "2px 8px", borderRadius: 7, cursor: "help", userSelect: "none",
+                     border: `1px solid ${relayTok > 0 ? "#E0A21C" : t.ghostBorder}`,
+                     color: relayTok > 0 ? "#E0A21C" : t.muted }}>
+        {relayTok > 0 ? "⚠️" : "ⓘ"}
+        <span style={{ fontWeight: 600 }}>路由分账</span>
+      </span>
+      {/* ★ 挪进标题行后浮层要**靠左对齐角标**并留出右侧余量：
+          `minWidth: 320` 在窄窗下会顶出容器（本仓 UI 规范:溢出算 bug）。 */}
+      <div className="cb-hoverpop"
+           style={{ minWidth: 300, maxWidth: "min(460px, 60vw)", padding: "10px 12px", borderRadius: 10,
+                    background: t.cardBg, border: `1px solid ${t.cardBorder}`,
+                    boxShadow: t.shadow, display: "flex", flexDirection: "column", gap: 5,
+                    color: t.muted, whiteSpace: "nowrap" }}>
+        {/* ★★ **必须写出窗口。** `by_provider` 是 scan 下发的**近 90 天**合计,
+            而这一页的 KPI 与图跟着 `range` 走 —— 今日档旁边挂着 90 天的路由数
+            就是"同页两个数不同窗口"。 */}
+        <span style={{ fontWeight: 600, color: t.text }}>路由 · 近 90 天</span>
+        {rows.map(([id, b]) => (
+          <span key={id} style={{ fontFamily: "'JetBrains Mono', monospace",
+                                  fontVariantNumeric: "tabular-nums" }}>
+            {/* ★ 金额琥珀只给**真的在花钱**的那条路由。未登记/未标注走中性色 ——
+                颜色在本仓是有语义的,乱用等于把语义稀释掉。 */}
+            {nameOf(id)} <b style={{ color: isRelay(id) ? "#E0A21C" : isPool(id) ? t.text : t.muted }}>{fmtTok(b.total)}</b>
+            <span style={{ opacity: 0.7 }}> · {((b.total / sum) * 100).toFixed(1)}%</span>
+          </span>
+        ))}
+        {relayTok > 0 && (
+          <span data-route-footnote style={{ color: "#E0A21C", whiteSpace: "normal" }}>
+            ⚠️ 其中 {fmtTok(relayTok)} 经中转站 —— <b>下面的「总费用」对它们不适用</b>
+            （那是按 OpenAI 牌价折算的等效成本），真实扣款见「中转站」页。
+          </span>
+        )}
+      </div>
+    </div>
+  );
 }
 
 export default function PlatformPage({ t, data, raw, cacheMode, pk, range, setRange, onBack, busy }: {
@@ -320,6 +325,9 @@ export default function PlatformPage({ t, data, raw, cacheMode, pk, range, setRa
         <CacheChip mode={cacheMode} />
         <span style={{ fontSize: 11, color: t.muted, fontFamily: "'JetBrains Mono'", overflow: "hidden",
                        textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{SRC[pk] ?? ""}</span>
+        {/* ★ 路由分账角标**紧挨源路径**（用户 2026-09-09 指位）：两者是同一类信息 ——
+            "这一页的数字从哪来"。单独占一行会把 KPI 往下推、且看着像一条告警。 */}
+        <RouteSplit t={t} p={data?.platforms[pk]} />
         <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
           <Seg opts={["models", "total"] as const} cur={mode} on={setMode}
                label={(x) => (x === "models" ? "分模型" : "总量")} t={t} />
@@ -327,13 +335,13 @@ export default function PlatformPage({ t, data, raw, cacheMode, pk, range, setRa
         </div>
       </div>
 
-      {/* ★ 覆盖率提示放在 KPI **之前** —— 读者先看数字再看脚注，把「这个数不全」写进脚注
-          等于没写（前车之鉴：两条「利润被高估」的警告在 tooltip 里躺了几个月没人看见）。
-          只有带 coverage 字段的平台才渲染，其余平台一个像素都不多。 */}
-      <CoverageBanner t={t} coverage={data?.platforms[pk]?.coverage} />
-      {/* ★ 只有 agy 有第二本账。紧跟覆盖率横幅 —— 那条说"这个数只有 15.9%",
-          这块紧接着回答"那剩下的怎么办"，两者必须相邻，隔开就成了两条各说各话的信息。 */}
-      {pk === "agy" && <AgyQuotaBars t={t} q={data?.agy_quota} color={colorOf(data, "agy")} />}
+      {/* ★★ **这里曾经有两块 agy 专属内容，2026-09-09 用户拍板删掉**：
+          ① 覆盖率横幅（`覆盖 277/303 …`）—— 主源换成 agy 自己的会话库之后覆盖已 ~95%，
+             那条横幅从"必要的免责"退化成了噪音；
+          ② 「额度消耗」条（gemini-5h / gemini-weekly）—— **账号额度不属于用量页**。
+             它是账号的属性，归总览的额度卡；放在这里破坏了平台详情页的统一性
+             （其余 7 个平台都没有这两块）。
+          ⚠️ 不要"顺手"再加回来：平台详情页的统一性规则见项目 `CLAUDE.md` §5c。 */}
 
 
       <KpiStrip t={t} items={kpis} intro={intro} />

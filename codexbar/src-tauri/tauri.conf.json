@@ -46,6 +46,7 @@
     "resources": {
       "../../codex-rotate": "scripts/codex-rotate",
       "../../portalock.py": "scripts/portalock.py",
+      "../../resume_provenance.py": "scripts/resume_provenance.py",
       "../../grok-quota": "scripts/grok-quota",
       "../../agy-quota": "scripts/agy-quota",
       "../../traffic/scan.py": "scripts/traffic/scan.py",
@@ -53,7 +54,11 @@
       "../../traffic/agy_quota_series.py": "scripts/traffic/agy_quota_series.py",
       "../../traffic/quota_anchors.py": "scripts/traffic/quota_anchors.py",
       "../../traffic/agy_quota_sampler.py": "scripts/traffic/agy_quota_sampler.py",
-      "../../traffic/rotation.py": "scripts/traffic/rotation.py"
+      "../../traffic/rotation.py": "scripts/traffic/rotation.py",
+      "../../relay-ctl": "scripts/relay-ctl",
+      "../../relay/__init__.py": "scripts/relay/__init__.py",
+      "../../relay/store.py": "scripts/relay/store.py",
+      "../../relay/monitor.py": "scripts/relay/monitor.py"
     }
   }
 }

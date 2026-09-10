@@ -11,6 +11,7 @@ import GhostButton from "./components/GhostButton";
 import AccountCard from "./components/AccountCard";
 import DetailModal, { type AccountDetail } from "./components/DetailModal";
 import LogsPage from "./pages/LogsPage";
+import RelayPage from "./pages/RelayPage";
 import TrafficPage from "./pages/TrafficPage";
 import PlatformPage from "./pages/PlatformPage";
 import type { Range } from "./traffic";
@@ -34,11 +35,12 @@ import PlanBadge from "./components/PlanBadge";
 import "./App.css";
 
 // 平台详情页不进导航栏,只能从流量总览钻取(图例行 / 卡片「明细→」/ 点图层),用户定稿 2026-08-09。
-type Page = "overview" | "traffic" | "logs" | "settings";
+type Page = "overview" | "traffic" | "logs" | "relay" | "settings";
 
 const IconChart = () => <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><rect x="3" y="12" width="4" height="9" rx="1"/><rect x="10" y="7" width="4" height="14" rx="1"/><rect x="17" y="3" width="4" height="18" rx="1"/></svg>;
 // 流量总览 = 四宫格(交接稿 §0)
 const IconGrid = () => <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><rect x="3" y="3" width="8" height="8" rx="2"/><rect x="13" y="3" width="8" height="8" rx="2"/><rect x="3" y="13" width="8" height="8" rx="2"/><rect x="13" y="13" width="8" height="8" rx="2"/></svg>;
+const IconRelay = () => <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7"><circle cx="5" cy="12" r="2.4"/><circle cx="19" cy="12" r="2.4"/><path d="M7.6 12h8.8M13.4 9.2 16.4 12l-3 2.8"/></svg>;
 const IconClip = () => <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7"><rect x="5" y="4" width="14" height="17" rx="2"/><path d="M9 3.5h6v3H9z" fill="currentColor" stroke="none"/></svg>;
 // ★ 真齿轮(带齿廓),不是 circle+8 条直射线 —— 那个画出来和标题栏的 `IconSun` 几乎同一个图形,
 //   侧栏第 4 格看着像"亮度"而不是"设置"(用户 2026-08-09 实测截图)。
@@ -198,6 +200,11 @@ export default function App() {
     { id: "overview", Icon: IconChart, name: "总览", tip: "总览" },
     { id: "traffic", Icon: IconGrid, name: "AI用量信息", tip: "AI用量信息（各 AI CLI 的本机用量）" },
     { id: "logs", Icon: IconClip, name: "日志", tip: "日志" },
+    // ★★ 「中转站」是**独立版块**(用户 2026-09-09 定稿:「新增一个版块放中转站的内容信息,
+    //   而不是共用版块」)。一度拆进总览+用量两页,被否 —— 混进别的版块会让两边都变成拼盘。
+    //   ★ 每项的 `data-page` 不可删:harness 原来按**位置**点 `.cb-rail > div` 第 N 项,
+    //   任何一次增删页面都会让它静默点到别处,而"点错位置"和"没点中"在截图里一模一样。
+    { id: "relay", Icon: IconRelay, name: "中转站", tip: "中转站（按量付费的替代路由）" },
     { id: "settings", Icon: IconGear, name: "设置", tip: "设置" },
   ];
 
@@ -269,6 +276,10 @@ export default function App() {
         <div className="cb-rail" style={{ width: navOpen ? 176 : 52, flexShrink: 0, borderRight: `1px solid ${t.railBorder}`, background: t.railBg, display: "flex", flexDirection: "column", alignItems: navOpen ? "stretch" : "center", padding: navOpen ? "14px 8px" : "14px 0", gap: 4, overflow: "hidden", transition: "width .18s ease, background-color .35s ease" }}>
           {sidebarItems.map((it) => (
             <div key={it.id} onClick={() => setPage(it.id)}
+                 // ★ 给每项一个身份标记。harness 原来按**位置**点（`.cb-rail > div` 第 N 项），
+                 //   任何一次插入新页都会让它静默点到别处 —— 而"点错位置"和"没点中"
+                 //   在截图里长得一模一样。有了它就能按身份点，位置随便变。
+                 data-page={it.id}
                  title={navOpen ? undefined : it.tip}
                  style={{ height: 34, width: navOpen ? "100%" : 34, borderRadius: 9,
                           display: "flex", alignItems: "center",
@@ -531,6 +542,8 @@ export default function App() {
               })()}
             </>
           )}
+
+          {page === "relay" && <RelayPage t={t} />}
 
           {page === "traffic" && (drill
             ? <PlatformPage t={t} data={traffic} raw={trafficRaw} cacheMode={cacheMode}

@@ -377,6 +377,140 @@ STUB = """
   };
 
   var ipc = {}, sizes = [], emitted = [];
+  // ★★ **路由分账夹具必须自己注入,不能指望活快照。**
+  //   `.traffic-latest.json` 会被**正在运行的 app** 用它自己打包的（旧）`scan.py` 覆盖 ——
+  //   实测过一次:harness 刚生成好，app 一扫就把 `by_provider` 抹没了，
+  //   于是 DOM 闸变红，而根因和"代码写错了"完全无关。
+  //   数值取自真实 `scan.py --days 90` 的输出（含 `openai-nows` 这个**未登记** provider,
+  //   它是 09-07 WS 实验的临时产物,专门用来验证三分类不会把它误判成中转站）。
+  //   ⚠️ `SNAPSHOT` 是**字符串**不是对象（`read_traffic_snapshot` 的 Rust 签名是
+  //     `Option<String>`）。我第一版直接读 `SNAPSHOT.platforms` —— `undefined`,
+  //     被 try/catch 吞掉,注入静默没生效,而 DOM 闸红得像是组件写错了。
+  (function () {
+    try {
+      var _o = JSON.parse(SNAPSHOT);
+      var c = _o && _o.platforms && _o.platforms.codex;
+      if (c && !c.by_provider) {
+        c.by_provider = {
+          openai:        { total: 4651131297, uncached_in: 0, cache_read: 0, cache_write: 0, output: 0, rounds: 0, models: {} },
+          rotateproxy:   { total: 3529396103, uncached_in: 0, cache_read: 0, cache_write: 0, output: 0, rounds: 0, models: {} },
+          'openai-nows': { total: 38627,      uncached_in: 0, cache_read: 0, cache_write: 0, output: 0, rounds: 0, models: {} },
+          tokendun:      { total: 39513,      uncached_in: 0, cache_read: 0, cache_write: 0, output: 0, rounds: 0, models: {} }
+        };
+        c.provider_labels = { tokendun: 'TokenDun' };
+        SNAPSHOT = JSON.stringify(_o);
+      }
+    } catch (e) { /* 快照形状变了就让 DOM 闸去发现 */ }
+  })();
+
+  var relayCalls = [];
+  var agyPushed = false;
+
+// ── 中转站（relay）夹具 ──────────────────────────────────────────────────────
+// ★ 形状**照抄 `relay-ctl status` / `usage` 的真实输出**（2026-09-09 实测键集），
+//   不是我凭印象编的。夹具与真实响应对不上时,页面在 harness 里绿、真机上空 ——
+//   本仓已经栽过三次「不打桩 ⇒ 落 default 返 null ⇒ 页面画空 ⇒ 假绿」。
+// ★ `cost` 与 `actual_cost` 用**真实的两个数**（0.36 / 0.0863,差 4.2 倍）——
+//   夹具里让它们相等的话,"两列合并成一列"的实现也能绿。
+var RELAY_USAGE_OK = {
+  balance: 69.88, unit: 'USD', plan: '钱包余额', valid: true, mode: 'unrestricted',
+  today: { cost: 0.36, actual_cost: 0.0863, requests: 1, total_tokens: 39513 },
+  total: { cost: 82.82, actual_cost: 26.39, requests: 513, total_tokens: 37700219,
+           cache_read_tokens: 29405179 },
+  rpm: 0, tpm: 0, avg_ms: 30274.9,
+  // ★ 每天两个分解维度都有：四类 token（上游 daily_usage 直接给）+ 按模型
+  //   （后端逐日查 `?start_date=D&end_date=D` 拿到）。夹具必须两个都带，
+  //   否则图一层都画不出来、而"画不出来"和"这段时间没用过"长得一样。
+  // ★★ **20 天**，且模型构成**随时间变化**：`gpt-5.6-luna` 只出现在第 0~4 天。
+  //    这不是为了好看 —— 夹具若各天相同，「模型表跟随档位」那条闸换任何档位都得到
+  //    同一张表，是个**空守卫**。有了这条，7d 里必须查不到 luna、30d 里必须查得到。
+  daily: (function () {
+    var out = [];
+    for (var k = 19; k >= 0; k--) {
+      var d = new Date(Date.now() - k * 86400000);
+      var date = d.toISOString().slice(0, 10);
+      var old = k >= 15;                       // 最早 5 天
+      var ms = old
+        ? [{ model: 'gpt-5.6-luna', requests: 12, total_tokens: 480000, input_tokens: 90000,
+             output_tokens: 6000, cache_read_tokens: 384000, cache_write_tokens: 0,
+             cost: 2.4, actual_cost: 0.6 }]
+        : [{ model: 'gpt-5.5', requests: 40, total_tokens: 1600000, input_tokens: 280000,
+             output_tokens: 17000, cache_read_tokens: 1303000, cache_write_tokens: 0,
+             cost: 8.2, actual_cost: 2.05 },
+           { model: 'gpt-6-astra', requests: 9, total_tokens: 320000, input_tokens: 60000,
+             output_tokens: 4000, cache_read_tokens: 256000, cache_write_tokens: 0,
+             cost: 1.6, actual_cost: 0.42 }];
+      var agg = { requests: 0, total_tokens: 0, input_tokens: 0, output_tokens: 0,
+                  cache_read_tokens: 0, cache_write_tokens: 0, cost: 0, actual_cost: 0 };
+      for (var i = 0; i < ms.length; i++) {
+        for (var f in agg) agg[f] += ms[i][f] || 0;
+      }
+      // ★ 每天的四类之和**必须等于** total_tokens（真实数据实测差 0），
+      //   夹具对不上的话「分层精确」就成了假绿。
+      agg.total_tokens = agg.input_tokens + agg.output_tokens
+                       + agg.cache_read_tokens + agg.cache_write_tokens;
+      out.push(Object.assign({ date: date, models: ms }, agg));
+    }
+    return out;
+  })(),
+  models: [
+    { model: 'gpt-5.5', requests: 226, total_tokens: 21400000, input_tokens: 3982390,
+      output_tokens: 174123, cache_read_tokens: 17243487, cache_write_tokens: 0,
+      cost: 30.0, actual_cost: 8.12 },
+    { model: 'gpt-6-astra', requests: 134, total_tokens: 9100000, input_tokens: 1500000,
+      output_tokens: 80000, cache_read_tokens: 7520000, cache_write_tokens: 0,
+      cost: 14.2, actual_cost: 3.51 }
+  ],
+  runway: { days: 30.1, per_active_day: 2.32, sample_days: 7, reason: null },
+  usage_path: '/usage', fetched_at: Math.floor(Date.now() / 1000)
+};
+// ★★ 2026-09-09「一个 provider,两种上游」之后 `path` 恒指向**账号池那一份** ——
+//    中转站不再有自己的 profile。`profile_stale` 整个消失(没有第二份文件可漂移),
+//    新增 `relay_disabled`(登记着但被停用 ⇒ 代理退回账号池、用户以为在花钱)。
+var POOL_TOML = '/Users/x/.codex/rotateproxy.config.toml';
+var RELAY_ROUTES = {
+  pool:    { state: 'pool', profile: 'rotateproxy', path: POOL_TOML },
+  relay:   { state: 'relay', profile: 'tokendun', path: POOL_TOML,
+             label: 'TokenDun', key_fp: 'sk-73a1…294 (0f39111c7caf)' },
+  missing: { state: 'profile_missing', profile: 'tokendun', path: POOL_TOML,
+             detail: 'rotateproxy.config.toml 不存在 ⇒ codex 会静默退回 base 配置' },
+  // ★ 键名叫 `offroute` 不叫 `disabled`:`disabled` 已经是**条目**的状态
+  //   (用户把这个中转站停用了),两者同名会让 relayRoute() 与 relayEntry() 互相打架。
+  offroute:{ state: 'relay_disabled', profile: 'tokendun', path: POOL_TOML, label: 'TokenDun',
+             detail: 'TokenDun 已停用 ⇒ 代理退回账号池。你以为在按量付费,实际扣的是订阅额度。' },
+  orphan:  { state: 'orphan', profile: 'tokendun', path: POOL_TOML,
+             detail: "路由指向 'tokendun',但它已不在登记表里 ⇒ 代理退回账号池。你以为在按量付费,实际扣的是订阅额度。" },
+  corrupt: { state: 'route_corrupt', profile: null, path: '/Users/x/relay/route.local.json',
+             detail: '路由文件不是合法 JSON: Expecting value: line 1 column 2 (char 1)' }
+};
+// ★ `key` 是**诱饵**:真实 `relay-ctl status` 的 payload 里没有它(只有 key_fp)。
+//   放在这里是为了让「页面不许渲染完整 key」那条闸**真的能失败** ——
+//   夹具里没有完整 key 的话,那条断言永远红不了,是个空守卫。
+var RELAY_ROW = { id: 'tokendun', label: 'TokenDun', base_url: 'https://api.tokendun.com/v1',
+                  enabled: true, usage_path: '/usage', model: null,
+                  key: 'sk-DECOY-must-never-be-rendered-0000000000',
+                  key_fp: 'sk-73a1…294 (0f39111c7caf)', added_at: '2026-09-09T10:28:24+0800' };
+function relayMode() { return p.get('relay') || 'relay'; }
+function relayRoute() {
+  var m = relayMode();
+  return RELAY_ROUTES[m] || RELAY_ROUTES[m === 'never' || m === 'unreachable' || m === 'auth' || m === 'nobill' || m === 'empty' ? 'relay' : 'relay'];
+}
+function relayEntry() {
+  var m = relayMode();
+  var base = { id: 'tokendun', label: 'TokenDun', base_url: RELAY_ROW.base_url, key_fp: RELAY_ROW.key_fp };
+  // ★ `disabled` 是**用户的选择**,不是故障 —— `collect()` 对它返回的 payload 没有 `ok`,
+  //   页面原来把它渲染成"用量读不到（disabled）：undefined"。这个态必须有夹具。
+  if (m === 'disabled') return { id: 'tokendun', label: 'TokenDun', state: 'disabled' };
+  if (m === 'unreachable') return Object.assign(base, { ok: false, state: 'unreachable', detail: 'URLError: no route to host' });
+  if (m === 'auth') return Object.assign(base, { ok: false, state: 'auth', http: 401, detail: '{"code":"INVALID_API_KEY"}' });
+  if (m === 'nobill') return Object.assign(base, { ok: false, state: 'no_billing_endpoint',
+    detail: '试过 /usage, /dashboard/billing/usage, /dashboard/billing/subscription,没有一条返回可解析的 JSON' });
+  if (m === 'never') return Object.assign(base, { ok: true, state: 'ok', data: Object.assign({}, RELAY_USAGE_OK, {
+    balance: null, today: { cost: null, actual_cost: null, requests: null, total_tokens: null },
+    runway: { days: null, per_active_day: null, sample_days: 1, reason: '活跃日样本不足 2 天' } }) });
+  return Object.assign(base, { ok: true, state: 'ok', data: RELAY_USAGE_OK });
+}
+
   function invoke(cmd, args) {
     ipc[cmd] = (ipc[cmd] || 0) + 1;
     // 记下每次 setSize 的目标高度 —— 菜单栏的高度就是这么定的,只数次数看不出设成了多少
@@ -454,6 +588,22 @@ STUB = """
       //   而你想验的六个降级态一张都截不到 —— 页面照常渲染、零报错,看着像通过。
       //   同族的前车之鉴:`metadata` 空对象 / `read_auth_tokens` 返 null 那两次假阴性。
       //   `?grok=ok|expired|401|missing|never|stale`,email 一律脱敏。
+      case 'read_relay_snapshot':
+      case 'run_relay_usage': {
+        if (relayMode() === 'empty') return Promise.resolve(JSON.stringify({ ok: true, relays: [], route: relayRoute(), fetched_at: Math.floor(Date.now()/1000) }));
+        return Promise.resolve(JSON.stringify({ ok: true, relays: [relayEntry()], route: relayRoute(), fetched_at: Math.floor(Date.now()/1000) }));
+      }
+      case 'relay_ctl': {
+        // ★ 记下调用(sub+arg),**不记 payload** —— 它含 key。
+        relayCalls.push(String((args && args.sub) || '') + ((args && args.arg) ? ':' + args.arg : ''));
+        var sub = args && args.sub;
+        if (sub === 'status') {
+          return Promise.resolve(JSON.stringify({ ok: true, v: 1,
+            relays: relayMode() === 'empty' ? [] : [RELAY_ROW], route: relayRoute() }));
+        }
+        if (sub === 'test') return Promise.resolve(JSON.stringify({ ok: true, id: 'tokendun', state: 'ok', model_count: 22 }));
+        return Promise.resolve(JSON.stringify({ ok: true, route: relayRoute() }));
+      }
       case 'read_grok_quota':
       case 'run_grok_quota': {
         var g = p.get('grok') || 'ok';
@@ -468,7 +618,20 @@ STUB = """
       case 'run_agy_quota': {
         var ag = p.get('agy') || 'ok';
         if (ag === 'never') return Promise.resolve(null);
-        return Promise.resolve(JSON.stringify(AGY[ag] || AGY.ok));
+        var base = AGY[ag] || AGY.ok;
+        // ★ `?agypush=<rem>`:**推送到达之后**的读取返回一份更新过的快照。
+        //   `agyPushed` 由下面的 `?agypush` 分支在 fire 事件前置位 ——
+        //   这样这条测试判的是"推送触发了重读并采纳了新值",
+        //   而不是"夹具本来就是新值"（后者恒绿，等于没测）。
+        if (agyPushed) {
+          var bumped = JSON.parse(JSON.stringify(base));
+          bumped.fetched_at = (base.fetched_at || 0) + 600;
+          try {
+            bumped.quota.groups[0].buckets[0].remaining_percent = Number(p.get('agypush'));
+          } catch (e) { /* 夹具形状变了就让断言去发现 */ }
+          return Promise.resolve(JSON.stringify(bumped));
+        }
+        return Promise.resolve(JSON.stringify(base));
       }
       case 'plugin:autostart|is_enabled':
         return Promise.resolve(false);
@@ -507,13 +670,74 @@ STUB = """
       //   ⚠️ **不能用 `?click=日志`**:窗口 <860 时侧栏自动折叠、只剩图标,文字压根不渲染
       //   ⇒ 命中 0 个。sweep 要在 860/900/940 三档扫这一页,那三档全会静默漏掉。
       //   按**位置**点(第 3 个 rail 项)在两种形态下都成立;图标恒在。
-      else if (nav === 'logs') {
+      // ★★ **按身份点,不按位置。** 原来点的是 `.cb-rail > div` 的第 3 项 ——
+      //   2026-09-09 加「中转站」页时才发现:任何一次插入新页都会让它静默点到别处,
+      //   而"点错位置"和"没点中"在截图里长得一模一样。App.tsx 已给每项加 `data-page`。
+      //   ⚠️ 仍**不能**用 `?click=日志`:窗口 <860 时侧栏折叠、文字不渲染 ⇒ 命中 0 个,
+      //     而 sweep 要在 860/900/940 三档扫这一页。图标恒在,`data-page` 也恒在。
+      else if (nav === 'logs' || nav === 'relay') {
         setTimeout(function () {
+          var want = nav === 'relay' ? 'relay' : 'logs';
+          var el = document.querySelector('.cb-rail > div[data-page="' + want + '"]');
+          if (el) el.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+          // ★ `?rtab=账号|用量` 切中转站页内的版块。**按文字身份点,不按位置** ——
+          //   位置耦合在这个仓库已经静默点错过两次(插一页就全歪),而"点错"和"没点中"
+          //   在截图里长得一模一样。
+          var rtab = p.get('rtab');
+          if (rtab) {
+            setTimeout(function () {
+              var box = document.querySelector('[data-relay-tabs]');
+              var hit = 0;
+              if (box) {
+                var opts = box.querySelectorAll('span,div');
+                for (var k = 0; k < opts.length; k++) {
+                  if ((opts[k].textContent || '').trim() === rtab) {
+                    opts[k].dispatchEvent(new MouseEvent('click', { bubbles: true }));
+                    hit++; break;
+                  }
+                }
+              }
+              clicks.push('rtab=' + rtab + ' →命中 ' + hit);
+              if (!hit) errors.push('中转站页里点不到版块 "' + rtab + '" —— bundle 可能是旧的');
+              // ★ `?rrange=30d` / `?rmode=总量` —— 在**用量版块内**按文字身份点档位。
+              //   限定在 `[data-section="relay-usage"]` 里找,免得点到页签那个 Seg。
+              //   位置耦合在本仓静默点错过两次,所以一律按文字。
+              setTimeout(function () {
+                ['rrange', 'rmode'].forEach(function (name) {
+                  var want = p.get(name);
+                  if (!want) return;
+                  var scope = document.querySelector('[data-section="relay-usage"]');
+                  var n = 0;
+                  if (scope) {
+                    var os = scope.querySelectorAll('span,div');
+                    for (var q = 0; q < os.length; q++) {
+                      if ((os[q].textContent || '').trim() === want) {
+                        os[q].dispatchEvent(new MouseEvent('click', { bubbles: true }));
+                        n++; break;
+                      }
+                    }
+                  }
+                  clicks.push(name + '=' + want + ' →命中 ' + n);
+                  if (!n) errors.push('用量版块里点不到档位 "' + want + '"');
+                });
+                // ★ `?riso=<模型名>` 点一行把它从图里摘掉。按 `data-model-row` 身份点。
+                var riso = p.get('riso');
+                if (riso) {
+                  setTimeout(function () {
+                    var row = document.querySelector('[data-model-row="' + riso + '"]');
+                    if (row) row.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+                    clicks.push('riso=' + riso + ' →命中 ' + (row ? 1 : 0));
+                    if (!row) errors.push('点不到模型行 "' + riso + '"');
+                  }, 120);
+                }
+              }, 260);
+            }, 300);
+          }
           var items = document.querySelectorAll('.cb-rail > div');
-          if (items[2]) items[2].dispatchEvent(new MouseEvent('click', { bubbles: true }));
-          // 命中数照样要报 —— 点错位置和没点中长得一模一样(本仓 `click` 探针同一条纪律)。
-          clicks.push('nav=logs →rail 共' + items.length + '项,点第3');
-          if (items.length < 4) errors.push('rail 项数异常: ' + items.length);
+          clicks.push('nav=' + want + ' →rail 共' + items.length + '项,按 data-page 命中 ' + (el ? 1 : 0));
+          // 命中数照样要报 —— 没有 `data-page` 的旧构建会静默什么都不点。
+          if (!el) errors.push('rail 里没有 data-page="' + want + '" —— 前端 bundle 可能是旧的');
+          if (items.length < 5) errors.push('rail 项数异常: ' + items.length);
         }, 500);
       }
       else fire('navigate-traffic');
@@ -530,6 +754,11 @@ STUB = """
       //    这里发 `from: 'other-window'`,正是真机上另一个窗口发来的形状。
       //    ⚠️ 没有这个开关,「两端同步」的改动在 harness 里**一个像素都验不到**,
       //      而截图会正常渲染、探针会报干净 —— 本仓点名过的那种假绿。
+      // ★★ `?agypush=<rem>` 模拟**采样器写完 sidecar、Rust 广播**（Phase 5）。
+      //   判据是"推送到达后 UI 上的数变了" —— 而不是源码里有没有 `listen`。
+      if (p.get('agypush')) {
+        setTimeout(function () { agyPushed = true; fire('agy-quota-updated'); }, 900);
+      }
       if (p.get('busyfrom')) {
         setTimeout(function () {
           fire('action-busy', { action: p.get('busyfrom'), at: Date.now() / 1000,
@@ -646,6 +875,11 @@ STUB = """
           //   不是缺陷。不排掉的话,每个刻意做了截断的标签(数据源路径、长模型名)都会被报一次,
           //   真缺陷淹在噪音里。这与「散文允许换行」是同一条原则:**刻意的取舍不是缺陷**。
           if (ocs.textOverflow === 'ellipsis') continue;
+          // ★ **浮动读出层本来就在盒子外**（`.cb-hoverpop`，绝对定位、`pointer-events:none`）。
+          //   它会计进父元素的 scrollWidth，但那不是"内容装不下"——是这个设计的定义。
+          //   不排掉的话，每个带悬浮浮层的角标都会被报一次，真溢出淹在噪音里
+          //   （同上面省略号那条：**刻意的取舍不是缺陷**）。
+          if (e.querySelector && e.querySelector(':scope > .cb-hoverpop')) continue;
           over.push((e.className || e.tagName) + ' ' + e.scrollWidth + '/' + e.clientWidth
                     + ' 「' + (e.textContent || '').trim().slice(0, 22) + '」');
         }
@@ -847,6 +1081,8 @@ STUB = """
         errors: errors.slice(0, 4),
         unknownCmds: unknown.filter(function (v, i, a) { return a.indexOf(v) === i; }),
         clicks: clicks,
+        // ★ 只记 sub+arg,**不记 payload** —— 它含 API key。
+        relayCalls: relayCalls,
         // 只报关心的两个,别把 plugin:event|* 的噪音带进来
         sizes: sizes,
         ipc: { run_traffic: ipc['run_traffic'] || 0,

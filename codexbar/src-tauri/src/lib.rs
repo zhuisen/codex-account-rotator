@@ -438,6 +438,22 @@ static AGY_LOCK: Mutex<()> = Mutex::new(());
 /// 往返(实测毫秒级),没有外网成本也没有配额成本;而它的 5h 窗口跳得比 grok 的周窗口快。
 const AGY_COALESCE_SECS: u64 = 60;
 
+/// 中转站（第三方 OpenAI 协议 relay）用量的 sidecar。不进 `state.json` 的理由同上,
+/// 且更硬:那份文件里**有 API key**(0600),而 sidecar 是要送给 webview 的 ——
+/// 两者绝不能同源。`relay-ctl` 的输出恒为已脱敏形态(只出 `key_fp`)。
+const RELAY_SNAPSHOT: &str = ".relay-usage.json";
+
+/// ★★ **两把锁,不是一把。** 一把的话,一次外网 `usage`(实测 2.34s;中转站不可达时
+/// `monitor.TIMEOUT=25s`,首次探测最多 4 个请求 ⇒ 100s)会把用户点"保存"堵住 ——
+/// 而那**恰恰发生在中转站配错的时候**,也就是用户最想改配置的那一刻,且 UI 上毫无反馈。
+/// 网络调用与配置读写本来就不共享状态(配置的并发由 `relay/store.py` 的 flock 管,
+/// 那一层还能挡住命令行里跑的 `relay-ctl`,进程内 Mutex 挡不住)。
+static RELAY_NET_LOCK: Mutex<()> = Mutex::new(());
+static RELAY_STORE_LOCK: Mutex<()> = Mutex::new(());
+/// ★ 300s,与 grok 同量级:中转站的 `/usage` 是**外网**请求(2s 量级),
+/// 且它的数字按天聚合、分钟级刷新没有意义。agy 那边 60s 是因为它是 loopback。
+const RELAY_COALESCE_SECS: u64 = 300;
+
 // ---- sidecar 的三件套。参数化而不是每条链路抄一份 ----
 // 在 agy 之前这套就已经有两份(traffic / grok),第三份落地时才合并 —— 到这里
 // 「同一段代码的三个副本」已经是实打实的成本,而不是预支的抽象。
@@ -510,6 +526,109 @@ fn read_grok_quota() -> Result<Option<String>, String> {
 /// ★ 这里的 `None` 与「agy 没在跑」是**两件事**:前者是我们没测过,后者是测过且确定没有
 /// (`available:false, reason:"no_process"`)。前端必须分开显示 —— 合并了就等于把
 /// 「不知道」讲成「确实没有」。
+/// 只读中转站用量快照。`null` = 还没成功取过 —— 前端据此显示首次加载而不是空数据。
+/// **故意不判新鲜度**(策略属于展示层,焊死在这里会把两种策略压成一种,同 `read_traffic_snapshot`)。
+#[tauri::command]
+fn read_relay_snapshot() -> Result<Option<String>, String> {
+    read_sidecar(RELAY_SNAPSHOT)
+}
+
+/// 拉一次中转站用量。合并窗口内直接复用快照,不起 python、不发外网请求。
+#[tauri::command]
+async fn run_relay_usage(force: Option<bool>) -> Result<String, String> {
+    let script = format!("{}/relay-ctl", script_dir());
+    let forced = force.unwrap_or(false);
+    let out = tauri::async_runtime::spawn_blocking(move || {
+        let _guard = RELAY_NET_LOCK.lock();
+        if !forced {
+            if let Some(fresh) = fresh_sidecar(RELAY_SNAPSHOT, "fetched_at", RELAY_COALESCE_SECS)
+            {
+                return Ok(Err(fresh));
+            }
+        }
+        py_cmd().arg(&script).arg("usage").output().map(Ok)
+    })
+    .await
+    .map_err(|e| format!("join: {}", e))?
+    .map_err(|e: std::io::Error| format!("exec: {}", e))?;
+    let out = match out {
+        Ok(o) => o,
+        Err(cached) => return Ok(cached),
+    };
+    let body = String::from_utf8_lossy(&out.stdout).to_string();
+    if out.status.success() && !body.trim().is_empty() {
+        write_sidecar(RELAY_SNAPSHOT, &body);
+        Ok(body)
+    } else {
+        Err(format!("{}\n{}", body, String::from_utf8_lossy(&out.stderr)))
+    }
+}
+
+/// 中转站的写侧命令。**子命令白名单** —— 参数直接进 argv,放开等于给 webview 一个任意执行面。
+///
+/// ★★ `payload` 走 **stdin**,不走 argv:`ps` 能看到任何进程的完整命令行,
+///    key 走参数等于全机器可见,还会进 shell 历史。`set` 是唯一带 key 的子命令。
+#[tauri::command]
+async fn relay_ctl(sub: String, arg: Option<String>, payload: Option<String>) -> Result<String, String> {
+    // `rewrite` 已随「一个 provider，两种上游」删除（不再有第二份 profile 可写）；
+    // `cleanup` 清掉 2026-09-09 之前留下的每中转站一份遗留 profile。
+    const ALLOWED: &[&str] = &["status", "test", "set", "remove", "route", "cleanup"];
+    if !ALLOWED.contains(&sub.as_str()) {
+        return Err(format!("disallowed relay-ctl subcommand: {:?}", sub));
+    }
+    // id / profile 名同时是文件名,字符集必须卡死(路径穿越)。与 relay/store.py 的 ID_RE 同源。
+    if let Some(a) = arg.as_deref() {
+        let ok = a == "pool"
+            || (a.len() >= 2
+                && a.len() <= 31
+                && a.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
+                && a.chars().next().is_some_and(|c| c.is_ascii_alphanumeric()));
+        if !ok {
+            return Err(format!("bad relay id: {:?}", a));
+        }
+    }
+    let script = format!("{}/relay-ctl", script_dir());
+    let out = tauri::async_runtime::spawn_blocking(move || {
+        // ★ `test` 会发外网请求,和 `usage` 抢同一条链路;其余是纯本地读写。
+        let _net;
+        let _store;
+        if sub == "test" {
+            _net = Some(RELAY_NET_LOCK.lock());
+        } else {
+            _net = None;
+            _store = Some(RELAY_STORE_LOCK.lock());
+        }
+        let mut cmd = py_cmd();
+        cmd.arg(&script).arg(&sub);
+        if let Some(a) = arg {
+            cmd.arg(a);
+        }
+        cmd.stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let mut child = cmd.spawn()?;
+        // ★★ **只 take 一次。** 原来写成两次 take:第一次在 `if let` 里被移出、块末 drop,
+        //    第二次拿到的是 `None`(no-op)。两条路都能关上管道,但注释指错了行 ——
+        //    一个"看起来在做事、实际是空操作"的语句比没有更糟。
+        //    管道必须关:不关的话子进程读 stdin 永不返回,症状是"点了按钮没反应",
+        //    和"命令根本没被调用"长得一模一样。
+        let sin = child.stdin.take();
+        if let (Some(mut s), Some(body)) = (sin, payload) {
+            use std::io::Write;
+            let _ = s.write_all(body.as_bytes());
+        }
+        child.wait_with_output()
+    })
+    .await
+    .map_err(|e| format!("join: {}", e))?
+    .map_err(|e: std::io::Error| format!("exec: {}", e))?;
+    let body = String::from_utf8_lossy(&out.stdout).to_string();
+    if body.trim().is_empty() {
+        return Err(format!("relay-ctl 无输出: {}", String::from_utf8_lossy(&out.stderr)));
+    }
+    Ok(body)
+}
+
 #[tauri::command]
 fn read_agy_quota() -> Result<Option<String>, String> {
     read_sidecar(AGY_SNAPSHOT)
@@ -1616,8 +1735,19 @@ pub fn run() {
             let handle_timer = handle.clone();
             tauri::async_runtime::spawn(async move {
                 let path = format!("{}/state.json", data_dir());
+                // ★★ agy 额度改成**推送**(2026-09-09,Phase 5)。采样器(唯一抓取者)写完
+                //    sidecar,这里 1s 内看到 mtime 变化就广播;前端监听后只读 sidecar,
+                //    **零 RPC**。改之前是 app 自己另起一套轮询,而它**只在有人看着这一页时
+                //    才前进** —— 切走再回来最坏等 2.5 分钟。两个 webview 也因此各看各的。
+                let agy_path = sidecar_path(AGY_SNAPSHOT);
+                let mut agy_seen: Option<(std::time::SystemTime, u64)> = None;
                 let mut seen: Option<(std::time::SystemTime, u64)> = None;
                 let mut since_tick = 0u32;
+                // *** 独立计数器。`since_tick` 会被下面的 `changed` 分支清零,
+                //   拿它做 % 60 的话:state.json 一变就清零 => 判据几乎恒为 0 =>
+                //   每秒都拉一次采样器。复用一个会被别人重置的计数器不会报错,
+                //   只会让频率悄悄错掉一个数量级。
+                let mut sampler_tick = 0u32;
                 loop {
                     tokio::time::sleep(Duration::from_secs(1)).await;
                     since_tick += 1;
@@ -1630,6 +1760,42 @@ pub fn run() {
                     let changed = stamp.is_some() && seen.is_some() && stamp != seen;
                     if stamp.is_some() {
                         seen = stamp;
+                    }
+
+                    // ★ 与 state.json 同一条 tick,不另起线程 —— 多一个 1s 循环只为看一个文件
+                    //   是纯浪费,而且两个循环的时序会让"谁先发"变得不可预期。
+                    let agy_stamp = fs::metadata(&agy_path)
+                        .ok()
+                        .and_then(|m| m.modified().ok().map(|t| (t, m.len())));
+                    // 首次观测不发 —— 冷启动时前端本来就会自己读一次,发了是重复。
+                    if agy_stamp.is_some() && agy_seen.is_some() && agy_stamp != agy_seen {
+                        let _ = handle_timer.emit("agy-quota-updated", ());
+                    }
+                    if agy_stamp.is_some() {
+                        agy_seen = agy_stamp;
+                    }
+
+                    // ★★ **补拉采样器**（Phase 5）。采样器目前只由 `bin/agy` wrapper 拉起 ——
+                    //    从 IDE / VS Code / 绝对路径起的 agy 没有 wrapper,于是**没有采样器**,
+                    //    额度就永远停在上一次的读数上,而 UI 看不出这一点(它只知道"数据旧了")。
+                    //    与 dawn-probe 的「launchd + app 内补跑」是同一条双路径设计。
+                    //    ⚠️ 只在**锁文件不存在**时拉:采样器自己有单实例锁,重复拉会白起一个
+                    //      python 再立刻退出 —— 无害但每分钟一次是纯噪音。
+                    //    ⚠️ 拉起来的采样器若发现 agy 没在跑,会在 IDLE_SECS 后自己退出,
+                    //      所以这不会变成一个常驻。
+                    sampler_tick += 1;
+                    if sampler_tick % 60 == 0 {
+                        let lock = format!("{}/traffic/agy-quota-ledger/.sampler.lock", data_dir());
+                        if !std::path::Path::new(&lock).exists() {
+                            let script = format!("{}/traffic/agy_quota_sampler.py", script_dir());
+                            if std::path::Path::new(&script).exists() {
+                                let _ = py_cmd()
+                                    .arg(&script)
+                                    .stdout(std::process::Stdio::null())
+                                    .stderr(std::process::Stdio::null())
+                                    .spawn();
+                            }
+                        }
                     }
 
                     if changed || since_tick >= 30 {
@@ -1679,6 +1845,9 @@ pub fn run() {
             run_grok_quota,
             read_agy_quota,
             run_agy_quota,
+            read_relay_snapshot,
+            run_relay_usage,
+            relay_ctl,
             check_update,
             set_dock_visible,
             set_main_visible,

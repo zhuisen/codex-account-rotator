@@ -66,3 +66,17 @@ body { background: transparent; font-family: 'Space Grotesk', system-ui, sans-se
 .cb-light ::-webkit-scrollbar-thumb:hover { background: rgba(0, 0, 0, .26); }
 /* 两条轴交汇的小方块,默认会画成不透明色块 */
 ::-webkit-scrollbar-corner { background: transparent; }
+
+/* ★ 悬浮才展开的读出层（2026-09-09 用户：「放在一个感叹号里，鼠标悬浮才看到」）。
+   ★★ **用 CSS 控制可见性，不用条件渲染。** 条件渲染会让内容离开 DOM ——
+   而本仓的行为闸是在 `--dump-dom` 的静态 DOM 上断言的，一改就全部静默失效
+   （"测试还在、但什么也没验"，本仓记过的空守卫形态）。
+   照 UI 规范：60% 不透明 + 模糊 + `pointer-events:none`，不挡它盖住的东西。 */
+.cb-hoverwrap { position: relative; display: inline-flex; }
+.cb-hoverpop {
+  position: absolute; top: calc(100% + 6px); left: 0; z-index: 40;
+  opacity: 0; visibility: hidden; pointer-events: none;
+  transition: opacity .15s ease, visibility .15s;
+}
+.cb-hoverwrap:hover .cb-hoverpop { opacity: 1; visibility: visible; }
+@media (prefers-reduced-motion: reduce) { .cb-hoverpop { transition: none; } }
