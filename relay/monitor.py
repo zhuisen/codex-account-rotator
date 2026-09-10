@@ -311,27 +311,65 @@ def day_models(relay, path, date):
     return _rows(raw.get("model_stats"), "model")
 
 
-def attach_day_models(relay, path, days, prev_days, today):
+# ★ 连续失败到这个数就停手。见 `attach_day_models` 里的熔断说明。
+MAX_CONSECUTIVE_FAILS = 3
+
+
+def attach_day_models(relay, path, days, prev_cache, today):
     """给每个 `daily` 行挂上 `models`。**历史日复用上一份快照，只重取今天。**
 
     ★ 历史日不可变 —— 拉过一次就永远是那个值。所以稳态每次刷新只多 **1** 个请求。
     ★ 拿不到的那天 `models` 留 **None** 而不是 `[]`：前端据此显示"这天没有按模型明细"，
       而 `[]` 会被画成"这天没用过任何模型"—— 又一次把「没读到」和「确实没有」折叠成一个值。
+
+    `prev_cache`: `date -> (models, partial)`。
+
+    ## 2026-09-10 修的三条
+
+    ① **「历史日不可变」不适用于"当时还是今天"的那一份。**
+       `cached is not None and date != today` 一旦成立就永远复用 —— 但那份缓存很可能是
+       **昨天下午**抓的、只包含到那一刻为止的用量。第二天它变成"历史日"，
+       于是那半天的模型构成被**永久冻结**，而当天的四类 token 总量是完整的
+       ⇒ 同一天里「按模型」加起来 ≠ 「总量」，两个数放在同一页上。
+       现在给当天抓的明细打 `partial` 标记，它变成历史日之后**必须再取一次**。
+
+    ② **预算要从今天开始花，不是从最老的日子。**
+       `days` 按日期升序，`budget` 从头花 ⇒ 上游给了超过 `MAX_DAY_FETCH` 天时，
+       今天（唯一每轮都在变的那天）**永远排在预算之外**，模型图停在旧值上。
+       现在按「今天 → 昨天 → …」的顺序花。
+
+    ③ **失败之后要熔断。** 每个 `_get` 带 `TIMEOUT=25`,对端整个挂掉时会把预算跑完:
+       最坏 40×25s ≈ **17 分钟**,而这段时间 `RELAY_NET_LOCK` 一直被占着,
+       UI 上表现为"刷新键点了没反应"。连续失败 3 次就停,剩下的如实留 `None`。
     """
     budget = MAX_DAY_FETCH
+    fails = 0
+    # ★ 只对"真的要联网"的那些日子排序 —— 命中缓存的不花预算，顺序无所谓。
+    need = []
     for d in days:
         date = d.get("date")
-        cached = prev_days.get(date)
-        # 今天会变，必须重取；历史日有缓存就直接用。
-        if cached is not None and date != today:
+        cached, partial = prev_cache.get(date, (None, False))
+        # 历史日且**当时不是今天**抓的 ⇒ 不可变，直接用。
+        if cached is not None and date != today and not partial:
             d["models"] = cached
             continue
-        if budget <= 0:
+        need.append((d, date, cached))
+    # 今天优先，然后由近及远。
+    need.sort(key=lambda x: x[1] or "", reverse=True)
+    for d, date, cached in need:
+        if budget <= 0 or fails >= MAX_CONSECUTIVE_FAILS:
             d["models"] = cached          # 可能是 None —— 如实留空，不编造
+            d["models_partial"] = bool(cached is not None and date == today)
             continue
         budget -= 1
         got = day_models(relay, path, date)
+        if got is None:
+            fails += 1
+        else:
+            fails = 0
         d["models"] = got if got is not None else cached
+        # ★ 今天抓到的是**半天**。落进快照后要能自己说出来,否则明天没人知道该重取。
+        d["models_partial"] = (date == today) and d["models"] is not None
     return days
 
 
@@ -375,7 +413,8 @@ def fetch(relay, remember_path=False, prev=None):
     prev_days = {}
     for d in ((prev or {}).get("daily") or []):
         if isinstance(d, dict) and d.get("date") and d.get("models") is not None:
-            prev_days[d["date"]] = d["models"]
+            # ★ 带上 `partial`：当天抓的明细只覆盖到那一刻，明天必须重取一次。
+            prev_days[d["date"]] = (d["models"], bool(d.get("models_partial")))
     norm["daily"] = attach_day_models(
         relay, path, norm.get("daily") or [], prev_days,
         time.strftime("%Y-%m-%d", time.localtime()))
@@ -404,7 +443,11 @@ def merge_daily(prev_days, new_days):
         old = by_date.get(d["date"])
         # ★ 新的那天若没取到按模型明细，**沿用旧的**，别把已有的抹成 None。
         if d.get("models") is None and old and old.get("models") is not None:
-            d = {**d, "models": old["models"]}
+            # ★★ `models_partial` 必须**跟着 models 一起搬**。只搬明细不搬标记的话，
+            #    一份"当天抓的半天数据"会摇身变成"完整的历史日"，从此再也不会被重取 ——
+            #    这正是这个标记要挡的那件事，而漏搬它不会有任何症状。
+            d = {**d, "models": old["models"],
+                 "models_partial": bool(old.get("models_partial"))}
         by_date[d["date"]] = d
     return [by_date[k] for k in sorted(by_date)]
 

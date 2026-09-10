@@ -1,16 +1,27 @@
 import React, { useMemo, useState } from "react";
 import type { Theme } from "../theme";
 import { modelColor } from "../theme";
-import StackedArea, { type Layer } from "./StackedArea";
-import KpiStrip, { type Kpi, UP, DOWN } from "./KpiStrip";
 import Seg from "./Seg";
-import { MONEY, MONO, NUM } from "./relay/RelayBits";
+import { UP, DOWN } from "./KpiStrip";
+import ModelSparkCard, { type ModelCardData } from "./relay/ModelSparkCard";
+import { MONEY, MONO } from "./relay/RelayBits";
 import { useRelayUsage } from "../hooks/useRelayUsage";
 import { fmtTok } from "../traffic";
 import { currencyOf, money, runwayText, type RelayEntry, type RelayUsage as RU } from "../relay";
 
 /**
- * 中转站 · **用量** —— 与「AI用量信息 / 平台详情」页同结构（用户 2026-09-09：「1:1 复刻」）。
+ * 中转站 · **用量** —— 1:1 复刻 `design_handoff_codexbar/中转站-交接说明.md` §4/§5。
+ *
+ * 版面：工具行（口径牌 + 刷新 + 按站筛选 + 时间段）→ KPI 条 → **模型小图阵**。
+ *
+ * ## ★ 与上一版（堆叠面积图 + 模型表）的差别
+ *
+ * 上一版按用户 2026-09-09 的要求与「AI用量信息」页 1:1 同构。2026-09-10 的设计稿
+ * **改了这个决定**：用量改为「每模型一张小图卡」（2c 方案），理由写在稿里 ——
+ * 堆叠图回答"这段时间的构成"，而这一页被问的是"**哪个模型在烧钱**"；
+ * 堆叠图里占比 0.1% 的模型是一条看不见的细线。
+ * 随之去掉的：分模型/总量两档、四类 token 图例、模型表、「全部」档、点行摘除。
+ * 换来的：按站筛选、聚焦（点卡片其余变暗）、每卡独立 y 轴的走势线。
  *
  * ## ★★ 我曾断言"按模型上色做不到"，那是错的 —— 留档防再犯
  *
@@ -20,48 +31,29 @@ import { currencyOf, money, runwayText, type RelayEntry, type RelayUsage as RU }
  * **逐 token 相等**（8/8 天核对过，唯一不等的是今天 —— 两次 HTTP 之间用量还在涨）。
  * 用一个看不见目标的探针得出"目标不存在" —— 与本仓记过两次的 grep 假阴性同族、同方向。
  *
- * ## 两个分层档（与「平台详情」页同名同义）
- *
- * - **分模型**（默认）：每个模型一层，颜色取 `modelColor()` —— 与 AI用量页同一个函数，
- *   所以同一个模型在两页颜色一致。**点模型行 = 把它从图里摘掉**（最后一个不许摘）。
- * - **总量**：四类 token（缓存读 / 输入 / 输出 / 缓存写）。
- *
- * 模型表与图**同窗口**，一起跟着档位走 —— 同一页上两个数不同口径正是本仓在 scan 侧
- * 栽过的错（119M vs 9,004M）。
- *
- * ## ★ 一张图，钱在 hover 里
- *
- * 用户定稿：「实扣款公用一张图，只是鼠标悬浮显示对应的金额」。所以不画第二张钱的图 ——
- * 金额进 tooltip 标题与 KPI 条。token 与钱是两个量纲，本来就不该共用一个 y 轴。
- *
  * ## ★★ 三个不同的钱，永不合并
  *
  * ①「AI用量信息」页的「总费用」= 本机所有 CLI 的 token 按 OpenAI 牌价折算的**等效**成本
  *   （订阅制下并没有真付）；② 中转站的 `cost`（对方按上游牌价记的账）；
  * ③ 中转站的 `actual_cost`（**真实扣款**）。实测 ②③ 差 3.85 倍。
- * 这一页的主口径恒为 ③；② 只在模型表末列作参考并压成 muted，**绝不进 KPI**。
+ * 这一页的主口径恒为 ③，而且**只出 ③** —— 设计稿把牌价那一列去掉了，
+ * 所以现在页面上不存在第二个金额可被误读。口径牌「实扣口径」是它的凭证。
  */
 
 /**
- * 档位。与「AI用量信息」页同序：今日 → 7d → 14d → 30d → 全部。
+ * 档位（设计稿 §4）：今日 / 7d / 14d / 30d。**没有「全部」** —— 稿里去掉了。
  *
  * ★★ **「今日」有数据，但没有小时曲线。** 2026-09-09 实测：中转站 `/usage`
  *   **不提供小时粒度** —— `period` / `granularity` / `group_by` / `hourly` /
  *   `interval` / `unit` / `type` / `default_time` 共 10 种参数形式全部原样返回按天数据，
  *   响应里也没有任何 hour 字段。（而 `start_date`/`end_date` 是**认的**，见 `day_models`。）
  *
- *   所以这一档**不画面积图** —— 一个点的面积图没有意义。改画「今日构成条」：
- *   一条横向堆叠条 + 模型表，都是真数据。少画一条假曲线，不少给一个真数字。
+ *   所以这一档的每张卡只有一个点（走势线画成水平线），并在卡阵上方**明说原因** ——
+ *   不说的话，用户会以为是我们没做（他 2026-09-09 就是这么问的）。
  */
-const RANGES = ["today", 7, 14, 30, 0] as const;
+const RANGES = ["today", 7, 14, 30] as const;
 type RelayRange = (typeof RANGES)[number];
-const rangeLabel = (r: RelayRange): string =>
-  (r === "today" ? "今日" : r === 0 ? "全部" : `${r}d`);
-
-/** 分层维度。与「平台详情」页的「分模型 / 总量」同名同义 —— 别发明第二套说法。 */
-const MODES = ["model", "total"] as const;
-type Mode = (typeof MODES)[number];
-const modeLabel = (m: Mode): string => (m === "model" ? "分模型" : "总量");
+const rangeLabel = (r: RelayRange): string => (r === "today" ? "今日" : `${r}d`);
 
 /**
  * 四类 token 的分层。**顺序 = 画图顺序**，占比最大的贴基线（本仓 UI 规范：
@@ -82,15 +74,25 @@ type Row = { id: string; name: string; u: RelayEntry };
 export default function RelayUsage({ t }: { t: Theme }): React.ReactElement {
   const { snap, busy, err, refresh } = useRelayUsage();
   const [range, setRange] = useState<RelayRange>(14);
-  const [mode, setMode] = useState<Mode>("model");
-  const [hoverKey, setHoverKey] = useState<string | null>(null);
-  /** 被摘掉的模型（点一下从图里拿走）。★ 与「平台详情」页 `iso` 同义。
-   *  **占比恒按全量算，不随隔离变** —— 隔离只是"这张图先不画它"，不是"它不存在了"。 */
-  const [iso, setIso] = useState<Set<string>>(() => new Set());
+  /** 按站筛选（设计稿 §4）。`"all"` = 全部站。 */
+  const [station, setStation] = useState<string>("all");
+  /**
+   * 聚焦的模型（设计稿 §5：点卡片 = 聚焦，其余变暗；再点取消）。
+   *
+   * ★★ **它索引进一个会变的数据集，所以不能活得比数据集久**（本仓 UI 规范）。
+   *    切档位 / 换站之后模型集合会变，一个指向已不存在模型的 `focus` 会让整屏都变暗
+   *    而没有任何一张卡是亮的 —— 越界检查发现不了这种"值还在、含义没了"。
+   *    所以渲染时按**当前**模型集合校验一次，不在 `setState` 里补丁。
+   */
+  const [focus, setFocus] = useState<string | null>(null);
 
-  const rows: Row[] = useMemo(
+  const allRows: Row[] = useMemo(
     () => (snap?.relays ?? []).map((u) => ({ id: u.id, name: u.label ?? u.id, u })),
     [snap],
+  );
+  const rows: Row[] = useMemo(
+    () => (station === "all" ? allRows : allRows.filter((r) => r.id === station)),
+    [allRows, station],
   );
 
   /**
@@ -121,16 +123,11 @@ export default function RelayUsage({ t }: { t: Theme }): React.ReactElement {
         //   两者跨午夜时会差一天，而"今天没有数据"和"时区对不上"长得一模一样。
         labels.push(present[present.length - 1]);
       } else {
+        // ★ 设计稿 §4 的档位是「今日 / 7d / 14d / 30d」，没有「全部」——
+        //   所以这里不再有"按观测跨度自适应"的分支（TS 也已判它是死代码）。
         const end = new Date(present[present.length - 1] + "T00:00:00Z");
-        const first = new Date(present[0] + "T00:00:00Z");
-        const span = range === 0
-          ? Math.round((end.getTime() - first.getTime()) / 86400000) + 1
-          : range;
-        for (let k = span - 1; k >= 0; k--) {
-          const d = new Date(end.getTime() - k * 86400000);
-          const iso = d.toISOString().slice(0, 10);
-          if (range === 0 && iso < present[0]) continue;
-          labels.push(iso);
+        for (let k = range - 1; k >= 0; k--) {
+          labels.push(new Date(end.getTime() - k * 86400000).toISOString().slice(0, 10));
         }
       }
     }
@@ -143,8 +140,10 @@ export default function RelayUsage({ t }: { t: Theme }): React.ReactElement {
     /** 模型 → 每天的 token / 实扣 / 轮数。**窗口内**，所以模型表跟着档位走。 */
     const mtok = new Map<string, number[]>();
     const mcost = new Map<string, number[]>();
+    // ★ 牌价（`m.cost`）**不再收集**。设计稿去掉了牌价那一列之后它没有任何消费者 ——
+    //   而"算了但没人用"的字段正是本仓栽过的孤儿字段：它会让下一个人以为页面上
+    //   某个数就是它，也会让"牌价没有出现在页面上"这条闸永远被一句注释绊住。
     const mreq = new Map<string, number[]>();
-    const mlist = new Map<string, number[]>();   // 牌价（参考口径）
     /** ★ 有几天**没取到**按模型明细。`null` ≠ 空 —— 必须能说出来，
      *  否则"这天没数据"会被画成"这天没用过"。 */
     let missing = 0;
@@ -162,12 +161,11 @@ export default function RelayUsage({ t }: { t: Theme }): React.ReactElement {
         for (const m of ms) {
           if (!mtok.has(m.model)) {
             mtok.set(m.model, zero()); mcost.set(m.model, zero());
-            mreq.set(m.model, zero()); mlist.set(m.model, zero());
+            mreq.set(m.model, zero());
           }
           mtok.get(m.model)![i] += m.total_tokens || 0;
           mcost.get(m.model)![i] += m.actual_cost || 0;
           mreq.get(m.model)![i] += m.requests || 0;
-          mlist.get(m.model)![i] += m.cost || 0;
         }
       }
     }
@@ -177,7 +175,7 @@ export default function RelayUsage({ t }: { t: Theme }): React.ReactElement {
       .map((k) => ({
         model: k, tok: mtok.get(k)!, cost: mcost.get(k)!, req: mreq.get(k)!,
         totalTok: sum(mtok.get(k)!), totalCost: sum(mcost.get(k)!),
-        totalReq: sum(mreq.get(k)!), totalList: sum(mlist.get(k)!),
+        totalReq: sum(mreq.get(k)!),
       }))
       .sort((a, b) => b.totalTok - a.totalTok);
 
@@ -187,7 +185,7 @@ export default function RelayUsage({ t }: { t: Theme }): React.ReactElement {
 
   /** 环比：本窗口 vs 紧邻的上一个等长窗口。**样本不够就说「—」，不给一个假的 0%。** */
   const delta = useMemo(() => {
-    if (range === 0 || range === "today" || view.labels.length === 0) return null;
+    if (range === "today" || view.labels.length === 0) return null;
     const all = new Set<string>();
     for (const r of rows) for (const d of r.u.data?.daily ?? []) all.add(d.date);
     const n = range as number;
@@ -287,86 +285,109 @@ export default function RelayUsage({ t }: { t: Theme }): React.ReactElement {
                : `↻ ${at} 那次没取到` };
   }, [rows, snap?.fetched_at]);
 
-  const kpis: Kpi[] = [
-    { k: "总 token", v: fmtTok(view.grandTok), n: view.grandTok, fmt: fmtTok,
-      sub: delta?.tok ? `环比 ${delta.tok.txt}` : "环比 —",
-      subC: delta?.tok ? (delta.tok.up ? UP : DOWN) : t.muted },
-    { k: "请求数", v: view.grandReq.toLocaleString(), n: view.grandReq,
-      fmt: (x) => Math.round(x).toLocaleString() },
-    { k: "日均", v: fmtTok(view.grandTok / days), n: view.grandTok / days, fmt: fmtTok },
-    // ★★ 主口径恒为**实扣**。牌价绝不进 KPI —— KPI 是一眼看的地方，
-    //    放一个"其实没付这么多"的数就是骗人。
-    { k: "总实扣", v: money(addable(view.grandCost), unit), n: view.grandCost,
-      fmt: (x) => money(addable(x), unit), c: MONEY,
-      sub: mixNote ?? (delta?.cost ? `环比 ${delta.cost.txt}` : "真实扣款"),
-      subC: mixNote ? "#E0901C" : delta?.cost ? (delta.cost.up ? UP : DOWN) : t.muted },
-    { k: "日均实扣", v: money(addable(view.grandCost / days), unit),
-      n: view.grandCost / days,
-      fmt: (x) => money(addable(x), unit), c: MONEY, sub: mixNote,
-      subC: mixNote ? "#E0901C" : undefined },
-    // ★ 余额与 runway 是中转站独有的（订阅制的 AI用量页没有对应物）。
-    //   读不到显 `—` 不显 0 —— 两者的下一步动作完全相反。
-    { k: "余额", v: money(addable(balance), unit), c: MONEY, sub: mixNote,
-      subC: mixNote ? "#E0901C" : undefined },
-    { k: "还能撑", v: runwayText(tightest?.runway) },
-  ];
-
-  const layers: Layer[] = mode === "total"
-    ? CLASSES
-        .map((c) => ({ key: c.key, name: c.name, color: c.color, values: view.cls[c.key] ?? [] }))
-        .filter((l) => l.values.some((v) => v > 0))
-    : view.models
-        // ★ 被摘掉的模型**不进图层**，但仍留在表里（划掉+变淡），且占比照全量算。
-        .filter((m) => !iso.has(m.model))
-        .map((m) => ({ key: m.model, name: m.model, color: modelColor(m.model), values: m.tok }));
-
-  /** 模型表 = **窗口内**的逐日明细求和，所以它跟着上面的档位走
-   *  （用户 2026-09-09：「模型消耗没有按照我的日期来变化口径」）。 */
   const models = view.models;
-  const modelGrand = Math.max(1, models.reduce((a, m) => a + m.totalTok, 0));
-  /** ★ **每个单元格用同一份纵向 padding。** 只给第一格加 padding 会把行撑高，
-   *  其余格子被拉满 ⇒ harness 的折行探针（比"内容盒高 vs 行高"）把它们全判成折行。
-   *  实测 10 处假阳性 —— 而真折行淹没在假阳性里，正是这个探针要防的事。 */
-  const CELL: React.CSSProperties = { padding: "4px 0" };
-  const modelMax = Math.max(1, models[0]?.totalTok ?? 1);
+  const grandTok = Math.max(1, view.grandTok);
+  const topTok = Math.max(1, models[0]?.totalTok ?? 1);
+  // ★ 见 `focus` 的声明：按**当前**模型集合校验，值还在但已不在集合里就当没聚焦。
+  const activeFocus = focus && models.some((m) => m.model === focus) ? focus : null;
+
+  const cards: ModelCardData[] = models.map((m) => ({
+    model: m.model,
+    color: modelColor(m.model),
+    series: m.tok,
+    labels: view.labels,
+    totalTok: m.totalTok,
+    totalReq: m.totalReq,
+    costText: money(addable(m.totalCost), unit),
+    pct: m.totalTok / grandTok,
+    bar: m.totalTok / topTok,
+  }));
+
+  const STATIONS = ["all", ...allRows.map((r) => r.id)];
+  const stationLabel = (v: string): string =>
+    (v === "all" ? "全部站" : allRows.find((r) => r.id === v)?.name ?? v);
+
+  /** KPI 条一格。设计稿 §4：token 组 20px 白，钱组 15px 琥珀（明显降级）。 */
+  const Cell = ({ k, v, sub, subC, money: isMoney, delta }: {
+    k: string; v: string; sub?: string; subC?: string; money?: boolean;
+    /** ★ 环比的**机器可读状态**。设计稿的环比是裸的 `↑4.4%`（没有"环比"两个字），
+     *  而未知时只能写「环比 —」—— 两种措辞下没有一个稳定的文字锚点，
+     *  而 `↑` 这个字符页面别处也会出现。状态放进属性，闸就不必去猜文案。 */
+    delta?: "up" | "down" | "none";
+  }): React.ReactElement => (
+    <div data-kpi={k} data-delta={delta} style={{ minWidth: 0 }}>
+      <div style={{ fontSize: 10, color: "#6b7480", marginBottom: 3 }}>{k}</div>
+      <div style={{ fontSize: isMoney ? 15 : 20, fontWeight: 700,
+                    color: isMoney ? MONEY : t.text, whiteSpace: "nowrap",
+                    fontVariantNumeric: "tabular-nums" }}>
+        {v}
+        {sub && <span style={{ fontSize: 10, marginLeft: 6, fontWeight: 400,
+                               color: subC ?? "#8a93a0" }}>{sub}</span>}
+      </div>
+    </div>
+  );
 
   return (
-    <div data-section="relay-usage" style={{ display: "flex", flexDirection: "column", minHeight: 0 }}>
-      {/* ── 顶栏（与 AI用量信息页同构：标题 + 口径牌 + 刷新时间戳 + 档位）── */}
-      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 9,
+    <div data-section="relay-usage" style={{ display: "flex", flexDirection: "column",
+                                             minHeight: 0 }}>
+      {/* ── 工具行（设计稿 §4）────────────────────────────────────────────── */}
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12,
                     flexWrap: "wrap", rowGap: 7 }}>
-        <span style={{ fontSize: 15, fontWeight: 700, whiteSpace: "nowrap" }}>用量</span>
+        <span style={{ fontSize: 13, fontWeight: 700, whiteSpace: "nowrap" }}>用量</span>
         {/* ★ 口径牌照 `CacheChip` 的先例：被它改变的数字就在下面，不挂牌子页面就会静默说谎。 */}
-        <span data-scope-chip style={{ fontSize: 10, fontWeight: 700, letterSpacing: ".03em",
-                       padding: "2px 7px", borderRadius: 6, whiteSpace: "nowrap",
-                       border: `1px solid ${MONEY}`, color: MONEY }}>
+        <span data-scope-chip style={{ fontSize: 9.5, fontWeight: 700, padding: "2px 8px",
+                       borderRadius: 6, whiteSpace: "nowrap", fontFamily: MONO,
+                       border: "1px solid rgba(224,162,28,.5)", color: MONEY }}>
           实扣口径
         </span>
-        <span style={{ fontSize: 10.5, color: t.muted }}>
-          与「AI用量信息」的「总费用」<b>不同口径</b>：那是按 OpenAI 牌价折算的<b>等效</b>成本
-          （订阅制下并没有真付），这里是从余额<b>真扣掉</b>的钱。
+        <span style={{ fontSize: 11, color: "#6b7480", minWidth: 0, overflow: "hidden",
+                       textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          每张卡独立 y 轴 · 按 token 排序 · 实扣为从余额真扣的钱
         </span>
-        <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 10 }}>
+        <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 10,
+                      flexWrap: "wrap", rowGap: 7 }}>
           {snap?.fetched_at && (
             <span data-act="relay-refresh" data-relay-freshness={freshness.kind}
                   onClick={busy ? undefined : () => refresh()}
                   title={busy ? "取用量中…" : "重新向中转站取一次账单（免费，不消耗余额）"}
                   style={{ fontSize: 10.5,
                            color: busy ? t.accent
-                                : freshness.kind === "stale" ? "#E0901C" : t.muted,
-                           whiteSpace: "nowrap",
-                           fontFamily: MONO, cursor: busy ? "default" : "pointer",
-                           userSelect: "none", transition: "color .15s" }}>
+                                : freshness.kind === "stale" ? "#E0901C" : "#6b7480",
+                           whiteSpace: "nowrap", fontFamily: MONO,
+                           cursor: busy ? "default" : "pointer", userSelect: "none",
+                           transition: "color .15s" }}>
               {freshness.text}
             </span>
           )}
-          {/* ★ 与「平台详情」页同名同义的两档，用同一个 `Seg` —— 别发明第二种切换器。 */}
-          <Seg opts={MODES} cur={mode} on={setMode} label={modeLabel} t={t} />
+          {/* ★ 只有一家中转站时不画「按站筛选」—— 一个只有"全部"可选的控件是噪音。 */}
+          {allRows.length > 1 && (
+            <div data-station-filter>
+              <Seg opts={STATIONS} cur={station} on={setStation} label={stationLabel} t={t} />
+            </div>
+          )}
           <Seg opts={RANGES} cur={range} on={setRange} label={rangeLabel} t={t} />
         </div>
       </div>
 
-      <KpiStrip t={t} items={kpis} />
+      {/* ── KPI 条（设计稿 §4）────────────────────────────────────────────── */}
+      <div data-kpi-bar style={{ display: "flex", alignItems: "center", gap: 30,
+                    padding: "11px 18px", background: "#0e1319",
+                    border: "1px solid rgba(255,255,255,.08)", borderRadius: 12,
+                    marginBottom: 12, fontFamily: MONO, flexWrap: "wrap", rowGap: 10 }}>
+        <Cell k="总 token" v={fmtTok(view.grandTok)}
+              sub={delta?.tok ? delta.tok.txt : "环比 —"}
+              delta={delta?.tok ? (delta.tok.up ? "up" : "down") : "none"}
+              subC={delta?.tok ? (delta.tok.up ? UP : DOWN) : "#6b7480"} />
+        <Cell k="请求数" v={view.grandReq.toLocaleString()} />
+        <Cell k="日均" v={fmtTok(view.grandTok / days)} />
+        <Cell k="模型数" v={String(models.length)}
+              sub={models.length ? `Top1 占 ${(models[0].totalTok / grandTok * 100).toFixed(0)}%` : undefined} />
+        <div style={{ width: 1, height: 30, background: "rgba(255,255,255,.08)" }} />
+        <Cell k="总实扣" v={money(addable(view.grandCost), unit)} money
+              sub={mixNote} subC="#E0901C" />
+        <Cell k="余额 · 还能撑" v={money(addable(balance), unit)} money
+              sub={runwayText(tightest?.runway)} />
+      </div>
 
       {err && (
         <div data-card="relay-ioerr" style={{ fontSize: 11, color: "#E0901C", marginBottom: 8 }}>
@@ -374,12 +395,12 @@ export default function RelayUsage({ t }: { t: Theme }): React.ReactElement {
         </div>
       )}
       {/* ★ `disabled` 是**用户的选择**不是故障，与真故障分开说。 */}
-      {rows.filter((r) => r.u.state === "disabled").map((r) => (
+      {allRows.filter((r) => r.u.state === "disabled").map((r) => (
         <div key={r.id} data-relay-off style={{ fontSize: 11.5, color: t.muted, marginBottom: 6 }}>
           {r.name} 已停用 —— 不取用量、也不参与路由。
         </div>
       ))}
-      {rows.filter((r) => !r.u.ok && r.u.state !== "disabled").map((r) => (
+      {allRows.filter((r) => !r.u.ok && r.u.state !== "disabled").map((r) => (
         <div key={r.id} data-relay-err style={{ fontSize: 11.5, color: "#E0901C", marginBottom: 6 }}>
           {/* ★★ 取不到时**页面上的数字仍然是上一次的**，必须说清楚这一点 ——
               否则用户会把旧数字当成刚取的。反过来把它清空更糟（他会以为用量丢了）。 */}
@@ -396,167 +417,51 @@ export default function RelayUsage({ t }: { t: Theme }): React.ReactElement {
           )}
         </div>
       ))}
+      {/* ★ 「有几天没取到按模型明细」必须出声：`null` ≠ 空。
+          不说的话那几天会被当成"没用过任何模型"，而卡上的数就少了一块。 */}
+      {view.missing > 0 && (
+        <div data-models-missing style={{ fontSize: 11, color: "#E0901C", marginBottom: 8 }}>
+          有 {view.missing} 天没取到按模型明细 —— 下面的卡少算了这些天，
+          <b>不是这些天没用过模型</b>。
+        </div>
+      )}
 
-      {view.labels.length === 0 ? (
-        <div data-card="nodata" style={{ fontSize: 12.5, color: t.muted, padding: "14px 0" }}>
-          这个档位里没有任何用量记录。<b>这不等于读取失败</b> —— 上面若没有红字，
-          就是这段时间真的没走过中转站。
+      {/* ★★ 「今日」档**没有小时曲线**，必须说出为什么 —— 用户 2026-09-09 问过
+          「中转站是无法看今天用量吗？」。今天的数据是有的（在 `daily_usage` 最后一行），
+          缺的只是**小时粒度**：2026-09-09 实测 10 种参数形式
+          （`period`/`granularity`/`group_by`/`hourly`/`interval`/`unit`/`type`/`default_time`
+          及组合）全部原样返回按天数据，响应里也没有任何 hour 字段。
+          不写这一句，用户会以为是我们没做。 */}
+      {range === "today" && (
+        <div data-today-note style={{ fontSize: 10.5, color: "#6b7480", marginBottom: 8,
+                                      fontFamily: MONO }}>
+          今日只有一个点 —— 中转站<b>不提供小时曲线</b>（实测 10 种参数形式都只回按天数据）。
+          下面每张卡是这一天的合计。
+        </div>
+      )}
+
+      {/* ── 模型小图阵（设计稿 §4 的 2c 方案）──────────────────────────── */}
+      {cards.length === 0 ? (
+        <div data-usage-empty style={{ fontSize: 12, color: t.muted, padding: "18px 0" }}>
+          这个窗口内没有按模型明细。换个档位，或点右上角 ↻ 重新取一次。
         </div>
       ) : (
-        <>
-          {range === "today" ? (
-            /* ── 今日构成条 ────────────────────────────────────────
-               ★★ 中转站**不提供小时粒度**（10 种参数形式实测全部原样返回按天）。
-               一个点的面积图没有任何可读信息，所以这一档画横向堆叠条：
-               同样的颜色、同样的分层、同样的 hover 数字，只是没有时间轴。
-               **少画一条假曲线，不少给一个真数字。** */
-            <div data-today-bar style={{ marginTop: 10 }}>
-              <div style={{ fontSize: 10.5, color: t.muted, marginBottom: 6 }}>
-                {view.labels[0] ?? "今日"} 的构成 · 共 {fmtTok(view.grandTok)} token ·
-                实扣 <b style={{ color: MONEY }}>{money(view.grandCost, unit)}</b>
-                {` · ${view.grandReq} 次请求`}
-                <span style={{ marginLeft: 8 }}>
-                  ⓘ 中转站只提供<b>按天</b>结算，没有小时曲线 —— 所以这一档画构成，不画走势。
-                </span>
-              </div>
-              <div style={{ display: "flex", height: 26, borderRadius: 7, overflow: "hidden",
-                            border: `1px solid ${t.cardBorder}` }}>
-                {layers.map((l) => {
-                  const tot = l.values.reduce((a, b) => a + b, 0);
-                  const pct = (tot / Math.max(1, view.grandTok)) * 100;
-                  if (pct <= 0) return null;
-                  return (
-                    <span key={l.key} data-layer={l.key}
-                          title={`${l.name} · ${fmtTok(tot)} · ${pct.toFixed(1)}%`}
-                          onMouseEnter={() => setHoverKey(l.key)}
-                          onMouseLeave={() => setHoverKey(null)}
-                          style={{ width: `${pct}%`, background: l.color,
-                                   opacity: hoverKey && hoverKey !== l.key ? 0.35 : 1,
-                                   transition: "opacity .15s" }} />
-                  );
-                })}
-              </div>
-            </div>
-          ) : (
-          <div style={{ marginTop: 10 }}>
-            <StackedArea key={`${mode}:${range}:${view.labels[0]}:${view.labels.length}`}
-                         labels={view.labels} layers={layers} height={156} fmt={fmtTok} t={t}
-                         dimmed={hoverKey}
-                         tipTitle={(i) =>
-                           `${view.labels[i]} · ${view.req[i]} 次请求 · 实扣 ${money(view.cost[i], unit)}`} />
-          </div>
-          )}
-
-          {/* ★ 四类图例只属于「总量」档。分模型档的图例就是下面那张模型表 ——
-              同一个东西画两遍只会让人以为它们是两组数。 */}
-          {mode === "total" && (
-          <div data-legend style={{ display: "flex", gap: 14, flexWrap: "wrap", marginTop: 8 }}>
-            {layers.map((l) => {
-              const tot = l.values.reduce((a, b) => a + b, 0);
-              return (
-                <span key={l.key} data-legend-row={l.key}
-                      onMouseEnter={() => setHoverKey(l.key)} onMouseLeave={() => setHoverKey(null)}
-                      style={{ display: "inline-flex", alignItems: "center", gap: 6,
-                               fontSize: 11, color: t.muted, cursor: "default" }}>
-                  <span style={{ width: 9, height: 9, borderRadius: 3, background: l.color }} />
-                  <span style={{ color: t.text }}>{l.name}</span>
-                  <span style={{ fontFamily: MONO, fontVariantNumeric: "tabular-nums" }}>
-                    {fmtTok(tot)} · {((tot / Math.max(1, view.grandTok)) * 100).toFixed(1)}%
-                  </span>
-                </span>
-              );
-            })}
-          </div>
-          )}
-
-          {/* ── 模型消耗（★ 不同模型不同颜色 —— 用户要的那一处）── */}
-          {models.length > 0 && (
-            <div style={{ marginTop: 16 }}>
-              <div style={{ display: "flex", alignItems: "baseline", gap: 10, marginBottom: 6,
-                            flexWrap: "wrap", rowGap: 4 }}>
-                <span style={{ fontSize: 13, fontWeight: 700, color: t.text }}>模型消耗</span>
-                {/* ★ 与上面的图**同窗口**（用户 2026-09-09 要求）：两个数放在同一页上
-                    必须同口径 —— 这正是本仓在 scan 侧栽过的错（119M vs 9,004M）。 */}
-                <span style={{ fontSize: 10.5, color: t.muted }}>
-                  与上图同窗口（{rangeLabel(range)}）· 点一行可把它从图里摘掉
-                </span>
-                {/* ★★ 「这几天没取到明细」必须说出来，不能让它长得像"这几天没用过"。 */}
-                {view.missing > 0 && (
-                  <span data-models-missing style={{ fontSize: 10.5, color: "#E0901C" }}>
-                    ⚠️ 有 {view.missing} 天没取到按模型明细，未计入本表（总量图不受影响）。
-                  </span>
-                )}
-              </div>
-              <table data-models style={{ width: "100%", fontSize: 11.5, borderCollapse: "collapse" }}>
-                <thead>
-                  <tr style={{ color: t.muted, textAlign: "left" }}>
-                    <th style={{ fontWeight: 600, paddingBottom: 5 }}>模型</th>
-                    <th />
-                    <th style={{ fontWeight: 600, textAlign: "right" }}>TOKEN</th>
-                    <th style={{ fontWeight: 600, textAlign: "right" }}>占比</th>
-                    <th style={{ fontWeight: 600, textAlign: "right" }}>轮数</th>
-                    <th style={{ fontWeight: 600, textAlign: "right" }}>实扣</th>
-                    <th style={{ fontWeight: 600, textAlign: "right", opacity: 0.7 }}>牌价</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {models.map((m) => {
-                    const c = modelColor(m.model);
-                    const off = iso.has(m.model);
-                    return (
-                      <tr key={m.model} data-model-row={m.model}
-                          title="点一下把它从图里摘掉（只影响这张图，不改总量/费用/占比）"
-                          onClick={() => setIso((z) => {
-                            const nx = new Set(z);
-                            nx.has(m.model) ? nx.delete(m.model) : nx.add(m.model);
-                            // ★ 全摘光就什么都不剩了，最后一个不许摘（与「平台详情」页同规矩）。
-                            return nx.size >= models.length ? z : nx;
-                          })}
-                          onMouseEnter={() => setHoverKey(m.model)}
-                          onMouseLeave={() => setHoverKey(null)}
-                          style={{ color: t.text, cursor: "pointer",
-                                   opacity: off ? 0.38 : 1, transition: "opacity .15s",
-                                   background: hoverKey === m.model && !off ? t.cardBg : "transparent" }}>
-                        <td style={{ ...CELL, whiteSpace: "nowrap" }}>
-                          <span style={{ display: "inline-flex", alignItems: "center", gap: 7 }}>
-                            <span style={{ width: 9, height: 9, borderRadius: 3, background: c,
-                                           flexShrink: 0, opacity: off ? 0.35 : 1 }} />
-                            {/* ★ 模型名走等宽 —— 它是标识符不是散文（本仓 UI 规范）。 */}
-                            <span style={{ fontFamily: MONO,
-                                           textDecoration: off ? "line-through" : "none" }}>
-                              {m.model}
-                            </span>
-                          </span>
-                        </td>
-                        <td style={{ ...CELL, width: "38%", paddingLeft: 12, paddingRight: 12 }}>
-                          {/* 条形是这一行里**唯一一眼可比**的东西，给它全宽。 */}
-                          <span style={{ display: "block", height: 6, borderRadius: 3,
-                                         background: t.ghostBorder }}>
-                            <span style={{ display: "block", height: "100%", borderRadius: 3,
-                                           background: c,
-                                           width: `${(m.totalTok / modelMax) * 100}%` }} />
-                          </span>
-                        </td>
-                        <td style={{ ...NUM, ...CELL, fontWeight: 700 }}>{fmtTok(m.totalTok)}</td>
-                        {/* ★ 占比恒按**全量**算，不随隔离变 —— 隔离只是"这张图先不画它"，
-                            不是"它不存在了"（与「平台详情」页同一条纪律）。 */}
-                        <td style={{ ...NUM, ...CELL, color: t.muted }}>
-                          {((m.totalTok / modelGrand) * 100).toFixed(1)}%
-                        </td>
-                        <td style={{ ...NUM, ...CELL, color: t.muted }}>{m.totalReq.toLocaleString()}</td>
-                        <td style={{ ...NUM, ...CELL, color: MONEY, fontWeight: 700 }}>
-                          {money(m.totalCost, unit)}
-                        </td>
-                        <td style={{ ...NUM, ...CELL, color: t.muted }}>{money(m.totalList, unit)}</td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </>
+        // 固定 3 列（设计稿 §4）。`minmax(0,1fr)` 而不是 `1fr`：后者的最小宽度是
+        // `auto`，模型名一长就把列撑开、整行溢出，而 `overflow:hidden` 只管文字、救不了列宽。
+        <div data-model-grid data-model-window={String(range)} style={{ display: "grid",
+                      gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 12 }}>
+          {cards.map((c) => (
+            <ModelSparkCard key={c.model} d={c}
+                            focused={activeFocus === c.model}
+                            dimmed={!!activeFocus && activeFocus !== c.model}
+                            onPick={() => setFocus((f) => (f === c.model ? null : c.model))} />
+          ))}
+        </div>
       )}
+
+      <div style={{ marginTop: 8, fontSize: 10, color: "#454d57", fontFamily: MONO }}>
+        悬浮走势线 = 当日 token · 点卡片 = 聚焦该模型（其余变暗）· 按站筛选 / 时间段联动全部数字
+      </div>
     </div>
   );
 }

@@ -130,9 +130,20 @@ class RelayPageRenders(unittest.TestCase):
         self.assertIn("data-relay-tabs", self.raw,
                       "页内没有「账号 / 用量」两块的切换器")
 
-    def test_each_route_state_shows_its_own_note_and_no_others(self):
-        """★★ 双向。只断言"本态在"的话,恒显示同一句的实现也会绿。"""
+    # 健康的两态。设计稿把"现在走哪个出口"交给了出口卡（`在用` 角标 + `✓ 当前`），
+    # 所以它们**不再**渲染文字提示 —— 常亮的告警会被训练成噪音。
+    HEALTHY = {"pool", "relay"}
+
+    def test_each_abnormal_route_state_shows_its_own_note_and_no_others(self):
+        """★★ 双向。只断言"本态在"的话，恒显示同一句的实现也会绿。
+
+        ⚠️ 2026-09-10 改版：健康的 `pool`/`relay` 两态不再出文字（见 `HEALTHY`），
+           所以它们从这条闸移到下面 `test_the_healthy_states_are_shown_on_the_card`。
+           **四个异常态一个都不能少** —— 它们是静默失败唯一会出声的地方。
+        """
         for mode, mark in MARK.items():
+            if mode in self.HEALTHY:
+                continue
             with self.subTest(state=mode):
                 d = self.page(mode)
                 self.assertIn(mark, d, f"{mode} 的文案没渲染出来")
@@ -141,6 +152,25 @@ class RelayPageRenders(unittest.TestCase):
                         continue
                     self.assertNotIn(omark, d, f"{mode} 的页面上出现了 {other} 的文案")
 
+    def test_the_healthy_states_are_shown_on_the_card_not_as_a_warning(self):
+        """★★ 健康态的"现在走哪个出口"由**出口卡**回答，而且必须回答得出来。
+
+        判据两条，缺一不可：
+        ① 对应那张卡有 `data-outlet-active` —— 否则用户根本看不出走的是哪个；
+        ② 页面上**没有**任何异常态的文案 —— 健康时弹告警比不弹更糟。
+        """
+        for mode in sorted(self.HEALTHY):
+            with self.subTest(state=mode):
+                d = self.page(mode)
+                m = re.search(r'data-outlet="(\w+)" data-outlet-active="1"', d)
+                self.assertIsNotNone(m, f"{mode}：没有任何一张出口卡标成「在用」")
+                self.assertEqual(m.group(1), mode, f"{mode}：标成在用的是 {m.group(1)}")
+                self.assertIn("在用", d)
+                for other, omark in MARK.items():
+                    if other in self.HEALTHY:
+                        continue
+                    self.assertNotIn(omark, d, f"{mode}（健康）却显示了 {other} 的告警")
+
     def test_the_dangerous_states_spell_out_the_silent_fallback(self):
         """★★ `profile_missing` 是最危险的:codex **不报错**、静默退回 base 配置。
         文案必须把「现在实际会发生什么」写在页面上,不是只写在源码注释里。"""
@@ -148,26 +178,24 @@ class RelayPageRenders(unittest.TestCase):
         self.assertIn("不报错", d)
         self.assertIn("不轮换", d)
 
-    def test_both_cost_columns_appear_with_different_values(self):
-        """★★ 实测 `cost` 与 `actual_cost` 差 3.85 倍，**永不合并**。
+    def test_the_page_shows_the_charged_amount_never_the_list_price(self):
+        """★★★ `cost`（牌价）与 `actual_cost`（真实扣款）实测差 3.85 倍，**永不混用**。
 
-        夹具的模型表:`cost` 30.0/14.2 vs `actual_cost` 8.12/3.51 —— 两组数都必须出现。
-        夹具让它们相等的话这条测试就是空的，所以夹具也必须是不等的。
+        ⚠️ 原契约是「两列并排、各自标注」。设计稿去掉了牌价那一列 —— 于是风险从
+           「两个数被合并」变成了「**剩下的那一个其实是牌价**」，而页面上再没有
+           第二个数可以对照。所以判据换成**值本身**：
+
+        夹具的 `today.cost = 0.36`、`today.actual_cost = 0.0863`（差 4.2 倍，
+        夹具让它们相等的话这条闸就是空的）。出口卡上的「今日实扣」必须是后者。
         """
-        d = self.usage_page("relay")
+        d = self.page("relay")
         self.assertIn("实扣", d)
-        self.assertIn("牌价", d)
-        self.assertIn("实扣口径", d, "没挂口径牌,用户会把它当成 AI用量页那个等效成本")
-        # ★★ 判据是**不变量**不是具体数值。上一版写死了 `$8.12` / `$30.00`，
-        #    模型表一改成跟随档位，数字全变、闸就红了 —— 而它要守的东西
-        #    （两个口径不许合并）**根本没被破坏**。夹具值不该进断言。
-        row = re.search(r'data-model-row="[^"]+".*?</tr>', d, re.S)
-        self.assertIsNotNone(row, "模型表没渲染")
-        nums = re.findall(r"\$([\d.]+)", row.group(0))
-        self.assertGreaterEqual(len(nums), 2, f"一行里只有 {nums} —— 两列被合并了？")
-        actual, listed = float(nums[-2]), float(nums[-1])
-        self.assertNotEqual(actual, listed, "实扣与牌价相等 —— 两列指向了同一个数")
-        self.assertLess(actual, listed, "实扣不该大于牌价（中转站是折扣转售）")
+        self.assertIn("$0.0863", d, "★★ 「今日实扣」印的是牌价不是实扣款")
+        self.assertNotIn("$0.36", d, "★★ 牌价出现在了页面上，而它没有任何标注")
+        # 用量块必须挂口径牌 —— 否则用户会把它当成 AI用量页那个「等效成本」。
+        u = self.usage_page("relay")
+        self.assertIn("实扣口径", u, "没挂口径牌")
+        self.assertNotIn("牌价", u, "牌价那一列已按设计稿去掉，它又回来了")
 
     def test_unknown_money_renders_as_a_dash_not_zero(self):
         """★★ 「读不到」和「真的是 0」用户的下一步动作完全相反。
@@ -222,108 +250,116 @@ class RelayPageRenders(unittest.TestCase):
                         f"★ VS Code 落在「生效」那一侧: {seg[:200]}")
         self.assertIn("cxd", seg, "逃生口没写出来")
 
-    def test_the_usage_block_mirrors_the_ai_usage_page(self):
-        """★★ 用户 2026-09-09：「用量你也没有1:1复刻我的ai用量信息」。
+    def test_the_usage_block_has_the_three_parts_the_design_specifies(self):
+        """★★ 设计稿 §4 的三段：工具行 → KPI 条 → 模型小图阵。
 
-        判据是**同一批组件、同一个版面顺序**都真的渲染出来了：
-        档位 `Seg` → KPI 条 → 堆叠面积图 → 图例 → 模型表。
+        ⚠️ 这条闸原名 `..._mirrors_the_ai_usage_page`，判的是"与 AI用量页同一批组件"
+           （堆叠面积图 + 图例 + 模型表）—— 那是用户 2026-09-09 的要求。
+           2026-09-10 的设计稿**改了这个决定**（改成每模型一张小图卡），
+           所以旧契约是**被取代**，不是被违反。留档在这里，免得下一个人照旧文档去"修复"。
         """
         d = self.usage_page("relay")
-        for label in ("7d", "14d", "30d", "全部"):
-            self.assertIn(label, d, f"档位缺 {label} —— 没用与 AI用量页同一套 Seg")
-        for kpi in ("总 token", "请求数", "日均", "总实扣", "日均实扣", "余额", "还能撑"):
+        for label in ("今日", "7d", "14d", "30d"):
+            self.assertIn(label, d, f"档位缺 {label}")
+        # ★ 不能直接 `assertNotIn("全部", d)`：按站筛选里有「全部站」，子串会撞车
+        #   （本仓空守卫形态①：子串存在 ≠ 规则存在）。按**档位的完整文本节点**判。
+        self.assertNotIn(">全部<", d, "★ 设计稿去掉了「全部」档，它又回来了")
+        for kpi in ("总 token", "请求数", "日均", "模型数", "总实扣", "余额 · 还能撑"):
             self.assertIn(kpi, d, f"KPI 条缺「{kpi}」")
-        self.assertIn("data-models", d, "模型表没渲染")
-        # ★ 四类图例只属于「总量」档（分模型档的图例就是模型表本身）。
-        self.assertIn("data-legend", self.usage_q("rmode=总量"), "总量档没有图例")
+        self.assertIn("data-kpi-bar", d, "KPI 条没渲染")
+        self.assertIn("data-model-grid", d, "模型小图阵没渲染")
+        self.assertIn("data-model-card", d, "一张模型卡都没有")
+    def test_each_model_card_carries_its_own_numbers(self):
+        """★★ 每张卡自带：占比 / token / 轮数 / 峰值 / 实扣 / 走势线（设计稿 §4）。
 
-    def test_one_chart_layered_by_token_class_with_money_in_the_tooltip(self):
-        """★★ 用户 2026-09-09 定稿：「实扣款公用一张图，只是鼠标悬浮显示对应的金额，
-        然后区分不同模型不同颜色」。
-
-        ① **一张图**：金额不再单独占一张，进 tooltip 标题；
-        ② 图的分层是**四类 token** —— 中转站不提供「每天 × 每模型」的交叉
-           （`daily_usage` 无模型、`model_stats` 无日期，2026-09-09 查过源响应），
-           按模型上色只能靠摊派，那是编造数据；
-        ③ "不同模型不同颜色"落在**模型表**上，那里的数据是真的。
+        ⚠️ 原契约是「一张堆叠图 + 钱在 hover 里」（用户 2026-09-09 定稿）。
+           设计稿改成每模型一张卡之后，钱不再藏在 hover 里而是印在卡上 ——
+           **更容易看见，不是更少**。旧闸留档见上一条。
         """
-        d = self.usage_q("rmode=总量")
-        for cls in ("缓存读", "输入", "输出"):
-            self.assertIn(cls, d, f"图例缺「{cls}」—— 总量档没有按四类 token 分层")
-        # ★ 一张图：钱**不占第二个 y 轴**，只进 tooltip 与 KPI。
-        #   tooltip 标题由 `tipTitle` 生成、静态 DOM 里取不到，所以判它的**输入**在页面上。
-        self.assertIn("实扣", d)
-        self.assertEqual(len(re.findall(r"<svg", d)) >= 1, True, "一张图都没有")
-
-    def test_the_model_table_colours_each_model(self):
-        """★ 用户要的"不同模型不同颜色"。判据是**每个模型行都有自己的色块** ——
-        取 `modelColor()`（与「AI用量信息」页同一个函数）。"""
+        d = self.usage_page("relay")
+        card = d[d.index("data-model-card"):]
+        card = card[:card.index("data-model-card", 10)] if card.count("data-model-card") > 1 else card[:2500]
+        for piece in ("轮", "峰 ", "实扣", "<svg", "<path"):
+            self.assertIn(piece, card, f"卡上缺「{piece}」")
+        # ★ 走势线必须是**真路径**，不是一个空的 `d=""` —— 后者渲染出来是一张白卡。
+        paths = re.findall(r'<path data-spark="[^"]*" d="(M[^"]+)"', card)
+        self.assertTrue(paths, "卡上没有走势线路径")
+        self.assertGreater(len(paths[0]), 20, f"走势线是空的: {paths[0]}")
+    def test_each_model_card_gets_its_own_colour(self):
+        """★ 同一个模型在本 app 各页**同色**（`modelColor()` 是唯一来源）。
+        卡的色块、走势线 stroke、底部胶囊条必须是同一个颜色 —— 三处不一致时
+        用户会以为它们是三个不同的东西。"""
         d = self.usage_page("relay")
         self.assertIn("gpt-5.5", d)
         self.assertIn("gpt-6-astra", d)
-        self.assertIn("模型消耗", d)
-
-
-    def test_the_model_table_follows_the_date_range(self):
+        cards = re.findall(r'data-model-card="([^"]+)"', d)
+        self.assertGreaterEqual(len(cards), 2, f"卡片数不对: {cards}")
+        colours = set(re.findall(r'stroke="(#[0-9a-fA-F]{6})"', d))
+        self.assertGreaterEqual(len(colours), 2,
+                                f"★ 两个模型用了同一个颜色: {colours}")
+    def test_the_model_cards_follow_the_date_range(self):
         """★★ 用户 2026-09-09：「模型消耗没有按照我的日期来变化口径」。
 
         夹具是 **20 天**，`gpt-5.6-luna` **只出现在最早 5 天**（15~19 天前）。
         所以 14d 里必须查不到它、30d 里必须查得到 —— 各天构成相同的夹具会让这条闸
-        换任何档位都得到同一张表，是个**空守卫**。
+        换任何档位都得到同一批卡，是个**空守卫**。
+
+        ★ 判据同时打在 `data-model-window` 上：那是卡阵**自己声明**的窗口，
+          比"页面上某处出现了 14d"强 —— 档位 Seg 上本来就一直印着所有档位。
         """
         d14 = self.usage_page("relay")
-        self.assertIn("与上图同窗口（14d）", d14, "没写出模型表跟着哪个窗口")
-        self.assertNotIn("gpt-5.6-luna", d14, "14d 的表里出现了只在 15 天前用过的模型")
+        self.assertIn('data-model-window="14"', d14, "卡阵没声明它的窗口")
+        self.assertNotIn("gpt-5.6-luna", d14, "14d 里出现了只在 15 天前用过的模型")
         d30 = self.usage_q("rrange=30d")
-        self.assertIn("与上图同窗口（30d）", d30, "档位没切过去")
-        self.assertIn("gpt-5.6-luna", d30, "30d 的表里没有那个只在早期用过的模型")
+        self.assertIn('data-model-window="30"', d30, "档位没切过去")
+        self.assertIn("gpt-5.6-luna", d30, "30d 里没有那个只在早期用过的模型")
+    def test_clicking_a_card_focuses_it_and_dims_the_rest(self):
+        """★★ 设计稿 §5：点卡片 = 聚焦（该卡描边变模型色，其余 opacity .35），再点取消。
 
-    def test_clicking_a_model_removes_it_from_the_chart(self):
-        """★★ 用户 2026-09-09：「点击具体模型，图片没有跟着变化」。
-
-        判据是**图层数真的少了一层**，不是"那一行画了删除线" ——
-        后者只证明点击被记下了，证明不了图跟着变。
+        ⚠️ 原契约是「点模型行 = 从图里摘掉」（用户 2026-09-09）。设计稿改成聚焦 ——
+           两者的差别是**减法 vs 强调**：摘除会改变图的构成，聚焦不改任何数字。
+           判据打在 `data-model-focused` + 其余卡的 opacity 上，不是"那一行画了删除线"。
         """
         before = self.usage_page("relay")
-        self.assertIn("gpt-5.5", self.layers(before), "分模型档没有按模型分层")
-        after = self.usage_q("riso=gpt-5.5")
-        self.assertNotIn("gpt-5.5", self.layers(after), "★ 点了模型，图没跟着变")
-        self.assertEqual(len(self.layers(after)), len(self.layers(before)) - 1)
-        # ★ 表里仍然在（划掉 + 变淡），因为"摘掉"只影响这张图，不是"它不存在了"。
-        self.assertIn("gpt-5.5", after)
-        self.assertIn("line-through", after)
+        self.assertNotIn("data-model-focused", before, "还没点就已经有聚焦态")
+        after = dom(BASE + "/harness.html?nav=relay&rail=open&relay=relay"
+                           "&rtab=用量&rcard=gpt-5.5")
+        self.assertIn('data-model-focused="1"', after, "★ 点了卡片，没有进入聚焦态")
+        focused = re.findall(r'data-model-card="([^"]+)" data-model-focused', after)
+        self.assertEqual(focused, ["gpt-5.5"], f"聚焦的不是被点的那张: {focused}")
+        # ★ 其余卡必须**真的变暗** —— 只给被点的加描边证明不了"其余变暗"。
+        self.assertIn("opacity:0.35", after.replace(" ", ""),
+                      "★ 其余卡没有变暗，聚焦只做了一半")
+    def test_the_layer_mode_toggle_is_gone_by_design(self):
+        """★ 「分模型 / 总量」两档已被设计稿取消（2026-09-10）。
 
-    def test_the_two_layer_modes_match_the_platform_page(self):
-        """★ 与「平台详情」页同名同义的两档：分模型 / 总量。可以新增，不许减少。"""
+        留这条闸不是为了守住"没有"，而是为了**留下取消的记录**：
+        下一个人看到「平台详情」页有这两档、中转站没有，会以为是漏做。
+        四类 token 的分解仍然在数据里（`view.cls`），只是这一页不再画它 ——
+        它回答的是"构成"，而这一页问的是"哪个模型在烧钱"。
+        """
         d = self.usage_page("relay")
-        self.assertIn("分模型", d)
-        self.assertIn("总量", d)
-        # 分模型（默认）→ 图层是模型；总量 → 图层是四类 token。
-        self.assertTrue(all(k.startswith("gpt-") for k in self.layers(d)), self.layers(d))
-        tot = self.usage_q("rmode=总量")
-        self.assertTrue(all(k.endswith("_tokens") for k in self.layers(tot)), self.layers(tot))
-        self.assertIn("缓存读", tot)
-
+        self.assertNotIn("data-legend", d, "四类图例回来了 —— 设计稿里没有它")
+        self.assertNotIn("data-layer=", d, "堆叠图层回来了")
     def test_today_is_offered_and_says_why_there_is_no_hourly_curve(self):
         """★★ 用户 2026-09-09：「中转站是无法看今天用量吗？…时间口径少了今天」。
 
-        今天的数据**是有的**（在 `daily_usage` 最后一行）。缺的只是这一档。
-        但中转站**不提供小时粒度** —— 2026-09-09 实测 10 种参数形式
-        （`period`/`granularity`/`group_by`/`hourly`/`interval`/`unit`/`type`/`default_time`
-        及组合）全部原样返回按天数据，响应里也没有任何 hour 字段。
+        今天的数据**是有的**（在 `daily_usage` 最后一行）。缺的只是**小时粒度** ——
+        2026-09-09 实测 10 种参数形式（`period`/`granularity`/`group_by`/`hourly`/
+        `interval`/`unit`/`type`/`default_time` 及组合）全部原样返回按天数据。
 
-        所以这一档画**构成条**而不是面积图：一个点的面积图没有可读信息。
-        ★ 而且必须**说出为什么没有走势** —— 不说的话，用户会以为是我们没做。
+        ★ 必须**说出为什么没有走势** —— 不说的话用户会以为是我们没做。
+          设计稿没写这句话（它的样例是 14d），但那是一条实测出来的事实，不能因为
+          稿里没有就删掉。
         """
         d = self.usage_page("relay")
         self.assertIn("今日", d, "档位里没有「今日」")
         today = self.usage_q("rrange=今日")
-        self.assertIn("data-today-bar", today, "「今日」档没画构成条")
-        self.assertIn("没有小时曲线", today, "没说明为什么这一档没有走势")
-        # ★ 构成条也要**按模型分层**，与其它档位同一套颜色/身份。
-        self.assertTrue(self.layers(today), "构成条没有分层")
-        self.assertIn("与上图同窗口（今日）", today, "模型表没跟到今日档")
-
+        self.assertIn('data-model-window="today"', today, "档位没切到今日")
+        self.assertIn("data-today-note", today, "「今日」档没解释为什么没有走势")
+        self.assertIn("不提供小时曲线", today)
+        # ★ 今日档仍要出卡 —— 「没有小时曲线」不等于「没有数据」。
+        self.assertIn("data-model-card", today, "今日档一张卡都没有")
     def test_the_window_is_calendar_days_not_days_with_data(self):
         """★★★ 档位必须按**自然日**切，不是"最近 N 个有数据的日期"（Fable 评审抓到）。
 
@@ -336,13 +372,23 @@ class RelayPageRenders(unittest.TestCase):
            稠密夹具下两种实现结果**完全一样**，闸换任何档位都绿 —— 空守卫。
         """
         d = self.usage_q("rrange=7d", mode="sparse")
-        axis = sorted(set(re.findall(r">(\d\d-\d\d)<", d)))
-        self.assertEqual(len(axis), 7,
-                         f"7d 档轴上有 {len(axis)} 个日期 —— 不是 7 个自然日: {axis}")
+        # ★ 轴标签随堆叠图一起没了（设计稿改成小图卡）。新锚点是**走势线的点数** ——
+        #   Catmull-Rom 路径里每两点之间一段 `C`，所以 `C` 的个数 = 天数 - 1。
+        #   这比"页面上出现了 7d"强得多：档位 Seg 上本来就一直印着所有档位。
+        path = re.search(r'<path data-spark="[^"]*" d="(M[^"]+)"', d)
+        self.assertIsNotNone(path, "没有走势线 —— 探针坏了，不是窗口错了")
+        pts = path.group(1).count("C") + 1
+        self.assertEqual(pts, 7,
+                         f"7d 档的走势线有 {pts} 个点 —— 不是 7 个自然日")
         # 日均 = 窗口总量 ÷ **自然日数**。夹具每个有数据的日子恰好 1,000,000 token，
         # 7d 窗口里有 2 天（今天 / 2 天前）⇒ 2M ÷ 7 = 285.7K，而按"有数据的天"是 1M。
         self.assertIn("285.7K", d, "★ 日均用了「有数据的天」当分母 —— 会虚高数倍")
         self.assertNotIn("日均 1M", d)
+        # ★ 反向：稠密夹具（每天都有数据）下 7d 也必须是 7 个点，别把修法做成"永远补零到 7"
+        #   之外的什么东西。
+        dense = re.search(r'<path data-spark="[^"]*" d="(M[^"]+)"', self.usage_q("rrange=7d"))
+        self.assertIsNotNone(dense)
+        self.assertEqual(dense.group(1).count("C") + 1, 7)
 
     def test_the_previous_window_must_be_equal_length_and_fully_observed(self):
         """★★★ 环比的上一窗口必须**等长、不与当前窗口重叠、且整段可观测**。
@@ -363,13 +409,18 @@ class RelayPageRenders(unittest.TestCase):
         #    稀疏夹具有数据的日子是 今天 / 2 / 9 / 16 / 23 天前，
         #    14d 档的上期（14~27 天前）里恰好只有「23 天前」那一天被观测过 ⇒ 部分重叠，
         #    正是守卫要挡的形状。删掉守卫会拿 1M 当 14 天的上期，算出 ↑200%。
+        # ★ 判据打在 `data-delta` 上，不是文案：设计稿的环比是**裸的** `↑4.4%`
+        #   （没有"环比"两个字），而未知时只能写「环比 —」—— 两种措辞下没有稳定的
+        #   文字锚点，而 `↑` 这个字符页面别处也会出现。
         d14 = self.usage_q("rrange=14d", mode="sparse")
-        self.assertIn("环比 —", d14,
+        self.assertIn('data-delta="none"', d14,
                       "★ 上一窗口只有 1/14 天被观测过，却拿它当整段基数比 —— 涨幅是凭空的")
+        self.assertIn("环比 —", d14, "「不可比」必须**说出来**，不能只是不显示")
         # 反向：7d 档的上期（7~13 天前）整段落在观测范围内且有数据 ⇒ 必须给真数，
         # 否则"修法"退化成了永远显「—」，那同样是假的。
         d7 = self.usage_q("rrange=7d", mode="sparse")
-        self.assertRegex(d7, r"环比 [↑↓]", "★ 上期可观测却拒绝比较 —— 修法退化成了永远显 —")
+        self.assertRegex(d7, r'data-delta="(up|down)"',
+                         "★ 上期可观测却拒绝比较 —— 修法退化成了永远显 —")
 
     def test_money_kpis_refuse_to_add_across_currencies(self):
         """★★★ 一家 USD、一家 CNY 时，「总实扣 / 日均实扣 / 余额」不许给一个数。

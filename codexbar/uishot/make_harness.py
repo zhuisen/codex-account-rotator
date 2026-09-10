@@ -443,16 +443,24 @@ var RELAY_USAGE_OK = {
       var d = new Date(Date.now() - k * 86400000);
       var date = d.toISOString().slice(0, 10);
       var old = k >= 15;                       // 最早 5 天
+      // ★★ **每天必须不一样。** 各天相同的话走势线画出来是一条直线,
+      //    而"画的是这条序列"与"画的是一个常数"**在图上完全一样** —— 那条闸是空的。
+      //    用 k 的确定性函数,不用随机:截图与 DOM 闸要可复现。
+      var w = 0.55 + 0.45 * Math.sin(k * 1.1) + 0.25 * ((k % 3) / 2);
+      var sc = function (v) { return Math.round(v * w); };
       var ms = old
-        ? [{ model: 'gpt-5.6-luna', requests: 12, total_tokens: 480000, input_tokens: 90000,
-             output_tokens: 6000, cache_read_tokens: 384000, cache_write_tokens: 0,
-             cost: 2.4, actual_cost: 0.6 }]
-        : [{ model: 'gpt-5.5', requests: 40, total_tokens: 1600000, input_tokens: 280000,
-             output_tokens: 17000, cache_read_tokens: 1303000, cache_write_tokens: 0,
-             cost: 8.2, actual_cost: 2.05 },
-           { model: 'gpt-6-astra', requests: 9, total_tokens: 320000, input_tokens: 60000,
-             output_tokens: 4000, cache_read_tokens: 256000, cache_write_tokens: 0,
-             cost: 1.6, actual_cost: 0.42 }];
+        ? [{ model: 'gpt-5.6-luna', requests: sc(12), total_tokens: sc(480000),
+             input_tokens: sc(90000), output_tokens: sc(6000),
+             cache_read_tokens: sc(384000), cache_write_tokens: 0,
+             cost: 2.4 * w, actual_cost: 0.6 * w }]
+        : [{ model: 'gpt-5.5', requests: sc(40), total_tokens: sc(1600000),
+             input_tokens: sc(280000), output_tokens: sc(17000),
+             cache_read_tokens: sc(1303000), cache_write_tokens: 0,
+             cost: 8.2 * w, actual_cost: 2.05 * w },
+           { model: 'gpt-6-astra', requests: sc(9), total_tokens: sc(320000),
+             input_tokens: sc(60000), output_tokens: sc(4000),
+             cache_read_tokens: sc(256000), cache_write_tokens: 0,
+             cost: 1.6 * w, actual_cost: 0.42 * w }];
       var agg = { requests: 0, total_tokens: 0, input_tokens: 0, output_tokens: 0,
                   cache_read_tokens: 0, cache_write_tokens: 0, cost: 0, actual_cost: 0 };
       for (var i = 0; i < ms.length; i++) {
@@ -754,11 +762,12 @@ function relayEntry() {
               }
               clicks.push('rtab=' + rtab + ' →命中 ' + hit);
               if (!hit) errors.push('中转站页里点不到版块 "' + rtab + '" —— bundle 可能是旧的');
-              // ★ `?rrange=30d` / `?rmode=总量` —— 在**用量版块内**按文字身份点档位。
+              // ★ `?rrange=30d` / `?rstation=<站名>` —— 在**用量版块内**按文字身份点档位/站。
+              //   （`rmode` 随「分模型/总量」两档一起被设计稿取消,2026-09-10。）
               //   限定在 `[data-section="relay-usage"]` 里找,免得点到页签那个 Seg。
               //   位置耦合在本仓静默点错过两次,所以一律按文字。
               setTimeout(function () {
-                ['rrange', 'rmode'].forEach(function (name) {
+                ['rrange', 'rstation'].forEach(function (name) {
                   var want = p.get(name);
                   if (!want) return;
                   var scope = document.querySelector('[data-section="relay-usage"]');
@@ -775,14 +784,15 @@ function relayEntry() {
                   clicks.push(name + '=' + want + ' →命中 ' + n);
                   if (!n) errors.push('用量版块里点不到档位 "' + want + '"');
                 });
-                // ★ `?riso=<模型名>` 点一行把它从图里摘掉。按 `data-model-row` 身份点。
-                var riso = p.get('riso');
-                if (riso) {
+                // ★ `?rcard=<模型名>` 点一张模型卡 = 聚焦（设计稿 §5）。
+                //   按 `data-model-card` 身份点,不按位置 —— 位置耦合在本仓静默点错过两次。
+                var rcard = p.get('rcard');
+                if (rcard) {
                   setTimeout(function () {
-                    var row = document.querySelector('[data-model-row="' + riso + '"]');
-                    if (row) row.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-                    clicks.push('riso=' + riso + ' →命中 ' + (row ? 1 : 0));
-                    if (!row) errors.push('点不到模型行 "' + riso + '"');
+                    var c = document.querySelector('[data-model-card="' + rcard + '"]');
+                    if (c) c.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+                    clicks.push('rcard=' + rcard + ' →命中 ' + (c ? 1 : 0));
+                    if (!c) errors.push('点不到模型卡 "' + rcard + '"');
                   }, 120);
                 }
               }, 260);

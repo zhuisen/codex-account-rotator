@@ -256,35 +256,46 @@ class TheCopyMustNotOutliveTheArchitectureItDescribed(unittest.TestCase):
         self.assertNotIn("case", block, "捕获范围溢出到了别的 case 块")
 
 
-class TheTwoCostColumnsAreLabelledDifferently(unittest.TestCase):
-    """★★ 实测 `cost` 与 `actual_cost` 差 3.85 倍。页面上必须分列且标注 ——
-    合并、或用同一个词描述，就是骗人。
+class OnlyTheChargedAmountIsShown(unittest.TestCase):
+    """★★ 实测 `cost`（牌价）与 `actual_cost`（真实扣款）差 3.85 倍。
 
-    2026-09-09 起中转站不再是独立页：金额并进「AI用量信息」（`RelayCost`），
-    选号/增删并进「总览」（`RelaySection`）。"""
+    ⚠️ **契约在 2026-09-10 的设计稿里变了**：原来是「两列并排、各自标注」，
+       现在牌价那一列**整个去掉**了，页面上只剩实扣。
+       于是风险从「两个数被合并」变成「**剩下的那一个其实是牌价**」——
+       而页面上再没有第二个数可以对照。所以判据换成两条：
+       ① 源码里 KPI/卡片取的是 `actual_cost` 那条链路（`totalCost` / `grandCost`）；
+       ② 页面上不出现「牌价」这个词（出现了就说明第二个口径又回来了，而它没有标注）。
+       值本身的判据在 `tests/test_relay_page_renders.py`
+       （夹具 `today.cost=0.36` vs `today.actual_cost=0.0863`，渲染出来必须是后者）。
+    """
 
     PAGE = (ROOT / "codexbar" / "src" / "components" / "RelayUsage.tsx").read_text(encoding="utf-8")
+    CARD = (ROOT / "codexbar" / "src" / "components" / "relay"
+            / "ModelSparkCard.tsx").read_text(encoding="utf-8")
 
-    def test_both_columns_exist_and_are_distinctly_labelled(self):
-        # 主口径恒为**实扣**（KPI 与图都用它）；牌价只作参考列，压成 muted。
+    def test_the_charged_scope_is_labelled(self):
         self.assertIn("总实扣", self.PAGE)
-        self.assertIn("日均实扣", self.PAGE)
         self.assertIn("实扣口径", self.PAGE, "没挂口径牌")
-        self.assertIn("牌价", self.PAGE)
-        # ★ 牌价**绝不进 KPI** —— KPI 是一眼看的地方，放一个"其实没付这么多"的数就是骗人。
-        # ★★ 判据只取 `k: "..."` 那几个**标签字面量**，不做整块文本匹配：
-        #    整块匹配会命中源码里解释"牌价不进 KPI"的那句注释 —— 同一台机器上
-        #    今天第三次踩到"闸被自己的说明文字判红"（另两次在 test_proxy_relay_upstream.py
-        #    与 test_relay_store.py）。**说明文字不是行为。**
-        # ★ 切片边界用**正则抓那个数组字面量**，不写死"下一个变量叫什么" ——
-        #   上一版写死 `const tokLayers`，变量一改名这条闸就 ValueError 崩掉
-        #   （崩溃与"断言失败"在 CI 上颜色一样，但前者什么也没验到）。
-        m = re.search(r"const kpis[^=]*=\s*\[(.*?)\n  \];", self.PAGE, re.S)
-        self.assertIsNotNone(m, "解析不出 kpis 数组 —— 判据失效了")
-        kpi = m.group(1)
-        labels = re.findall(r'\{\s*k:\s*"([^"]+)"', kpi)
-        self.assertTrue(labels, "解析不出 KPI 标签 —— 判据失效了")
-        self.assertNotIn("牌价", "".join(labels), f"牌价混进了 KPI 条: {labels}")
+
+    def test_the_list_price_column_is_gone(self):
+        """★ 双向：既要没有「牌价」这个词，也要**确实还在显示实扣** ——
+        只判"没有牌价"的话，一个什么钱都不显示的实现同样全绿。"""
+        # ★ 剥掉注释:说明文字里会解释"牌价那一列去掉了"，那不是行为。
+        code = re.sub(r"/\*(?:.|\n)*?\*/", "", self.PAGE)
+        # ★ 行尾注释也要剥。只剥整行注释时，`const mlist = ...;   // 牌价（参考口径）`
+        #   会让这条闸被自己的说明文字判红 —— 本仓空守卫形态④的镜像。
+        code = re.sub(r"//[^\n]*", "", code)
+        self.assertNotIn("牌价", code, "★ 牌价又回到了页面上，而它没有任何标注")
+        self.assertIn("实扣", code)
+        self.assertIn("costText", self.CARD, "卡上不显示实扣了")
+
+    def test_the_card_shows_the_charged_amount_not_the_list_price(self):
+        """★★ 卡上那个金额必须来自 `totalCost`（= `actual_cost` 求和），
+        不是 `totalList`（= `cost` 求和）。两者在源码里只差一个词。"""
+        m = re.search(r"costText:\s*money\(([^)]*)\)", self.PAGE)
+        self.assertIsNotNone(m, "解析不出卡片金额的来源 —— 判据失效了")
+        self.assertIn("totalCost", m.group(1), f"卡上印的不是实扣: {m.group(1)}")
+        self.assertNotIn("totalList", m.group(1))
 
     def test_they_are_never_added_together(self):
         """不许出现把两者相加的表达式。"""
@@ -304,8 +315,17 @@ class TheKeyIsNeverRenderedInFull(unittest.TestCase):
     FORM = (ROOT / "codexbar" / "src" / "components" / "relay" / "RelayBits.tsx").read_text(encoding="utf-8")
 
     def test_the_list_shows_only_the_fingerprint(self):
-        self.assertIn("key_fp", self.PAGE)
-        self.assertNotIn("{r.key}", self.PAGE, "列表里出现了完整 key")
+        """★ 列表里绝不出现完整 key。
+
+        ⚠️ 2026-09-10 起列表在 `RelayTable.tsx`（`RelaySection` 改成表格版式），
+           而且行里只画指纹的**可读前缀**（`sk-73a1…`），括号里的 sha256 前 12 位
+           进 `title` —— 它的用途是跨机器比对，不是一眼认人。
+        """
+        table = (ROOT / "codexbar" / "src" / "components" / "relay"
+                 / "RelayTable.tsx").read_text(encoding="utf-8")
+        self.assertIn("key_fp", table)
+        self.assertNotIn("{r.key}", table, "列表里出现了完整 key")
+        self.assertNotIn("r.key}", table.replace("r.key_fp}", ""), "列表里出现了完整 key")
 
     def test_the_key_input_is_a_password_field_and_starts_empty(self):
         """★★ 绝不把 `key_fp` 回填进 key 框 —— 那串指纹**非空**、会通过校验、

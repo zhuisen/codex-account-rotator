@@ -1,56 +1,85 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import type { Theme } from "../theme";
-import RouteNote from "./RouteBar";
-import { MONO, RelayForm, Stat, relayBtn, relayCard } from "./relay/RelayBits";
+import Toast from "./Toast";
+import OutletCards from "./relay/OutletCards";
+import RelayTable from "./relay/RelayTable";
+import { RelayForm, relayCard } from "./relay/RelayBits";
 import { useRelayConfig } from "../hooks/useRelayConfig";
 import { useRelayUsage } from "../hooks/useRelayUsage";
-import { money, runwayText, type RelayEntry, type RelayRow } from "../relay";
+import { invalidateSidecar } from "../hooks/useQuotaSidecar";
+import { useStore } from "../hooks/useStore";
+import type { RelayRow } from "../relay";
 
 /**
- * 「总览」页里的中转站版块 —— **账号池的另一个槽位**（用户 2026-09-09 定稿）。
+ * 中转站「账号」块 —— 1:1 复刻 `design_handoff_codexbar/中转站-交接说明.md` §1/§2/§6。
  *
- * ## 它和账号池是同一个池子里的两类槽位
+ * 版面：`当前出口` 两张同权卡 → 生效范围 → 中转站表格（`···` 菜单）→ 新增表单。
  *
- * **选择方式是点卡片**，与总览的账号卡完全同一套词汇（`当前` 药丸徽章、accent 描边、
- * 实心「切换」按钮）。账号池自己也是其中一张卡 —— 它同样是一个可选项。
- * 底层只有一个 `relay/route.local.json`，代理据它决定往哪转发 ——
- * "同时开着"在物理上不存在，所以 UI 也不该表达得出那个状态。
+ * ## 与上一版（大卡片阵列）的差别，以及为什么换
  *
- * ## 这里只放「选哪个 / 增删改」，钱和 token 在「AI用量信息」页
+ * 设计稿的三个目标：① 一眼看出「现在走哪个出口」；② 中转站从大卡片压成表格行、
+ * 操作收进图标；③ 用量改为每模型小图卡。前两条落在这一块。
+ * 上一版每个中转站一张大卡，两三家就把一屏撑满，而这一屏真正要回答的第一个问题是
+ * "现在走哪个出口" —— 那个答案原来被埋在一排同权卡片里。
  *
- * 卡片上只留最小的决策信息：余额、还能撑多久。完整的实扣/牌价/日柱图/模型表
- * 都在用量页 —— 一张卡上塞六个金额，用户分不清哪个是真付的。
+ * ## ★ 按设计稿去掉了「切到中转站」的两段确认
+ *
+ * 上一版我给切换加了两段确认（理由：切过去之后每次 codex 都扣余额，实测一句 trivial
+ * prompt $0.0863）。设计稿 §6 的交互是**点行即切 + toast**，本次按稿复刻。
+ * 代价是**误点一行就开始花钱**；补偿是成本在同屏三处可见（`按量 · 真扣余额` 琥珀 pill、
+ * 卡上的余额/今日实扣、表格里的日均实扣）。要恢复两段确认说一声。
+ * 删除仍保留二次确认 —— 设计稿 §6 自己也写着"删除（二次确认）"。
  */
 export default function RelaySection({ t }: { t: Theme }): React.ReactElement {
-  const { cfg, note, acting, act } = useRelayConfig();
+  const { cfg, note, setNote, acting, act } = useRelayConfig();
   const { snap } = useRelayUsage();
+  const store = useStore();
   const [editing, setEditing] = useState<Partial<RelayRow> | null>(null);
-  const [confirmDel, setConfirmDel] = useState<string | null>(null);
-  const [confirmSwitch, setConfirmSwitch] = useState<string | null>(null);
+  const [toast, setToast] = useState<string | null>(null);
   const card = relayCard(t);
-  const btn = relayBtn(t);
+
+  useEffect(() => {
+    if (!toast) return;
+    const h = setTimeout(() => setToast(null), 1800);
+    return () => clearTimeout(h);
+  }, [toast]);
+
+  const relays = cfg?.relays ?? [];
+  const route = cfg?.route;
+  const activeId = route?.state === "relay" ? (route.profile ?? null) : null;
+  // 出口卡上那一家：优先当前路由指向的，否则第一个启用的（"切到中转站"要有个目标）。
+  const cur = relays.find((r) => r.id === activeId)
+    ?? relays.find((r) => r.enabled)
+    ?? relays[0];
+  const curUsage = (snap?.relays ?? []).find((x) => x.id === cur?.id);
+
+  /** ★★ 改完配置**立刻**让用量重取（P2 #30）。不然「已停用」与 KPI 里还加着它的余额
+   *  最长 5 分钟同时挂在屏幕上 —— 那不是"数据有延迟"，是"我刚点的东西没生效"。 */
+  const afterConfigChange = (msg: string): void => {
+    setToast(msg);
+    invalidateSidecar("run_relay_usage");
+  };
+
+  const pick = async (target: string, msg: string): Promise<void> => {
+    const d = await act("route", target);
+    // ★★ 失败的原因藏在 `route.detail` 里（`cmd_route` 的 payload 顶层没有 detail）。
+    //    只读顶层的话，切到一个已停用的中转站会显示"✗ 未知错误"，
+    //    而路由文件**已经改了**、代理会静默退回账号池 —— 用户既不知道失败了、也不知道钱扣在哪。
+    if (d && d.ok === false) {
+      // `act` 返回的是 `Record<string, unknown>`；`route` 是嵌套对象，取它要先窄化。
+      const rt = d.route as { detail?: string } | undefined;
+      setNote("✗ " + (d.detail || rt?.detail || d.state || "未知错误"));
+      return;
+    }
+    if (d) afterConfigChange(msg);
+  };
 
   return (
-    <div data-section="relay" style={{ marginTop: 14 }}>
-      <RouteNote t={t} route={cfg?.route} />
-
+    <div data-section="relay" style={{ position: "relative" }}>
       {note && (
-        <div data-card="note" style={{ ...card, borderColor: "#E0524D", color: "#E0524D", fontSize: 12 }}>
-          {note}
-        </div>
+        <div data-card="note" style={{ ...card, borderColor: "#E0524D", color: "#E0524D",
+                                       fontSize: 12 }}>{note}</div>
       )}
-
-      <div style={{ display: "flex", alignItems: "baseline", gap: 10, marginBottom: 8 }}>
-        <span style={{ fontSize: 13, fontWeight: 700, color: t.text }}>中转站</span>
-        <span style={{ fontSize: 11, color: t.muted }}>
-          点一张卡切换 · 与账号池<b>互斥</b>，同时只有一个在用
-        </span>
-        <span style={{ flex: 1 }} />
-        {/* ★ 编辑态由 `editing` 驱动。`{}` 而不是 `null` —— `null` 表示"表单关着"。 */}
-        {!editing && (
-          <span data-act="add" style={btn(true)} onClick={() => setEditing({})}>+ 新增中转站</span>
-        )}
-      </div>
 
       {/* ★ 读失败与「没配过」必须分开。后者是一句关于事实的假陈述。 */}
       {cfg === null && (
@@ -58,159 +87,61 @@ export default function RelaySection({ t }: { t: Theme }): React.ReactElement {
           读不到中转站配置 —— <b>这不等于你没配过</b>。上面的红字是原因。
         </div>
       )}
-      {cfg !== null && cfg.relays.length === 0 && !editing && (
+
+      <OutletCards
+        route={route} cur={cur} curUsage={curUsage}
+        poolAccounts={store.counts.total}
+        poolPct={store.hero?.tightestWin ? store.hero.tightestWin.pct / 100 : null}
+        onPool={() => void pick("pool", "已切换到账号池 · 逐请求轮换")}
+        onRelay={() => {
+          if (!cur) { setToast("还没有中转站，先点「+ 新增」"); return; }
+          if (!cur.enabled) { setToast(`${cur.label} 已停用，请先启用`); return; }
+          void pick(cur.id, `已切换到中转站 · ${cur.label}`);
+        }}
+      />
+
+      {cfg !== null && relays.length === 0 && !editing ? (
         <div data-card="empty" style={{ ...card, fontSize: 12.5, color: t.muted }}>
-          还没有中转站。点「+ 新增中转站」加一个 —— 加完它会作为一张卡出现在账号池旁边。
+          还没有中转站。点「+ 新增中转站」加一个 —— 加完它会作为一行出现在这里。
         </div>
+      ) : (
+        <RelayTable
+          t={t} rows={relays} usage={snap?.relays ?? []} activeId={activeId} acting={acting}
+          onPick={(id) => {
+            const r = relays.find((x) => x.id === id);
+            if (!r) return;
+            void pick(id, `已切换到中转站 · ${r.label}`);
+          }}
+          onTest={(id) => void act("test", id)}
+          onEdit={(r) => setEditing({ ...r, key: "" } as Partial<RelayRow>)}
+          onToggle={(r) => {
+            // ★ 停用/启用走 CLI 而不是前端记一份：真源是 relays.local.json，
+            //   代理在 app 没开时也要读它 —— 两个真源迟早分叉。
+            void act("set", undefined, { ...r, key: "", enabled: !r.enabled }).then((d) => {
+              if (!d) return;
+              afterConfigChange(`${r.label} ${r.enabled ? "已停用" : "已启用"}` +
+                (r.enabled && activeId === r.id ? " · 出口回落到账号池" : ""));
+            });
+          }}
+          onRemove={(id) => void act("remove", id).then((d) => {
+            if (d) afterConfigChange("已删除");
+          })}
+          onAdd={() => setEditing({})}
+        />
       )}
-
-      {/* ★★ 选择用**卡片**，与账号池同一套词汇（用户 2026-09-10 定稿）：
-          `当前` 药丸徽章 + accent 描边 + 实心「切换」按钮。
-          此前是一排独立 chip —— 那读起来像"几个动作"，而这是**互斥单选**，
-          而且与总览那一屏的账号卡完全两种语言。 */}
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 12 }}>
-        {/* ── 账号池：它也是一个可选项，所以也是一张卡 ───────────── */}
-        {(() => {
-          const active = cfg?.route?.state === "pool";
-          return (
-            <div data-relay="pool" style={{
-              ...card, marginBottom: 0,
-              borderColor: active ? t.accentBorder : t.cardBorder,
-              background: active ? t.curCardBg : t.cardBg,
-            }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                <span style={{ fontSize: 13, fontWeight: 700, color: t.text }}>账号池</span>
-                <span style={{ fontSize: 10.5, color: t.muted }}>代理轮换</span>
-                {active && (
-                  <span data-route-active="1"
-                        style={{ marginLeft: "auto", fontSize: 10, fontWeight: 700, color: t.accent,
-                                 border: `1px solid ${t.accentBorder}`, padding: "1px 7px",
-                                 borderRadius: 999 }}>当前</span>
-                )}
-              </div>
-              <div style={{ fontSize: 11, color: t.muted, marginTop: 6, lineHeight: 1.6 }}>
-                订阅制，<b>不额外花钱</b>；逐请求轮换，撞额度要等重置。
-              </div>
-              <div style={{ display: "flex", gap: 7, marginTop: 11 }}>
-                {active ? (
-                  <span style={{ flex: 1, textAlign: "center", fontSize: 11, fontWeight: 600,
-                                 color: t.accent, padding: "5px 0" }}>✓ 当前</span>
-                ) : (
-                  <span data-act="route-pool" title="切回账号池"
-                        style={{ ...btn(true), flex: 1, textAlign: "center" }}
-                        onClick={() => void act("route", "pool")}>
-                    {acting === "route:pool" ? "切换中…" : "切换"}
-                  </span>
-                )}
-              </div>
-            </div>
-          );
-        })()}
-
-        {(cfg?.relays ?? []).map((r) => {
-          const u: RelayEntry | undefined = (snap?.relays ?? []).find((x) => x.id === r.id);
-          const d = u?.data;
-          const active = cfg?.route?.state === "relay" && cfg.route.profile === r.id;
-          return (
-            <div key={r.id} data-relay={r.id} style={{
-              ...card, marginBottom: 0,
-              borderColor: active ? t.accentBorder : t.cardBorder,
-              background: active ? t.curCardBg : t.cardBg,
-            }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", minWidth: 0 }}>
-                <span style={{ fontSize: 13, fontWeight: 700, color: t.text, whiteSpace: "nowrap" }}>
-                  {r.label}
-                </span>
-                {/* ★ 与账号池卡、总览的 `AccountCard` **同一枚徽章**：accent 描边药丸。
-                    此前这里是实心 `USE NOW`、那边是描边「当前」—— 同一个含义两种画法。 */}
-                {active && (
-                  <span data-route-active="1"
-                        style={{ fontSize: 10, fontWeight: 700, color: t.accent,
-                                 border: `1px solid ${t.accentBorder}`, padding: "1px 7px",
-                                 borderRadius: 999 }}>当前</span>
-                )}
-                {!r.enabled && (
-                  <span data-relay-off style={{ fontSize: 9.5, fontWeight: 700, letterSpacing: ".04em",
-                                 padding: "1px 6px", borderRadius: 5,
-                                 border: `1px solid ${t.ghostBorder}`, color: t.muted }}>已停用</span>
-                )}
-                <span style={{ flex: 1 }} />
-                {/* ★ 只显示指纹。列表里绝不出现完整 key。 */}
-                <span data-key-fp style={{ fontSize: 10.5, color: t.muted, fontFamily: MONO }}>
-                  {r.key_fp}
-                </span>
-              </div>
-              <div style={{ fontSize: 10.5, color: t.muted, fontFamily: MONO, marginTop: 3,
-                            overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                {r.base_url}
-              </div>
-
-              {/* ★ 只放决策需要的两个数。完整口径在用量页 —— 一张卡上六个金额分不清哪个是真付的。 */}
-              <div style={{ display: "flex", gap: 18, marginTop: 10, flexWrap: "wrap" }}>
-                <Stat t={t} k="余额" v={money(d?.balance ?? null, d?.unit)} />
-                <Stat t={t} k="还能撑" v={runwayText(d?.runway)} />
-              </div>
-              {u && !u.ok && u.state !== "disabled" && (
-                <div data-relay-err style={{ fontSize: 11, color: "#E0901C", marginTop: 7 }}>
-                  用量读不到（{u.state}）：{u.detail ?? "（对方没给原因）"}
-                </div>
-              )}
-
-              <div style={{ display: "flex", gap: 7, marginTop: 11, flexWrap: "wrap" }}>
-                {/* ★★ 主操作放最前，与 `AccountCard` 一致 —— 它是这张卡存在的理由。
-                    ★ 切过去之后每次 codex 都在扣余额（实测一句 trivial prompt $0.0863），
-                      所以照 `ProbeButton` 的先例走**两段确认**，确认态用金额琥珀。 */}
-                {active ? (
-                  <span style={{ flex: "1 1 auto", minWidth: 62, textAlign: "center", fontSize: 11,
-                                 fontWeight: 600, color: t.accent, padding: "5px 0" }}>✓ 当前</span>
-                ) : confirmSwitch === r.id ? (
-                  <span data-act={`route-confirm-${r.id}`}
-                        style={{ ...btn(true), background: "#E0A21C", borderColor: "#E0A21C",
-                                 color: "#1b1405", flex: "1 1 auto", textAlign: "center" }}
-                        onClick={() => { setConfirmSwitch(null); void act("route", r.id); }}>
-                    确认？之后每次 codex 都扣费
-                  </span>
-                ) : (
-                  <span data-act={`route-${r.id}`} title={`把路由切到 ${r.label}（按量付费）`}
-                        style={{ ...btn(true), flex: "1 1 auto", minWidth: 62, textAlign: "center" }}
-                        onClick={() => setConfirmSwitch(r.id)}>
-                    {acting === `route:${r.id}` ? "切换中…" : "切换 · 💰按量"}
-                  </span>
-                )}
-                <span data-act={`test:${r.id}`} style={btn()} onClick={() => void act("test", r.id)}>
-                  {acting === `test:${r.id}` ? "测试中…" : "测试连接（免费）"}
-                </span>
-                <span data-act={`edit:${r.id}`} style={btn()}
-                      onClick={() => setEditing({ ...r, key: "" } as Partial<RelayRow>)}>编辑</span>
-                {/* ★ 停用/启用走 CLI 而不是前端记一份:真源是 relays.local.json,
-                    代理在 app 没开时也要读它 —— 两个真源迟早分叉。 */}
-                <span data-act={`toggle:${r.id}`} style={btn()}
-                      onClick={() => void act("set", undefined, { ...r, key: "", enabled: !r.enabled })}>
-                  {r.enabled ? "停用" : "启用"}
-                </span>
-                {confirmDel === r.id ? (
-                  <span data-act={`del-confirm:${r.id}`}
-                        style={{ ...btn(), borderColor: "#E0524D", color: "#E0524D" }}
-                        onClick={() => { setConfirmDel(null); void act("remove", r.id); }}>
-                    确认删除？
-                  </span>
-                ) : (
-                  <span data-act={`del:${r.id}`} style={btn()}
-                        onClick={() => setConfirmDel(r.id)}>删除</span>
-                )}
-              </div>
-            </div>
-          );
-        })}
-      </div>
 
       {editing && (
         <div style={{ marginTop: 12 }}>
           <RelayForm t={t} editing={editing} setEditing={setEditing}
-                     onSave={(payload) => act("set", undefined, payload)}
+                     onSave={(payload) => act("set", undefined, payload).then((d) => {
+                       if (d) afterConfigChange("已保存");
+                       return d;
+                     })}
                      acting={acting === "set"} />
         </div>
       )}
+
+      {toast && <Toast msg={toast} t={t} />}
     </div>
   );
 }

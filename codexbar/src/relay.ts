@@ -183,5 +183,6 @@ export function currencyOf(units: (string | null | undefined)[]):
 export function runwayText(rw: RelayUsage["runway"] | undefined): string {
   if (!rw) return "—";
   if (rw.days === null) return `— · ${rw.reason ?? "无法估算"}`;
-  return `≈ ${Math.round(rw.days)} 个活跃日`;
+  // ★ 与设计稿及「当前出口」卡同一句话 —— 同一屏上两种说法会让人以为是两个数。
+  return `≈ ${Math.round(rw.days)} 活跃日`;
 }

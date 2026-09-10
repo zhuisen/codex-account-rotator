@@ -39,6 +39,31 @@ export interface QuotaSidecar<T> {
   refresh: () => void;
 }
 
+/** ★ 同一个 `runCmd` 的在途请求。第二个调用方**等同一个 promise**，不再起第二个子进程。 */
+const _inflight = new Map<string, Promise<unknown>>();
+/** ★ 同一个 `runCmd` 的所有实例。取到结果后广播，保证同一屏上的两块永远同一份数据。 */
+const _subs = new Map<string, Set<(d: unknown) => void>>();
+
+/**
+ * 让某个 sidecar 的所有实例**立刻重取**。
+ *
+ * ★★ 给「改了配置，用量的口径就变了」用（2026-09-10）：停用/启用/删除一个中转站之后，
+ *    用量块对它的状态陈述与 KPI 最长 **5 分钟**与事实相反 —— 页面上写着"已停用"，
+ *    而同一屏的 KPI 里还加着它的余额。配置动作是**用户刚做的**，
+ *    这时候的陈旧不是"数据有延迟"，是"我刚点的东西没生效"。
+ */
+export function invalidateSidecar(runCmd: string): void {
+  _inflight.delete(runCmd);
+  void invoke<string>(runCmd, { force: true })
+    .then((raw) => {
+      try {
+        const d = JSON.parse(raw);
+        for (const fn of _subs.get(runCmd) ?? []) fn(d);
+      } catch { /* 形状坏了让 DOM 闸去发现 */ }
+    })
+    .catch(() => { /* 取不到就保持旧值 —— 比清空好，见 monitor.collect 的"只增不减" */ });
+}
+
 export function useQuotaSidecar<T extends HasFetchedAt>(cfg: {
   /** Tauri 命令：只读 sidecar，不起子进程。 */
   readCmd: string;
@@ -57,7 +82,6 @@ export function useQuotaSidecar<T extends HasFetchedAt>(cfg: {
   const [snap, setSnap] = useState<T | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-  const running = useRef(false);
 
   const parse = (raw: string | null): T | null => {
     if (!raw) return null;
@@ -70,28 +94,47 @@ export function useQuotaSidecar<T extends HasFetchedAt>(cfg: {
     setSnap((prev) => (prev && prev.fetched_at >= d.fetched_at ? prev : d));
   }, []);
 
+  // ★★ 同一个 `runCmd` 的所有实例**共享一次取数**（2026-09-10 修）。
+  //    「总览」的中转站卡与「AI用量信息」的用量块各挂一个 `useRelayUsage()`，
+  //    而 in-flight 守卫原来是 `useRef`（**每个实例一份**）⇒ 两边各起一次
+  //    python 子进程、各打一次外网；手动 ↻ 更糟：`force:true` 让 Rust 的 300s
+  //    合并窗口失效，两块于是拿到两份不同时刻的快照，**同一屏上的两个数最多差 5 分钟**。
+  //    订阅表让所有实例采纳**同一份**结果 —— 这同时解决"一块刷新了另一块还是旧的"。
+  useEffect(() => {
+    const subs = _subs.get(runCmd) ?? new Set();
+    subs.add(adopt as (d: unknown) => void);
+    _subs.set(runCmd, subs);
+    return () => { subs.delete(adopt as (d: unknown) => void); };
+  }, [runCmd, adopt]);
+
   const fetchQuota = useCallback(async (force = false) => {
-    if (running.current) return;
-    running.current = true;
+    const pending = _inflight.get(runCmd);
+    if (pending) { await pending; return; }
     setBusy(true);
     setErr(null);
-    try {
+    const job = (async () => {
       if (!force) {
         const cached = parse(await invoke<string | null>(readCmd));
-        if (cached && Date.now() - cached.fetched_at * 1000 <= freshMs) { adopt(cached); return; }
+        if (cached && Date.now() - cached.fetched_at * 1000 <= freshMs) return cached;
       }
       // ★★ **手动 ↻ 必须传 `force`。** 不传的话 Rust 侧命中合并窗口(relay 是 300s)
       //    直接回旧 sidecar —— 按钮转一圈、数字纹丝不动,而"刚点过"和"没点中"
       //    在 UI 上一模一样。relay 的 hook docstring 承诺了这个行为,原来它不存在。
       //    ⚠️ Tauri 会忽略命令未声明的参数,所以对 grok/agy 无害。
-      adopt(parse(await invoke<string>(runCmd, { force: true })));
+      return parse(await invoke<string>(runCmd, { force: true }));
+    })();
+    _inflight.set(runCmd, job);
+    try {
+      const d = await job;
+      // ★ 广播给**所有**实例，不只是发起的那个。
+      for (const fn of _subs.get(runCmd) ?? []) fn(d);
     } catch (e: unknown) {
       setErr(String(e).slice(0, 200));
     } finally {
-      running.current = false;
+      _inflight.delete(runCmd);
       setBusy(false);
     }
-  }, [adopt, readCmd, runCmd, freshMs]);
+  }, [readCmd, runCmd, freshMs]);
 
   // 首次进入：先读盘（立刻有数），过期才补取。
   const primed = useRef(false);
