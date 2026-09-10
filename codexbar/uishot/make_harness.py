@@ -528,6 +528,21 @@ function relaySparseDaily() {
   return out.sort(function (a, b) { return a.date < b.date ? -1 : 1; });
 }
 
+// ★★ **混币夹具**：两家中转站，一家 USD、一家 CNY。
+//    KPI 条原来把所有中转站的钱**直接相加**、币种取第一家的 —— 得到的数
+//    不属于任何一种货币，而它长得和一个正常金额一模一样。
+//    ⚠️ 单家夹具下"相加"与"不相加"**结果完全相同**，那条闸恒绿 —— 空守卫。
+//    这份夹具专门让两者分开（另一半："读不到币种"也自成一类，与 USD 同样不可加）。
+function relayMixedEntries() {
+  var mk = function (id, label, unit, bal) {
+    return { id: id, label: label, base_url: RELAY_ROW.base_url, key_fp: RELAY_ROW.key_fp,
+             ok: true, state: 'ok',
+             data: Object.assign({}, RELAY_USAGE_OK, { unit: unit, balance: bal }) };
+  };
+  return [mk('tokendun', 'TokenDun', 'USD', 69.88),
+          mk('cnrelay', '国内中转', 'CNY', 420.5)];
+}
+
 function relayEntry() {
   var m = relayMode();
   if (m === 'sparse') {
@@ -629,7 +644,9 @@ function relayEntry() {
       case 'read_relay_snapshot':
       case 'run_relay_usage': {
         if (relayMode() === 'empty') return Promise.resolve(JSON.stringify({ ok: true, relays: [], route: relayRoute(), fetched_at: Math.floor(Date.now()/1000) }));
-        return Promise.resolve(JSON.stringify({ ok: true, relays: [relayEntry()], route: relayRoute(), fetched_at: Math.floor(Date.now()/1000) }));
+        return Promise.resolve(JSON.stringify({ ok: true,
+          relays: relayMode() === 'mixed' ? relayMixedEntries() : [relayEntry()],
+          route: relayRoute(), fetched_at: Math.floor(Date.now()/1000) }));
       }
       case 'relay_ctl': {
         // ★ 记下调用(sub+arg),**不记 payload** —— 它含 key。

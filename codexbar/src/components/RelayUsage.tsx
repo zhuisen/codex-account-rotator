@@ -7,7 +7,7 @@ import Seg from "./Seg";
 import { MONEY, MONO, NUM } from "./relay/RelayBits";
 import { useRelayUsage } from "../hooks/useRelayUsage";
 import { fmtTok } from "../traffic";
-import { money, runwayText, type RelayEntry, type RelayUsage as RU } from "../relay";
+import { currencyOf, money, runwayText, type RelayEntry, type RelayUsage as RU } from "../relay";
 
 /**
  * 中转站 · **用量** —— 与「AI用量信息 / 平台详情」页同结构（用户 2026-09-09：「1:1 复刻」）。
@@ -244,8 +244,48 @@ export default function RelayUsage({ t }: { t: Theme }): React.ReactElement {
     if (!a?.runway || a.runway.days === null) return d;
     return d.runway.days < a.runway.days ? d : a;
   }, undefined);
-  const unit = rows.find((r) => r.u.data?.unit)?.u.data?.unit ?? null;
+  // ★★ **币种不一致时这些数不可相加**（2026-09-10 修）。原来是「取第一个非空的
+  //    unit」然后把所有中转站的钱直接加起来 —— 一家 USD、一家 CNY 的话，
+  //    KPI 条上那个数**不属于任何一种货币**，而它长得和一个正常金额一模一样。
+  //    `null`（读不到币种）自成一类:它和 USD 也不可加。
+  const { unit, mixed } = currencyOf(rows.map((r) => r.u.data?.unit));
+  /** 可加时给数，不可加时给 `null` —— 让 `money()` 去渲染 `—`。 */
+  const addable = (x: number | null) => (mixed ? null : x);
+  const mixNote = mixed ? "多币种，不可相加" : undefined;
   const days = Math.max(1, view.labels.length);
+
+  /**
+   * ★★★ 页头这行说的必须是**数据有多新**，不是**我们什么时候试过**（2026-09-10 修）。
+   *
+   * `collect()` 每轮结尾都写 `fetched_at = now`，**取失败也写** —— 因为它确实
+   * "跑过一轮"。于是所有中转站都取不到、页面上全是上一次的数字时，
+   * 页头照样显示当前时刻的「↻ 上次刷新 14:32」。
+   * 而正下方的 stale 横幅同时说着「下面显示的是上一次的数据」—— 同一屏两句话互相矛盾，
+   * 用户信哪一句取决于他先看哪里。
+   *
+   * 三态：全新 / 部分旧 / 全旧。**全旧时时间戳换成上一次成功的那个**。
+   */
+  const freshness = useMemo(() => {
+    const hhmm = (sec: number) => new Date(sec * 1000).toTimeString().slice(0, 5);
+    const live = rows.filter((r) => r.u.state !== "disabled");
+    const staleRows = live.filter((r) => r.u.stale);
+    const at = hhmm(snap?.fetched_at ?? 0);
+    if (!live.length || !staleRows.length) {
+      return { kind: "fresh" as const, text: `↻ 上次刷新 ${at}` };
+    }
+    if (staleRows.length < live.length) {
+      return { kind: "partial" as const,
+               text: `↻ 上次刷新 ${at} · ${staleRows.length} 家是旧数据` };
+    }
+    // 全旧：`stale_since` 是上一次**成功**的时刻。取最早的那个，别乐观。
+    const since = staleRows
+      .map((r) => r.u.stale_since)
+      .filter((x): x is number => typeof x === "number");
+    return { kind: "stale" as const,
+             text: since.length
+               ? `↻ 数据停在 ${hhmm(Math.min(...since))} · ${at} 那次没取到`
+               : `↻ ${at} 那次没取到` };
+  }, [rows, snap?.fetched_at]);
 
   const kpis: Kpi[] = [
     { k: "总 token", v: fmtTok(view.grandTok), n: view.grandTok, fmt: fmtTok,
@@ -256,15 +296,18 @@ export default function RelayUsage({ t }: { t: Theme }): React.ReactElement {
     { k: "日均", v: fmtTok(view.grandTok / days), n: view.grandTok / days, fmt: fmtTok },
     // ★★ 主口径恒为**实扣**。牌价绝不进 KPI —— KPI 是一眼看的地方，
     //    放一个"其实没付这么多"的数就是骗人。
-    { k: "总实扣", v: money(view.grandCost, unit), n: view.grandCost,
-      fmt: (x) => money(x, unit), c: MONEY,
-      sub: delta?.cost ? `环比 ${delta.cost.txt}` : "真实扣款",
-      subC: delta?.cost ? (delta.cost.up ? UP : DOWN) : t.muted },
-    { k: "日均实扣", v: money(view.grandCost / days, unit), n: view.grandCost / days,
-      fmt: (x) => money(x, unit), c: MONEY },
+    { k: "总实扣", v: money(addable(view.grandCost), unit), n: view.grandCost,
+      fmt: (x) => money(addable(x), unit), c: MONEY,
+      sub: mixNote ?? (delta?.cost ? `环比 ${delta.cost.txt}` : "真实扣款"),
+      subC: mixNote ? "#E0901C" : delta?.cost ? (delta.cost.up ? UP : DOWN) : t.muted },
+    { k: "日均实扣", v: money(addable(view.grandCost / days), unit),
+      n: view.grandCost / days,
+      fmt: (x) => money(addable(x), unit), c: MONEY, sub: mixNote,
+      subC: mixNote ? "#E0901C" : undefined },
     // ★ 余额与 runway 是中转站独有的（订阅制的 AI用量页没有对应物）。
     //   读不到显 `—` 不显 0 —— 两者的下一步动作完全相反。
-    { k: "余额", v: money(balance, unit), c: MONEY },
+    { k: "余额", v: money(addable(balance), unit), c: MONEY, sub: mixNote,
+      subC: mixNote ? "#E0901C" : undefined },
     { k: "还能撑", v: runwayText(tightest?.runway) },
   ];
 
@@ -305,12 +348,16 @@ export default function RelayUsage({ t }: { t: Theme }): React.ReactElement {
         </span>
         <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 10 }}>
           {snap?.fetched_at && (
-            <span data-act="relay-refresh" onClick={busy ? undefined : () => refresh()}
+            <span data-act="relay-refresh" data-relay-freshness={freshness.kind}
+                  onClick={busy ? undefined : () => refresh()}
                   title={busy ? "取用量中…" : "重新向中转站取一次账单（免费，不消耗余额）"}
-                  style={{ fontSize: 10.5, color: busy ? t.accent : t.muted, whiteSpace: "nowrap",
+                  style={{ fontSize: 10.5,
+                           color: busy ? t.accent
+                                : freshness.kind === "stale" ? "#E0901C" : t.muted,
+                           whiteSpace: "nowrap",
                            fontFamily: MONO, cursor: busy ? "default" : "pointer",
                            userSelect: "none", transition: "color .15s" }}>
-              ↻ 上次刷新 {new Date(snap.fetched_at * 1000).toTimeString().slice(0, 5)}
+              {freshness.text}
             </span>
           )}
           {/* ★ 与「平台详情」页同名同义的两档，用同一个 `Seg` —— 别发明第二种切换器。 */}

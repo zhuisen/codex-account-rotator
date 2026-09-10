@@ -204,11 +204,23 @@ class RelayPageRenders(unittest.TestCase):
         self.assertNotIn("undefined", d)
 
     def test_the_scope_of_the_switch_is_on_the_page(self):
-        """★ 路由只影响终端里的 `codex`。不写出来,用户会以为所有入口都改了,
-        然后奇怪为什么账号池还在掉。"""
+        """★★ 生效范围必须**两侧都点名**，且判据打在**渲染出来的文字**上。
+
+        ⚠️ 这条原来是 `assertIn("不受此选择影响", d)` —— 只查"有一句排除说明存在"，
+           不查**谁在哪一侧**。VS Code 从"不生效"被挪到"生效"侧那次改动，
+           这条和它在 `test_relay_route_copy.py` 里的兄弟**双双全绿**。
+           两份实现同一条规则，所以同时错。
+
+        这一份有 DOM，所以它比源码级那份更强：JSX 注释根本不会出现在这里，
+        不需要先剥注释。
+        """
         d = self.page("relay")
         self.assertIn("生效范围", d)
-        self.assertIn("不受此选择影响", d)
+        seg = d[d.index("生效范围"):][:400]
+        self.assertIn("不生效", seg, "只说了生效的那半")
+        self.assertLess(seg.index("不生效"), seg.index("VS Code"),
+                        f"★ VS Code 落在「生效」那一侧: {seg[:200]}")
+        self.assertIn("cxd", seg, "逃生口没写出来")
 
     def test_the_usage_block_mirrors_the_ai_usage_page(self):
         """★★ 用户 2026-09-09：「用量你也没有1:1复刻我的ai用量信息」。
@@ -358,6 +370,34 @@ class RelayPageRenders(unittest.TestCase):
         # 否则"修法"退化成了永远显「—」，那同样是假的。
         d7 = self.usage_q("rrange=7d", mode="sparse")
         self.assertRegex(d7, r"环比 [↑↓]", "★ 上期可观测却拒绝比较 —— 修法退化成了永远显 —")
+
+    def test_money_kpis_refuse_to_add_across_currencies(self):
+        """★★★ 一家 USD、一家 CNY 时，「总实扣 / 日均实扣 / 余额」不许给一个数。
+
+        原实现把所有中转站的钱直接相加、币种取**第一家**的 —— 得到的数
+        不属于任何一种货币，而它长得和一个正常金额一模一样。
+
+        ⚠️ **必须用 `?relay=mixed`**：单家夹具下"相加"与"不相加"结果完全相同，
+           这条闸在别的夹具上恒绿。
+        """
+        d = self.usage_q("rrange=30d", mode="mixed")
+        self.assertIn("多币种，不可相加", d,
+                      "★ 混币时没说出来 —— 用户会把那个数当成真金额")
+        # ★ 双向：既要有那句话，也要**那几个金额真的变成了 `—`**。
+        #   只判提示语的话，一个"提示照显、数照加"的实现同样全绿。
+        seg = d[d.index("总实扣"):]
+        seg = seg[:400]
+        self.assertNotIn("$", seg,
+                         f"★★ 混币时仍然打出了带币种的金额: {seg[:200]}")
+        self.assertIn("—", seg)
+
+    def test_a_single_currency_still_shows_the_money(self):
+        """★ 反向闸：只有一家（或全同币种）时必须照常给数 ——
+        否则"修法"退化成"永远不显示金额"，那同样是错的。"""
+        d = self.usage_q("rrange=30d")
+        self.assertNotIn("多币种，不可相加", d)
+        seg = d[d.index("总实扣"):][:400]
+        self.assertIn("$", seg, f"★ 单币种下金额消失了: {seg[:200]}")
 
     def test_an_empty_config_says_so_instead_of_rendering_nothing(self):
         """★ 「没配过」必须有一句话。一片空白和"加载失败"长得一样。"""

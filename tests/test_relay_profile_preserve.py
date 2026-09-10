@@ -64,8 +64,11 @@ class RemoveResetsTheRouteBeforeDeletingTheFile(_Tmp):
         它只在崩溃/并发时才显形,而那正是最难复现的时刻。"""
         src = (Path(store.__file__)).read_text(encoding="utf-8")
         body = src[src.index("def remove("):src.index("def get(")]
-        self.assertLess(body.index("set_route(POOL_PROFILE)"), body.index("prof.unlink()"),
-                        "先删文件后复位路由 —— 中间那一瞬是 profile_missing")
+        # ★ 2026-09-10：删文件那一步抽成了 `drop_managed_profile()`（`remove()` 与
+        #   `relay-ctl cleanup` 共用一条归属判据）。**不变量没变**，锚点跟着换。
+        self.assertLess(body.index("set_route(POOL_PROFILE)"),
+                        body.index("drop_managed_profile("),
+                        "先动文件后复位路由 —— 中间那一瞬是 profile_missing")
 
 
 if __name__ == "__main__":

@@ -140,8 +140,29 @@ class TheProtobufMappingIsPinned(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0][3:], (5, 7, 6))
 
-    def test_an_unreadable_db_returns_empty_instead_of_raising(self):
+    def test_an_unreadable_db_raises_instead_of_returning_empty(self):
+        """★★★ 契约**反过来了**（2026-09-10）——原来这条叫
+        `..._returns_empty_instead_of_raising`，**把缺陷本身写成了要求**。
+
+        返回 `[]` 看着"稳健"，实际是本仓最贵那条规则的违反：`scan()` 会把结果
+        **连同签名一起写进缓存**，而签名要等文件下次变动才变 ⇒ 一次瞬时读失败
+        （sqlite 被别人锁着、2s 超时）把该会话**永久固化成 0 token**，零报错。
+        「读不到」和「确实没有」必须是两个可区分的值 —— 抛出来，让缓存那层决定
+        保留旧值还是这轮跳过。
+
+        ⚠️ 一条写着"不要抛"的测试会**恰好挡住修好它的那次改动**。
+           发现测试与规则冲突时，先问哪个是对的，别顺手改实现去迁就测试。
+        """
         Path(self.db).write_bytes(b"not a database")
+        with self.assertRaises(scan.ScanReadError):
+            scan._scan_agy_db(self.db)
+
+    def test_a_table_that_does_not_exist_yet_is_still_empty(self):
+        """★ 反向闸：新建的会话库还没写 `gen_metadata` —— 那是**合法的空**，
+        不能跟着一起抛，否则修法把正常路径也堵了。"""
+        import sqlite3 as _s
+        Path(self.db).unlink(missing_ok=True)
+        _s.connect(self.db).close()
         self.assertEqual(scan._scan_agy_db(self.db), [])
 
 

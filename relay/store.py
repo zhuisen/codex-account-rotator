@@ -98,25 +98,58 @@ def codex_home():
 def fingerprint(key):
     """★ 给 UI / 日志用的**唯一**表示形式。永远不要把完整 key 递出去。
 
-    形如 `sk-73a1…4f2 (0f39111c7caf)` —— 前缀够认人,尾巴够区分同前缀的两把,
-    sha256 前 12 位用来在两台机器之间比对「是不是同一把」而不用传原文。
+    形如 `sk-73a1… (0f39111c7caf)` —— 前缀够认人,sha256 前 12 位既区分同前缀的两把,
+    又能在两台机器之间比对「是不是同一把」而不用传原文。
+
+    ## ⚠️ 为什么**不再**露出明文尾巴（2026-09-10 修）
+
+    原来是 `head(7) + "…" + tail(3) + sha256[:12]`。那 12 位哈希是一个 **48 bit 的
+    验证预言机**:拿一个猜测算 sha256 前 12 位比一下就知道对不对。露出首尾共 10 个明文
+    字符之后,一把 18 字符的 key 只剩 8 个未知位 —— base62^8 ≈ 2.2e14,离线可暴力。
+    而指纹会进 **0644 的快照文件**、进日志、进截图。
+    去掉尾巴后未知位回到 11 个（62^11 ≈ 5e19),同时哈希仍然承担「区分」与「跨机比对」
+    两个职责 —— 尾巴本来就是多余的那一份。
+
+    ★ 前缀也跟着 key 长度收缩:短 key 上固定露 7 位等于露掉大半。
     """
     if not key:
         return ""
-    head = key[:7]
-    tail = key[-3:] if len(key) > 12 else ""
-    return f"{head}…{tail} ({sha256(key.encode()).hexdigest()[:12]})"
+    # 至多 7 位,且不超过全长的三分之一 —— 短 key 上自动收敛。
+    head = key[:max(1, min(7, len(key) // 3))]
+    return f"{head}… ({sha256(key.encode()).hexdigest()[:12]})"
 
 
 def _atomic_write(path, text, mode=0o600):
     """★ 原子写 + 权限。照 `set_scan_source` 的做法（tmp + rename）——
     监控进程随时可能在读这份配置,直接覆写会让它读到半截 JSON。
-    ⚠️ 权限要在 **rename 之前**设在临时文件上:先 rename 再 chmod 会留下一个
-    短暂的 0644 窗口。"""
+
+    ★★ **权限必须在 `open` 的那一刻就定下来**（2026-09-10 修）。
+       原来是 `tmp.write_text(...)` 再 `os.chmod(tmp, mode)` —— `write_text` 按 umask
+       建文件（通常 022 ⇒ **0644**),于是从建立到 chmod 之间存在一个窗口,
+       期间这份**含明文 api key** 的临时文件是全局可读的。
+       原 docstring 只说「chmod 要在 rename 之前」,那一半是对的、也确实做到了,
+       但它挡的是 rename 之后的窗口,挡不住**创建时**的窗口 —— 一条只覆盖一半的规则
+       读起来和覆盖全部一样。
+    ★ 同时带 `O_EXCL`:临时文件名含 pid,但同一进程重入或残留符号链接都会让
+      「写进一个别人指定的路径」变得可能。`O_EXCL` 让这种情况直接失败而不是跟随。
+    """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f"{path.name}.tmp{os.getpid()}")
-    tmp.write_text(text, encoding="utf-8")
+    # 残留的同名文件（上次崩在中途）会让 O_EXCL 失败 —— 先清掉,那是我们自己的文件。
+    try:
+        tmp.unlink()
+    except FileNotFoundError:
+        pass
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+    # ★ umask 会**削**掉 open 的 mode 位（0600 & ~umask 通常仍是 0600,但不保证),
+    #   所以再显式 chmod 一次把它钉死。此时文件从未有过更宽的权限。
     os.chmod(tmp, mode)
     os.replace(tmp, path)
 
@@ -296,13 +329,8 @@ def remove(rid):
         set_route(POOL_PROFILE)
     prof = codex_home() / f"{rid}.config.toml"
     if prof.exists():
-        # ★ 只删带托管标记的。没标记 = 用户或别的工具的文件,一律不动。
-        try:
-            owned = split_managed(prof.read_text(encoding="utf-8"))[1] is not None
-        except OSError:
-            owned = False
-        if owned:
-            prof.unlink()
+        # ★ 只动带托管标记的那一段。没标记 = 用户或别的工具的文件,一律不碰。
+        drop_managed_profile(prof)
     return before != len(cfg["relays"])
 
 
@@ -365,6 +393,38 @@ def split_managed(text):
     a = text.index(MARK_BEGIN)
     b = text.index(MARK_END) + len(MARK_END)
     return text[:a], text[a:b], text[b:].lstrip("\n")
+
+
+def drop_managed_profile(path):
+    """把一份 codex profile 里**属于本工具**的那一段拿掉。返回三态：
+
+    · `"removed"` —— 整份都是我们写的，文件已删；
+    · `"stripped"` —— 文件里还有用户自己的内容，只剥掉了托管区，文件保留；
+    · `"kept"` —— 没有托管标记 / 读不出来，一个字节都没动。
+
+    ★★ **绝不因为"文件里出现过托管标记"就删掉整份**（2026-09-10 修）。
+       `split_managed` 一直把 `before` / `after` 切出来 —— 那两段就是用户自己加在
+       我们那段前后的内容（自定义 effort、注释、别的 provider）。原来两处调用点
+       （`remove()` 与 `relay-ctl cleanup`）都是命中标记就 `unlink()` 整份,
+       而返回值只说「删掉了这个孤儿」,读起来像只清掉了我们自己的东西。
+
+    ★ 这个判据以前是**两份实现**（各写各的 `split_managed(...)[1] is not None`),
+      所以两边同时错。本仓铁律：同一条规则的两份实现必然分叉,合成一份。
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return "kept"
+    before, managed, after = split_managed(text)
+    if managed is None:
+        return "kept"
+    if before.strip() or after.strip():
+        # ★ profile 不含密钥（key 走 `relay-key` 脚本/环境),所以 0644 ——
+        #   与 `write_profile` 当初写它时同一档权限,别悄悄收紧用户能读的文件。
+        _atomic_write(path, (before + after).rstrip("\n") + "\n", mode=0o644)
+        return "stripped"
+    path.unlink()
+    return "removed"
 
 
 # ── 路由开关 ──────────────────────────────────────────────────────────────────

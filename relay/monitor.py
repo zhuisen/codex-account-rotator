@@ -427,7 +427,8 @@ def collect(prev=None):
         if isinstance(r, dict) and r.get("id") and isinstance(r.get("data"), dict):
             prev_by_id[r["id"]] = r["data"]
     out = []
-    for r in store.load()["relays"]:
+    cfg = store.load()
+    for r in cfg["relays"]:
         old = prev_by_id.get(r["id"])
         if not r.get("enabled", True):
             # ★ 停用也别丢历史:用户重新启用时该看到之前的曲线,而不是从零开始。
@@ -447,6 +448,28 @@ def collect(prev=None):
         out.append({"id": r["id"], "label": r.get("label"),
                     "base_url": r["base_url"], "key_fp": store.fingerprint(r["key"]),
                     **res})
+    # ★★★ **登记表坏掉时,绝不让历史跟着一起消失**（2026-09-10 修）。
+    #
+    #    `store.load()` 对损坏的 `relays.local.json` 会改名留档并返回**空表**。
+    #    原实现只遍历这张表 ⇒ `out = []` ⇒ Rust 把这份空快照原样写回
+    #    `.relay-usage.json` ⇒ 下一轮 `prev` 里已无任何中转站，
+    #    **已经滑出上游窗口的日子从此永久消失**（对端只回最近 N 天）。
+    #    一个文件损坏就把另一份不相关的历史抹掉,而且零报错。
+    #
+    #    ⚠️ 判据必须是「**登记表坏了**」而不是「这个 id 不在表里」——
+    #    用户**真的删掉**一个中转站时它就该消失。两者的区别只有 `store_corrupt` 认得。
+    if cfg.get("store_corrupt"):
+        known = {r["id"] for r in out}
+        for rid, data in prev_by_id.items():
+            if rid in known:
+                continue
+            out.append({"id": rid, "label": data.get("label") or rid,
+                        "ok": False, "state": "registry_corrupt",
+                        "detail": "中转站配置文件损坏,已改名留档: %s。"
+                                  "这一条的用量是上一次读到的,**不是丢失** ——"
+                                  "重新填一次表单即可。" % cfg["store_corrupt"],
+                        "data": data, "stale": True,
+                        "stale_since": data.get("fetched_at")})
     # ★ 键名是 `fetched_at`,**不是** `generated_at` —— 仓库的 `HasFetchedAt`/
     #   `useQuotaSidecar` 认这个名字,Rust 的 `fresh_sidecar` 也用它。
     #   两边不一致时前端会**永远判过期**、每次进页都联网,而且不报错、只是费流量。

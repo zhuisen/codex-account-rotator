@@ -63,6 +63,19 @@ _STORE = Path(os.environ.get("CODEX_ROTATE_STORE")
 
 AGY_ROOT = Path(os.environ.get("AGY_LEDGER_DIR")
                 or (_STORE / "traffic" / "agy-ledger"))
+class ScanReadError(Exception):
+    """**读失败**，不是「这里确实没有数据」。
+
+    ★★★ 本仓最贵那条规则的又一次落地（CLAUDE.md §7.0b「读不到 ≠ 没有」）:
+       解析器返回 `[]` 有两种含义 —— 「这个文件里真的一条记录都没有」与
+       「我压根没读成」。两者**绝不能返回同一个值**:`scan()` 会把结果
+       **连同签名一起写进缓存**,而签名要等文件下次变动才会变 ⇒
+       一次瞬时读失败（sqlite 被别人锁着、2s 超时）会把该会话
+       **永久固化成 0 token**,而且零报错。
+       抛出来,让缓存那一层决定「保留旧值还是这轮跳过」,而不是把假数据落盘。
+    """
+
+
 CACHE = _STORE / ".traffic-cache.json"
 
 CACHE_V = 1
@@ -771,40 +784,63 @@ AGY_DB_ROOT = Path(os.environ.get("AGY_DB_DIR")
                    or (HOME / ".gemini" / "antigravity-cli" / "conversations"))
 
 
+def _varint(buf, i, n):
+    """-> `(值, 下一个下标)`；**截断或超宽时返回 `(None, i)`**。
+
+    ★★★ 「截断」必须与「读到 0」区分开（2026-09-10 修）。原来的内联循环
+       `while i < n:` 在缓冲区提前结束时**直接退出并交出已累积的部分值** ——
+       `b"\\x08\\xff\\xff"` 解出 `f1 = 16383`，一个长得完全像 token 数的数字；
+       而这些 db 有正在被 agy 写入的，读到半条记录是**常态不是异常**。
+       结果是一个凭空的用量数进了图表，且永不报错。
+
+    ★ 同时卡宽度:protobuf varint 至多 10 字节（64 bit）。不卡的话
+      20 个 `\\xff` 会解出 ~2.8e42 —— 它照样会被当成 token 数加进总量。
+    """
+    v = shift = 0
+    start = i
+    while i < n:
+        c = buf[i]; i += 1
+        v |= (c & 0x7F) << shift
+        if not c & 0x80:
+            return v, i
+        shift += 7
+        if shift >= 70:                 # 10 字节封顶
+            return None, start
+    return None, start                  # 缓冲区在 varint 中间结束 = 截断
+
+
 def _pb(buf):
     """够用的 protobuf wire-format 解析：field -> [值]。值是 int 或 bytes。
 
     ★ 只为读几个已知字段，不做 schema 校验。坏字节直接停在那里返回已解出的部分 ——
       半个会话的数字也比整份丢掉强（而且这些库有正在写入的）。
+    ★★ 但「停在那里」必须是**真的停下**：截断的 varint / 越界的长度前缀
+      以前会交出一个部分值或短 blob，那不是"少解了一点"，是**编出了一个数**。
     """
     out, i, n = {}, 0, len(buf)
     while i < n:
-        k = s_ = 0
-        while i < n:
-            c = buf[i]; i += 1
-            k |= (c & 0x7F) << s_; s_ += 7
-            if not c & 0x80:
-                break
+        k, i = _varint(buf, i, n)
+        if k is None:
+            break
         f, wt = k >> 3, k & 7
         if wt == 0:
-            v = s_ = 0
-            while i < n:
-                c = buf[i]; i += 1
-                v |= (c & 0x7F) << s_; s_ += 7
-                if not c & 0x80:
-                    break
+            v, i = _varint(buf, i, n)
+            if v is None:
+                break
         elif wt == 2:
-            ln = s_ = 0
-            while i < n:
-                c = buf[i]; i += 1
-                ln |= (c & 0x7F) << s_; s_ += 7
-                if not c & 0x80:
-                    break
+            ln, i = _varint(buf, i, n)
+            # ★★ **长度超出剩余字节时停下,不要交出一个短掉的 blob。**
+            #    python 切片对越界是静默截断的 —— `buf[i:i+999]` 在只剩 3 字节时
+            #    给你 3 字节,而调用方会把它当成一条**完整**的嵌套消息去解,
+            #    解出来的 token 数看着完全正常。
+            if ln is None or i + ln > n:
+                break
             v = buf[i:i + ln]; i += ln
-        elif wt == 5:
-            v = buf[i:i + 4]; i += 4
-        elif wt == 1:
-            v = buf[i:i + 8]; i += 8
+        elif wt in (1, 5):
+            width = 8 if wt == 1 else 4
+            if i + width > n:
+                break
+            v = buf[i:i + width]; i += width
         else:
             break
         out.setdefault(f, []).append(v)
@@ -848,16 +884,21 @@ def _scan_agy_db(path):
     rows = []
     try:
         con = sqlite3.connect("file:%s?mode=ro" % path, uri=True, timeout=2.0)
-    except Exception:
-        return rows
+    except Exception as e:
+        # ★ 绝不 `return []` —— 见 `ScanReadError`。连不上 ≠ 这个会话没用过 token。
+        raise ScanReadError("打不开 %s: %s: %s" % (path, type(e).__name__, e)) from e
     conv = Path(path).stem
     try:
         try:
             gens = list(con.execute("SELECT data FROM gen_metadata ORDER BY idx"))
             steps = list(con.execute(
                 "SELECT step_type, metadata FROM steps ORDER BY idx"))
-        except Exception:
-            return rows
+        except Exception as e:
+            # ★ 「表不存在」是**合法的空**（新建的会话库还没写 gen_metadata）,
+            #   只有它可以当作「确实没有」。其余（锁、损坏、超时）一律抛。
+            if "no such table" in str(e).lower():
+                return rows
+            raise ScanReadError("查不了 %s: %s: %s" % (path, type(e).__name__, e)) from e
         # 第 k 个 `step_type=15` 的时间戳 ↔ 第 k 条 gen_metadata。
         ts_list = []
         for stype, meta in steps:
@@ -1216,6 +1257,9 @@ def scan(days=90, use_cache=True, only=None, exclude=None):
     cut = time.time() - max(days, 90) * 86400
     fresh = {}
     scanned = reused = incr = 0
+    # ★ 读失败的文件清单。**必须出现在输出里** —— 悄悄少算几个会话，
+    #   和「确实没用过」长得一模一样。
+    read_failed = []
     out = {}
     acc = {}
     # ★ 旁挂的路由分账。key = 平台键 → provider → 桶。总量完全不受影响。
@@ -1283,11 +1327,25 @@ def scan(days=90, use_cache=True, only=None, exclude=None):
                     if got is not None:
                         data, off, anc = got
                         incr += 1
+                        fresh[ck] = {"sig": sig, "r": data, "off": off, "a": anc}
                     else:
-                        data = parse(f); scanned += 1
-                        off, anc = (_full_off_anchors(f, st.st_size)
-                                    if lines_fn is not None else (None, None))
-                    fresh[ck] = {"sig": sig, "r": data, "off": off, "a": anc}
+                        try:
+                            data = parse(f)
+                        except ScanReadError as e:
+                            # ★★ **读失败绝不写缓存。** 写了就等于把「0 token」钉死在这个
+                            #    签名上,而签名要等文件下次变动才会变 —— 一次瞬时失败
+                            #    被永久固化。有旧值就原样留着（**连旧签名一起**,好让下一轮
+                            #    再试一次);没有就这轮跳过这个文件。
+                            read_failed.append("%s: %s" % (ck, e))
+                            if hit is None:
+                                continue
+                            fresh[ck] = dict(hit)
+                            data = hit.get("r")
+                        else:
+                            scanned += 1
+                            off, anc = (_full_off_anchors(f, st.st_size)
+                                        if lines_fn is not None else (None, None))
+                            fresh[ck] = {"sig": sig, "r": data, "off": off, "a": anc}
                 if dedup:
                     if isinstance(data, dict):
                         # 全局按 id 合并。冲突取 token 总量大者而非后来者覆盖 —— 实测跨文件重复里
@@ -1467,6 +1525,11 @@ def scan(days=90, use_cache=True, only=None, exclude=None):
     #   事后完全无法判断是"当时被停用了"还是"解析器坏了"—— 2026-08-09 就吃过一次这个哑巴亏。
     return out, {"scanned": scanned, "reused": reused, "incr": incr,
                  "files": scanned + reused + incr,
+                 # ★ 与上面同一条理由:**降级必须出现在值里**。少算了几个会话而输出里
+                 #   毫无痕迹的话，「读失败」和「确实没用过」在页面上完全一样。
+                 #   路径可能含会话 id,只给条数和前几条样本,别把整份清单塞进快照。
+                 "read_failed": len(read_failed),
+                 "read_failed_sample": read_failed[:3],
                  "enabled": [s["key"] for s in _enabled_sources(only, exclude)],
                  "registered": [s["key"] for s in SOURCES]}
 

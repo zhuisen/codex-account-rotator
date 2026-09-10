@@ -159,9 +159,24 @@ export function relayRouteNote(r: RouteStatus): { tone: "ok" | "warn" | "bad"; t
 /** 金额显示。★ `null` 显 `—` 而不是 `$0.00` —— 「读不到」和「真的是 0」是两件事。 */
 export function money(v: number | null | undefined, unit: string | null | undefined): string {
   if (v === null || v === undefined) return "—";
-  const sym = !unit || unit === "USD" ? "$" : "";
-  const tail = sym ? "" : ` ${unit}`;
-  return `${sym}${v.toFixed(v < 1 ? 4 : 2)}${tail}`;
+  const n = v.toFixed(v < 1 ? 4 : 2);
+  if (unit === "USD") return `$${n}`;
+  // ★★ **币种读不到时绝不默认 `$`**（2026-09-10 修）。`monitor.py` 明写着
+  //    「读不到就 None，不许默认 USD —— 国内中转站不少按 CNY 或"额度"计，
+  //    编一个 `$` 比留空糟得多」，而这里正是那条规则的另一半实现，一直在编。
+  //    同一条规则的两份实现分叉，而分叉的后果是用户按错误的币种判断余额。
+  //    没有币种就**只给数字**：少一个符号是"我不知道"，给错符号是一句假话。
+  if (!unit) return n;
+  return `${n} ${unit}`;
+}
+
+/** 一组中转站的币种是否可加。`null`（读不到）自成一类 —— 它和 USD 也不可加。 */
+export function currencyOf(units: (string | null | undefined)[]):
+    { unit: string | null; mixed: boolean } {
+  const set = new Set(units.map((u) => u || ""));
+  if (set.size > 1) return { unit: null, mixed: true };
+  const only = [...set][0] ?? "";
+  return { unit: only || null, mixed: false };
 }
 
 /** runway 文案。样本不足 / 余额读不到时**说出原因**，不给一个看着精确的假数。 */

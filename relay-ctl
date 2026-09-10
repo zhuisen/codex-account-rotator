@@ -187,23 +187,24 @@ def cmd_cleanup(_argv):
       工具写的，绝不碰。保留名（`rotateproxy` / codex 内置 provider）也一律跳过 ——
       删掉账号池那份会让所有 cxp 当场 exit 78。
     """
-    removed, skipped = [], []
+    removed, stripped, skipped = [], [], []
     home = store.codex_home()
     for p in sorted(home.glob("*.config.toml")):
         rid = p.name[: -len(".config.toml")]
         if rid in store.RESERVED_IDS:
             continue                       # 账号池自用 / codex 内置,不归本模块管
-        try:
-            owned = store.split_managed(p.read_text(encoding="utf-8"))[1] is not None
-        except OSError as e:
-            skipped.append({"id": rid, "why": f"读不出: {e}"})
-            continue
-        if not owned:
+        # ★ 判据与 `store.remove()` **共用同一个函数** —— 两份实现必然分叉,
+        #   而这条规则分叉的后果是删掉用户自己写的配置。
+        what = store.drop_managed_profile(p)
+        if what == "removed":
+            removed.append(rid)
+        elif what == "stripped":
+            # ★ 「文件还在、只是我们那段没了」是第三种结果,不能混进 removed ——
+            #   否则用户以为文件已经不见了。
+            stripped.append(rid)
+        else:
             skipped.append({"id": rid, "why": "没有托管标记 —— 不是本工具写的,不动"})
-            continue
-        p.unlink()
-        removed.append(rid)
-    return out({"ok": True, "removed": removed, "skipped": skipped,
+    return out({"ok": True, "removed": removed, "stripped": stripped, "skipped": skipped,
                 "route": store.route_status()})
 
 
