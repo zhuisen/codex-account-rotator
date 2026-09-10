@@ -155,6 +155,13 @@ loopback RPC,**不联网、不消耗配额**)。没装那家 CLI 的机器上**�
 | `proxy/auth-token` | codex `auth.command` 占位 token(代理会覆盖) |
 | `proxy/test-home/config.toml` | 隔离测试用 CODEX_HOME(非日常) |
 | `proxy/README.md` | 代理层细节文档 |
+| `proxy/cxd` | **单号直连入口**:绕过代理直接跑某一个号(`/usage` 看重置卡要它)。与 `cxp` 共用 `codex-profile-scope.sh` 的判据,同样拦 `logout`/`login` |
+| `relay/` | **中转站**(第三方 OpenAI 协议 relay):`store.py`(配置/路由/托管区,纯模块) + `monitor.py`(拉用量余额,**只读零计费**)。★ 中转站不是 codex 的第二个 provider —— 它是**代理的第二个上游**,`proxy.py::_relay_upstream()` 每请求读 `relay/route.local.json` 决定往 chatgpt.com 还是往中转站转发 |
+| `relay-ctl` | 中转站的**唯一 CLI 入口**(Rust 侧只认它):key 走 **stdin 不走 argv**、退出码恒 0、payload 只出指纹 |
+| `relay/relays.local.json`(gitignored) | 中转站登记表(0600,含明文 key) |
+| `relay/route.local.json`(gitignored) | 当前走哪个出口(账号池 / 某个中转站)。**互斥单选**,同时只有一个 |
+| `.relay-usage.json`(gitignored) | 中转站用量的成品快照。**只增不减**:取数失败保留旧值并标 `stale`,`daily` 按日期并集 |
+| `tools/mutate.py` | **变异验证工具**。把六个流程漏项变成做不到的事(基线未验绿/选择器 0 命中/锚点不存在或多处/文件没真变/还原未复跑),任何一项不过就 `SystemExit`。手写变异脚本一律改用它,理由见 `CLAUDE.md` §7.-1 |
 | `.traffic-cache.json`(gitignored) | `traffic/scan.py` 的**逐文件增量缓存**(~14MB,按 `(mtime,size)` 命中)。冷 ~23s → 热 ~0.8s 靠它。额外存 `off`+锚点哈希，Claude 据此**只解析追加的部分**。删了只是重扫一次,不丢数据 |
 | `.traffic-latest.json`(gitignored) | 最近一次扫描的**成品快照**(~91KB)。两个 webview 都先读它再后台重扫,所以进页面/点托盘不再等 1~3 秒。由 `run_traffic` 原子写入(`.tmp<pid>` → `rename`) |
 | `traffic/sources.local.json`(gitignored) | 本机停用哪些平台:`{"disabled": ["grok"]}`。等价 CLI:`--exclude grok` / `--only kimi` |
@@ -169,6 +176,8 @@ loopback RPC,**不联网、不消耗配额**)。没装那家 CLI 的机器上**�
 | `CHANGELOG.md` | 版本史 + bug 日志 |
 
 外部依赖:`~/.codex/config.toml` 里有一个 dormant 的 `[model_providers.rotateproxy]` 块;`~/.codex/rotateproxy.config.toml` 是 cxp 的 profile overlay。详见 RUNBOOK。
+★ **中转站不再各有一份 profile**(2026-09-09 定稿「一个 provider,两种上游」):codex 眼里永远只有
+`rotateproxy` 一个 `model_provider`,所以 `codex resume` 的会话列表不会因为接中转站而分裂。
 
 > ⛔ **加号/重登只用 `codex-rotate login`,别直接跑 `codex login` 或 `codex logout`。**
 >

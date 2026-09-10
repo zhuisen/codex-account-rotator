@@ -2247,6 +2247,167 @@ row 加第 8 位 · `PARSER_V` 8→9 · `by_provider` **旁挂，总量一个字
 ② 「路由行存在」——断言的字符串在**组件定义**里，删掉调用点照样绿（已补调用点断言 + 真 DOM 闸）；
 ③ `auth_command`/`auth_args` 进比对——前面几条其实都被"文件存在性"抓到的（已补 2 条）。
 
+### B42 · 评审驱动的一整轮：P0/P1/P2 清零 + 中转站页按设计稿重做 — 2026-09-10 ✅
+
+Fable 评审 40 条 + 四方评审 9 条，全部处理完。17 个 commit 未发版（见「已知待办」）。
+
+**★★★ 安全（两条，都不出声）**
+
+① **`urllib` 跟随重定向时原样带上 `Authorization`**（只剥 Content-\* 头）。中转站回一句
+`302 Location: https://别人家/`，按量付费的 key 就送出去了，而调用方只看到 200 ——
+不需要对端有恶意，一个被接管的域名就够。`monitor._get` 改走自建 `_OPENER` +
+`_SameOriginRedirect`：**跨源直接拒绝**，不是"跟过去但删 header"（后者拿到的响应与
+「key 失效」长得一模一样，把安全事件伪装成凭证问题）。同源判据**带端口**。
+② **`_atomic_write` 有个 0644 窗口**：`Path.write_text` 按 umask 建文件、之后才 chmod 0600，
+其间这份含明文 key 的临时文件全局可读。原 docstring 承诺的「chmod 要在 rename 之前」
+是对的也做到了，但它挡的是 rename 之后的窗口 —— **一条只覆盖一半的规则读起来和覆盖全部一样**。
+改用 `os.open(O_CREAT|O_EXCL, 0600)`。
+③ 顺带：`fingerprint()` 原来露首 7 + 尾 3 明文 + sha256 前 12 位。那 12 位是个 **48 bit 验证
+预言机**，配上 10 个明文字符，一把 18 字符的 key 只剩 8 个未知位。尾巴是多余的那份（哈希已经
+能区分同前缀的两把），已去掉；前缀跟长度收缩。
+④ `store.validate` 只校验「是不是 http(s) 开头」，**远端明文 http 一路放行**，而
+`proxy.py::_relay_upstream()` 一直要求 https —— 同一条规则三处实现，宽的说了算。
+现在配置侧与发送侧都只放行 https 或**回环** http（自建 one-api 跑 127.0.0.1 是正常用法）。
+
+**★★ 数据目录脑裂（critical，本机永远看不见）**
+
+`proxy.py` 的 `STORE` 是全仓第 9 个入口里**唯一**不认 `CODEX_ROTATE_STORE` 的。
+更要命的是**改完之后没人喂它**：`install-launchd.sh` 与 `install-windows.ps1` 的**四个任务
+一个都没带这个变量**，而 `grep proxy.py lib.rs` **零命中**（app 根本不 spawn 代理）。
+本机看不出来，是因为 `deploy.sh` 把仓库路径烧进 `CODEXBAR_STORE_DEFAULT`，于是 app 与服务
+碰巧同一个目录；CI 出的安装包没有那个烧录值 ⇒ `route.local.json` / `state.json` / `auth/` 全部分叉，
+且 `.refresh.lock` / `.state.lock` 落在两个路径上 = **等于没有锁**，两侧会同时刷同一个号的
+一次性 refresh_token。两个安装器现在按 Rust `store_dir()` 同一条优先级链注入**每个**任务；
+`proxy.py` 在 `__main__` 里建目录 + 打 `store=` + `state.json` 缺失时 exit 78。
+
+⚠️ **`launchctl bootout` 是异步的**，紧跟的 `bootstrap` 撞 `Bootstrap failed: 5: I/O error`；
+配合 `set -e`，脚本停在那一行 —— 该服务已 bootout、未 bootstrap，**就那么停着**（本轮 quotad
+真停了），后面的任务连 plist 都没重写。`emit` 已改成轮询等它消失 + 重试 + **按"真的加载上"判**。
+
+**★ 数字说谎（六条）**
+
+- 环比 `slice(max(0,len-2n), len-n)`：`len-n` 为负时 JS 把负数 end 当**从尾部倒数**
+  ⇒ "上一窗口"落在当前窗口**内部**（拿总量和自己的子集比）。实测真快照 7d 档「环比 ↑148757.6%」。
+  现在按自然日回退等长窗口 + 零交集 + **整段可观测**三条。
+- 档位按「最近 N 个**有数据**的日子」切，而中转站 `daily` 只含有请求的日子 ⇒ 7d 档实测跨了
+  **23 个自然日**、页面却标 7d，「日均」虚高 **3.3×**。改成自然日补零。
+- `_scan_agy_db` 读失败返回 `[]`，而 `scan()` 把结果**连同签名一起写进缓存** ⇒ 一次瞬时失败
+  （sqlite 被锁、2s 超时）把该会话**永久固化成 0 token**。改为抛 `ScanReadError`，缓存保留旧值
+  **连同旧签名**（好让下轮重试），并在 stats 里报 `read_failed`。
+- `_pb` 的 varint 截断时交出**部分值**：`b"\x08\xff\xff"` → `f1=16383`，一个长得完全像 token
+  数的数字，而这些库正在被写入。另有无位宽上限（20×0xff → ~2.8e42）与长度前缀越界
+  （python 切片静默截断，调用方当成完整嵌套消息解）。三处都改成停止解析。
+- `money()` 在币种读不到时打 `$`，与 `monitor.py` 明写的「读不到就 None，不许默认 USD」直接矛盾
+  （国内中转站不少按 CNY 或额度计）。KPI 还把多家的钱**直接相加**、币种取第一家 ⇒ 一家 USD
+  一家 CNY 时那个数**不属于任何货币**。现在 `currencyOf()` 把 `null` 也当一类，混币显 `—`。
+- 页头 `↻ 上次刷新` 直接渲染 `fetched_at`，而 `collect()` **取失败也写**它 ⇒ 整屏都是旧数据时
+  页头照样显示当前时刻，与正下方的 stale 横幅互相矛盾。改成三态（全新/部分旧/全旧）。
+
+**★ 只增不减 / 只删自己的**
+
+- `collect()` 只遍历登记表 ⇒ `relays.local.json` 损坏时快照里零个中转站，**已滑出上游窗口的
+  日子永久消失**。现在按 `store_corrupt` 判据把上一份里的中转站带过来标 `registry_corrupt`
+  （用户**真的删掉**的仍然消失 —— 判据是"登记表坏了"，不是"这个 id 不在表里"）。
+- `cleanup` / `remove()` 命中托管标记就 `unlink()` **整个文件**，把用户写在我们那段前后的内容
+  一并删掉。两处各写了一份判据所以同时错，现在合成 `store.drop_managed_profile()`，
+  三态返回 `removed` / `stripped` / `kept`。
+
+**★ 逐日模型明细（三条）**
+
+「历史日不可变」被套在**当时还是今天**抓的那份上，一旦它变成历史日就永久冻结 ⇒ 同一天里
+按模型加起来 ≠ 总量。现在打 `models_partial` 标记、变成历史日后重取一次，`merge_daily`
+**连标记一起搬**。`MAX_DAY_FETCH=40` 的预算按日期升序从**最老**的花，今天永远排在预算之外
+（而今天是唯一每轮都在变的）—— 改成今天优先。对端整个挂掉时没有熔断，最坏 41×25s ≈ **17 分钟**
+占着网络锁，UI 上表现为"刷新键点了没反应" —— 连续失败 3 次停手。
+
+**★ agy 时间戳精确 join（PARSER_V 10 → 11）**
+
+原来是「第 k 个 `step_type=15` ↔ 第 k 条 gen_metadata」，一个**猜测**。实测 263 库 3758 条：
+`gen.f1.f20` 是一串 kv，其中有 `last_step_index`，而 `last_step_index + 1` 落在一个
+`step_type=15` 上的比例是 **3758/3758 = 100%**，时间戳也 100% 解得出；与序数猜测
+**有 164 条（4.4%）不一致** —— 那 4.4% 拿的是别人的时间戳，足以把用量记到错的日子。
+序数猜测保留为兜底。⚠️ **这条我探错了两次**：`inner.get(20)` 是 bytes 不是 int（用
+`isinstance(v[0], int)` 过滤数出 0 条，差点判"字段不存在"）；且 f20 是**重复字段**，
+只取 `[0]` 拿到的是 `request_id`。★ PARSER_V 一变，`.traffic-cache.json` 会全量重解析一次。
+
+**★ agy 模型撞色**
+
+7 个 agy 模型 id 全部落进散列兜底，10 色盘上**撞了 3 对**，撞的恰好是最需要区分的
+（`gemini-3.7-flash` vs `-tiered`、`gemini-3.8-flash` vs `gemini-3.6-flash-tiered`、
+`gemini-pro-c` vs `gemini-3.1-pro-low`）。两条同色的带子在堆叠图上是一条，**不报任何错**
+（`assign_colors` 早为泳道加了线性探测，`modelColor` 这侧没有）。散列兜底本身没错，
+错在**同时在场**的模型一多必然撞（7 进 10 撞车概率近 9 成）。agy 的模型集合可枚举，已手工登记。
+
+**★ 中转站泳道的计数器分家**
+
+`stream_aborts` / `committed_aborts` 的**存在理由**是量化账号池那条路上的**双计费**
+（有 failover ⇒ 同一次生成可能被两个号各计一次费）。中转站单上游、没有 failover，
+一次断流的含义完全不同。混在一个键：账号池的指标被稀释，中转站自己的失败率无处可查。
+改为 `relay_stream_aborts`。
+
+**★ 两处过期的因果（改结论容易，改**理由**才要紧）**
+
+- `route_corrupt` 的 detail 写着「cxp 会直接 exit 78，codex 一条都跑不起来」——「一个 provider，
+  两种上游」定稿后 `cxp` **根本不读** `route.local.json`。真实后果是代理**退回账号池**：
+  codex 照常跑，但用户选的按量付费被无声忽略、扣的是订阅额度。**照着过期理由做判断，
+  下次会诊断到错误的组件上。**
+- 「生效范围」把 **VS Code** 列在"走本地代理"一侧，实测不成立：扩展自带 codex 二进制、
+  从 `extensionUri` 拼路径启动、**根本不查 PATH**（唯一覆盖项 `chatgpt.cliExecutable` 自标
+  "DEVELOPMENT ONLY"、默认 null）；且它跑的是 `app-server`，而 `app-server` 在
+  `codex-profile-scope.sh` 的黑名单里。两条独立理由任一条成立就够。
+  ⚠️ 2026-09-09 的 B41 与 memory.md 都写过「四个入口已统一，含 VS Code」—— **那句是错的**。
+
+**★★ 中转站页按 `design_handoff_codexbar/中转站-交接说明.md` 1:1 重做**
+
+- **账号 Tab**：`当前出口` 两张同权卡（46px 环 + `在用` 角标 + `✓当前`/`切到…`）→ 生效范围 →
+  中转站**表格**（站点 / endpoint·key / 余额 / 还能撑 / 日均实扣 + `✓`/`···` 图标钮）→ 虚线新增行。
+  新组件 `relay/OutletCards.tsx` + `relay/RelayTable.tsx`。
+- **用量 Tab**：工具行（实扣口径牌 + ↻ + **按站筛选** + 今日/7d/14d/30d）→ KPI 条 →
+  **模型小图阵**（3 列，每卡独立 y 轴 + Catmull-Rom 走势线 + 峰值/实扣 + 相对 Top1 胶囊条，
+  点卡聚焦其余变暗）。新组件 `relay/ModelSparkCard.tsx`。
+- **随之取消**（都是 2026-09-09 定的、被这份稿取代）：分模型/总量两档、四类 token 图例、
+  模型表、「全部」档、点行摘除、牌价参考列。旧契约的测试**改写并在原地说明是被取代不是被违反**。
+- **两处没照抄，都写在代码注释里**：① 稿子把 VS Code 列在生效侧（见上）；
+  ② 稿子的样例数据一切正常所以没画异常态，但六个路由态仍走 `relayRouteNote()` 渲染 ——
+  那四个异常态是静默失败**唯一**会出声的地方。
+- **一处按稿去掉了**：切到中转站的**两段确认**（稿子 §6 是点行即切 + toast）。
+  代价是误点一行就开始花钱；补偿是成本在同屏三处可见。删除仍保留二次确认。
+- ⚠️ 交接包 `design_handoff_codexbar 6` 的四张 relay 截图是**同一份 5926 字节纯白 PNG**
+  （暗像素 0/4000），没有任何设计信息；真源是 `prototypes/CodexBar 中转站 原型.dc.html`
+  （渲染它取稿）。`8` 那份截图正常，两份说明文档逐字相同。
+
+**★ 孤儿字段：中转站的 `model`**
+
+表单能填、store 落盘、`_relay_upstream()` 装进 `up["model"]`，但代理**从没有任何读者**
+（`_open()` 把 body 原样透传），而提示语「留空 = 沿用 config.toml 里的 model」反过来暗示
+填了会生效。用户 2026-09-10 拍板**从 UI 去掉**；`relays.local.json` 里的键保留（老配置不该
+因一次 UI 改动被静默丢弃）。★ 将来真要做「按站覆盖模型」，必须同时在页面标出「已被 X 覆盖」——
+悄悄改掉用户要的模型 = 行为与计费都变了却看不见。
+
+**★★★ 我自己的 17 次错误，15 次是同一个形状**
+
+**测量工具坏了，而坏掉的样子长得像「通过」。** 判断失误只有 2 次。所以要防的不是"想错了"，
+是"量错了却以为量对了"。已做成两件东西：
+
+- **`tools/mutate.py`**（新）把六个**流程漏项**变成做不到的事：基线未验绿 / 选择器 0 命中
+  （`-k world_readable` 对 `WorldReadable` 选中 0 条而退出码是 0）/ 锚点不存在 / 锚点多处
+  （`replace(...,1)` 命中第一处而被测的是第二处）/ 文件没真变 / 还原未复跑。任何一项不过就
+  `SystemExit` —— **不许跑出一份看着完整的报告**。
+- **`CLAUDE.md` §7.-1「仪器自己会撒谎 —— 动手前的六问」**收判断类的那一半。
+  ⚠️ 那一节写完的**同一轮**里我又犯了第 ① 条（protobuf 字段类型过滤错），是六问的自检抓住的，
+  而那条结论正好反转成了上面「agy 时间戳」那个真 bug 的修复。
+
+**其它**：`useQuotaSidecar` 现在按 `runCmd` 共享一次在途取数并广播结果 —— 两个
+`useRelayUsage()` 实例原来各起一次 python、各打一次外网，手动 ↻ 时 `force:true` 让 Rust 的
+300s 合并窗口失效，两块最多差 5 分钟；新增 `invalidateSidecar()` 让改完配置立刻重取
+（原来「已停用」与仍在加它余额的 KPI 会同屏共存最长 5 分钟）；切到已停用的中转站原来显示
+「✗ 未知错误」（原因在 `route.detail` 里，前端只读顶层）。
+
+**测试 784 → 879 passed。** 新增闸 8 份：`test_relay_key_transport` / `test_relay_key_at_rest` /
+`test_degradation_is_visible` / `test_store_root_agreement` / `test_installers_pass_the_store` /
+`test_relay_day_models_budget` / `test_p2_last_batch`，以及 `?relay=sparse` / `?relay=mixed`
+两份夹具（**稠密夹具下新旧实现结果完全一样，那些闸恒绿**）。
+
 ---
 
 ## 已知待办 / cleanup
@@ -2260,6 +2421,9 @@ row 加第 8 位 · `PARSER_V` 8→9 · `by_provider` **旁挂，总量一个字
   99.5% 是 cargo 构建产物、0.5% 是官方源码解包，**无独一无二信息**（补丁 + 34 个文件锚点哈希 +
   上游 commit 全在 `scripts/native-resume/`）。删除用点名 `rm -rf <dir>`、**不带通配符**，
   并做逐名比对确认只少目标一项。
+- ⏳ **17 个 commit 未发版**（`b75621c`…`6977fe0`，2026-09-10）。版本串仍是 `v1.4.1`。
+  按本仓发版规则这批该走 **`Y` 级（v1.5.0）**：架构级 UI 重做 + 两个安全修复 +
+  一个会改数字的解析器版本（PARSER_V 10→11）。**未推**，等用户发话。
 - ⏳ **`resume_provenance.mark_proxy_session` 全仓无调用者** —— marker 从来没人写，`.proxy-sessions-v1/` 是空的。
   归属判定实际全靠 `payload.model_provider == "rotateproxy"` 这条主判据。模块与 `codex-rotate:399` 的
   接线留着（无害、测试全绿），但**别当它在工作**。
