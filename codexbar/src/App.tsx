@@ -334,8 +334,8 @@ export default function App() {
                 <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 5 }}>
                 <div style={{ display: "flex", gap: 7, alignItems: "center",
                               flexWrap: "wrap", justifyContent: "flex-end", rowGap: 7 }}>
-                  <GhostButton t={t} onClick={() => run("refresh-all", ["refresh-all", "--notify"], `已刷新全池 · ${counts.total} 个号`)} loading={loadingAction === "refresh-all"} loadingText="刷新中…"><IconRefresh spin={loadingAction === "refresh-all"} />刷新全池</GhostButton>
-                  <GhostButton t={t} onClick={() => run("health", ["health"], "已检查各号 token")} accent loading={loadingAction === "health"} loadingText="检查中…">
+                  <GhostButton t={t} onClick={() => void run("refresh-all", ["refresh-all", "--notify"], `已刷新全池 · ${counts.total} 个号`)} loading={loadingAction === "refresh-all"} loadingText="刷新中…"><IconRefresh spin={loadingAction === "refresh-all"} />刷新全池</GhostButton>
+                  <GhostButton t={t} onClick={() => void run("health", ["health"], "已检查各号 token")} accent loading={loadingAction === "health"} loadingText="检查中…">
                     检查 token
                   </GhostButton>
                   <ProbeButton t={t} label="探针 全池"
@@ -358,8 +358,8 @@ export default function App() {
                     {autoSwitch ? "自动切号 开" : "自动切号"}
                   </span>
                   <span style={{ width: 1, height: 18, background: t.divider, margin: "0 1px" }} />
-                  <GhostButton t={t} onClick={() => run("cool", ["cool", "300"], `已冷却 ${slots[currentNode ?? ""]?.label ?? "当前号"}`)} loading={loadingAction === "cool"} loadingText="冷却中…">冷却当前号</GhostButton>
-                  <GhostButton t={t} onClick={() => run("uncool", ["uncool", "all"], "已清除所有冷却")} loading={loadingAction === "uncool"} loadingText="解冻中…">清除冷却</GhostButton>
+                  <GhostButton t={t} onClick={() => void run("cool", ["cool", "300"], `已冷却 ${slots[currentNode ?? ""]?.label ?? "当前号"}`)} loading={loadingAction === "cool"} loadingText="冷却中…">冷却当前号</GhostButton>
+                  <GhostButton t={t} onClick={() => void run("uncool", ["uncool", "all"], "已清除所有冷却")} loading={loadingAction === "uncool"} loadingText="解冻中…">清除冷却</GhostButton>
                 </div>
                 <span style={{ fontSize: 10, color: t.muted, fontFamily: "'JetBrains Mono'" }}>
                   {/* ★★ 原文是「上次全池刷新 X 前」,而它取的是**全池最大值** —— 那句话本身就是假的:
@@ -428,7 +428,7 @@ export default function App() {
                       </div>
                     </div>
                     {betterExists && hero ? (
-                      <span onClick={() => run("switch-hero", ["switch", hero.node], `当前号 → ${hero.node}`)} style={{ display: "inline-flex", flexDirection: "column", alignItems: "center", gap: 4, padding: "8px 14px", borderRadius: 9, fontSize: 11, fontWeight: 700, color: t.accentText, background: t.accent, flexShrink: 0, cursor: "pointer", userSelect: "none", opacity: loadingAction?.startsWith("switch") ? 0.6 : 1 }}>
+                      <span onClick={() => void run("switch-hero", ["switch", hero.node], `当前号 → ${hero.node}`)} style={{ display: "inline-flex", flexDirection: "column", alignItems: "center", gap: 4, padding: "8px 14px", borderRadius: 9, fontSize: 11, fontWeight: 700, color: t.accentText, background: t.accent, flexShrink: 0, cursor: "pointer", userSelect: "none", opacity: loadingAction?.startsWith("switch") ? 0.6 : 1 }}>
                         <span style={{ fontSize: 10, opacity: 0.8 }}>建议切到 {hero.node}({hero.tightest}%)</span>
                         <span>{loadingAction?.startsWith("switch") ? "切换中…" : "切换 →"}</span>
                       </span>

@@ -21,6 +21,7 @@
    停掉续期，暂停就变成慢性死亡（token 过期 → 恢复时号已废）。
    这条看起来矛盾，所以更需要一条测试说明它是**故意**的，而不是漏掉的。
 """
+import re
 import importlib.machinery
 import importlib.util
 import json
@@ -256,3 +257,57 @@ class TheLastUsableAccountIsStillProtected(_Cli):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TheUiNeverProposesAPausedAccount(unittest.TestCase):
+    """★★ 用户 2026-09-10：「我选了禁止轮换，还是会切换到对应的号上」。
+
+    实测链路：`cmd_switch` **确实拒绝**了（暂停号不许成为当值号）。真正坏的是前端 ——
+
+      ① `useAutoSwitch` 挑目标时只看额度 `tightest`，**没过滤 `rotates`**，
+         于是每隔一轮就挑中被暂停的号；
+      ② 它把 `notify("已切到 X")` 和 `run(...)` 并排写，**无条件发**成功通知。
+         CLI 拒绝了，用户照样收到系统通知说切过去了。
+
+    「它说切了、其实没切」是这条链路最不该出现的谎，而系统通知比 toast 更难撤回。
+    """
+
+    ROOT = Path(__file__).resolve().parents[1]
+    HOOK = (ROOT / "codexbar" / "src" / "hooks" / "useAutoSwitch.ts").read_text(encoding="utf-8")
+    STORE = (ROOT / "codexbar" / "src" / "hooks" / "useStore.ts").read_text(encoding="utf-8")
+
+    def _body(self, text):
+        """剥注释再断言 —— 本仓已多次被"闸命中自己的说明文字"判红。"""
+        text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+        return re.sub(r"^\s*//.*$", "", text, flags=re.M)
+
+    def test_the_candidate_loop_skips_paused_accounts(self):
+        body = self._body(self.HOOK)
+        self.assertIn("if (!a.rotates) continue;", body,
+                      "★ 自动切号没排除被暂停的号 —— 会反复挑中它、被 CLI 拒、再挑中")
+
+    def test_the_success_notification_waits_for_the_result(self):
+        """★ `notify` 必须在 `run(...)` 的结果分支里，不能与它并排。"""
+        body = self._body(self.HOOK)
+        self.assertNotIn('run("auto-switch"', body.split(".then(")[0].split("notify(")[0][:0] or "\x00")
+        # 判据:notify 出现在 `.then(` 之后
+        i_run, i_then, i_notify = body.find("run(\"auto-switch\""), body.find(".then("), body.find("notify(\"自动切号\"")
+        self.assertGreater(i_then, i_run, "run 之后没有 .then —— 通知没等结果")
+        self.assertGreater(i_notify, i_then, "★ notify 在结果之前发出 —— CLI 拒绝了也会说「已切到」")
+        self.assertIn("if (ok)", body, "没有按成功与否分支")
+
+    def test_run_reports_whether_it_actually_succeeded(self):
+        """★ 上游能力:`run` 必须返回布尔。它以前吞掉异常、返回 undefined，
+        调用方**无从判断** CLI 拒绝没拒绝 —— 上面那条谎的根子在这里。"""
+        body = self._body(self.STORE)
+        self.assertIn("let ok = false;", body)
+        self.assertIn("ok = true;", body)
+        self.assertIn("return ok;", body)
+
+    def test_the_cli_still_refuses_as_the_last_line_of_defence(self):
+        """★ 前端过滤是**体验**，CLI 拒绝才是**保证**。两道都要在 ——
+        前端可以被绕过（命令行、另一个 webview、旧 bundle）。"""
+        cli = (self.ROOT / "codex-rotate").read_text(encoding="utf-8")
+        body = cli[cli.index("def cmd_switch"):cli.index("def cmd_switch") + 2000]
+        self.assertIn("paused(", body, "cmd_switch 不再检查暂停状态")
+        self.assertIn("拒绝", body)

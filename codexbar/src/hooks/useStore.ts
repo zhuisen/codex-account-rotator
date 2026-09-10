@@ -76,11 +76,17 @@ export function useStore() {
     //   (用户 2026-09-06 报的就是这个)。
     announce(actionId);
     showToast(`${msg}…`);
+    // ★★ **返回成功与否。** 原来无论成败都只落一个 toast、返回 `undefined` ——
+    //    于是调用方**无法区分**"CLI 干成了"和"CLI 拒绝了"。
+    //    自动切号就栽在这里：它无条件弹「已切到 X」，而 `cmd_switch` 其实拒绝了
+    //    （目标号被用户暂停）。用户看到的是一句关于事实的假陈述。
+    let ok = false;
     try {
       await invoke("run_rotate", { args });
       await refresh();
       showToast(`✓ ${msg}`);
-    } catch (e) {
+      ok = true;
+    } catch (e: unknown) {
       const errMsg = String(e).slice(0, 80);
       showToast(`✗ 失败: ${errMsg}`);
     } finally {
@@ -89,6 +95,7 @@ export function useStore() {
       setLoadingAction(null);
       announce(null);
     }
+    return ok;
   }, [refresh, showToast, announce]);
 
   const slots: Record<string, Slot> = state.slots ?? {};
