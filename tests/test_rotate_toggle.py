@@ -46,19 +46,29 @@ class CliContract(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp(prefix="cbx_rotate_")
         os.makedirs(os.path.join(self.dir, "auth"), exist_ok=True)
+        os.makedirs(os.path.join(self.dir, "codex-home"), exist_ok=True)
         self.state = os.path.join(self.dir, "state.json")
         with open(self.state, "w", encoding="utf-8") as fh:
             json.dump({"active": "a1", "slots": {
                 "a1": {"label": "plusA", "plan": "plus", "file": "a1.json"},
                 "a2": {"label": "plusB", "plan": "plus", "file": "a2.json"},
             }}, fh)
+        # ★ 2026-09-09 补:暂停当值号时 CLI 会**先把 live auth 交接出去**,所以
+        #   fixture 必须有可读的凭证文件,否则测的是"交接失败"这条分支而不是主路径。
+        #   原来的 fixture 没有它们 —— 语义扩大后这三条测试立刻变红,红得有信息量。
+        #   ⚠️ 全是假凭证,只在 tmpdir 里,绝不碰真实 auth/。
+        for name in ("a1.json", "a2.json"):
+            with open(os.path.join(self.dir, "auth", name), "w", encoding="utf-8") as fh:
+                json.dump({"tokens": {"access_token": "TESTONLY", "account_id": name[:2]}}, fh)
 
     def tearDown(self):
         import shutil
         shutil.rmtree(self.dir, ignore_errors=True)
 
     def run_cli(self, *args):
-        env = dict(os.environ, CODEX_ROTATE_STORE=self.dir)
+        # ★ CODEX_HOME 也要设 —— `LIVE = CODEX_HOME / "auth.json"` 不看 STORE。
+        env = dict(os.environ, CODEX_ROTATE_STORE=self.dir,
+                   CODEX_HOME=os.path.join(self.dir, "codex-home"))
         return subprocess.run([sys.executable, str(ROOT / "codex-rotate"), "rotate", *args],
                               capture_output=True, text=True, env=env)
 

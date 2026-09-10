@@ -4,12 +4,11 @@
 # ~/.codex config (MCP / hooks / model settings inherited) and swaps the model provider to the
 # local proxy on 127.0.0.1:8011. Plain `codex` is unaffected. Proxy = launchd service.
 #
-# EXCEPTION — `resume` / `fork` run WITHOUT the proxy profile. Codex stamps every session with the
-# model_provider it ran under, and the resume/fork PICKER only lists sessions matching the current
-# provider. Under the proxy profile (provider=rotateproxy) the picker hides your plain-codex history
-# (provider=openai) — the "会话都不见了" symptom. Plain codex here lists & continues that full history,
-# identical to typing `\codex resume`. Trade-off: a resumed session runs on the single live account,
-# not the rotating pool — same as the `\codex resume` you're already using by hand.
+# **运行时**子命令一律走代理（resume/fork/exec/review/… 以及裸 prompt）；`doctor`/`update`/`plugin`
+# 这类本地工具子命令按原样透传 —— codex 0.154 起对它们带 `--profile` 会硬报错，详见文件下方。
+# 可选的 CodexBar CLI 补丁保留官方原生 picker，只让 rotateproxy 的历史查询兼容 openai；
+# 不改用户的会话数据。
+#
 # ★★ NO_PROXY 是必需的，不是优化（2026-08-16 定位，Fable 复核，我实测确认）。
 # macOS 系统代理开着时（Clash Verge：HTTPEnable=1 → 127.0.0.1:7890），codex 的 reqwest 会把
 # 发往 `http://127.0.0.1:8011` 的请求也送进 Clash，而 Clash 对 loopback 目标是**黑洞**
@@ -41,14 +40,92 @@ export no_proxy="$NO_PROXY"
 #      且不可覆盖**（`merge_configured_model_providers` 对内置 id 用 `or_insert`）。
 #      所以「不走代理」= WS 必开 = 单号烧到停。
 #
-# ⚠️ 代价（已知、已量）：resume picker 按 provider **逐字**过滤
-#    （`ProviderMatcher::matches`，filters = [当前 provider]），所以 `openai` 戳记的
-#    历史会话不出现在列表里。**不是消失** —— `codex resume <session-id>` 照样能进。
-#    实测本机（2026-09-07，4179 个会话）：最近 50 个里 rotateproxy 占 **76%**、
-#    最近 500 个占 64%，往后新会话全是 rotateproxy 戳记，比例只增不减。
+# ⚠️ 代价：resume picker 按 provider **逐字**过滤，所以 `openai` 戳记的历史会话不出现在
+#    原生列表里。**这是 OpenAI 明确不修的行为** —— issue openai/codex#15494 被维护者
+#    以 `NOT_PLANNED` 关闭：「The current behavior is by design… it's a major foot-gun,
+#    it's not a use case we want to enable through a happy path.」
+#    他建议的 `codex resume --all` **解决不了**：`--all` 只解除 cwd 过滤，provider 照过滤
+#    （issue #19318；本机实测 2026-09-08：`--all` 下仍然只有 1 条，裸 codex 有 51 条）。
+#    ★ 那个 issue 还明确把「改写 rollout / SQLite 里的 model_provider」列为**要避免的危险绕法**。
 #
 # ★★ 曾经试过第三条路并**已回滚**：新建一个 `openai-nows` provider 当默认、只关 WS 不走代理。
 #    它错在**没有任何存量会话带这个戳记**，于是 picker 直接**空了**（不是变短）。
 #    provider 过滤是逐字相等的，换 id 就等于清空列表 —— 别再试这个方向。
-# 所有子命令一视同仁 —— 不再有例外分支。
-exec command codex --profile rotateproxy "$@"
+#
+# 2026-09-08：用户要求保留官方原生 picker；自建列表仍为弃案。
+#
+# ★★★ **打补丁的 codex 二进制这条路已废弃，别再走**（用户 2026-09-08 拍板：「不要弄补丁的，
+#      改为官方版」，理由是它会挡住后续官方版更新）。这里**只 exec 官方 codex**。
+#
+#   曾经的做法：把本地编译的 `0.153.4+codexbar.1` 放到 `<store>/native-codex/codex`，
+#   `cxp` 探到就改走它。三条独立理由让它必须废：
+#   ① ★ **它当场炸掉了全部工具调用。** codex 按**自己可执行文件的同级目录**解析辅助进程，
+#      而 `build.py` 只 `shutil.copy2` 了 `codex` 一个文件 —— 官方 vendor 是 4 件套
+#      （`codex` / `codex-code-mode-host` / `codex-resources/` / `codex-path/`）。
+#      `code_mode_host` 是 stable/true，spawn 不到 ⇒ `tools::router` **fail closed** ⇒
+#      模型一个工具都调不动。实测报文：
+#        failed to spawn code-mode host …/native-codex/codex-code-mode-host: No such file or directory
+#      ⚠️ 而这个故障**没有任何「配置坏了」的迹象**：`codex doctor` 全绿、config.toml 解析 ok、
+#         auth ok、MCP 8 个都在。所以第一反应必然是去翻配置，而配置是干净的 —— 白查一轮。
+#   ② **它把版本钉死。** 补丁对着 0.153.4，npm 当天已经走到 0.154.0-alpha.6；
+#      `codex update` 更新的是 npm 那份，**跑的却是被钉住的补丁**，二者会越差越远且无声。
+#   ③ 每次官方发版都要重新 apply + 重编 + 重验，这个成本没人会长期付。
+#
+#   历史资料仍在 `scripts/native-resume/`（patch / build.py / verify.py），**仅作存档**。
+#   代价照旧：`openai` 戳记的老会话不出现在 rotateproxy 的 picker 里（见上面那段）。
+#   闸：`tests/test_resume_routing.py::NoPatchedBinaryEntry`。
+
+# `CODEX_ROTATE_STORE` = 本仓统一的数据目录，`codex-rotate` / `traffic/*` 都读它
+# （各自有 `__file__` 兜底，值相同）。它**不是**补丁的东西 —— codex 起的 hook / 子进程
+# 从这里继承，所以留着。拆补丁时别顺手删掉。
+cxp_source="${BASH_SOURCE[0]}"
+while [ -L "$cxp_source" ]; do
+  cxp_dir="$(cd -P "$(dirname "$cxp_source")" && pwd)"
+  cxp_source="$(readlink "$cxp_source")"
+  case "$cxp_source" in /*) ;; *) cxp_source="$cxp_dir/$cxp_source" ;; esac
+done
+export CODEX_ROTATE_STORE="${CODEX_ROTATE_STORE:-$(cd -P "$(dirname "$cxp_source")/.." && pwd)}"
+
+# ★★ 该不该注入 profile 的判据**与 PATH wrapper 共用同一份**
+#    (`proxy/codex-profile-scope.sh`)。这里原来有一份独立实现 —— 同一条规则的两份实现
+#    必然在边界输入上分叉,而这条分叉的后果是**静默退回单号直连、不轮换**。
+#    共享文件里写着为什么用黑名单、为什么不能拿 `--help` 去测。
+cxp_route=""          # 空 = 本次不注入 profile（非运行时子命令）
+# shellcheck source=codex-profile-scope.sh
+. "$(cd -P "$(dirname "$cxp_source")" && pwd)/codex-profile-scope.sh"
+codex_wants_profile "$@" && cxp_route="?"
+
+# ── profile:恒为 rotateproxy ─────────────────────────────────────────────────
+#
+# ★★ **2026-09-09 定稿:一个 provider,两种上游。** 中转站不再有自己的 profile ——
+#    账号池与中转站的切换发生在**代理内部**(`proxy.py::_relay_upstream` 读
+#    `relay/route.local.json` 决定往哪转发),cxp 这一侧永远只认 `rotateproxy`。
+#
+#    为什么这么改:`codex resume` 的 picker 按 `model_provider` 过滤,而且
+#    **没有任何配置键能放宽它**(0.154 二进制里逐个查过)。每多一个 provider id
+#    就多一份互相看不见的会话列表。让代理去分叉,codex 眼里就永远只有一个 provider,
+#    会话列表只有一份。
+#
+#    顺带消掉的三个静默失败态:`profile_missing` / `profile_stale` / `orphan` ——
+#    它们全部源于"第二份 profile 文件与登记表不同步",而现在没有第二份文件了。
+#
+# ★★ 保留的那道闸(**不要删**):codex 对「`--profile X` 但 `X.config.toml` 不存在」
+#    **不报错**,直接静默退回 base 配置(直连单号、不轮换、WS 全开)——
+#    和正常运行**长得一模一样**。闸必须在 exec 这一刻,UI 只在你打开那一页时才看得到。
+if [ -n "$cxp_route" ]; then
+  cxp_route="rotateproxy"
+  cxp_home="${CODEX_HOME:-$HOME/.codex}"
+  if [ ! -f "$cxp_home/$cxp_route.config.toml" ]; then
+    printf '%s\n' \
+      "⛔ cxp: profile 文件不存在 —— $cxp_home/$cxp_route.config.toml" \
+      "   codex 对这种情况**不报错**,会静默退回 base 配置(直连单号、不轮换、WS 全开)," \
+      "   所以这里替它硬失败。" \
+      "   修:CodexBar 总览页点一次「重写 profile」。" >&2
+    exit 78
+  fi
+  cxp_profile=(--profile "$cxp_route")
+else
+  cxp_profile=()
+fi
+
+exec command codex "${cxp_profile[@]}" "$@"

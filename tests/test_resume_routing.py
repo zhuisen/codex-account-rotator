@@ -18,8 +18,15 @@
 
 resume picker 按 provider **逐字**过滤(`ProviderMatcher::matches`),`openai` 戳记的
 历史会话不出现在列表里 —— **不是消失**,`codex resume <id>` 照样能进。
-实测 2026-09-07(4179 个会话):最近 50 个里 rotateproxy 占 **76%**、最近 500 个占 64%,
-往后新会话全是 rotateproxy 戳记。
+实测 2026-09-08(4230 个会话,picker 口径 = archived=0 + has_user_event=1 + source in cli/vscode):
+**openai 238 : rotateproxy 2**。
+★★ 这里原本写着「最近 50 个里 rotateproxy 占 76%、往后只增不减」—— **实测推翻**:
+最近 50 条里 rotateproxy 只有 2 条,2026-08 及以前**每月都是 0**。
+大概率是 wrapper 里那个已删的 `repair_codex_session_visibility()` 一直在把 DB 的
+rotateproxy 改写成 openai(238 这个数基本就是它的产物);另一部分是 69 条 VS Code 会话,
+那条路根本不经过 cxp。**两者分不干净,别当已知事实用。**
+可确认的只有一条:repair 移除后(2026-09-08),新交互会话稳稳戳 rotateproxy(当天 14:22/14:30 两条已验),
+所以 238 是**存量、不再增长**。
 
 ## ★★ 一条走过的弯路,别再试
 
@@ -194,12 +201,81 @@ class CxpRouting(unittest.TestCase):
 class NoLeftoverExceptionBranch(unittest.TestCase):
     """★ 全平台都跑:「例外分支有没有回来」与平台无关,不该被上面那个 macOS 门连带跳过。"""
 
-    def test_source_has_a_single_exec_path(self):
+    def test_every_exec_path_carries_the_same_profile_decision(self):
+        """★ 判据换过两次,记清楚它守的是什么。
+
+        原判据「只有一条 exec」→ 可选的原生补丁入口合法地多出一条,会被误判。
+        次判据「每条 exec 字面带 `--profile rotateproxy`」→ 2026-09-08 又失效:
+        codex 0.154 起对非运行时子命令带 profile 会**硬报错**
+        （`codex doctor` / `update` / `plugin` 全死,见 tests/test_cxp_profile_scope.py）,
+        所以 profile 必须变成按子命令算出来的 `${cxp_profile[@]}`,不能再是字面量。
+
+        ⚠️ 要守的不变量三次都没变:**没有一条 exec 路径绕过代理**
+        （绕过 = WS 直连 = 单号烧到停,B36）。字面量与计数都只是当时恰好等价的代理判据。
+        ★ 「运行时子命令确实还带着 profile」这件事**本文件判不了** —— 它是行为,
+        判它的是 `test_cxp_profile_scope.py::RuntimeSubcommandsKeepTheProxy`(真跑 cxp)。
+        这里只守「每条 exec 都用同一个决策,没有谁自己另开一条」。"""
         src = "\n".join(l for l in CXP.read_text(encoding="utf-8").splitlines()
                          if not l.lstrip().startswith("#"))
-        self.assertNotIn("resume|fork", src, "例外分支还在")
-        self.assertEqual(src.count("exec command codex"), 1,
-                         "有多于一条 exec 路径 —— 说明还有分支")
+        self.assertNotIn("resume|fork)", src, "旧的例外分支(resume/fork 不走代理)回来了")
+        execs = re.findall(r"exec [^\n]*", src)
+        self.assertGreaterEqual(len(execs), 1, "一条 exec 都没有")
+        for e in execs:
+            self.assertIn('"${cxp_profile[@]}"', e,
+                          f"有一条 exec 没带公共的 profile 决策 —— 它可能绕过代理:{e}")
+        # 决策只能算一次;两份 case 表迟早会漂移成「同一台机器两种行为」。
+        # ★ 2026-09-09 判据又换了一次:profile 名不再是字面量,而是由**路由**决定
+        #   (账号池 `rotateproxy` / 某个中转站)。所以改成数赋值点。
+        self.assertEqual(src.count("cxp_profile=(--profile"), 1, "profile 决策被算了不止一次")
+        self.assertIn('cxp_profile=(--profile "$cxp_route")', src,
+                      "profile 名写死了 —— 那样路由切换不会生效")
+        # ★★ 静默失败的闸必须在 cxp 里,不能只在 UI 的路由卡上:
+        #    codex 对「profile 文件不存在」不报错,而那一刻发生在 exec,不是在你打开 UI 时。
+        self.assertIn("$cxp_home/$cxp_route.config.toml", src, "缺少 profile 文件的硬检查")
+
+
+class NoPatchedBinaryEntry(unittest.TestCase):
+    """★★★ `cxp` 只准 exec **官方** codex —— 打补丁的本地构建这条路已废弃
+    （用户 2026-09-08 拍板:「不要弄补丁的,改为官方版」,理由是它会挡住后续官方版更新）。
+
+    三条独立理由,任何一条单独成立就足够:
+    ① ★ **它当场炸掉了全部工具调用。** codex 按**自己可执行文件的同级目录**解析辅助进程,
+       而 `scripts/native-resume/build.py` 只 `shutil.copy2` 了 `codex` 一个文件 ——
+       官方 vendor 是 4 件套(`codex` / `codex-code-mode-host` / `codex-resources/` /
+       `codex-path/`)。`code_mode_host` 是 stable/true,spawn 不到 ⇒ `tools::router`
+       **fail closed** ⇒ 模型一个工具都调不动。
+       ⚠️ 而它**没有任何「配置坏了」的迹象**:`codex doctor` 全绿、`config.toml parse ok`、
+          auth ok、MCP 8 个都在 —— 所以人必然先去翻配置,而配置是干净的。
+    ② **它把版本钉死。** 补丁对着 0.153.4,npm 当天已到 0.154.0-alpha.6;`codex update`
+       更新 npm 那份,**跑的却是被钉住的补丁**,二者越差越远且无声。
+    ③ 每次官方发版都要重新 apply + 重编 + 重验,这个成本没人会长期付。
+    """
+
+    def _src(self):
+        return "\n".join(l for l in CXP.read_text(encoding="utf-8").splitlines()
+                         if not l.lstrip().startswith("#"))
+
+    def test_the_only_exec_target_is_the_installed_codex(self):
+        execs = re.findall(r"^\s*exec .*", self._src(), re.M)
+        self.assertEqual(len(execs), 1, f"多了一条 exec 分支:{execs}")
+        self.assertIn("exec command codex", execs[0])
+
+    def test_no_patched_binary_hook_survives(self):
+        """★ 逐个点名 —— 只查 `native-codex` 会漏掉换个目录名重新接回来的情况。"""
+        src = self._src()
+        for token in ("native-codex", "CODEX_NATIVE_BIN",
+                      "codex-wrapper-with-logout-guard.sh"):
+            self.assertNotIn(token, src, f"补丁入口的残留:{token}")
+        # ★ `CODEX_ROTATE_STORE` **不在**这张表里,它是全仓统一的数据目录变量
+        #   (`codex-rotate` / `traffic/*` 都读),只是恰好也被补丁分支用过。
+        #   我拆补丁时顺手删过一次 —— 那是把公共设施当成残留。
+        self.assertIn("CODEX_ROTATE_STORE", src, "误删了公共的数据目录变量")
+
+    def test_the_patched_binary_is_not_shipped_in_the_repo(self):
+        """★ 入口拆了但二进制还躺在仓库里 ⇒ 下一个人会把它接回去。
+        归档在 ~/archive/codex-account-rotator/native-codex-dropped-20260908/。"""
+        for p in (ROOT / "native-codex", ROOT / "output" / "native-codex"):
+            self.assertFalse(p.exists(), f"补丁二进制还在仓库里:{p}")
 
 
 class SwitchBestStillWorksAsAManualEntry(unittest.TestCase):

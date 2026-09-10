@@ -35,6 +35,7 @@ import tempfile
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -43,6 +44,17 @@ PORT = int(os.environ.get("CRP_PORT", "8011"))
 UPSTREAM_HOST = "chatgpt.com"
 UPSTREAM_BASE = "/backend-api/codex"
 STORE = Path(__file__).resolve().parent.parent          # codex-account-rotator/
+# ★★ 中转站上游(2026-09-09 定稿:**一个 provider，两种上游**)。
+#    以前的做法是给每个中转站单独生成一份 `~/.codex/<id>.config.toml`，靠 cxp 换 profile 切换。
+#    那样做 codex 会看到两个不同的 `model_provider` id，而 `codex resume` 的 picker
+#    **按 provider 过滤且无配置可绕** ⇒ 会话列表必然分裂成两份。
+#    改成由代理自己决定往哪转发之后：provider 恒为 `rotateproxy`，会话列表只有一份；
+#    并且 `profile_missing` / `profile_stale` / `orphan` 这三种**静默失败态直接不再可能发生**
+#    (它们全部源于"第二份 profile 文件与登记不同步")。
+RELAY_DIR = STORE / "relay"
+RELAY_ROUTE = RELAY_DIR / "route.local.json"
+RELAY_STORE = RELAY_DIR / "relays.local.json"
+POOL_PROFILE = "rotateproxy"            # 账号池档的保留名，绝不可用作中转站 id
 AUTH_DIR = STORE / "auth"
 STATE = STORE / "state.json"
 LIVE = Path(os.environ.get("CODEX_LIVE_AUTH", str(Path.home() / ".codex" / "auth.json")))
@@ -277,6 +289,74 @@ def _tightest_used(slot):
 # 5 个百分点(超过即换号),不会出现「一个号跑到 100% 而别人闲着」。
 # 回退:`CRP_PICK_HYSTERESIS=0` 即逐字节回到旧行为(已单测覆盖)。
 PICK_HYSTERESIS = float(os.environ.get("CRP_PICK_HYSTERESIS", "5"))
+
+# ── 中转站上游解析 ────────────────────────────────────────────────────────────
+# ★★ **一个键，存一个元组。** 原来是 `{"sig": ..., "up": ...}` 两次独立赋值 ——
+#    而这是 `ThreadingHTTPServer`：线程 A 写完 `sig`、还没写 `up` 时，线程 B 读到的是
+#    **新签名配旧上游**。后果是钱去了用户没选的地方：刚切到中转站却发去账号池，
+#    或刚切回账号池却还在扣中转站余额。两者都不报错。
+#    单个 dict 赋值在 GIL 下是原子的，所以把这一对绑成一个值就消掉了这个窗口。
+_relay_cache = {"v": (None, None)}
+
+
+def _route_sig():
+    """两个文件的 (mtime, size)。**必须两个都看** —— 只看 route.local.json 的话，
+    改了 key/base_url 却不切路由时，代理会一直用着旧凭证往旧地址发。"""
+    out = []
+    for p in (RELAY_ROUTE, RELAY_STORE):
+        try:
+            st = p.stat()
+            out.append((st.st_mtime_ns, st.st_size))
+        except OSError:
+            out.append(None)
+    return tuple(out)
+
+
+def _relay_upstream():
+    """-> None(走账号池) | dict(走中转站)。**每请求调用，靠 mtime 签名避免读盘。**
+
+    ★ 解析失败一律**退回账号池**（返回 None），绝不 fail-closed 成"谁也不通"。
+      理由：账号池是零边际成本的那一档，而中转站是花钱的那一档 —— 判不准时
+      往免费那边倒，最坏结果是"没按预期扣费"，反过来则是"用户不知情地在花钱"。
+    ★ 同样绝不 fail-**open** 成中转站：路由文件读不到 ≠ 用户选了中转站。
+    """
+    sig = _route_sig()
+    cached_sig, cached_up = _relay_cache["v"]
+    if cached_sig == sig:
+        return cached_up
+    up = None
+    try:
+        route = json.loads(RELAY_ROUTE.read_text(encoding="utf-8"))
+        rid = route.get("profile") if isinstance(route, dict) else None
+        # `rotateproxy` = 账号池档的保留名；任何读不出 id 的形状都按账号池处理。
+        if isinstance(rid, str) and rid and rid != POOL_PROFILE:
+            reg = json.loads(RELAY_STORE.read_text(encoding="utf-8"))
+            row = next((r for r in (reg.get("relays") or [])
+                        if isinstance(r, dict) and r.get("id") == rid), None)
+            if row and row.get("enabled") and row.get("key") and row.get("base_url"):
+                u = urllib.parse.urlsplit(str(row["base_url"]))
+                if u.scheme == "https" and u.hostname:
+                    up = {
+                        "id": rid,
+                        "label": str(row.get("label") or rid),
+                        "host": u.hostname,
+                        "port": u.port or 443,
+                        # base_url 到 `/v1` 为止；请求路径(`/responses`)由 codex 给出。
+                        "base": u.path.rstrip("/"),
+                        "key": str(row["key"]),
+                        "model": row.get("model") or None,
+                    }
+    except Exception as e:
+        _plog(f"relay route unreadable ({e}) — 退回账号池")
+        up = None
+    # ★★ **读完再取一次签名，两次不一致就不缓存。** 签名是在**读文件之前**取的，
+    #    两者之间文件被改写的话，缓存里就会固化「新签名 + 旧内容」—— 而新签名等于
+    #    最新文件状态，于是**直到下一次再改动为止**，代理都在用旧上游。
+    #    这一版：只在"读的前后文件没变过"时才缓存；变过就这次用新读到的值、不写缓存，
+    #    下次请求重来一遍。
+    if _route_sig() == sig:
+        _relay_cache["v"] = (sig, up)
+    return up
 
 
 def _pick(prev_id, exclude=None, conv=None):
@@ -620,15 +700,21 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
 
-    def _open(self, body, token, account_id, label, reason, prev_id, rid=None):
+    def _open(self, body, token, account_id, label, reason, prev_id, rid=None, up=None):
         """Send the request upstream under one account's token; return (conn, resp). Caller closes conn.
 
-        两阶段分开抛异常,让调用方**无法**再把「没送出去」和「送出去了但没读到回应」当成一回事。"""
-        path = UPSTREAM_BASE + self.path
+        两阶段分开抛异常,让调用方**无法**再把「没送出去」和「送出去了但没读到回应」当成一回事。
+
+        ★ `up` = 中转站上游描述（见 `_relay_upstream`）。给了就换 host/base/鉴权，
+          **并且必须去掉 `chatgpt-account-id`** —— 那是 ChatGPT 订阅端点的私有头，
+          原样发给第三方中转站等于把本机账号 id 泄露给一个无关服务。"""
+        host = up["host"] if up else UPSTREAM_HOST
+        port = up["port"] if up else 443
+        path = (up["base"] if up else UPSTREAM_BASE) + self.path
         skip = {"host", "authorization", "chatgpt-account-id", "content-length", "connection"}
         hdrs = {k: v for k, v in self.headers.items() if k.lower() not in skip}
         hdrs["Authorization"] = f"Bearer {token}"
-        if account_id:
+        if account_id and not up:
             hdrs["chatgpt-account-id"] = account_id
         hdrs.setdefault("originator", "codex_cli_rs")
         hdrs["Content-Length"] = str(len(body))
@@ -650,7 +736,7 @@ class Handler(BaseHTTPRequestHandler):
         # 连接构造/TLS ctx 也放进这一段:它们抛错时零字节送出,同属 SendFailed。
         conn = None
         try:
-            conn = http.client.HTTPSConnection(UPSTREAM_HOST, 443,
+            conn = http.client.HTTPSConnection(host, port,
                                                context=ssl.create_default_context(), timeout=180)
             conn.request(self.command, path, body=body, headers=hdrs)
         except Exception as e:
@@ -697,15 +783,18 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             pass
 
-    def _open_or_fail(self, body, token, account_id, label, reason, prev_id, rid=None):
+    def _open_or_fail(self, body, token, account_id, label, reason, prev_id, rid=None, up=None):
         """包住 _open,把结局压成 (conn, resp) | "NEXT" | "ABORT"。
 
         返回 "ABORT" 时**响应已经发出去了**,调用方只需 `return`。
 
         ★ 两个调用点(首发 + 401 强刷后重发)必须共用这段。评审在初版里抓到:我只改了首发那个,
-        401 那条仍是 bare `except Exception: continue` —— 同一个双计费 bug 原封不动地活着。"""
+        401 那条仍是 bare `except Exception: continue` —— 同一个双计费 bug 原封不动地活着。
+
+        ⚠️ 中转站档下 `"NEXT"` **没有下一个可试** —— 那一档只有一个上游。调用方
+        (`_proxy_relay`)必须把 `"NEXT"` 当成终局，不能像账号池那样继续循环。"""
         try:
-            return self._open(body, token, account_id, label, reason, prev_id, rid)
+            return self._open(body, token, account_id, label, reason, prev_id, rid, up=up)
         except SendFailed as e:
             _plog(f"send err [{label}]: {e} — 未完整送达,安全换号", rid)
             return "NEXT"
@@ -717,11 +806,16 @@ class Handler(BaseHTTPRequestHandler):
             return "ABORT"
 
     def _finish(self, conn, resp, aid, label):
-        """Relay the chosen upstream response back to codex, recording quota + session affinity."""
-        _record_quota(aid, resp.getheaders(), resp.status)
+        """Relay the chosen upstream response back to codex, recording quota + session affinity.
+
+        ★ `aid=None` = 中转站档。**不记额度、不记粘性** —— 中转站不回 ChatGPT 的额度头，
+          硬记会把一个账号的额度写成中转站的响应；而粘性在只有一个上游时没有意义。
+          把它们做成 `if aid:` 而不是"反正写进去也没人看"，因为额度账本是被 UI 直接消费的。"""
+        if aid:
+            _record_quota(aid, resp.getheaders(), resp.status)
         # ★ 只在**真正成功服务过**之后才登记会话归属 —— 挑中但 401/429 失败的号不该被粘住。
         conv = getattr(self, "_conv_key", None)
-        if conv:
+        if conv and aid:
             with _lock:
                 _conv[conv] = aid
                 while len(_conv) > 512:          # FIFO 上界:长跑的代理不能无限攒会话
@@ -741,7 +835,9 @@ class Handler(BaseHTTPRequestHandler):
                 break
             self.wfile.write(chunk)
             self.wfile.flush()
-            if not got:
+            # ★ `aid` 为空(中转站档)时整段跳过:粘性表存 `None` 会让 `_pick` 把
+            #   "没有归属"读成"归属于一个叫 None 的号"。跳过后 scanbuf 也不再增长。
+            if aid and not got:
                 scanbuf += chunk
                 m = _RESP_ID.search(scanbuf)
                 if m:
@@ -774,6 +870,13 @@ class Handler(BaseHTTPRequestHandler):
         # 放到实例上而不是往 _finish 传参:_finish 有两个调用点(首发 + 401 强刷后重发),
         # 靠参数传递意味着漏掉一处就静默失去粘性。Handler 每请求一个实例,这样存是安全的。
         self._conv_key = conv
+        # ★★ 路由分叉。中转站档走一条**完全独立**的路径，不碰账号池的任何机制
+        #    (挑号 / failover / OAuth 刷新 / dead 标记 / 冷却 / 额度记账)。
+        #    合流写在一个循环里试过一次就该知道不行：那些机制的每一条都以
+        #    "还有别的号可以换"为前提，而中转站档只有一个上游。
+        up = _relay_upstream()
+        if up is not None:
+            return self._proxy_relay(body, up, rid)
         # failover loop: pick least-used → on 401 (dead token) mark dead + try next; on 429 cool + try
         # next; on a network error before any bytes reach codex, try next. First usable account wins.
         # One dead/exhausted/unreachable attempt never blocks the whole request.
@@ -868,6 +971,69 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             pass
 
+    def _proxy_relay(self, body, up, rid):
+        """中转站档的转发：**单上游、零 failover**。
+
+        ★ 与账号池档的根本区别：那边"换个号重试"既免费又正确，这边**没有第二个上游** ——
+          `"NEXT"`（可证明未送达、未计费）只能变成一个错误码，绝不能变成重试循环。
+
+        ★★ **401 在这里不是"号死了"。** 它是 key 无效或余额耗尽。所以这条路径
+          绝不 `_mark_dead`、绝不 `_cool`、绝不碰 `auth.json`、绝不刷任何 token ——
+          账号池与中转站是两套互不相干的凭证。（Fable 复核在 `env_key` 那版抓到过同形状的真 bug：
+          中转站回 401 会让 codex 去刷账号池当值号的 refresh_token 并喊"log out and sign in
+          again"，而 `codex logout` 在本仓是**杀号**操作。）
+
+        ★ 同理**不把 401 原样转给 codex**：本仓既有不变量是"401 永不出现在 codex 面前"
+          （账号池档也从不转发它，全部内部消化）。转过去会触发 codex 的重新登录流程，
+          而那正是上面那条要防的事。改回一个不可重试的 400 + 一句人话。
+        """
+        label = up["label"]
+        conn = None
+        streamed = False
+        try:
+            got = self._open_or_fail(body, up["key"], None, label, "relay", None, rid, up=up)
+            if got == "ABORT":
+                return                      # 响应已由 _abort() 发出
+            if got == "NEXT":
+                # 可证明未送达 ⇒ 未计费。但没有下一个上游可试，如实回错而不是静默换回账号池
+                # ——"以为在用中转站、其实扣的是订阅额度"是这条链路最不该出现的谎。
+                _plog(f"relay send failed [{label}] — 无第二上游可切", rid)
+                try:
+                    self.send_error(502, "relay upstream unreachable")
+                except Exception:
+                    pass
+                return
+            conn, resp = got
+            if resp.status == 401:
+                _plog(f"relay 401 [{label}] — key 无效或余额耗尽（**未触碰账号池凭证**）", rid)
+                try:
+                    self.send_error(self.ABORT_STATUS,
+                                    "relay rejected the API key (401): check the key or the balance "
+                                    "on the relay page; the account pool was NOT touched")
+                except Exception:
+                    pass
+                return
+            streamed = True
+            self._finish(conn, resp, None, label)
+            return
+        except Exception as e:
+            if self._billable():
+                _bump("stream_aborts")
+            _plog(f"relay stream err [{label}]: {e}", rid)
+            if not streamed:
+                try:
+                    if self._billable():
+                        self.send_error(self.ABORT_STATUS,
+                                        "relay failed; not retried to avoid double-billing")
+                    else:
+                        self.send_error(502, "relay failed")
+                except Exception:
+                    pass
+            return
+        finally:
+            if conn is not None:
+                conn.close()
+
     def do_POST(self):
         self._proxy()
 
@@ -876,5 +1042,10 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    _plog(f"rotating proxy on 127.0.0.1:{PORT} → https://{UPSTREAM_HOST}{UPSTREAM_BASE}")
+    # ★ 起手就把**当前路由**印出来。这个进程可能连着好几天，而"钱扣在哪里"是排查时
+    #   第一个要回答的问题 —— 只印一个写死的 chatgpt.com 会让日志在中转站档下说谎。
+    _up0 = _relay_upstream()
+    _dest = (f"https://{_up0['host']}{_up0['base']} (中转站 {_up0['id']} · 按量付费)"
+             if _up0 else f"https://{UPSTREAM_HOST}{UPSTREAM_BASE} (账号池轮换)")
+    _plog(f"rotating proxy on 127.0.0.1:{PORT} → {_dest}")
     ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()

@@ -384,13 +384,20 @@ def _newest_rollout():
 
 
 def _rollout_is_proxy(p):
-    """A rollout produced via cxp (session_meta.payload.model_provider == 'rotateproxy') records the
-    PROXY-served account's telemetry, NOT the live/active account's — so it must never be attributed to
-    `active` (that was the plus3≡plus5 cross-account leak). The proxy already accounts per-request."""
+    """Proxy telemetry belongs to the served account, not `active`. Older openai
+    headers survive proxy resume, so also consult CodexBar's immutable session markers.
+    The proxy already accounts per-request; unknown provenance refuses attribution."""
     try:
         with open(p) as fh:
             meta = json.loads(fh.readline())
-        return ((meta.get("payload") or {}).get("model_provider")) == "rotateproxy"
+        payload = meta.get("payload") or {}
+        if payload.get("model_provider") == "rotateproxy":
+            return True
+        module_root = str(Path(__file__).resolve().parent)
+        if module_root not in sys.path:
+            sys.path.insert(0, module_root)  # quotad imports this file by path from daemon/
+        from resume_provenance import is_proxy_session
+        return is_proxy_session(STORE, CODEX_HOME, payload.get("id"))
     except Exception:
         return True  # can't tell → refuse attribution (fail-safe; never leak)
 
@@ -544,6 +551,34 @@ def _syncback(s):
         _activate(s, aid)  # keep active_since in lockstep with active (attribution window correctness)
 
 
+def paused(sl):
+    """这个号是不是**暂停使用**（用户 2026-09-09：「禁用后意味着这个号是暂停使用的，不可调用状态」）。
+
+    ## ★★ 语义在 2026-09-09 扩大过，键名没跟着改 —— 这是刻意的
+
+    键仍叫 `rotate_off`，因为 **缺省必须等于「可用」**：autosync 新入池的号和所有存量号
+    槽位里都没有这个键，改成正向命名就得写迁移，而**漏迁移的号会静默变成"暂停"** ——
+    症状是"代理只用那两三个号"，零报错。存反向键时"键不存在"天然读成 False，零迁移。
+
+    但**语义已经不是"只是不参与自动轮换"**了。原来它只挡住 `proxy.py::_pick` 一条路，
+    于是出现过一个自相矛盾的状态：号在 UI 上写着"已禁用"，却仍然会被
+      · `cmd_switch` 切成 active ⇒ **裸 `\\codex` / `cx` 全走它**
+      · `_pick_best`（`switch --best`）挑中
+      · `cmd_probe` / `cmd_dawn_probe` 发**计费**请求（后者是全仓唯一自动花钱的东西）
+    「已禁用但还在被调用」正是本仓最忌讳的那类失败：**写入侧标志撒谎**。
+    所以现在**任何会发出业务请求、或会让这个号成为 active 的路径，都必须过这道闸**。
+
+    ## ⚠️ 一个看起来矛盾、但故意保留的例外：续期照做
+
+    `refresh` / `refresh-all` / keepalive **不受暂停约束**。OAuth 刷新打的是
+    `auth.openai.com/oauth/token`，**不计费、不占额度、不产生任何用量**，它只是让这个号
+    别死掉。停掉续期的话，暂停就变成了慢性死亡：token 过期 → 读不到额度 → 恢复时
+    号已经废了（本仓「续期只剩代理」那条坑的同一个机制）。
+    **暂停的语义是"不发业务请求"，不是"断绝一切网络往来"。**
+    """
+    return bool(sl.get("rotate_off"))
+
+
 def _pick_next(s):
     now = time.time()
     aids = list(s["slots"].keys())
@@ -559,6 +594,8 @@ def _pick_next(s):
             continue
         if s["slots"][aid].get("auth_dead"):
             continue  # never hand the live auth to an account the server already rejected
+        if paused(s["slots"][aid]):
+            continue  # 暂停 = 不可调用:交出 live auth 就等于让裸 codex 开始用它
         return aid
     return None
 
@@ -921,6 +958,8 @@ def _pick_best(s):
     for aid, sl in (s.get("slots") or {}).items():
         if sl.get("auth_dead") or (sl.get("cooling_until") or 0) > time.time():
             continue
+        if paused(sl):
+            continue   # 暂停 = 不可调用;挑中它就等于把 live auth 交给一个用户已停用的号
         plan = (sl.get("plan") or (sl.get("quota") or {}).get("plan_type") or "").lower()
         if plan != "plus":
             continue
@@ -958,6 +997,12 @@ def cmd_switch(args):
         target = _resolve_slot(s, key)
         if not target:
             sys.exit(f"no slot matching '{key}'")
+        # ★ 切号 = 把这个号写进 live auth.json ⇒ 裸 `\codex` / `cx` 从此全走它。
+        #   对一个用户已暂停的号做这件事,等于让"已禁用"的标志当场撒谎。
+        if paused(s["slots"][target]):
+            lbl = s["slots"][target].get("label") or target
+            sys.exit(f"拒绝:[{lbl}] 处于暂停状态(不可调用)。"
+                     f"要用它请先 `codex-rotate rotate {lbl} --on`。")
     else:
         target = _pick_next(s)
         if not target:
@@ -1054,12 +1099,17 @@ def cmd_rotate(args):
     args = list(args or [])
     if "--status" in args or not args:
         s = _state()
-        rows = [(sl.get("label") or aid, bool(sl.get("rotate_off")))
+        rows = [(sl.get("label") or aid, paused(sl), aid == s.get("active"))
                 for aid, sl in s["slots"].items()]
-        on = sum(1 for _l, off in rows if not off)
-        for label, off in sorted(rows):
-            print(f"  {label:10} {'✗ 已停用轮换' if off else '✓ 参与轮换'}")
-        print(f"参与轮换 {on}/{len(rows)} 个")
+        on = sum(1 for _l, off, _a in rows if not off)
+        for label, off, is_active in sorted(rows):
+            mark = "✗ 已暂停(不可调用)" if off else "✓ 可用"
+            # ★ 暂停的号不可能还是 active(cmd_rotate 会先交接),真出现说明有人手改了
+            #   state.json 绕过了这里 —— 那是必须当场看见的不一致,不能只显示"已暂停"。
+            if off and is_active:
+                mark += "  ⚠️ 但它仍是 active:auth.json 里还是它,裸 codex 会用到"
+            print(f"  {label:10} {mark}")
+        print(f"可用 {on}/{len(rows)} 个")
         return
     target_key = args[0]
     if "--off" in args:
@@ -1074,19 +1124,66 @@ def cmd_rotate(args):
                    if aid == target_key or sl.get("label") == target_key), None)
     if not target:
         sys.exit(f"no slot matching '{target_key}'")
+    handover = None
     if want_off:
         others_on = [aid for aid, sl in s["slots"].items()
-                     if aid != target and not sl.get("rotate_off")]
+                     if aid != target and not paused(sl)]
         if not others_on:
-            sys.exit("拒绝:这是最后一个参与轮换的号。全部停用后代理无号可挑,codex 会整个不可用。")
+            sys.exit("拒绝:这是最后一个可用的号。全部暂停后代理无号可挑,codex 会整个不可用。")
+        # ★★ **暂停一个正在当值的号,必须先把 live auth 交出去。**
+        #
+        #   `rotate_off` 只挡代理的选号,**不动 `auth.json`**。所以在这条路补上之前,
+        #   暂停当前 active 号会留下一个自相矛盾的状态:UI 上写着"已暂停",而
+        #   裸 `\codex` / `cx` / 任何不经代理的入口**仍然全走这个号** ——
+        #   标志说停了,号还在被调用。这正是本仓最忌讳的「写入侧标志撒谎」。
+        #
+        #   ⚠️ 交接对象用 `_pick_next`(它已排除 auth_dead / cooling / paused)。
+        #      挑不到就**拒绝暂停**而不是"停了但不切" —— 后者会让用户以为号已停用。
+        if s.get("active") == target:
+            handover = _pick_next(s)
+            if not handover:
+                lbl = s["slots"][target].get("label") or target
+                sys.exit(f"拒绝:[{lbl}] 是当前正在使用的号,而没有其它可接手的号"
+                         f"(其余全部失效/冷却中/已暂停)。现在暂停它只会让标志说谎 ——"
+                         f"auth.json 里仍是它,裸 codex 照样在用。")
     if want_off:
         s["slots"][target]["rotate_off"] = True
     else:
-        s["slots"][target].pop("rotate_off", None)   # 删键而不是写 False,保持"缺省=参与"
-    _save_state(s)
+        s["slots"][target].pop("rotate_off", None)   # 删键而不是写 False,保持"缺省=可用"
+
+    if handover:
+        # 锁序恒 state → cred(本仓铁律)。这里与 `cmd_switch` 是同一段凭证搬运,
+        # 只是把 `rotate_off` 的写入并进了同一次 `_save_state`,避免中途崩在两者之间。
+        #
+        # ★★ **交接失败必须让整个暂停失败,不能"停了但没切"。**
+        #    接手号的 auth 文件可能缺失/损坏(手删过、磁盘问题、槽位 `file` 指错)。
+        #    此时若吞掉异常继续 `_save_state`,结果正是这次改动要消灭的那个状态:
+        #    标志写着"已暂停",而 auth.json 里还是它,裸 codex 照样在用。
+        #    所以这里**先搬凭证再存 state**,任何一步炸掉都不留下半个状态。
+        try:
+            with _cred_lock():
+                auth = _load_json(AUTH_DIR / s["slots"][handover]["file"])
+                if not auth:
+                    raise ValueError("凭证文件为空或不可解析")
+                _atomic_write(LIVE, auth)
+                _activate(s, handover)
+                _save_state(s)
+        except Exception as e:
+            lbl = s["slots"][target].get("label") or target
+            hlbl = s["slots"][handover].get("label") or handover
+            sys.exit(f"拒绝:[{lbl}] 是当前正在使用的号,交接给 [{hlbl}] 失败({e})。"
+                     f"**没有暂停任何东西** —— 若此时写下暂停标志,auth.json 里仍是 "
+                     f"[{lbl}],标志就会说谎。请先修好 [{hlbl}] 的凭证。")
+    else:
+        _save_state(s)
+
     label = s["slots"][target].get("label") or target
-    left = sum(1 for sl in s["slots"].values() if not sl.get("rotate_off"))
-    print(f"{label} → {'已停用轮换' if want_off else '已恢复轮换'}(参与轮换 {left} 个)")
+    left = sum(1 for sl in s["slots"].values() if not paused(sl))
+    tail = ""
+    if handover:
+        tail = f" · 已把当值交给 [{s['slots'][handover].get('label') or handover}]"
+    print(f"{label} → {'已暂停(不可调用)' if want_off else '已恢复可用'}"
+          f"(可用 {left} 个){tail}")
 
 
 def cmd_refresh(args):
@@ -1803,7 +1900,8 @@ def cmd_probe(args):
 
     s = _state()
     if take_all:
-        targets = [aid for aid, sl in s["slots"].items() if not sl.get("auth_dead")]
+        targets = [aid for aid, sl in s["slots"].items()
+                   if not sl.get("auth_dead") and not paused(sl)]
         # ★★ 被跳过的死号也要留痕。否则「这个号没探过」和「这个号被跳过了」在
         #    `state.json` 里长得一模一样(都是没有 last_probe),而用户点的是「探针全池」——
         #    他有理由以为每个号都测了。静默跳过 = 又一次把两种"没有"折叠成一个。
@@ -1813,17 +1911,30 @@ def cmd_probe(args):
                                   model=model, effort=effort, completion_ok=False,
                                   quota_ok=False, status="skipped_dead",
                                   detail="token 已失效,probe --all 跳过", answer="")
+            elif paused(sl_):
+                # ★ 暂停也要留痕,理由和上面那条一字不差:「没探过」与「被跳过」
+                #   在 state.json 里不能长得一样。**状态码必须不同** ——
+                #   死号要去修 token,暂停号只需要用户自己决定要不要恢复,动作不同。
+                _write_last_probe(aid_, at=int(time.time()), started_at=int(time.time()),
+                                  model=model, effort=effort, completion_ok=False,
+                                  quota_ok=False, status="skipped_paused",
+                                  detail="该号处于暂停状态(不可调用),probe --all 跳过", answer="")
     elif labels:
         targets = []
         for key in labels:
             aid = _resolve_slot(s, key)
             if not aid:
                 sys.exit(f"no slot matching '{key}'")
+            # ★ 这是**花真钱**的动作。对一个用户已暂停的号照做,等于让"已禁用"当场失效。
+            if paused(s["slots"][aid]):
+                lbl = s["slots"][aid].get("label") or aid
+                sys.exit(f"拒绝:[{lbl}] 处于暂停状态(不可调用),而 probe 会消耗它的周额度。"
+                         f"要探它请先 `codex-rotate rotate {lbl} --on`。")
             targets.append(aid)
     else:
         sys.exit("要探哪些号?给 label(codex-rotate probe plus5 plus7)或 --all")
     if not targets:
-        sys.exit("没有可探测的号(全部标记为失效)")
+        sys.exit("没有可探测的号(全部已失效或处于暂停状态)")
 
     active = s.get("active")
     print(f"计费探测 · model={model} effort={effort} · {len(targets)} 个号 "
@@ -1910,6 +2021,10 @@ def _dawn_targets(s):
     out = []
     for aid, sl in (s.get("slots") or {}).items():
         if sl.get("auth_dead"):
+            continue
+        # ★★ 暂停的号绝不能进这里。dawn-probe 是**全仓唯一自动花钱**的东西,
+        #    给一个用户已经停用的号发计费请求,是这次改动里后果最实的一条。
+        if paused(sl):
             continue
         plan = (sl.get("plan") or (sl.get("quota") or {}).get("plan_type") or "").lower()
         if plan == "plus":
@@ -2410,6 +2525,71 @@ def stale_daemon_gate():
     return {"level": "ok", "detail": "fresh", "lines": ["常驻服务代码 ✓ 均为最新"]}
 
 
+def relay_route_gate():
+    """★★ 中转站路由的静默失败闸（2026-09-09）。三态,和 `proxy_env_gate` 同构。
+
+    codex 对「`--profile X` 但 `X.config.toml` 不存在/内容漂了」**不报错**,直接静默退回
+    base 配置 —— 对 cxp 而言就是「直连单号、不轮换、WS 全开」,和正常运行**长得一模一样**。
+    `cxp` 里已有一道硬检查(exec 前),这里是第二道:让 `health` 一眼能看见,
+    而不必等到下一次跑 codex 才发现。两道挡的是不同时刻,不是重复。
+
+    ⚠️ 读不到 `relay/` 模块时返回 `unknown`,**不是 ok** —— 「没查」和「查过没问题」
+       必须给出不同的文案(本仓 `proxy_env_gate` 的同一条口径)。
+    """
+    try:
+        _root = str(Path(__file__).resolve().parent)
+        if _root not in sys.path:
+            sys.path.insert(0, _root)
+        from relay import store as _rs
+    except Exception as e:
+        return {"level": "unknown",
+                "lines": [f"  ❔ 中转站路由闸:读不到 relay 模块({type(e).__name__}),未检查"]}
+    try:
+        st = _rs.route_status()
+    except Exception as e:
+        return {"level": "unknown",
+                "lines": [f"  ❔ 中转站路由闸:检查失败({type(e).__name__}),状态未知"]}
+    state = st.get("state")
+    if state == "pool":
+        return {"level": "ok", "lines": ["  ✅ 路由:账号池(rotateproxy)"]}
+    if state == "relay":
+        return {"level": "ok",
+                "lines": [f"  ✅ 路由:中转站 [{st.get('label')}] · {st.get('key_fp')}"]}
+    if state == "profile_missing":
+        return {"level": "warn", "lines": [
+            "⚠️  账号池的 profile 文件不存在:",
+            f"      {st.get('path')}",
+            "    codex 对此**不报错**,会静默退回 base 配置(直连单号、不轮换、WS 全开)。",
+            "    修:重跑安装脚本重建 `~/.codex/rotateproxy.config.toml`。"]}
+    if state == "route_corrupt":
+        # ★ 原来它落进最后那条"孤儿"兜底,打印成「路由 `None` 是孤儿」——
+        #   文案说错了,用户会往错的方向查。这一态必须自己一条。
+        return {"level": "warn", "lines": [
+            "⚠️  路由文件损坏:",
+            f"      {st.get('detail')}",
+            f"      {st.get('path')}",
+            "    代理会**退回账号池**(判不准时往免费那档倒)。",
+            "    修:CodexBar 总览页重新选一次路由,或删掉该文件(删掉 = 账号池)。"]}
+    if state == "orphan":
+        return {"level": "warn", "lines": [
+            f"⚠️  路由指向 `{st.get('profile')}`,但它已不在登记表里:{st.get('detail')}",
+            "    代理退回账号池 —— **你以为在按量付费,实际扣的是订阅额度**。",
+            "    修:CodexBar 总览页重新选一次路由。"]}
+    if state == "relay_disabled":
+        return {"level": "warn", "lines": [
+            f"⚠️  中转站 [{st.get('label') or st.get('profile')}] 已停用,但路由还指着它。",
+            "    代理退回账号池 —— **你以为在按量付费,实际扣的是订阅额度**。",
+            "    修:启用它,或在 CodexBar 总览页明确切回账号池。"]}
+    # ★★ **兜底必须说「我不认识这个状态」,不能沿用上一个态的文案。**
+    #    原来兜底写的是"是孤儿",于是 `route_corrupt` 被打印成
+    #    「路由 `None` 是孤儿」—— 文案说错了,用户会往错的方向查。
+    #    新增状态时这条会明确喊出来,而不是静默套用一句不相干的话。
+    return {"level": "warn", "lines": [
+        f"⚠️  路由状态 `{state}` 是本闸不认识的 —— 它比 codex-rotate 新。",
+        f"      {st.get('detail') or '(无说明)'}",
+        "    请更新 `relay_route_gate`;在那之前以 CodexBar 中转站页的路由卡为准。"]}
+
+
 def proxy_env_gate():
     """★ 系统代理会不会黑洞掉发往本机代理的请求。-> {level, detail, lines}
 
@@ -2483,10 +2663,14 @@ def cmd_health(args):
     gate = proxy_env_gate()
     agate = agy_wrap_gate()
     dgate = stale_daemon_gate()
+    rgate = relay_route_gate()
     # ★ 旧代码那条排在最前面:它一响,下面所有额度数字都可能是旧逻辑算出来的,
     #   先看到它才不会照着一个假数字去排查别的东西。
     if dgate["level"] != "ok":
         for _l in dgate["lines"]:
+            print(_l)
+    if rgate["level"] != "ok":
+        for _l in rgate["lines"]:
             print(_l)
     if gate["level"] != "ok":
         for _l in gate["lines"]:
@@ -2500,6 +2684,9 @@ def cmd_health(args):
     s = _state()
     if not s["slots"]:
         print("no accounts")
+        if rgate["level"] == "ok":
+            for _l in rgate["lines"]:
+                print(_l)
         if gate["level"] == "ok":
             for _l in gate["lines"]:
                 print(_l)
@@ -2543,6 +2730,9 @@ def cmd_health(args):
         print(f"  [{slot.get('label', '?'):<8}] {who:<26} {st:<13} "
               f"last_refresh:{(auth.get('last_refresh') or '?')[:19]}{dead}")
 
+    if rgate["level"] == "ok":
+        for _l in rgate["lines"]:
+            print(_l)
     if gate["level"] == "ok":
         for _l in gate["lines"]:
             print(_l)

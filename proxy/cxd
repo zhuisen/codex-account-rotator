@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# cxd —— **单号直连**的 codex 入口（用户 2026-09-09 定稿）。
+#
+# 直接调真二进制，**绕过 PATH wrapper**，所以既不注入 `--profile rotateproxy`、
+# 也不经过轮换代理。用它跑 `/usage` 看重置卡才有意义 —— 那个命令问的是
+# 「当前这一个号」的额度，而经过代理时每个请求都可能落在不同的号上。
+#
+# ★ 其余入口一律走代理（受 CodexBar 里「账号池 ↔ 中转站」那个开关控制）：
+#     codex / \codex / omc ask codex / VS Code
+#
+# ⚠️ 这里**故意不带任何 profile**。加了就不是"直连"了，而它的整个存在理由就是直连。
+set -euo pipefail
+exec "${CODEX_NATIVE_BIN:-${HOME}/.local/npm-global/bin/codex}" "$@"

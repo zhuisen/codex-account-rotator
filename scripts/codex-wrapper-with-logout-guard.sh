@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-export CODEX_HOME="${HOME}/.codex"
+export CODEX_HOME="${CODEX_HOME:-${HOME}/.codex}"
 
 # The npm install used on this machine cannot run `codex agents` because that command requires the
 # standalone app-server package. Keep session discovery local and read-only instead.
@@ -88,74 +88,31 @@ WARN
 
 guard_automatic_session_resume "$@" || exit $?
 
-# Native resume/fork filters by thread metadata. Codex can leave genuine interactive sessions with
-# has_user_event=0, and cxp sessions are stamped rotateproxy even though this machine intentionally
-# resumes them through plain Codex. Repair only sessions recorded in history.jsonl that already have
-# native first-user-message metadata. One-shot exec, automation, aborted/empty, archived, and subagent
-# threads are excluded by the SQL predicate.
-repair_codex_session_visibility() (
-  local db="${CODEX_HOME}/state_5.sqlite"
-  local history="${CODEX_HOME}/history.jsonl"
-  local jq_bin="/opt/homebrew/bin/jq"
-  local ids_file=""
-  local repair_status
+# ★★ `repair_codex_session_visibility()` 已删除（2026-09-08）。
+#
+# 它在每次 `codex resume/fork` 前跑一段 SQL，把 `state_5.sqlite` 里 `model_provider` 为
+# `rotateproxy` 的行改写成 `openai` 并置 `has_user_event=1`，本意是让被代理戳记的会话
+# 在 picker 里可见。它现在必须走，有三条独立理由：
+#
+# ① **它制造的正是它要修的问题。** `cxp` 自 `aa1efb7` 起让所有子命令都走 `--profile rotateproxy`，
+#    于是 picker 请求的是 rotateproxy，而这段 SQL 把 DB 改成 openai —— 两边永远对不上。
+#    更糟的是**入口顺序决定副作用**：裸 `command codex resume` 会触发它，
+#    而 cxp 因为把 `--profile` 放在第一位反而跳过（守卫只看 `$1`）。同一台机器两种行为。
+# ② **DB 与 rollout 文件头从此不一致。** 文件里 session_meta 仍写着原 provider，
+#    活跃会话被 CLI 自然回写时又把 DB 改回去 —— 列表因此会自己翻转。
+# ③ ★ **未加引号的 `<<SQL` 让注释里的反引号被 bash 执行。** 2026-09-08 实测 stderr 出现
+#    `history.jsonl: command not found` / `reusme: command not found` / `cli/vscode: command not found`
+#    —— 那些字都在我写的 SQL 注释里。`bash -n` 对此**完全沉默**。
+#
+# 根治（迁移历史 provider）涉及 192 个 rollout 文件各 +5 字节，会让
+# `thread_history_1.sqlite` 的 `rollout_byte_offset` 全部失效，是一次需要备份与回滚的
+# 数据迁移，不属于这个 wrapper 的职责。详见交接包
+# `output/codex-resume-handoff-20260908/CLAUDE_HANDOFF.md`。
+#
+# 现状与绕法：`codex resume` 按**当前 provider** 过滤，所以 cxp 只列 rotateproxy 戳记的会话；
+# 旧的 openai 会话仍可用 `codex resume <session-id>` 直接进入，或用裸
+# `command codex resume`（不经 cxp，provider=openai）浏览。
 
-  cleanup_ids_file() {
-    if [ -n "$ids_file" ] && [ -e "$ids_file" ]; then
-      /bin/unlink "$ids_file"
-    fi
-  }
-  trap cleanup_ids_file EXIT
-
-  [ -f "$db" ] && [ -s "$history" ] && [ -x "$jq_bin" ] || return 0
-
-  ids_file="$(/usr/bin/mktemp "${TMPDIR:-/tmp}/codex-human-sessions.XXXXXX")" || return 1
-  if ! "$jq_bin" -Rrs '
-      [split("\n")[]
-        | fromjson?
-        | .session_id? // empty
-        | select(test("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"))]
-      | unique[]
-    ' "$history" > "$ids_file"; then
-    return 1
-  fi
-
-  if [ ! -s "$ids_file" ]; then
-    return 0
-  fi
-
-  /usr/bin/sqlite3 -batch "$db" >/dev/null <<SQL
-.bail on
-PRAGMA busy_timeout=5000;
-CREATE TEMP TABLE history_ids (id TEXT PRIMARY KEY);
-.mode tabs
-.import $ids_file history_ids
-BEGIN IMMEDIATE;
-UPDATE threads
-SET has_user_event = 1,
-    model_provider = CASE
-      WHEN model_provider = 'rotateproxy' THEN 'openai'
-      ELSE model_provider
-    END
-WHERE archived = 0
-  AND (thread_source = 'user' OR thread_source IS NULL)
-  AND source IN ('cli', 'vscode', 'exec')
-  AND first_user_message <> ''
-  -- ★★ 2026-09-07：`history.jsonl` 这道闸放行得太少 —— 实测它只有 **183** 个 session_id，
-  -- 而库里符合"真实交互式会话"的有 239 条（cli 174 + vscode 65），于是 41 条真会话
-  -- 长期不可见，且**可见的那些反而多是垃圾**（`reusme`、`Error: Failed to resume session…`）。
-  -- 改成两条并联：在 history.jsonl 里 **或** 来自 `cli`/`vscode`（真人交互的两个入口）。
-  -- ⚠️ `exec` 仍然只能走 history.jsonl 那一支 —— 库里 `source='exec'` 有 **3460** 条，
-  --    全是 `codex exec` 一次性调用（omc ask / 各类 harness）。全放进 picker 会把
-  --    真会话彻底淹掉，那是把「看不见」换成「找不到」，不是修复。
-  AND (EXISTS (SELECT 1 FROM history_ids WHERE history_ids.id = threads.id)
-       OR source IN ('cli', 'vscode'))
-  AND (has_user_event = 0 OR model_provider = 'rotateproxy');
-COMMIT;
-SQL
-  repair_status=$?
-  return "$repair_status"
-)
 
 # ── guard: `codex logout` REVOKES the active account's tokens server-side ──────────────────────────
 # The codex binary logs "failed to revoke auth tokens during logout", i.e. logout is a server-side
@@ -190,12 +147,53 @@ WARN
   esac
 fi
 
-case "$1" in
-  resume|fork)
-    if ! repair_codex_session_visibility; then
-      printf '%s\n' 'Warning: Codex session visibility repair failed; continuing with native resume.' >&2
-    fi
-    ;;
-esac
+# ★ 这里原本有一个 `case "$1" in resume|fork)` 分支去跑上面那个已删的 repair。
+#   连同删掉 —— 留一个只打警告的空分支比没有更糟：它会让人以为还有东西在守着。
 
-exec "${HOME}/.local/npm-global/bin/codex" "$@"
+# ── 走轮换代理 ────────────────────────────────────────────────────────────────
+#
+# ★★ 2026-09-09 用户定稿：`omc ask codex` / VS Code / `\codex` **一并跟随路由**。
+#    在这之前它们调的是裸 `codex` ⇒ 落到内置 provider `openai` ⇒ **单号直连**，
+#    烧 `auth.json` 里的当值号，而 CodexBar 上的「账号池 ↔ 中转站」开关管不到它们。
+#
+#    能这么做的前提是「一个 provider，两种上游」：中转站不再有自己的 profile，
+#    账号池 ↔ 中转站的切换发生在代理内部，所以这里只需恒定注入 `rotateproxy`。
+#
+# ★ 需要**真正直连某一个号**（例如跑 `/usage` 看重置卡）请用 `cxd` ——
+#   它直接调真二进制、绕过本 wrapper。
+#
+# ★★ 判据与 `proxy/cxp` **共用同一份**（`proxy/codex-profile-scope.sh`）。
+#    同一条规则的两份实现必然在边界输入上分叉，而这条分叉的后果是
+#    **静默退回单号直连、不轮换** —— 失败不出声，最坏的那一类。
+CODEX_ROTATE_STORE="${CODEX_ROTATE_STORE:-${HOME}/Projects/tools/codex-account-rotator}"
+export CODEX_ROTATE_STORE
+_scope="${CODEX_ROTATE_STORE}/proxy/codex-profile-scope.sh"
+_profile=()
+if [ -f "$_scope" ]; then
+  # shellcheck source=/dev/null
+  . "$_scope"
+  if codex_wants_profile "$@"; then
+    # ★★ 保留这道硬闸:codex 对「`--profile X` 但 `X.config.toml` 不存在」**不报错**,
+    #    直接静默退回 base 配置(直连单号、不轮换、WS 全开)—— 和正常运行长得一模一样。
+    if [ ! -f "${CODEX_HOME}/rotateproxy.config.toml" ]; then
+      printf '%s\n' \
+        "⛔ codex: profile 文件不存在 —— ${CODEX_HOME}/rotateproxy.config.toml" \
+        "   codex 对这种情况**不报错**,会静默退回 base 配置(直连单号、不轮换、WS 全开)," \
+        "   所以这里替它硬失败。" \
+        "   要单号直连请用 \`cxd\`。" >&2
+      exit 78
+    fi
+    _profile=(--profile rotateproxy)
+  fi
+else
+  # ⚠️ **不许静默跳过。** 判据文件不在 = 安装坏了;悄悄不注入等于把
+  #    「装坏了」伪装成「你选了单号直连」,而那正是这一整套要防的事。
+  printf '%s\n' \
+    "⛔ codex: 找不到 profile 判据 —— $_scope" \
+    "   没有它就无法决定该不该走轮换代理,而猜错的那一边(不注入)是**静默**失败。" \
+    "   修:确认 CODEX_ROTATE_STORE 指向仓库根,或重装 wrapper。" \
+    "   要单号直连请用 \`cxd\`。" >&2
+  exit 78
+fi
+
+exec "${CODEX_NATIVE_BIN:-${HOME}/.local/npm-global/bin/codex}" "${_profile[@]}" "$@"

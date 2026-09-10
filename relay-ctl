@@ -1,0 +1,214 @@
+#!/usr/bin/env python3
+"""中转站的单一 CLI 入口 —— Rust 侧只认这一个可执行文件。
+
+## 契约（照 `grok-quota` / `agy-quota` 那套，别再发明第二种）
+
+- **stdout 恒为一个 JSON 对象**，stderr 只放人看的诊断；
+- **退出码恒 0**（除非参数就不合法）。失败通过 payload 里的 `ok:false` + `state` 表达 ——
+  Rust 侧把非零退出当成"命令坏了"并整块丢弃，而我们要的是**降级数据照样送到 UI**；
+- 任何 payload **绝不含明文 key**，只出 `key_fp`。
+
+## ★★ key 只走 stdin，绝不走 argv
+
+`ps` 能看到任何进程的完整命令行。key 走参数 = 全机器可见，且会进 shell 历史。
+`set` 从 stdin 读一个 JSON 对象，Rust 侧用管道喂进来。
+
+## 为什么不是 `python -m relay`
+
+`relay/` 是包（`store` 与 `monitor` 互相引用），而打包后脚本被摊进 `scripts/relay/`。
+一个显式的顶层可执行文件比依赖 `-m` 的包解析更好排查 —— 与 `grok-quota` 保持同形。
+"""
+import json
+import re
+import sys
+import traceback
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from relay import monitor, store  # noqa: E402
+
+
+def out(payload):
+    """★ 恒 0 退出。Rust 侧对非零退出的处理是整块丢弃,而降级数据必须能到 UI。"""
+    json.dump(payload, sys.stdout, ensure_ascii=False)
+    sys.stdout.write("\n")
+    return 0
+
+
+def cmd_status(_argv):
+    cfg = store.load()
+    payload = {"ok": True, "route": store.route_status(), **store.redacted(cfg)}
+    # ★ 配置文件坏掉被改名时**说出来**。不说的话页面会画"还没有配置中转站" ——
+    #   一句关于事实的假陈述,而用户的中转站其实还在,只是文件损坏了。
+    if cfg.get("store_corrupt"):
+        payload.update(ok=False, state="store_corrupt", detail=
+                       f"配置文件损坏,已改名留档: {cfg['store_corrupt']}。中转站列表暂时为空,"
+                       f"不是你没配过 —— 重新填一次表单即可,或从留档里恢复。")
+    return out(payload)
+
+
+def cmd_usage(_argv):
+    """所有启用的中转站各拉一次。**这是唯一会发网络请求的只读命令。**
+
+    ★ 把上一份快照喂给 `collect` —— 逐日的「按模型」明细里，**历史日不可变**，
+      复用即可，稳态每次刷新只多 1 个请求（今天）。第一次跑会补拉至多
+      `monitor.MAX_DAY_FETCH` 天。
+    ★ 读快照**失败一律当作没有**（`prev=None`）：最坏结果是多打几个免费 GET，
+      而不是拿一份坏数据去冒充明细。
+    """
+    prev = None
+    try:
+        snap = Path(store.data_root()) / ".relay-usage.json"
+        if snap.exists():
+            prev = json.loads(snap.read_text(encoding="utf-8"))
+    except Exception:
+        prev = None
+    data = monitor.collect(prev=prev)
+    # ★ monitor 自己不写配置（读路径里写 = 与 UI 的 set 抢同一份文件、丢更新）。
+    #   探到的计费端点在这里落盘 —— 单点、有序。
+    for r in data.get("relays") or []:
+        d = (r.get("data") or {})
+        if d.get("usage_path_discovered") and d.get("usage_path"):
+            # ★ 用 `patch` 不用 `get`+`upsert`:后者是**整行重建**,`get` 与 `upsert` 之间
+            #   落进来的 UI 修改(label / base_url / key)会被旧快照盖回去。
+            #   而这两条路走的是**两把不同的 Rust 锁**,可以并发。
+            store.patch(r["id"], usage_path=d["usage_path"])
+    return out({"ok": True, **data})
+
+
+def cmd_test(argv):
+    if not argv:
+        return out({"ok": False, "state": "bad_args", "detail": "用法: relay-ctl test <id>"})
+    r = store.get(argv[0])
+    if not r:
+        return out({"ok": False, "state": "unknown_relay", "detail": f"没有 {argv[0]!r}"})
+    res = monitor.test_connection(r)
+    return out({"ok": res["state"] == "ok", "id": r["id"], **res})
+
+
+_FP_RE = re.compile(r"^\S{1,12}…\S{0,8}\s*\(([0-9a-f]{12})\)$")
+
+
+def _looks_like_fingerprint(v):
+    """`store.fingerprint()` 的形状:`sk-73a1…294 (0f39111c7caf)`。
+    真 key 不会长这样(没有省略号,也不会以 `(12位hex)` 结尾)。"""
+    return bool(_FP_RE.match(v.strip()))
+
+
+def cmd_set(_argv):
+    """从 **stdin** 读 `{id,label,base_url,key,model,enabled}` 并落盘。
+
+    ★ 2026-09-09 起**不再写 codex profile** —— 中转站是代理的另一个上游，不是 codex 的
+      另一个 provider。代理按 mtime 签名重读登记表，改完立即生效，无需重启。
+    """
+    try:
+        payload = json.load(sys.stdin)
+    except Exception as e:
+        return out({"ok": False, "state": "bad_stdin", "detail": str(e)})
+    if not isinstance(payload, dict):
+        return out({"ok": False, "state": "bad_stdin", "detail": "stdin 不是 JSON 对象"})
+    # 编辑时前端只会送指纹回来 —— 那不是新 key,要保留原来的。
+    #
+    # ★★ **两种"不是新 key"都要认**:空串,以及**指纹本身**。
+    #    只认空串的话,前端一旦把 `key_fp` 回填进 key 框(最自然的写法),
+    #    那串指纹会通过 `validate()`(它非空)、被当成真 key 写进配置,
+    #    中转站当场 401 —— 而症状"key 失效"和"key 真的过期了"**一模一样**。
+    # ★★ **不在这里读旧 key。** 锁外 `get()` 再 `upsert()` 的 RMW 会被并发的另一次
+    #    `set` 盖掉 —— 这里只判断"这次给的是不是一个真 key",沿用哪个交给锁内决定。
+    key_in = (payload.get("key") or "").strip()
+    if not key_in or _looks_like_fingerprint(key_in):
+        payload["_keep_key"] = True
+        payload["key"] = "sk-placeholder-replaced-under-lock"   # 只为过 validate 的非空检查
+    cfg, errs = store.upsert(payload)
+    if errs:
+        return out({"ok": False, "state": "invalid", "errors": errs})
+    # ★ 2026-09-09 起**不再写第二份 codex profile**。中转站是代理的另一个上游,
+    #   不是 codex 的另一个 provider —— 见 `store.route_status()` 的 docstring。
+    #   代理每请求按 mtime 签名重读登记表,所以改完立即生效,无需重启。
+    return out({"ok": True, "route": store.route_status(), **store.redacted()})
+
+
+def cmd_remove(argv):
+    if not argv:
+        return out({"ok": False, "state": "bad_args", "detail": "用法: relay-ctl remove <id>"})
+    try:
+        removed = store.remove(argv[0])
+    except KeyError as e:
+        # ★ `remove` 现在拒绝保留名与未登记 id（它会删 `~/.codex/<id>.config.toml`,
+        #   而 `rotateproxy.config.toml` 是账号池的）。拒绝要如实上报,不能吞成 ok。
+        return out({"ok": False, "state": "refused", "detail": str(e),
+                    "route": store.route_status(), **store.redacted()})
+    return out({"ok": True, "removed": removed,
+                "route": store.route_status(), **store.redacted()})
+
+
+def cmd_route(argv):
+    """切路由。`pool` 是账号池的别名 —— 前端不必知道 `rotateproxy` 这个内部名字。"""
+    if not argv:
+        return out({"ok": False, "state": "bad_args",
+                    "detail": "用法: relay-ctl route <pool|relay-id>"})
+    target = store.POOL_PROFILE if argv[0] == "pool" else argv[0]
+    # ★ 不再写 profile:切换发生在代理内部(`proxy.py::_relay_upstream`),
+    #   codex 那边永远是同一个 `rotateproxy` provider。`set_route` 自己会校验
+    #   目标是不是已登记的中转站,校验失败时路由一动不动。
+    try:
+        store.set_route(target)
+    except KeyError as e:
+        return out({"ok": False, "state": "unknown_relay", "detail": str(e)})
+    st = store.route_status()
+    # ★ 切过去之后**立刻回报状态**。`orphan` / `relay_disabled` / `profile_missing` 时
+    #   前端要能当场红着提示 —— 那三种下代理都会**退回账号池**,
+    #   而用户以为自己在按量付费。等到看账单才发现就太晚了。
+    return out({"ok": st["state"] in ("pool", "relay"), "route": st})
+
+
+def cmd_cleanup(_argv):
+    """删掉 2026-09-09 之前留下的**每中转站一份** codex profile。
+
+    ★ 旧模型给每个中转站生成 `~/.codex/<id>.config.toml` 并靠 cxp 换 profile 切换。
+      新模型只有 `rotateproxy` 一个 provider，那些文件成了**孤儿**：codex 不再加载它们，
+      但它们里面有明文可读的 `base_url` 和取 key 脚本路径，留着只会误导下一次排查。
+
+    ★★ **只删带托管标记的文件**（与 `store.remove` 同一条口径）。没有标记 = 用户或别的
+      工具写的，绝不碰。保留名（`rotateproxy` / codex 内置 provider）也一律跳过 ——
+      删掉账号池那份会让所有 cxp 当场 exit 78。
+    """
+    removed, skipped = [], []
+    home = store.codex_home()
+    for p in sorted(home.glob("*.config.toml")):
+        rid = p.name[: -len(".config.toml")]
+        if rid in store.RESERVED_IDS:
+            continue                       # 账号池自用 / codex 内置,不归本模块管
+        try:
+            owned = store.split_managed(p.read_text(encoding="utf-8"))[1] is not None
+        except OSError as e:
+            skipped.append({"id": rid, "why": f"读不出: {e}"})
+            continue
+        if not owned:
+            skipped.append({"id": rid, "why": "没有托管标记 —— 不是本工具写的,不动"})
+            continue
+        p.unlink()
+        removed.append(rid)
+    return out({"ok": True, "removed": removed, "skipped": skipped,
+                "route": store.route_status()})
+
+
+CMDS = {"status": cmd_status, "usage": cmd_usage, "test": cmd_test, "set": cmd_set,
+        "remove": cmd_remove, "route": cmd_route, "cleanup": cmd_cleanup}
+
+
+def main(argv):
+    if len(argv) < 2 or argv[1] not in CMDS:
+        sys.stderr.write("usage: relay-ctl {%s}\n" % "|".join(CMDS))
+        return 2
+    try:
+        return CMDS[argv[1]](argv[2:])
+    except Exception as e:
+        # ★ 任何未预期的异常也要变成 payload —— 崩一个 traceback 到 stderr 会让 Rust 侧
+        #   丢掉整块数据,UI 上表现为"一片空白",而空白与"确实没有中转站"长得一样。
+        traceback.print_exc(file=sys.stderr)
+        return out({"ok": False, "state": "crashed", "detail": f"{type(e).__name__}: {e}"})
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
