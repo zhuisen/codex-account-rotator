@@ -1204,7 +1204,10 @@ def scan(days=90, use_cache=True, only=None, exclude=None):
     out = {}
     acc = {}
     # ★ 旁挂的路由分账。key = 平台键 → provider → 桶。总量完全不受影响。
-    by_provider = {}            # 平台键 -> (days_b, hours_b);跨源累积
+    # 平台键 -> provider -> **日期** -> 桶。★ 2026-09-10 从"整窗口一个数"改成按日:
+    # 页面上的路由分账要跟着日期档走,而档位是前端的事,所以后端必须下发可切分的粒度。
+    # 旧形状（provider -> 桶）由前端按 range 求和还原,后端不再自己聚合一个第二口径。
+    by_provider = {}
     coverage = {}       # 源键 -> {covered,total,unit,since};只有采集不完整的源才有
     seen_roots = {}
     now_ts = time.time()
@@ -1324,7 +1327,11 @@ def scan(days=90, use_cache=True, only=None, exclude=None):
             #    这里只做归属,费用留给中转站页的实扣。
             prov = row[7] if len(row) > 7 else None
             if prov:
-                pv = by_provider.setdefault(pk, {}).setdefault(prov, _blank())
+                # ★ 按**日**存。前端按当前 range 求和 —— 这样"路由分账"与同页的 KPI/图
+                #   必然同窗口,不必再在标题上写死"近 90 天"（那行字本身就是个补丁）。
+                pv = by_provider.setdefault(pk, {}).setdefault(prov, {}).get(d)
+                if pv is None:
+                    pv = by_provider[pk][prov][d] = _blank()
                 _add(pv, model, i, cr, cw, o)
             if di == last_di:                               # 今日视图按小时,只需当天
                 h = strftime("%Y-%m-%dT%H", localtime(ep))
@@ -1376,7 +1383,14 @@ def scan(days=90, use_cache=True, only=None, exclude=None):
         #   「分账全是 0」是两件事,前者该让 UI 什么都不显示。
         bp = by_provider.get(pk)
         if bp:
-            entry["by_provider"] = {k: v for k, v in bp.items()}
+            # ★ 只保留**落在输出窗口内**的日期。`picked` 就是那批日子 ——
+            #   多给的日期前端不会显示,却会让"合计"对不上,而那正是同页两个数
+            #   不同窗口的老毛病。
+            entry["by_provider"] = {
+                prov: {d: b for d, b in per_day.items() if d in picked}
+                for prov, per_day in bp.items()
+            }
+            entry["by_provider"] = {p2: v for p2, v in entry["by_provider"].items() if v}
             # ★ 只给**中转站**标签(账号池那两个 id 是内部名,前端自己有文案)。
             entry["provider_labels"] = {k: v for k, v in relay_labels.items() if k in bp}
         cov = coverage.get(pk)

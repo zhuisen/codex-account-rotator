@@ -140,7 +140,10 @@ class TheSplitMatchesTheTotalOnRealData(unittest.TestCase):
         if not c or not c.get("by_provider"):
             self.skipTest("本机 codex 桶里没有分账数据")
         days_total = sum(b["total"] for b in c["days"].values())
-        split_total = sum(v["total"] for v in c["by_provider"].values())
+        # ★ 形状是 provider → 日期 → 桶（2026-09-10 起按日下发,前端按档求和）。
+        split_total = sum(b["total"]
+                          for per_day in c["by_provider"].values()
+                          for b in per_day.values())
         self.assertEqual(split_total, days_total,
                          f"分账与总量不同窗口: {split_total:,} vs {days_total:,}")
 
@@ -196,7 +199,7 @@ class TheUiSaysTheCostDoesNotApply(unittest.TestCase):
         而那个字符串在**组件定义**里,把调用点 `<RouteSplit …/>` 整行删掉照样绿。
         「组件存在」不等于「组件被渲染」,这正是本仓「名字出现 ≠ 真的接上」那一条。
         真正的判据是下面那条真 DOM 闸;这一条是它的静态前哨。"""
-        self.assertIn("<RouteSplit t={t} p={data?.platforms[pk]} />", self.PAGE,
+        self.assertIn("<RouteSplit t={t} p={data?.platforms[pk]}", self.PAGE,
                       "组件定义在,但没人调用它")
 
     def test_it_warns_that_the_equivalent_cost_does_not_apply_to_relay_tokens(self):

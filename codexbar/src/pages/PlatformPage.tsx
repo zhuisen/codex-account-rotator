@@ -95,13 +95,30 @@ function mixHex(hex: string, to: string, amt: number): string {
 
 
 /** 路由分账行。只有 scan 真的分出账的平台（目前只有 codex）才渲染。 */
-function RouteSplit({ t, p }: { t: Theme; p?: Platform }): React.ReactElement | null {
+function RouteSplit({ t, p, labels, rangeTxt }: {
+  t: Theme; p?: Platform;
+  /** 当前档位实际画出来的那些日期。**分账只对这批日子求和** ——
+   *  同一页上两个数不同窗口是本仓栽过的错（119M vs 9,004M）。 */
+  labels: string[];
+  rangeTxt: string;
+}): React.ReactElement | null {
   const bp = p?.by_provider;
   if (!bp) return null;
-  const rows = Object.entries(bp).filter(([, b]) => b.total > 0)
-    .sort((a, b) => b[1].total - a[1].total);
+  // ★ 「今日」档的标签是 `YYYY-MM-DDTHH`（小时），而分账只按日存 ——
+  //   取前 10 位归回日期，再去重。
+  const want = new Set(labels.map((l) => l.slice(0, 10)));
+  // ★ 显式类型:`Object.entries(...).map(() => [id, total])` 会被推成
+  //   `(string | number)[]`，后面的算术全部报错。用对象数组，别用元组。
+  const rows: Array<{ id: string; total: number }> = Object.entries(bp)
+    .map(([id, perDay]) => {
+      let total = 0;
+      for (const [d, b] of Object.entries(perDay)) if (want.has(d)) total += b.total;
+      return { id, total };
+    })
+    .filter((r) => r.total > 0)
+    .sort((a, b) => b.total - a.total);
   if (rows.length === 0) return null;
-  const sum = rows.reduce((a, [, b]) => a + b.total, 0);
+  const sum = rows.reduce((a, r) => a + r.total, 0);
   // 账号池的两个 id 是内部名 —— 前端自己给文案；中转站用用户起的显示名。
   const nameOf = (id: string): string =>
     id === "rotateproxy" ? "账号池（代理轮换）"
@@ -116,7 +133,7 @@ function RouteSplit({ t, p }: { t: Theme; p?: Platform }): React.ReactElement | 
   //    而不是"排除法"。排除法的清单永远追不上现实。
   const isRelay = (id: string): boolean => Boolean(p?.provider_labels?.[id]);
   const isPool = (id: string): boolean => id === "rotateproxy" || id === "openai";
-  const relayTok = rows.filter(([id]) => isRelay(id)).reduce((a, [, b]) => a + b.total, 0);
+  const relayTok = rows.filter((r) => isRelay(r.id)).reduce((a, r) => a + r.total, 0);
   return (
     // ★★ 2026-09-09 用户定稿：整块折叠进一个角标，**悬浮才展开**。
     //    页面上常驻四行路由明细 + 一条费用免责，占了 KPI 之前最贵的一段版面，
@@ -139,17 +156,17 @@ function RouteSplit({ t, p }: { t: Theme; p?: Platform }): React.ReactElement | 
                     background: t.cardBg, border: `1px solid ${t.cardBorder}`,
                     boxShadow: t.shadow, display: "flex", flexDirection: "column", gap: 5,
                     color: t.muted, whiteSpace: "nowrap" }}>
-        {/* ★★ **必须写出窗口。** `by_provider` 是 scan 下发的**近 90 天**合计,
-            而这一页的 KPI 与图跟着 `range` 走 —— 今日档旁边挂着 90 天的路由数
-            就是"同页两个数不同窗口"。 */}
-        <span style={{ fontWeight: 600, color: t.text }}>路由 · 近 90 天</span>
-        {rows.map(([id, b]) => (
-          <span key={id} style={{ fontFamily: "'JetBrains Mono', monospace",
-                                  fontVariantNumeric: "tabular-nums" }}>
+        {/* ★★ 窗口跟着页面档位走（2026-09-10）。此前后端只下发 90 天一个合计,
+            这里只好写死"近 90 天" —— 今日档旁边挂着 90 天的数，正是本仓在 scan 侧
+            栽过的那个"同页两个数不同窗口"（119M vs 9,004M）。现在按日下发、按档求和。 */}
+        <span style={{ fontWeight: 600, color: t.text }}>路由 · {rangeTxt}</span>
+        {rows.map((r) => (
+          <span key={r.id} style={{ fontFamily: "'JetBrains Mono', monospace",
+                                    fontVariantNumeric: "tabular-nums" }}>
             {/* ★ 金额琥珀只给**真的在花钱**的那条路由。未登记/未标注走中性色 ——
                 颜色在本仓是有语义的,乱用等于把语义稀释掉。 */}
-            {nameOf(id)} <b style={{ color: isRelay(id) ? "#E0A21C" : isPool(id) ? t.text : t.muted }}>{fmtTok(b.total)}</b>
-            <span style={{ opacity: 0.7 }}> · {((b.total / sum) * 100).toFixed(1)}%</span>
+            {nameOf(r.id)} <b style={{ color: isRelay(r.id) ? "#E0A21C" : isPool(r.id) ? t.text : t.muted }}>{fmtTok(r.total)}</b>
+            <span style={{ opacity: 0.7 }}> · {((r.total / sum) * 100).toFixed(1)}%</span>
           </span>
         ))}
         {relayTok > 0 && (
@@ -327,7 +344,8 @@ export default function PlatformPage({ t, data, raw, cacheMode, pk, range, setRa
                        textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{SRC[pk] ?? ""}</span>
         {/* ★ 路由分账角标**紧挨源路径**（用户 2026-09-09 指位）：两者是同一类信息 ——
             "这一页的数字从哪来"。单独占一行会把 KPI 往下推、且看着像一条告警。 */}
-        <RouteSplit t={t} p={data?.platforms[pk]} />
+        <RouteSplit t={t} p={data?.platforms[pk]} labels={v?.labels ?? []}
+                    rangeTxt={rangeLabel(range)} />
         <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
           <Seg opts={["models", "total"] as const} cur={mode} on={setMode}
                label={(x) => (x === "models" ? "分模型" : "总量")} t={t} />

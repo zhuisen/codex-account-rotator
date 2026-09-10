@@ -391,12 +391,25 @@ STUB = """
       var _o = JSON.parse(SNAPSHOT);
       var c = _o && _o.platforms && _o.platforms.codex;
       if (c && !c.by_provider) {
-        c.by_provider = {
-          openai:        { total: 4651131297, uncached_in: 0, cache_read: 0, cache_write: 0, output: 0, rounds: 0, models: {} },
-          rotateproxy:   { total: 3529396103, uncached_in: 0, cache_read: 0, cache_write: 0, output: 0, rounds: 0, models: {} },
-          'openai-nows': { total: 38627,      uncached_in: 0, cache_read: 0, cache_write: 0, output: 0, rounds: 0, models: {} },
-          tokendun:      { total: 39513,      uncached_in: 0, cache_read: 0, cache_write: 0, output: 0, rounds: 0, models: {} }
+        // ★★ 形状是 **provider → 日期 → 桶**（2026-09-10 起）。前端按当前档位求和，
+        //    所以路由分账与同页的 KPI/图必然同窗口。
+        // ★ 各 provider 落在**不同的日子**上 —— 全放同一天的话，「跟随档位」那条闸
+        //   换任何档位都得到同一批 provider，又是个空守卫。
+        var _days = Object.keys(c.days || {}).sort();
+        var _last = _days[_days.length - 1], _first = _days[0];
+        var _bk = function (n) {
+          return { total: n, uncached_in: 0, cache_read: 0, cache_write: 0,
+                   output: 0, rounds: 0, models: {} };
         };
+        c.by_provider = {};
+        if (_last) {
+          // 今天/最近：账号池 + 中转站 + 那个未登记的临时 provider
+          c.by_provider.rotateproxy = {}; c.by_provider.rotateproxy[_last] = _bk(3529396103);
+          c.by_provider.tokendun = {};    c.by_provider.tokendun[_last] = _bk(39513);
+          c.by_provider['openai-nows'] = {}; c.by_provider['openai-nows'][_last] = _bk(38627);
+          // 最早那天只有单号直连 —— 短档位里它必须消失
+          c.by_provider.openai = {};      c.by_provider.openai[_first || _last] = _bk(4651131297);
+        }
         c.provider_labels = { tokendun: 'TokenDun' };
         SNAPSHOT = JSON.stringify(_o);
       }
@@ -741,6 +754,22 @@ function relayEntry() {
         }, 500);
       }
       else fire('navigate-traffic');
+
+      // ★ `?prange=7d|90d|今日…` 点平台详情页的档位。按**文字身份**点（本仓纪律:
+      //   位置耦合已经静默点错过两次）。用来验"路由分账跟着档位走"。
+      var prange = p.get('prange');
+      if (prange) {
+        setTimeout(function () {
+          var hit = 0, os = document.querySelectorAll('#root span, #root div');
+          for (var q = 0; q < os.length; q++) {
+            if ((os[q].textContent || '').trim() === prange && !os[q].children.length) {
+              os[q].dispatchEvent(new MouseEvent('click', { bubbles: true })); hit++; break;
+            }
+          }
+          clicks.push('prange=' + prange + ' →命中 ' + hit);
+          if (!hit) errors.push('点不到平台页档位 "' + prange + '"');
+        }, 700);
+      }
 
       // ★ `?mbshow=<ms>` 在指定时刻发 `menubar-shown` —— Rust 是在 `win.show()` 之后发它的
       //   (lib.rs 的 `toggle_menubar`)。菜单栏的高度靠这个事件在**窗口真正可见时**重量一次,

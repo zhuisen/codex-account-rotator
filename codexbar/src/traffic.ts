@@ -32,10 +32,15 @@ export interface Platform {
   available: boolean;
   coverage?: Coverage;
   /** ★ 路由分账（目前只有 codex 有）：这批 token 走的是账号池还是某个中转站。
-   *  **与 `days` 同窗口**，合计等于 `days` 的合计 —— 两个数放在同一页上必须同口径。
+   *
+   *  **provider → 日期 → 桶**。2026-09-10 从"整窗口一个数"改成按日：页面上的路由分账
+   *  必须跟着用户选的日期档走，而档位是前端的事，所以后端下发可切分的粒度、
+   *  前端按当前 range 求和。（此前是后端自己聚合成 90 天一个数，页面上只好写死
+   *  "近 90 天"——那行字本身就是"同页两个数不同窗口"的补丁。）
+   *
    *  ⚠️ 它**不参与任何费用计算**：经中转站的 token 是真金按中转站价扣的，
    *  `rates.ts` 那张 OpenAI 牌价表对它们没有意义。费用见中转站页的「实扣」。 */
-  by_provider?: Record<string, Bucket>;
+  by_provider?: Record<string, Record<string, Bucket>>;
   /** 中转站 id → 用户起的显示名。账号池那两个 id（`rotateproxy`/`openai`）不在里面，
    *  前端自己有文案。拿不到时用 id 当名字（scan 侧整体 fail-open）。 */
   provider_labels?: Record<string, string>;
