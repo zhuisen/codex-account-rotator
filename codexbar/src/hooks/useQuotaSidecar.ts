@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { getSettings } from "../pages/SettingsPage";
 
 /**
@@ -46,8 +47,13 @@ export function useQuotaSidecar<T extends HasFetchedAt>(cfg: {
   /** 多新才算新鲜。见文件头 —— 这是唯一不共用的策略。 */
   freshMs: number;
   enabled?: boolean;
+  /** ★★ 可选的**推送**通道（Phase 5，agy 用）。后端有别人（采样器）在写 sidecar 时，
+   *  这里只要"被通知一声再读一次"，**不发任何 RPC**。
+   *  没有它的话 UI 只在自己轮询到点时才前进，而轮询只在 `enabled` 的页面上跑 ——
+   *  用户切走再回来最坏要等一整个 `freshMs`。 */
+  updateEvent?: string;
 }): QuotaSidecar<T> {
-  const { readCmd, runCmd, freshMs, enabled = true } = cfg;
+  const { readCmd, runCmd, freshMs, enabled = true, updateEvent } = cfg;
   const [snap, setSnap] = useState<T | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -74,7 +80,11 @@ export function useQuotaSidecar<T extends HasFetchedAt>(cfg: {
         const cached = parse(await invoke<string | null>(readCmd));
         if (cached && Date.now() - cached.fetched_at * 1000 <= freshMs) { adopt(cached); return; }
       }
-      adopt(parse(await invoke<string>(runCmd)));
+      // ★★ **手动 ↻ 必须传 `force`。** 不传的话 Rust 侧命中合并窗口(relay 是 300s)
+      //    直接回旧 sidecar —— 按钮转一圈、数字纹丝不动,而"刚点过"和"没点中"
+      //    在 UI 上一模一样。relay 的 hook docstring 承诺了这个行为,原来它不存在。
+      //    ⚠️ Tauri 会忽略命令未声明的参数,所以对 grok/agy 无害。
+      adopt(parse(await invoke<string>(runCmd, { force: true })));
     } catch (e: unknown) {
       setErr(String(e).slice(0, 200));
     } finally {
@@ -129,6 +139,23 @@ export function useQuotaSidecar<T extends HasFetchedAt>(cfg: {
     }, TICK_MS);
     return () => { clearInterval(id); };
   }, [enabled, refreshIfStale]);
+
+  // ★★ 推送通道（Phase 5）。**只读 sidecar，不 `run`** —— 数据已经被别人（采样器）
+  //    取好了，再发一次 RPC 就把"省下一次外部调用"这件事本身抵消掉。
+  //    `adopt` 按 `fetched_at` 单调采纳，所以重复/乱序的事件都是安全的。
+  //    ★ 不受 `enabled` 约束:推送是**别人**在推，收下一条已经取好的数据没有成本，
+  //      而受约束的话就退回"只在有人看这一页时才前进"——那正是要修的东西。
+  useEffect(() => {
+    if (!updateEvent) return;
+    let un: (() => void) | undefined;
+    let dead = false;
+    void listen(updateEvent, () => {
+      invoke<string | null>(readCmd)
+        .then((raw) => { adopt(parse(raw)); })
+        .catch(() => { /* 推送来了但读失败:轮询兜底,不打断 */ });
+    }).then((f) => { if (dead) f(); else un = f; });
+    return () => { dead = true; un?.(); };
+  }, [updateEvent, readCmd, adopt]);
 
   return { snap, busy, err, refresh: () => void fetchQuota(true) };
 }

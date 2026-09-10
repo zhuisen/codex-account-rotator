@@ -5,7 +5,7 @@
  * `RetrieveUserQuotaSummary`，无鉴权）。**不联网、不消耗任何配额。**
  *
  * 与本页 token 统计**不同源**，且这次的差距比 grok 那边更大：
- * token 那边是 `traffic/agy-ledger/`（只有经 wrapper 的 print 模式会被记账，
+ * token 那边是 `~/.gemini/antigravity-cli/conversations/*.db`（agy 自己的会话库，
  * 交互式会话一个字都进不来，所以那是**下界**）；这边是 Google 那侧的真实额度水位。
  * 两个数不可加、不可互推 —— 尤其**不能**拿账本去解释额度掉了多少。
  *

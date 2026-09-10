@@ -5,8 +5,32 @@
 
 `bin/agy` 的账本只覆盖 **print 模式**(近 90 天 34/214 轮 = 15.9%),交互式会话一个字都进不来 ——
 因为用量只存在于 `--output-format json` 的 stdout 里,交互态没有那个 stdout。
-2026-09-05 实测(310 个 RPC 全表 + 本机文件重扫)确认:**agy 不在任何地方落 token 计数**,
+2026-09-05 实测(310 个 RPC 全表 + 本机文件重扫)确认:**服务端接口不给 token 计数**,
 `GetUserAnalyticsSummary` 返回空 `{}`,其余全是「剩余」不是「已消耗」。
+
+★★★ **2026-09-09 更正一条我写错过的结论 —— 别再用文本搜索去判二进制。**
+这里原来写的是「agy **不在任何地方**落 token 计数」。**错了**:它落在
+`~/.gemini/antigravity-cli/conversations/<conv>.db` 的 `gen_metadata.data` 里,
+而那是 **protobuf wire format**,里面**根本没有字段名** —— `grep promptTokenCount`
+永远 0 命中,于是"扫遍 261 个 db 只有 3 处"被读成了"本地没有"。
+盲解 wire format 并与本机 69 个 conv 的账本逐条比对(Fable 复核 + 我独立复现):
+
+    gen_metadata.data → f1.f4.{f2,f3,f5,f9}
+      f5 = cache_read_tokens   69/69 逐字相等
+      f9 = thinking_tokens     69/69 逐字相等
+      f2 = input_tokens        63/69
+      f3 = output_tokens       63/69
+    f1.f19 = 模型名(`gemini-3.8-flash`,861/862 行有)
+
+**含义**:「交互式会话的 token 永久拿不到」这条结论**被推翻**。另有 192 个不在账本里的 db、
+约 **2.59 亿 token**(即 `coverage` 报的 84% 缺口),且**可追溯**(db 从 2026-07-13 起)。
+接一个 `_scan_agy_sqlite` 源就能把覆盖率从 15.9% 做到 ~100%,**且不依赖 wrapper**。
+⚠️ **尚未接入**;字段号是盲解推断,`f1`/`f6`/`f10` 语义、6 个 conv 的 ≤104 残差、
+行是 turn 进行中落还是结束落、58 天以上会不会被清理,都还没定。
+闸在 `tests/test_agy_realtime.py::AgyDoesPersistTokensAndScanHasNotWiredItYet`
+(含一条**真数据回归**:字段号失效时会红)。
+
+**这个文件仍然只管额度水位** —— 上面那条是给未来接 token 源的人看的路标,不是本文件的职责。
 
 所以换个量测:**额度是服务端真值,它不关心你走的是 print 还是交互。**
 判别实验(2026-09-05):一次 `agy -p` 调用后 `gemini-weekly` −0.85%、`gemini-5h` −1.01%,
@@ -49,6 +73,10 @@ FETCHER = ROOT / "agy-quota"
 LEDGER_DIR = Path(os.environ.get(
     "AGY_QUOTA_LEDGER_DIR", str(ROOT / "traffic" / "agy-quota-ledger")))
 LEDGER = "samples.jsonl"
+# ★★ app 读的那份 sidecar。**采样器现在同时写它** —— 见 `fetch()` 的注释:
+#   两个轮询者打同一个 RPC 是没必要的浪费,而且它们各自写、互相看不见对方的新鲜度。
+SIDECAR = Path(os.environ.get("CODEX_ROTATE_STORE") or
+               str(Path(__file__).resolve().parent.parent)) / ".agy-quota.json"
 LOCK = ".sampler.lock"
 
 POLL_SECS = int(os.environ.get("AGY_SAMPLER_POLL", "60"))
@@ -72,13 +100,60 @@ def fetch():
 
     ★ 复用抓取器,不在这里重写一遍 RPC —— 那套 10 秒预热窗口、双端口探测、
     「两种没有」的语义都在它里面,抄一份就等着两边漂移。
+
+    ★★ **同一份响应同时喂账本和 app 的 sidecar**(2026-09-09,Phase 5)。
+    改之前是两个独立的轮询者各打各的 RPC:采样器每 60s、app 的 `run_agy_quota` 另有一套
+    60s 合并 + 2min 保鲜 + 30s tick,而且 **app 那条只在有人看着的时候才前进** ——
+    用户切到别的页面再回来,最坏要等 2.5 分钟才看到新数。
+    现在采样器写完 sidecar,app 侧因 `fetched_at` 足够新自然不再 spawn,RPC 调用降到一份。
+
+    ★ 传 `--prev` 让 `last_good` 与锚点链**跨进程连续**。不传的话每次都是冷启动,
+      降级时那份"陈旧但真实"的读数会丢 —— 而"读不到"与"没有"必须可区分。
     """
     try:
-        p = subprocess.run([sys.executable, str(FETCHER)],
-                           capture_output=True, text=True, timeout=60)
-        return json.loads(p.stdout)
+        cmd = [sys.executable, str(FETCHER)]
+        if SIDECAR.exists():
+            cmd += ["--prev", str(SIDECAR)]
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        snap = json.loads(p.stdout)
     except Exception:                       # noqa: BLE001 — 采样失败绝不能弄死采样器
         return None
+    _write_sidecar(snap)
+    return snap
+
+
+_last_sidecar = None
+
+
+def _write_sidecar(snap):
+    """原子写 sidecar。**只在内容真的变了时写。**
+
+    ★ 原子写(tmp + rename):直接覆写会让正在读的 webview 拿到半截 JSON,
+      而半截 JSON 解析失败在 UI 上表现为"额度读不到" —— 与真的读不到同形。
+
+    ★★ **必须比内容,不能每次都写。** Rust 侧靠 mtime 变化来广播,
+      而快轮询期是 2 秒一次 —— 无条件写 ⇒ 每 2 秒一次广播 ⇒ 两个 webview 各读一次。
+      agy 没在跑时这会变成一个**永续空转**:app 每 60s 补拉采样器 → 它快轮询 90s
+      (每次失败 fetch 照样写) → 180s 空闲退出删锁 → 再被拉起来。
+      本仓量过「没人看时零开销」,这条会把它作废。
+      ⚠️ 比较时**剔掉 `fetched_at`/`pid`** —— 它们每次都变,留着等于没比。
+    """
+    global _last_sidecar
+    try:
+        key = json.dumps({k: v for k, v in (snap or {}).items()
+                          if k not in ("fetched_at", "pid")},
+                         ensure_ascii=False, sort_keys=True)
+    except Exception:
+        key = None
+    if key is not None and key == _last_sidecar:
+        return
+    try:
+        tmp = SIDECAR.with_name(SIDECAR.name + ".tmp%d" % os.getpid())
+        tmp.write_text(json.dumps(snap, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, SIDECAR)
+        _last_sidecar = key
+    except OSError:
+        pass                                # 写不了 sidecar 不影响账本,不吞掉主职责
 
 
 def flatten(snap):
@@ -158,6 +233,13 @@ def main():
     if not take_lock(LEDGER_DIR / LOCK):
         return 0
 
+    # ★★ **起手先探 agy 是否在跑。** 不探的话:agy 没在跑(甚至没装)时,
+    #    采样器照样进 90s 的 2 秒快轮询,每次 fetch 都起一个 python 子进程去打一个
+    #    不存在的端口。而 app 每 60s 会把它再拉起来一次 ⇒ **永续空转**。
+    #    没在跑就直接退出,把"要不要采"这件事交回给下一次补拉。
+    if not agy_alive():
+        return 0
+
     started = time.time()
     last_flat, last_write = None, 0.0
     got_one = False          # 是否已经拿到过至少一个读数(决定快/慢节拍)
@@ -182,9 +264,20 @@ def main():
                         idle_since = now
                     elif now - idle_since >= IDLE_SECS:
                         break
+            # ★★ **跨过重置点就立刻再取一次**（Phase 5，与 `quota_daemon._reset_crossed` 同款）。
+            #    窗口重置是这四个数**唯一会跳变**的时刻;按 60s 节拍撞上去,用户最坏看到
+            #    一个落后一分钟的"还剩 3%",而真实值已经回到 100%。
+            #    ⚠️ 判据是 `now >= 最近的 reset_at` **且这一轮的读数还早于它** ——
+            #    条件在下一次成功读数后自然清零,不需要额外的状态位。
+            nxt = None
+            if last_flat:
+                rs = [v[2] for v in last_flat.values()
+                      if isinstance(v[2], (int, float)) and v[2] > 0]
+                nxt = min(rs) if rs else None
+            crossed = nxt is not None and now >= nxt and last_write < nxt
             # 还没采到第一个读数、且仍在快轮询期内 ⇒ 用快节拍抢那个窗口
             fast = (not got_one) and (now - started < FAST_PHASE_SECS)
-            time.sleep(POLL_FAST_SECS if fast else POLL_SECS)
+            time.sleep(POLL_FAST_SECS if (fast or crossed) else POLL_SECS)
     finally:
         lk = LEDGER_DIR / LOCK
         try:

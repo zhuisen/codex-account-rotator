@@ -35,6 +35,7 @@
 import hashlib
 import json
 import os
+import sqlite3
 import re
 import shutil
 import subprocess
@@ -67,7 +68,11 @@ CACHE = _STORE / ".traffic-cache.json"
 CACHE_V = 1
 # ★ 改任何 _scan_* 的解析逻辑(改变 rows 里存什么/怎么算)必须 +1,否则那些此生不再变 mtime 的文件
 #   会永远沿用旧结果,产出一份新旧混血、无法察觉的数据集。
-PARSER_V = 8          # +1 于 2026-08-12:codex 累计值去重;接入 OpenClaw 并按 AI 平台路由(row 多一位)
+PARSER_V = 10         # +1 于 2026-09-09:agy 主源换成原生 SQLite(覆盖率 15.9% -> ~100%)
+# PARSER_V = 9        # 2026-09-09:codex row 多第 8 位 = model_provider(账号池/中转站分账)
+#                       ★ 必须 +1:旧缓存里的 codex 行没有这一位,只有版本号能逼它重解析。
+#                       codex 无增量解析(整文件重跑),代价只是冷路径重解 ~3.6k 个 rollout,秒级。
+# PARSER_V = 8        # 2026-08-12:codex 累计值去重;接入 OpenClaw 并按 AI 平台路由(row 多一位)
                       # +2 于 2026-08-15:接入 Reasonix 与 DeepSeek Harness 两个宿主源
                       # +3 于 2026-08-19:接入 Antigravity(agy);新增 `post` 钩子做跨文件会话差分
                       # +4 于 2026-08-19:agy 模型名归一改了(各家 id 点/横线惯例 + Sonnet 例外)
@@ -249,6 +254,12 @@ def _scan_codex_file(path):
     模型按 **ordinal 顺序**归属到最近一次 `turn_context` —— 实测 310 个文件里有 5 个中途换过模型,
     按会话整体归会错。"""
     rows, cur = [], None
+    # ★★ provider **按 ordinal 顺序跟踪,不是读一次**。实测:一份 rollout 里**可以有两条
+    #    `session_meta`**(2026-08-24 有 5 份,第二条之后还跟着 17 条 token_count)——
+    #    读一次会把后半段的 token 记到前半段的 provider 上。这与模型按 `turn_context`
+    #    顺序跟踪是同一条纪律(那条已经因为"5 个文件中途换过模型"栽过一次)。
+    #    ⚠️ `turn_context` 里**没有** provider,只有 `session_meta` 有。
+    cur_provider = None
     seen_cum = set()          # 本文件内已记过的累计值 —— 见 docstring
     try:
         fh = open(path, encoding="utf-8", errors="replace")
@@ -256,6 +267,16 @@ def _scan_codex_file(path):
         return rows
     with fh:
         for line in fh:
+            if '"session_meta"' in line:
+                try:
+                    d = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(d, dict) and d.get("type") == "session_meta":
+                    mp = (d.get("payload") or {}).get("model_provider")
+                    if isinstance(mp, str) and mp:
+                        cur_provider = mp
+                continue
             if '"turn_context"' in line:
                 try:
                     d = json.loads(line)
@@ -294,8 +315,11 @@ def _scan_codex_file(path):
             raw_in = _num(lt, "input_tokens")
             cr = _num(lt, "cached_input_tokens")           # ⊆ input(OpenAI 语义)
             cw = _num(lt, "cache_write_input_tokens")      # 实测该端点恒 0
+            # ★ 第 7 位 = 平台键(恒 "codex"),第 8 位 = **provider**。
+            #   不占第 7 位:那一位是宿主型源(OpenClaw)用来路由平台的,语义完全不同。
             rows.append([ep, cur or "unknown",
-                         max(0, raw_in - cr - cw), cr, cw, _num(lt, "output_tokens")])
+                         max(0, raw_in - cr - cw), cr, cw, _num(lt, "output_tokens"),
+                         "codex", cur_provider or "unknown"])
     return rows
 
 
@@ -694,31 +718,197 @@ def _agy_deltas(rows):
     return out
 
 
+def _agy_rows(db_rows):
+    """SQLite（主）∪ wrapper 账本（只补 db 已消失的会话）-> 标准 row。
+
+    ★ 为什么是并集而不是二选一：2026-09-09 实测账本的 **69 个会话全部**是 261 个 db 的
+      真子集（"仅账本 0"），所以 db 是超集、必须以它为主；但 agy 若清理过旧会话，
+      账本里可能留着 db 已经没有的那几个 —— 那部分不能白丢。
+    ★ **绝不双计**：账本里凡是 db 也有的会话，一律以 db 为准。
+    """
+    out, seen = [], set()
+    for ts, conv, model, i_tok, cr_tok, o_tok in db_rows:
+        seen.add(conv)
+        out.append([int(ts), model, i_tok, cr_tok, 0, o_tok])
+    # 账本是**会话内累计值**，要按会话差分（见 `_agy_deltas`）。只取 db 没有的那些会话。
+    led = []
+    try:
+        for f in sorted(AGY_ROOT.glob("usage.jsonl")):
+            led.extend(r for r in _scan_agy_file(f) if r[1] not in seen)
+    except Exception:
+        led = []
+    out.extend(_agy_deltas(led))
+    return out
+
+
+# ── agy 的原生 SQLite（真·全量用量）────────────────────────────────────────────
+#
+# ★★ **2026-09-09 推翻了本仓一条写了三周的结论。** 原话是「agy 什么都不落盘、交互式
+#    会话的 token 永久拿不到」，依据是"扫遍 261 个 db，结构化 `promptTokenCount` 零命中"。
+#    **那是假阴性**：`gen_metadata.data` 是 **protobuf wire format，里面根本没有字段名**，
+#    `grep promptTokenCount` 永远 0 命中。用一个看不见目标的探针得出"目标不存在" ——
+#    与本仓记过两次的 grep 假阴性同族。
+#
+# 盲解 wire format 后与 wrapper 账本逐会话核对（69 个共有会话）：
+#     f5 = cache_read  69/69 精确        f2 = input   63/69（残差 ≤104）
+#     f3 = output      63/69（残差 ≤6）  f9 = thinking —— **f3 的子项，绝不能加**
+#         （`f3+f9` 只有 1/69 命中，纯属巧合；agy 属 Claude/Kimi 族：各项互不相交）
+#     f1.f19 = 模型 id
+#
+# 时间戳：`gen_metadata` 的第 k 行 ↔ `steps` 里第 k 个 `step_type=15` 的
+#     `metadata → f1.f1`（epoch 秒）。逐库核对：末条时间与会话结束时间 203/212 天差 ≤90s，
+#     4 个抽样精确为 0s。
+#     ⚠️ 46/258 个库的两边条数对不上（gen 比 s15 少 1/2/4，多半是被取消/未完成的那一轮）。
+#     此时**前对齐**。实测前/后对齐的差异：**日桶只影响 1 行、小时桶 12 行**（中位差 22s），
+#     对交付无影响 —— 但这是"选了一个说不准的方案"，不是"没有歧义"。
+AGY_DB_ROOT = Path(os.environ.get("AGY_DB_DIR")
+                   or (HOME / ".gemini" / "antigravity-cli" / "conversations"))
+
+
+def _pb(buf):
+    """够用的 protobuf wire-format 解析：field -> [值]。值是 int 或 bytes。
+
+    ★ 只为读几个已知字段，不做 schema 校验。坏字节直接停在那里返回已解出的部分 ——
+      半个会话的数字也比整份丢掉强（而且这些库有正在写入的）。
+    """
+    out, i, n = {}, 0, len(buf)
+    while i < n:
+        k = s_ = 0
+        while i < n:
+            c = buf[i]; i += 1
+            k |= (c & 0x7F) << s_; s_ += 7
+            if not c & 0x80:
+                break
+        f, wt = k >> 3, k & 7
+        if wt == 0:
+            v = s_ = 0
+            while i < n:
+                c = buf[i]; i += 1
+                v |= (c & 0x7F) << s_; s_ += 7
+                if not c & 0x80:
+                    break
+        elif wt == 2:
+            ln = s_ = 0
+            while i < n:
+                c = buf[i]; i += 1
+                ln |= (c & 0x7F) << s_; s_ += 7
+                if not c & 0x80:
+                    break
+            v = buf[i:i + ln]; i += ln
+        elif wt == 5:
+            v = buf[i:i + 4]; i += 4
+        elif wt == 1:
+            v = buf[i:i + 8]; i += 8
+        else:
+            break
+        out.setdefault(f, []).append(v)
+    return out
+
+
+def _agy_db_sig(path, st):
+    """(有效 mtime, 缓存签名)。**必须把 `-wal` / `-shm` 算进去。**
+
+    ★★ agy 的库是 `journal_mode=wal`（实测 261/261 都有 `-wal`）。写入落在 WAL 上时
+       **主库的 mtime 与 size 原地不动** —— 只看主库会同时犯两个错：被 `cut` 判成
+       "太旧、跳过"，以及命中旧缓存。两个错的症状都是**数字停在旧值上、零报错**。
+    """
+    parts = [st.st_mtime_ns, st.st_size]
+    newest = st.st_mtime
+    for suffix in ("-wal", "-shm"):
+        try:
+            w = os.stat(str(path) + suffix)
+        except OSError:
+            parts += [0, 0]
+            continue
+        parts += [w.st_mtime_ns, w.st_size]
+        newest = max(newest, w.st_mtime)
+    return newest, parts
+
+
+def _scan_agy_db(path):
+    """-> [(ts, conv, model, input, cache_read, output)] —— **每次请求一条，已是增量。**
+
+    ⚠️ 返回形状与 `_scan_agy_file`（账本，累计值）**不同**，两者都只给 `_agy_rows` 消费。
+    """
+    rows = []
+    try:
+        con = sqlite3.connect("file:%s?mode=ro" % path, uri=True, timeout=2.0)
+    except Exception:
+        return rows
+    conv = Path(path).stem
+    try:
+        try:
+            gens = list(con.execute("SELECT data FROM gen_metadata ORDER BY idx"))
+            steps = list(con.execute(
+                "SELECT step_type, metadata FROM steps ORDER BY idx"))
+        except Exception:
+            return rows
+        # 第 k 个 `step_type=15` 的时间戳 ↔ 第 k 条 gen_metadata。
+        ts_list = []
+        for stype, meta in steps:
+            if stype != 15 or not meta:
+                continue
+            t = None
+            try:
+                f1 = _pb(meta).get(1)
+                if f1 and isinstance(f1[0], (bytes, bytearray)):
+                    v = _pb(f1[0]).get(1)
+                    if v and isinstance(v[0], int):
+                        t = v[0]
+            except Exception:
+                t = None
+            ts_list.append(t if isinstance(t, int) and 1.6e9 < t < 4e9 else None)
+        for k, (blob,) in enumerate(gens):
+            if not blob:
+                continue
+            ts = ts_list[k] if k < len(ts_list) else None
+            if ts is None:
+                # ★ 拿不到时间戳的**整条丢掉**,不拿文件 mtime 顶替 ——
+                #   那会把一整段历史压进"今天",而它看起来完全正常。
+                continue
+            try:
+                top = _pb(blob)
+                inner = _pb(top[1][0]) if 1 in top else {}
+                u = _pb(inner[4][0]) if 4 in inner else {}
+            except Exception:
+                continue
+            g = lambda fno: (u.get(fno, [0])[0] if isinstance(u.get(fno, [0])[0], int) else 0)
+            m = inner.get(19)
+            model = (m[0].decode("utf-8", "replace")
+                     if m and isinstance(m[0], (bytes, bytearray)) else None)
+            # ★★ **f9(thinking) 不加** —— 它是 f3(output) 的子项。加了会把 output 重复计一遍。
+            i_tok, cr_tok, o_tok = g(2), g(5), g(3)
+            if i_tok or cr_tok or o_tok:
+                rows.append((float(ts), conv, _agy_model(model), i_tok, cr_tok, o_tok))
+    finally:
+        con.close()
+    return rows
+
+
 # agy 的会话记录目录。**只用来算覆盖率**,不含任何 token —— agy 自己不落用量(见 AGY_ROOT)。
 AGY_BRAIN = Path(os.environ.get("AGY_BRAIN")
                  or (HOME / ".gemini" / "antigravity-cli" / "brain"))
 
 
-def _agy_coverage(days, ledger_rows):
-    """-> {"covered", "total", "unit"} 或 None。
+def _agy_coverage(days, src_rows):
+    """-> {"covered", "total", "unit", "days", "since"} 或 None。
 
-    ★★ **这个函数是接入 agy 的前提条件,不是装饰。**
-    账本只覆盖 print 模式(`agy -p`),交互式会话一个字都进不来 —— 而页面上一个偏小的数字
-    会被读成「agy 用得少」,不会被读成「只统计了一部分」。本项目已经因为这类静默降级栽过多次,
-    所以宁可把覆盖率算出来摆在旁边,也不给一个看起来完整的数。
+    ★★ 2026-09-09 口径变了：主源换成 agy 自己的 SQLite 之后，覆盖率不再是
+       「账本记到了几轮」，而是「**有多少轮所属的会话我们拿到了数据**」。
+       分母仍是 agy transcript 里的 `USER_INPUT` 条数（每条 = 用户发起的一轮）。
 
-    分母 = agy 自己 transcript 里的 `USER_INPUT` 条数(每条 = 用户发起的一轮)。
-    分子 = 账本记录条数(一次 print 调用 = 一轮)。
-    ⚠️ 两个已知偏差,都往「高估覆盖」方向,报告时别当精确值:
-      ① agy 若清理过旧会话,分母会偏小;
-      ② 交互式一轮里模型可能自己多跑几次请求,分母按「用户轮次」算不按请求算。
-    因此结果**钳在 100% 以内**,并且这是上界。
+    ★ `brain/<conv-id>/` 与 `conversations/<conv-id>.db` **一一对应**（实测 261/261），
+      所以按会话 id 判归属是精确的，不是估算。
+
+    ⚠️ 仍是**上界**：agy 若清理过旧会话，分母会偏小。所以结果钳在 100% 以内。
     """
     if not AGY_BRAIN.is_dir():
         return None
     cut = time.time() - days * 86400
-    total = 0
+    have = {r[1] for r in src_rows if len(r) > 1 and isinstance(r[1], str)}
+    total = covered = 0
     for f in AGY_BRAIN.glob("*/.system_generated/logs/transcript.jsonl"):
+        conv = f.parts[-4] if len(f.parts) >= 4 else None
         try:
             fh = open(f, encoding="utf-8", errors="replace")
         except OSError:
@@ -734,18 +924,16 @@ def _agy_coverage(days, ledger_rows):
                 if not isinstance(o, dict) or o.get("type") != "USER_INPUT":
                     continue
                 ep = _iso_epoch(o.get("created_at") or "")
-                if ep is not None and ep >= cut:
-                    total += 1
-    covered = sum(1 for r in ledger_rows if r[0] >= cut)
+                if ep is None or ep < cut:
+                    continue
+                total += 1
+                if conv in have:
+                    covered += 1
     if not total:
         return None
-    # ★ `since` 必须一并给出去。wrapper 是 2026-08-19 才装的,而窗口是 90 天 ——
-    #   头几个月覆盖率必然很低(实测装好当天 1.4%),不给起始时间的话,这个数会被读成
-    #   「采集坏了」而不是「采集还没覆盖到那么早」。两者要能一眼分开。
-    since = min((r[0] for r in ledger_rows), default=None)
-    # ★ `days` 必须一起下发。覆盖率是按**扫描窗口**算的(app 恒取 90 天),而 UI 上还有一个
-    #   用户自选的日期档 —— 拿档位标签去描述这个数就是让标签说谎(实测截到:选 14d 时
-    #   横幅写「14d 内覆盖 2/146」,而 146 是 90 天的分母)。
+    since = min((r[0] for r in src_rows), default=None)
+    # ★ `days` 与 `since` 必须一并下发:覆盖率是按**扫描窗口**算的(app 恒取 90 天),
+    #   而 UI 上还有一个用户自选的日期档 —— 拿档位标签去描述这个数就是让标签说谎。
     return {"covered": min(covered, total), "total": total, "unit": "turn", "days": days,
             "since": int(since) if since is not None else None}
 
@@ -958,9 +1146,13 @@ SOURCES = (
     # ★ agy 不是宿主源:它能跑 claude-*/gpt-oss-* 等别家模型,但**全部计在 Google 订阅上**,
     #   所以平台恒为 Antigravity、模型名照实记。按模型名往 Claude 路由会把账记到错的平台。
     # ★ `post` 是本源独有的钩子:累计值必须在汇总完所有文件之后才能差分(见 _agy_deltas)。
-    {"key": "agy", "name": "Antigravity", "root": AGY_ROOT, "color": "#4d9fff",
-     "glob": "usage.jsonl", "parse": _scan_agy_file, "dedup": False, "post": _agy_deltas,
-     "coverage": _agy_coverage},
+    # ★★ 2026-09-09:主源从 wrapper 账本换成 **agy 自己的 SQLite**。
+    #    账本只覆盖 print 模式(近 90 天 15.9%),交互式会话一个字都进不来;
+    #    SQLite 覆盖**全部**会话。账本仍作并集补位(见 `_agy_rows`),绝不双计。
+    #    `sig` 钩子:这些库是 WAL,写入不改主库 mtime —— 不看 `-wal` 就会静默停在旧值。
+    {"key": "agy", "name": "Antigravity", "root": AGY_DB_ROOT, "color": "#4d9fff",
+     "glob": "*.db", "parse": _scan_agy_db, "dedup": False, "post": _agy_rows,
+     "sig": _agy_db_sig, "coverage": _agy_coverage},
 )
 
 SRC_META = {s["key"]: {"name": s["name"], "color": s["color"]} for s in SOURCES}
@@ -1010,7 +1202,9 @@ def scan(days=90, use_cache=True, only=None, exclude=None):
     fresh = {}
     scanned = reused = incr = 0
     out = {}
-    acc = {}            # 平台键 -> (days_b, hours_b);跨源累积
+    acc = {}
+    # ★ 旁挂的路由分账。key = 平台键 → provider → 桶。总量完全不受影响。
+    by_provider = {}            # 平台键 -> (days_b, hours_b);跨源累积
     coverage = {}       # 源键 -> {covered,total,unit,since};只有采集不完整的源才有
     seen_roots = {}
     now_ts = time.time()
@@ -1046,10 +1240,15 @@ def scan(days=90, use_cache=True, only=None, exclude=None):
                     st = f.stat()
                 except OSError:
                     continue
-                if st.st_mtime < cut:
+                # ★★ 有的源的"这个文件变了没"不能只看它自己。SQLite 走 **WAL** 时
+                #    写入落在 `<db>-wal`，主库的 mtime **原地不动** ⇒ 既会被 `cut` 误跳过、
+                #    又会命中旧缓存，症状是"数字停在旧值上、且完全没有报错"。
+                #    所以给源留一个签名钩子：返回 (有效 mtime, 签名)。
+                sig_fn = src.get("sig")
+                eff_mtime, sig = sig_fn(f, st) if sig_fn else (st.st_mtime, _sig(st))
+                if eff_mtime < cut:
                     continue
                 ck = str(f)
-                sig = _sig(st)
                 hit = cached.get(ck)
                 if hit and hit.get("sig") == sig:
                     # 文件一个字节都没变:连守卫都不用查,直接沿用。`off`/`a` 原样带走,
@@ -1115,6 +1314,18 @@ def scan(days=90, use_cache=True, only=None, exclude=None):
             if b is None:
                 b = days_b[d] = _blank()
             _add(b, model, i, cr, cw, o)
+            # ★★ **分账不动总量,而且必须与 `days` 同窗口。**
+            #    `by_provider` 是旁挂的:30+ 处读 `b.total` 的地方一个都不用迁,
+            #    而"这些 token 走的是哪条路由"有了地方放。
+            #    ⚠️ 放在窗口判断**之后** —— 我第一版放在前面,于是它把 3600 个 rollout 的
+            #    全部历史都算进去:days 合计 119M 而 by_provider 合计 9,004M,
+            #    两个数放在同一页上就是骗人。**同一页上的两个数必须同窗口。**
+            #    经中转站的 token 是真金按中转站价扣的,绝不能用 `rates.ts` 的 OpenAI 表算 ——
+            #    这里只做归属,费用留给中转站页的实扣。
+            prov = row[7] if len(row) > 7 else None
+            if prov:
+                pv = by_provider.setdefault(pk, {}).setdefault(prov, _blank())
+                _add(pv, model, i, cr, cw, o)
             if di == last_di:                               # 今日视图按小时,只需当天
                 h = strftime("%Y-%m-%dT%H", localtime(ep))
                 hb = hours_b.get(h)
@@ -1132,6 +1343,21 @@ def scan(days=90, use_cache=True, only=None, exclude=None):
 
     # 出表放在**所有源之后**:一个平台可能由多个源汇入(OpenClaw 里的 gpt 并进 Codex),
     # 边扫边写 `out[key]` 会让后写的覆盖先写的。
+    # ★ 中转站的显示名。**整体 fail-open** —— relay 模块缺失/抛异常时扫描照常出结果。
+    #   `_agy_quota_series` 那次事故的同一条纪律:一个可选的装饰品不许拖垮主链路。
+    # ★★ **绝不读 `relays.local.json` 的 key。** `redacted()` 是唯一允许跨边界的形状,
+    #   而 `traffic/` 这一层的安全线是"不碰凭证"。拿不到就用 provider id 当名字。
+    relay_labels = {}
+    try:
+        import sys as _sys
+        _r = str(Path(__file__).resolve().parent.parent)
+        if _r not in _sys.path:
+            _sys.path.insert(0, _r)
+        from relay import store as _rs
+        relay_labels = {r["id"]: r.get("label") or r["id"] for r in _rs.redacted()["relays"]}
+    except Exception:
+        pass
+
     cur_h = int(strftime("%H", localtime(now_ts)))
     for pk, (days_b, hours_b) in acc.items():
         picked = {}
@@ -1146,6 +1372,13 @@ def scan(days=90, use_cache=True, only=None, exclude=None):
                  "available": seen_roots.get(pk, True)}
         # ★ 只有采集**不完整**的源才带 `coverage`。有它 = 这个平台的数字是部分的,UI 必须标出来;
         #   没有它 = 数据是各家 CLI 自己落的盘,本来就是全量,不该平白多一句免责声明。
+        # ★ 只有真的分出账的平台才带这一项。空字典也不给 —— 「没有分账信息」和
+        #   「分账全是 0」是两件事,前者该让 UI 什么都不显示。
+        bp = by_provider.get(pk)
+        if bp:
+            entry["by_provider"] = {k: v for k, v in bp.items()}
+            # ★ 只给**中转站**标签(账号池那两个 id 是内部名,前端自己有文案)。
+            entry["provider_labels"] = {k: v for k, v in relay_labels.items() if k in bp}
         cov = coverage.get(pk)
         if cov:
             entry["coverage"] = cov

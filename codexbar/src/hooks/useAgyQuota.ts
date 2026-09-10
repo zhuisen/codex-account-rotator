@@ -21,5 +21,8 @@ export function useAgyQuota(opts: { enabled?: boolean } = {}): QuotaSidecar<AgyS
     runCmd: "run_agy_quota",
     freshMs: FRESH_MS,
     enabled: opts.enabled,
+    // ★★ Phase 5:采样器（唯一抓取者）写完 sidecar，Rust 在 1s 内广播，这里被通知就重读。
+    //    轮询留着当兜底（采样器没在跑时），但正常路径上 app **一次 RPC 都不发**。
+    updateEvent: "agy-quota-updated",
   });
 }

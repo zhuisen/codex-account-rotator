@@ -160,19 +160,28 @@ class TestScanIntegration(unittest.TestCase):
             因为没人断言"输出里只该有 agy"。
 
         改法：`SOURCES` 收成**单元素**、去掉 coverage 钩子，并断言输出键恰好是 `["agy"]`。
+
+        ⚠️ **2026-09-09 又漏了一次，同一形状。** agy 主源换成原生 SQLite 之后，
+          账本变成 `post` 钩子里的兜底、读的是**模块常量 `AGY_ROOT`**（真路径），
+          而源的 `root` 现在指向 db 目录。只改 `root` 于是同时留下两个洞：
+          真实 db 目录仍被扫、真实账本仍被读。实测断言拿到 **59,896,597** 而不是 142。
+          所以这里**两个都要指到 tmpdir**。
         """
         d = pathlib.Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, d, ignore_errors=True)   # 原来没清
         (d / "usage.jsonl").write_text(ledger_text, encoding="utf-8")
+        dbs = d / "conversations"
+        dbs.mkdir()                                              # 空目录:一个 db 都没有
         agy = next(x for x in scan.SOURCES if x["key"] == "agy")
         fake = {k: v for k, v in agy.items() if k != "coverage"}
-        fake["root"] = d
-        orig = scan.SOURCES
+        fake["root"] = dbs
+        orig, orig_ledger = scan.SOURCES, scan.AGY_ROOT
         scan.SOURCES = (fake,)                                   # 单元素：其余源根本不存在
+        scan.AGY_ROOT = d                                        # 账本兜底也指到夹具
         try:
             out, st = scan.scan(days=days, use_cache=False)       # 不再依赖 only=
         finally:
-            scan.SOURCES = orig
+            scan.SOURCES, scan.AGY_ROOT = orig, orig_ledger
         self.assertEqual(sorted(out), ["agy"],
                          f"输出里混进了别的平台 {sorted(out)} —— 隔离没生效，扫到真数据了")
         return out, st

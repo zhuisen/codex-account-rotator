@@ -13,8 +13,8 @@ export interface Bucket extends ModelBucket {
  * 采集完整度。**只有采集不完整的平台才有这个字段** —— 其余平台的数据是各家 CLI
  * 自己落的盘,本来就是全量,平白挂一句免责声明只会稀释真正需要注意的那一条。
  *
- * 目前只有 Antigravity(agy):它自己不落用量,只有经 `bin/agy` wrapper 的 print 模式
- * 会被记账,交互式会话一个字都进不来。
+ * 目前只有 Antigravity(agy):主源是它自己的会话库(`conversations/*.db`),覆盖交互式会话;
+ * 缺口只剩「agy 已经清理掉的旧会话」—— 库没了就补不回来。
  */
 export interface Coverage {
   covered: number;
@@ -31,6 +31,14 @@ export interface Platform {
   hours: Record<string, Bucket>;  // 今日 00 点到当前小时,已补零
   available: boolean;
   coverage?: Coverage;
+  /** ★ 路由分账（目前只有 codex 有）：这批 token 走的是账号池还是某个中转站。
+   *  **与 `days` 同窗口**，合计等于 `days` 的合计 —— 两个数放在同一页上必须同口径。
+   *  ⚠️ 它**不参与任何费用计算**：经中转站的 token 是真金按中转站价扣的，
+   *  `rates.ts` 那张 OpenAI 牌价表对它们没有意义。费用见中转站页的「实扣」。 */
+  by_provider?: Record<string, Bucket>;
+  /** 中转站 id → 用户起的显示名。账号池那两个 id（`rotateproxy`/`openai`）不在里面，
+   *  前端自己有文案。拿不到时用 id 当名字（scan 侧整体 fail-open）。 */
+  provider_labels?: Record<string, string>;
 }
 
 /** 覆盖率百分比(0~100)。分母为 0 时返回 null 而不是 0 —— 「没有分母」不是「覆盖 0%」。 */
@@ -52,10 +60,14 @@ export function coverageNote(c: Coverage | undefined): string {
   // ★ 窗口用 `c.days`（后端算这个比值时用的那个），**不是**用户当前选的日期档。
   //   两者不是一回事：档位只改图表窗口，分母始终是扫描窗口。
   // ★ 这里是纯文本，不经 Markdown 渲染 —— 写 `**下界**` 会原样显示出星号（实测截到过）。
-  return `Antigravity 自己不记录用量，只有经 wrapper 的 print 模式（omc ask / omc team）会被记账，`
-    + `交互式会话拿不到。近 ${c.days} 天覆盖 ${c.covered}/${c.total} 轮（${pct.toFixed(1)}%）`
-    + (since ? `，采集自 ${since} 起。` : "。")
-    + `所以这个数字是下界，不是 Antigravity 的全部消耗。`;
+  // ★★ 2026-09-09 主源换成 agy **自己的 SQLite**（`conversations/*.db` 的
+  //   `gen_metadata` protobuf），交互式会话**已经能拿到**。旧文案说的
+  //   「只有 print 模式会被记账、交互式拿不到」是**过时的假陈述**，实测覆盖率
+  //   从 36.6% 升到 ~95%。剩下的缺口是 agy 清理过的旧会话，那些库已经不在了。
+  return `按 Antigravity 自己的会话库（conversations/*.db）统计，含交互式会话。`
+    + `近 ${c.days} 天覆盖 ${c.covered}/${c.total} 轮（${pct.toFixed(1)}%）`
+    + (since ? `，最早 ${since}。` : "。")
+    + `缺口是已被 agy 清理掉的旧会话（库没了就补不回来），所以这个数字仍是下界。`;
 }
 /**
  * agy 的**额度消耗**序列（`scan.py` 的 `_agy_quota_series`）。
@@ -64,8 +76,8 @@ export function coverageNote(c: Coverage | undefined): string {
  *   · `platforms[*]` 的单位是 token,可求和、可乘单价得出费用;
  *   · 这里的单位是 `quota_pct`（额度百分比），**不可与 token 相加、不可换算成钱**。
  *
- * 存在的理由：token 账本只覆盖 print 模式（近 90 天 15.9%），交互式会话一个字都进不来；
- * 而额度是服务端真值，交互态照样会掉。所以这条**覆盖 100%，代价是换了量纲**。
+ * 存在的理由：token 那本账的缺口是「已被清理的旧会话」（2026-09-09 起 ~95%，此前 16%），
+ * 而额度是服务端真值、连清理掉的会话也算过。所以这条**覆盖 100%，代价是换了量纲**。
  */
 export interface AgyQuotaSeries {
   unit: "quota_pct";
