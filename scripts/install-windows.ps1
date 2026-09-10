@@ -177,11 +177,32 @@ $DawnTrigger = @"
     </CalendarTrigger>
 "@
 
+# ★★★ **数据目录必须显式写进每一个任务**（2026-09-10 四方评审抓到 critical）。
+#
+#    计划任务不继承你的交互 shell 环境。不写的话子进程只能按 `__file__` 去猜,猜出来的是
+#    **安装目录** —— 而 Windows 上 CodexBar 每次更新会把安装目录**整个替换**,
+#    这正是数据目录必须与它分开的原因。app 侧 `data_dir()` 走的是
+#    env `CODEXBAR_STORE` > 构建期烧进去的 `CODEXBAR_STORE_DEFAULT` > `app_data_dir()`;
+#    CI 出的安装包没有那个烧录值,于是 app 用 app_data_dir、计划任务用安装目录 ⇒
+#    **route.local.json / state.json / auth/ 全部分叉**,且 `.refresh.lock` / `.state.lock`
+#    落在两个不同路径上 = **等于没有锁**,两侧会同时刷同一个号的一次性 refresh_token。
+#
+#    ⚠️ 这里**不能**用 `$Repo`(= `$PSScriptRoot/..`)当兜底数据目录 —— 那就是安装目录本身。
+#    app 通过 `spawn_cmd` 给每个子进程设了 `CODEX_ROTATE_STORE`,由 app 调起时第一条命中。
+$Store = if ($env:CODEX_ROTATE_STORE) { $env:CODEX_ROTATE_STORE }
+         elseif ($env:CODEXBAR_STORE) { $env:CODEXBAR_STORE }
+         else { Join-Path $env:LOCALAPPDATA "com.doushutangmu.codexbar" }
+if (-not (Test-Path $Store)) { New-Item -ItemType Directory -Force -Path $Store | Out-Null }
+Write-Host "==> 数据目录: $Store"
+
+# ★ 每个任务都带,一个不漏:quotad / autosync / dawnprobe 同样会写 state.json 和 auth/,
+#   漏掉任何一个它就在另一个目录上单干。
+$BaseEnv = @{ CODEX_ROTATE_STORE = $Store }
 $tasks = @(
-    @{ Name = "proxy";    Args = @((Join-Path $Repo "proxy\proxy.py"));        Trig = $PersistentTrigger; Env = @{ CRP_PORT = "8011" } },
-    @{ Name = "quotad";   Args = @((Join-Path $Repo "daemon\quota_daemon.py")); Trig = $PersistentTrigger; Env = @{} },
-    @{ Name = "autosync"; Args = @((Join-Path $Repo "codex-rotate"), "sync");   Trig = $PollTrigger;       Env = @{} },
-    @{ Name = "dawnprobe"; Args = @((Join-Path $Repo "codex-rotate"), "dawn-probe"); Trig = $DawnTrigger;  Env = @{} }
+    @{ Name = "proxy";    Args = @((Join-Path $Repo "proxy\proxy.py"));        Trig = $PersistentTrigger; Env = ($BaseEnv + @{ CRP_PORT = "8011" }) },
+    @{ Name = "quotad";   Args = @((Join-Path $Repo "daemon\quota_daemon.py")); Trig = $PersistentTrigger; Env = $BaseEnv },
+    @{ Name = "autosync"; Args = @((Join-Path $Repo "codex-rotate"), "sync");   Trig = $PollTrigger;       Env = $BaseEnv },
+    @{ Name = "dawnprobe"; Args = @((Join-Path $Repo "codex-rotate"), "dawn-probe"); Trig = $DawnTrigger;  Env = $BaseEnv }
 )
 
 foreach ($t in $tasks) {

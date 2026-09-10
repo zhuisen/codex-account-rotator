@@ -374,9 +374,16 @@ def read_route():
 
     ★★ **绝不把「文件坏了」折叠成「用户选了账号池」。** 2026-09-09 Fable 复核抓到:
        原实现 `except Exception: return POOL_PROFILE`,于是 `{"profile": null}` / 半截 JSON /
-       `[]` 全都报告"账号池" —— 而 `cxp` 对同样的输入是 **exit 78**。
-       症状:`health` 与 `relay-ctl status` 绿着说"路由:账号池",而用户的 `codex`
-       一条都跑不起来。**同一条规则的两份实现在边界输入上必须一致。**
+       `[]` 全都报告"账号池"。
+       ⚠️ 2026-09-10 更正这条的**理由**:原文写的是"而 `cxp` 对同样的输入是 exit 78" ——
+       那在「一个 provider,两种上游」定稿之后**已经不成立**,`cxp` 根本不读这个文件
+       (它恒用 `rotateproxy`,只检查 `rotateproxy.config.toml` 在不在)。
+       真正的后果换成了:`proxy.py::_relay_upstream()` 读不出来就**退回账号池**,
+       于是用户明明选了按量付费的中转站,却在**不知情地扣订阅额度**,
+       而工具绿着说"路由:账号池" —— 那句话字面上还成了"对的",这才是最坏的形状:
+       **它把一次静默改道说成了一次正常配置。**
+       结论不变(坏 ≠ 账号池),但**理由必须是真的** —— 照着一条过期理由做判断,
+       下一次同类问题就会被诊断到错误的组件上。
 
     ★ 还要**校验字符集**。profile 名同时是文件名,不校验就是路径穿越:
       实测原实现对 `{"profile": "../evil"}` 直接返回 `../evil`,
@@ -436,8 +443,10 @@ def route_status():
 
     ## 剩下的每一态都对应一种「看起来正常、其实不是」
 
-    - `route_corrupt` —— 路由文件坏了。`cxp` 对同样的输入 exit 78，这里必须同判，
-      否则「工具说没事、codex 跑不起来」。
+    - `route_corrupt` —— 路由文件坏了。代理会**退回账号池**（`_relay_upstream` 判不准时
+      往免费那档倒），所以 codex 照常能跑 —— 坏的是**你选的那条路由被无声忽略了**。
+      ⚠️ 这里原来写的是「`cxp` 对同样的输入 exit 78，codex 一条都跑不起来」，
+      那是上一版架构（中转站各有一份 profile）的事实，定稿之后 `cxp` 已经不读这个文件。
     - `profile_missing` —— `rotateproxy.config.toml` 没了。**codex 对此不报错**，
       直接静默退回 base 配置（直连单号、不轮换、WS 全开），和正常运行长得一模一样。
     - `orphan` / `relay_disabled` —— 路由指着一个已删除 / 已停用的中转站。
@@ -447,7 +456,8 @@ def route_status():
     rr = read_route()
     if rr["error"]:
         return {"state": "route_corrupt", "profile": None, "path": str(route_path()),
-                "detail": rr["error"] + "。cxp 会直接 exit 78,codex 一条都跑不起来。"}
+                "detail": rr["error"] + "。codex 照常能跑,但代理会**退回账号池** ——"
+                                        "你选的中转站被无声忽略,扣的是订阅额度不是余额。"}
     prof = rr["profile"]
     # ★ 现在只有一份 profile 需要存在 —— 账号池那份。中转站档也走它。
     path = codex_home() / f"{POOL_PROFILE}.config.toml"

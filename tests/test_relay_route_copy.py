@@ -17,8 +17,10 @@
 每个非正常态背后都是一条 codex **不会报错**的静默失败。文案是它唯一出声的地方，
 只说"坏了"等于没说 —— 必须写清楚「现在实际会发生什么」和「你该点什么」。
 """
+import os
 import re
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -28,6 +30,33 @@ from relay import store  # noqa: E402
 
 TS = (ROOT / "codexbar" / "src" / "relay.ts").read_text(encoding="utf-8")
 PY = Path(store.__file__).read_text(encoding="utf-8")
+
+
+def visible_scope_text():
+    """RouteBar 里「生效范围」那段**用户真的看得见**的文字。
+
+    ★★ 必须先剥掉 JSX 注释 `{/* … */}`。2026-09-10 变异实测：注释里正解释着
+       「不生效的那半必须同样显眼 —— 用户在 VS Code 里…」，于是 `不生效` 与 `VS Code`
+       **两个关键词都落在注释里**，把可见的那句 `<b>不生效：VS Code</b>` 整段删掉，
+       两条断言仍然全绿。本仓记过的空守卫形态④（断言打在自己的说明文字上）。
+    """
+    src = (ROOT / "codexbar" / "src" / "components" / "RouteBar.tsx").read_text(
+        encoding="utf-8")
+    m = re.search(r"生效范围：(.*?)</div>", src, re.S)
+    assert m, "找不到「生效范围」那段可见文案"
+    return re.sub(r"\{/\*.*?\*/\}", "", m.group(1), flags=re.S)
+
+
+def denylist_block():
+    """`codex_wants_profile` 里那个 `case` 的候选列表（**不含注释**）。"""
+    src = (ROOT / "proxy" / "codex-profile-scope.sh").read_text(encoding="utf-8")
+    m = re.search(r'case\s+"\$\{argv\[\$i\]:-\}"\s+in(.*?)\n\s*esac', src, re.S)
+    assert m, "解析不出黑名单 —— 探针坏了，不是规则没了"
+    block = m.group(1)
+    # ★ 注释里出现 `app-server` 也会让断言通过 —— 先剥掉。
+    block = "\n".join(l for l in block.splitlines() if not l.lstrip().startswith("#"))
+    # 只要第一条 `…)` 之前那一段(即候选列表本身),别把整个 case 体吞进来。
+    return block[:block.index(")")] if ")" in block else block
 
 
 def python_states():
@@ -87,8 +116,11 @@ def health_gate_states():
 class TheHealthGateHandlesEveryStateToo(unittest.TestCase):
     """★★ 三方变四方。`codex-rotate::relay_route_gate` 是**第四份**状态清单，
     而它原来漏了 `route_corrupt` —— 落进最后的"孤儿"兜底，打印成
-    「路由 `None` 是孤儿」。而那个态的真实后果是 **cxp 每次 exit 78、codex 一条都跑不起来**，
-    与"孤儿"完全不是一回事。文案说错了，用户会往错的方向查。"""
+    「路由 `None` 是孤儿」。而那个态的真实后果是**代理悄悄退回账号池**：codex 照常跑，
+    但你选的按量付费被无声忽略，扣的是订阅额度。与"孤儿"完全不是一回事
+    （两者的修法不同：孤儿要重新登记，坏文件要重写路由）。文案说错了，用户会往错的方向查。
+    ⚠️ 这段原来写的是「cxp 每次 exit 78、codex 一条都跑不起来」—— 那是上一版架构
+    （中转站各有一份 profile）的事实，「一个 provider，两种上游」定稿后 cxp 已不读这个文件。"""
 
     def test_the_probe_works(self):
         self.assertGreaterEqual(len(health_gate_states()), 4, health_gate_states())
@@ -129,6 +161,99 @@ class EveryAbnormalStateTellsYouWhatToDo(unittest.TestCase):
         （tokens used 39,513 —— 系统提示+工具定义就这么大）。不写出来是失职。"""
         body = self._note_body("relay")
         self.assertTrue("余额" in body or "付费" in body, body[:120])
+
+
+class TheCopyMustNotOutliveTheArchitectureItDescribed(unittest.TestCase):
+    """★★★ **文案里的因果句是对代码的事实断言，会跟着架构一起过期。**
+
+    2026-09-10 抓到两处，都是「上一版架构是对的、这一版还留着」：
+
+    ① `route_corrupt` 的 detail 写着「cxp 会直接 exit 78，codex 一条都跑不起来」。
+       「一个 provider，两种上游」定稿之后 `cxp` **根本不读这个路由文件**（它恒用
+       `rotateproxy`，只检查 `rotateproxy.config.toml` 在不在）。真实后果是
+       `proxy.py::_relay_upstream()` 读不出来就**退回账号池** —— codex 照常跑，
+       但用户选的按量付费被无声忽略，扣的是订阅额度。
+       ⚠️ 一条**过期的因果**比没有更糟：下次同类问题会被诊断到 cxp 上。
+
+    ② 「生效范围」把 **VS Code** 列在生效那一侧。实测两条独立理由任一条都推翻它：
+       扩展自带 codex 二进制、从 `extensionUri` 拼路径启动、根本不查 PATH；
+       且它跑的是 `app-server`，而 `app-server` 在黑名单里。
+
+    这两条闸都从**真源**取判据（黑名单从 `codex-profile-scope.sh` 解析），
+    不抄清单 —— 黑名单哪天去掉 `app-server`，这里必须红。
+    """
+
+    SCOPE = (ROOT / "proxy" / "codex-profile-scope.sh").read_text(encoding="utf-8")
+    ROUTEBAR = (ROOT / "codexbar" / "src" / "components" / "RouteBar.tsx").read_text(
+        encoding="utf-8")
+
+    def test_route_corrupt_no_longer_blames_cxp(self):
+        """★★ **调用它，别 grep 它。**
+
+        ⚠️ 这条最初写成 `body = PY[PY.index('"state": "route_corrupt"'):][:600]` 再判
+           `"退回账号池" in body or "账号池" in body` —— 那个 600 字符窗口一路跨到
+           `store.py` 下面一行 `# ★ 现在只有一份 profile 需要存在 —— 账号池那份`,
+           于是**把 detail 整句后果删光，闸照样绿**（2026-09-10 变异实测）。
+           `assertIn("route_corrupt", route_status.__doc__)` 更是同义反复。
+           断言打在自己的注释上 —— 本仓记过的空守卫形态④，我又犯了一次。
+
+        现在真的把一份坏路由写进隔离目录，调 `route_status()` 判返回值。
+        """
+        tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        (root / "store" / "relay").mkdir(parents=True)
+        (root / "store" / "relay" / "route.local.json").write_text("[]", encoding="utf-8")
+        (root / "codex-home").mkdir()
+        old = {k: os.environ.get(k) for k in ("CODEX_ROTATE_STORE", "CODEX_HOME")}
+
+        def restore():
+            for k, v in old.items():
+                os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
+        self.addCleanup(restore)
+        os.environ["CODEX_ROTATE_STORE"] = str(root / "store")
+        os.environ["CODEX_HOME"] = str(root / "codex-home")
+
+        st = store.route_status()
+        self.assertEqual(st["state"], "route_corrupt", st)
+        detail = st["detail"]
+        self.assertNotIn("78", detail,
+                         f"★ 还在说 cxp 会 exit 78 —— 已不成立: {detail}")
+        self.assertIn("退回账号池", detail,
+                      f"★ 没说出真实后果（代理悄悄退回账号池、扣的是订阅额度）: {detail}")
+
+    def test_the_scope_line_names_vscode_as_out_of_scope(self):
+        """★ 双向断言：既要出现 VS Code，又要它落在**不生效**那一侧。
+
+        只断言"提到了 VS Code"会被原来那句错的文案照样满足 —— 它也提到了。
+        """
+        seg = visible_scope_text()
+        self.assertIn("VS Code", seg)
+        neg = seg.index("不生效")
+        self.assertLess(neg, seg.index("VS Code"),
+                        f"★ VS Code 出现在「不生效」之前 —— 仍被列为生效入口: {seg[:200]}")
+
+    def test_the_denylist_still_backs_that_claim(self):
+        """★★ 文案的第二条理由依赖 `app-server` 在黑名单里。从**真源**核，
+        别让文案和黑名单各自漂移。"""
+        block = denylist_block()
+        self.assertIn("app-server", block,
+                      "★ app-server 不在黑名单里了 ⇒ RouteBar 那句理由不再成立，两处要同时改")
+
+    def test_the_denylist_probe_itself_is_not_broken(self):
+        """★★ 先证探针**真的**解析到了黑名单。
+
+        ⚠️ 最初写的是 `case\\s+"\\$\\{argv\\[i\\]:-\\}"` —— 源码是 `${argv[$i]:-}`（带 `$`），
+           那个正则**一次都没命中过**；整条闸挂在兜底正则
+           `\\n\\s*agents\\|[^\\n]*\\)` 上，而它把「agents 是第一个候选」写死了 ⇒
+           保留 app-server、只换个顺序，闸就**假红**（2026-09-10 变异实测）。
+           一个匹配数为 0 的正则会让整条闸恒绿，这里恰好被兜底救了一半 ——
+           两种病一起犯，所以必须单独证明探针有效。
+        """
+        block = denylist_block()
+        # 黑名单里必然有的几个,用来证明捕获到的是真的那一段。
+        for name in ("login", "logout", "plugin"):
+            self.assertIn(name, block, f"探针没捕到黑名单正文（缺 {name}）: {block[:200]}")
+        self.assertNotIn("case", block, "捕获范围溢出到了别的 case 块")
 
 
 class TheTwoCostColumnsAreLabelledDifferently(unittest.TestCase):
@@ -221,14 +346,30 @@ class TheManualRefreshActuallyForces(unittest.TestCase):
 
 
 class TheScopeOfTheSwitchIsStated(unittest.TestCase):
-    """★ 路由只影响交互 shell 里的 `codex`（cxp 的 alias）。
-    `\\codex` / `cx` / VS Code / `omc ask codex` 都走 PATH wrapper，**不受影响**。
-    不写这一行，用户会以为切完所有入口都改了 —— 然后奇怪为什么池子还在掉。"""
+    """生效范围那句话必须**两侧都点名**。
 
-    def test_the_page_says_which_entrypoints_are_affected(self):
-        page = (ROOT / "codexbar" / "src" / "components" / "RouteBar.tsx").read_text(encoding="utf-8")
-        self.assertIn("生效范围", page)
-        self.assertIn("不受此选择影响", page)
+    ⚠️ 这个类原来的断言是 `assertIn("不受此选择影响", page)` —— 只查"有没有一句
+       排除说明"，不查**谁在哪一侧**。于是把 VS Code 从"不生效"挪到"生效"的那次改动
+       照样全绿，错误文案就是这么活下来的（2026-09-10 复盘）。
+       它自己的 docstring 当时也还写着「`\\codex` / VS Code / `omc ask codex`
+       都走 PATH wrapper、不受影响」—— 四入口统一之后，那三条里有两条是反的。
+       **一条只验"提到了"的断言，挡不住"说反了"。**
+
+    真正的两侧判定在 `TheCopyMustNotOutliveTheArchitectureItDescribed`；
+    这里只留最基本的存在性，并把逃生口 `cxd` 钉住。
+    """
+
+    PAGE = (ROOT / "codexbar" / "src" / "components" / "RouteBar.tsx").read_text(
+        encoding="utf-8")
+
+    def test_the_page_states_a_scope_at_all(self):
+        self.assertIn("生效范围", self.PAGE)
+
+    def test_both_sides_are_named(self):
+        seg = visible_scope_text()
+        self.assertIn("不生效", seg, "只说了生效的那半 —— 用户会以为剩下的也跟着切")
+        for entry in ("codex", "VS Code", "cxd"):
+            self.assertIn(entry, seg, f"{entry} 没被点名")
 
 
 if __name__ == "__main__":

@@ -43,7 +43,18 @@ from pathlib import Path
 PORT = int(os.environ.get("CRP_PORT", "8011"))
 UPSTREAM_HOST = "chatgpt.com"
 UPSTREAM_BASE = "/backend-api/codex"
-STORE = Path(__file__).resolve().parent.parent          # codex-account-rotator/
+# ★★ **`CODEX_ROTATE_STORE` 是全仓统一的数据目录变量,这里必须跟着认**（2026-09-10 修）。
+#    此前只有本文件硬写 `__file__` 推算,而 `codex-rotate` / `relay/store.py` /
+#    `traffic/{scan,rotation,quota_anchors,agy_quota_sampler}.py` / `cxp` / `cxd`
+#    **八处全都认这个变量** —— 代理是唯一的例外。
+#    后果不是报错,是**脑裂**:安装目录与数据目录分开时(Windows 上 CodexBar 每次更新
+#    整个替换安装目录,所以必须分开),`relay-ctl` 把 `route.local.json` 写进数据目录,
+#    而代理去读安装目录里的那份 —— **切了路由代理毫不知情**,而两边都不报错。
+#    `auth/` / `state.json` / `relays.local.json` / 两把跨进程锁同理:锁在不同路径上
+#    等于没有锁,`codex-rotate` 与代理会同时刷同一个号的 token。
+#    不设该变量时行为**逐字不变**(默认值就是原来的表达式)。
+STORE = Path(os.environ.get("CODEX_ROTATE_STORE")
+             or Path(__file__).resolve().parent.parent)   # codex-account-rotator/
 # ★★ 中转站上游(2026-09-09 定稿:**一个 provider，两种上游**)。
 #    以前的做法是给每个中转站单独生成一份 `~/.codex/<id>.config.toml`，靠 cxp 换 profile 切换。
 #    那样做 codex 会看到两个不同的 `model_provider` id，而 `codex resume` 的 picker
@@ -1042,6 +1053,26 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
+    # ★★ **数据目录先落地、并印出来**（2026-09-10 四方评审）。
+    #    自从 STORE 认了 `CODEX_ROTATE_STORE`，一个写错的值会被**照单全收** ——
+    #    而本文件是全仓唯一从不 mkdir 的入口（`relay/store.py` 和 `codex-rotate` 都建）。
+    #    不建的话第一次写 state 才炸 FileNotFoundError，而它落在 handler 线程里，
+    #    `_mutate_state` 的 `except (OSError, ValueError): return` 会把它咽掉 ——
+    #    症状变成「池子是空的」，指不到真因。
+    #    印出来是因为：这个进程可能连着好几天，事后想知道它当时在哪个目录上跑，
+    #    除了日志没有第二个来源。
+    try:
+        STORE.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        _plog(f"⛔ 数据目录建不出来 {STORE}: {e}")
+        raise SystemExit(78)
+    _plog(f"store={STORE}" + ("" if os.environ.get("CODEX_ROTATE_STORE")
+                              else " (按 __file__ 推算 —— 没有 CODEX_ROTATE_STORE)"))
+    if not STATE.exists():
+        # ★ 「state.json 不在」与「池子里没有号」必须分开。后者是合法状态，前者是装错了。
+        #   服务化跑法下 launchd/schtasks 会重拉，理由留在日志里。
+        _plog(f"⛔ state.json 不存在: {STATE} —— 数据目录多半指错了，拒绝以空池提供服务")
+        raise SystemExit(78)
     # ★ 起手就把**当前路由**印出来。这个进程可能连着好几天，而"钱扣在哪里"是排查时
     #   第一个要回答的问题 —— 只印一个写死的 chatgpt.com 会让日志在中转站档下说谎。
     _up0 = _relay_upstream()

@@ -93,10 +93,14 @@ class RemoveOnlyDeletesWhatWeOwn(_Tmp):
 class ACorruptRouteIsNotSilentlyThePool(_Tmp):
     """★★ 同一条规则的两份实现，在边界输入上必须一致。
 
-    `cxp` 对坏路由文件是 **exit 78**（它的注释还明写"不许当作账号池"），
-    而 Python 侧原来是 `except Exception: return POOL_PROFILE` —— 正是它禁止的写法。
-    症状：`health` 与 `relay-ctl status` 绿着说"路由:账号池"，
-    而用户的 `codex` 一条都跑不起来。
+    Python 侧原来是 `except Exception: return POOL_PROFILE` —— 把"文件坏了"
+    折叠成"用户选了账号池"。症状：`health` 与 `relay-ctl status` 绿着说"路由:账号池"，
+    而代理确实也退回了账号池 —— 所以那句话**字面上还成了"对的"**，
+    这才是最坏的形状：它把一次静默改道说成了一次正常配置，
+    用户以为在按量付费、实际扣的是订阅额度。
+    ⚠️ 这段原来的理由是「`cxp` 对坏路由文件是 exit 78」—— 已不成立，
+    cxp 恒用 `rotateproxy`、根本不读 `route.local.json`（2026-09-10 更正）。
+    结论不变，但理由必须是真的：照着过期理由做判断，下次会诊断到错误的组件上。
     """
 
     def route(self, raw):
