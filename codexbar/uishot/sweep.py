@@ -101,6 +101,17 @@ VIEWS = [
     ("日志·折叠",        "/harness.html?nav=logs&rot=busy",                           [940, 900, 860]),
     # 诚实度脚注那一行(「N 行旧格式无时间戳、未计入 · 仅统计日志尾部」)最长,单独扫。
     ("日志·未计入提示",   "/harness.html?nav=logs&rail=open&rot=undated",              [1000, 960]),
+    # ── 中转站（2026-09-09）。★ `nav=relay` 与 `nav=logs` 现在都按 `data-page` 身份点,
+    #   不再按位置 —— 插入这一页时才发现按位置点会让日志视图静默扫到中转站页。
+    ("中转站·正常",      "/harness.html?nav=relay&rail=open&relay=relay",             [1200, 1000, 960]),
+    ("中转站·折叠",      "/harness.html?nav=relay&relay=relay",                       [940, 860]),
+    # `profile_stale` 的文案最长（要把 实际→应为 的漂移原样印出来）,必扫窄档。
+    ("中转站·profile漂移", "/harness.html?nav=relay&rail=open&relay=stale",            [1200, 1000, 960, 860]),
+    ("中转站·profile缺失", "/harness.html?nav=relay&rail=open&relay=missing",          [1000, 960]),
+    ("中转站·路由损坏",   "/harness.html?nav=relay&rail=open&relay=corrupt",           [1000, 960]),
+    # 读不到时全是 `—`,列宽会塌 —— 与有数时是两种排版,都要看。
+    ("中转站·读不到",    "/harness.html?nav=relay&rail=open&relay=never",             [1000, 960]),
+    ("中转站·空",        "/harness.html?nav=relay&rail=open&relay=empty",             [1000]),
     ("菜单栏·账号",      "/harness-menubar.html?w=352&grok=ok",                       [520]),
     ("菜单栏·今日",      "/harness-menubar.html?w=352&tab=today&grok=ok",             [520]),
     ("菜单栏·grok降级",  "/harness-menubar.html?w=352&grok=stale",                    [520]),

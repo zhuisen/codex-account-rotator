@@ -19,12 +19,51 @@ sqlite3 ~/.codex/logs_2.sqlite \
 里有 `supports_websockets = false`。**不要**试图给内置 provider 加这一行（配了也被忽略），
 也**不要**新建一个 provider 当默认（会让 `codex resume` 列表直接清空）。详见 B36 / B37。
 
+## `codex doctor` / `update` / `plugin` 报 `--profile only applies to runtime commands`
+
+codex **0.154** 起，非运行时子命令带 `--profile` 从「静默忽略」改成**硬报错**。而 `alias codex=cxp`
+曾给每个子命令都塞 profile，于是 `doctor` / `update` / `plugin` / `features` / `completion` /
+`apply` / `agents` 全死，而 `resume` / `exec` / 裸 `codex` 完全正常 ——
+症状是「**会话能开、本地工具全废**」。
+
+**已修**（`proxy/cxp` 按子命令决定是否注入，黑名单实现）。如果你手写了别的入口，照着改。
+⚠️ **别用 `codex <sub> --help` 验证** —— clap 在 `--help` 上短路，profile 校验根本没跑到，
+所有子命令都会「通过」，与事实相反。必须发真实调用。
+
+## codex 一个工具都调不动，但 `codex doctor` 全绿
+
+先看 `codex exec` 的 stderr。典型报文：
+
+    ERROR codex_core::tools::router: error=failed to spawn code-mode host
+      …/native-codex/codex-code-mode-host: No such file or directory
+
+codex 按**自己可执行文件的同级目录**找辅助进程。官方安装是 4 件套
+（`codex` / `codex-code-mode-host` / `codex-resources/` / `codex-path/`）；只放一个 `codex`
+就会让 `code_mode_host`（stable/enabled）spawn 失败，工具路由 **fail closed**。
+
+⚠️ **这类故障没有任何「配置坏了」的迹象** —— `codex doctor` 全绿、`config.toml parse ok`、
+auth ok、MCP 都在，所以第一反应去翻配置必然白查。
+⚠️ **`codex features list` 的第三列是默认值不是有效值**（`--disable X` 之后仍显示 `true`），
+拿它推断有效配置会得出相反结论。
+
+**修法**：别让任何非官方的 codex 二进制出现在 PATH 或包装器里。本仓已彻底移除该分支
+（`tests/test_resume_routing.py::NoPatchedBinaryEntry` 守着）。
+
 ## `codex resume` 列表变短了
 
-**正常。** picker 按 provider **逐字**过滤，只列当前 provider 戳记的会话。
-走代理之后只显示 `rotateproxy` 戳记的。
+**正常，而且这是终态。** picker 按 provider **逐字**过滤，只列当前 provider 戳记的会话。
 
-旧会话**没有消失** —— `codex resume <session-id>` 照样能进。往后新会话都是新戳记，列表会自己长回来。
+| 入口 | provider | 看到的会话 |
+|---|---|---|
+| `codex`（走代理，轮换） | `rotateproxy` | 新会话（持续累积） |
+| `\codex` / `cx`（单号直连，`/usage` 有意义） | `openai` | 存量老会话 |
+
+旧会话**没有消失** —— `codex resume <session-id>` **跨 provider 照样能进**。
+
+★ **不要试图让一个 picker 同时列出两个 provider**（2026-09-08 实测确认无解）：
+筛选器只有 `Cwd / Status / Sort`，没有 provider 这一维；`--all` 只解 cwd、
+`--include-non-interactive` 只解 `has_user_event`；也不能把自建 provider 命名为 `openai`
+（`reserved built-in provider IDs`）。唯一的办法是改 codex 本体，而那条路已被弃案（见 B38）。
 
 ## `codex resume` 列表**完全空了**
 

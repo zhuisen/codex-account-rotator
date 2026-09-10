@@ -2055,7 +2055,214 @@ filters = `[当前默认 provider]`，而**存量会话没有一个带 `openai-n
 - 第一次「验证配置是否生效」我塞了个虚构键 `zzz_bogus_key_probe`，**codex 也不报错** ⇒ 它对未知配置键静默忽略，「没报错」什么都证明不了。真正有判别力的对照是**写一个不存在的 provider id**，那会报 `Model provider not found`。
 - 第二次用 `codex exec` 验「WS 是否还发生」，实验组 0 条 —— 但**对照组（内置 provider）也是 0** ⇒ `exec` 这条路本来就不用 WS，测试**两边都没有判别力**。WS 只在交互式会话里发生（331 条记录 / 69 个进程，其中 30 个有 TUI 日志，`exec` 一条都没有）。
 
+### B38 · codex 升 0.154 后「本地工具全废」，真因是 `cxp` 给每个子命令都塞 `--profile` — 2026-09-08 ✅修
+
+**症状**：用户报「甚至现在 codex 的本地工具都用不了了」。`codex resume` / `codex exec` / 裸 `codex` **完全正常**，
+但 `codex doctor` / `update` / `plugin` / `features` / `completion` / `apply` / `agents` 一句话就死。
+
+**根因不在本仓，在上游**：npm 的 `@openai/codex` 当天 12:02 自动升到 **0.154.0-alpha.6**，
+0.154 起对非运行时子命令带 `--profile` 从「静默忽略」改成**硬报错**：
+
+```
+Error: --profile only applies to runtime commands and `codex mcp`: `codex`, `codex exec`,
+`codex review`, `codex resume`, `codex queue`, `codex archive`, `codex delete`,
+`codex unarchive`, `codex fork`, `codex mcp`, `codex sandbox`, and `codex debug prompt-input`.
+```
+
+而 `alias codex=cxp` 对**每一个**子命令无条件注入 profile。运行时那半不受影响，所以症状恰好是
+「会话能开、工具全废」—— 极易误判成本仓的 resume 改动弄坏了什么。
+
+**修法**：`proxy/cxp` 按子命令决定是否注入。**必须是黑名单不是白名单** —— 白名单会把裸 prompt
+（`codex 修一下这个 bug`，首个非选项 token 是 `修一下这个 bug`）判成「未知子命令」而丢掉 profile，
+等于**静默退回单号直连、不轮换**；那个方向的失败不出声，比报错危险。
+
+**★ 一个让你以为没事的坑**：`codex <sub> --help` 探不出这个 —— clap 在 `--help` 上短路，
+profile 校验根本没跑到，**26 个子命令会全绿**。我第一轮扫描就是这么扫出「全部 ok」的，与事实相反。
+
+**✅ 顺带堵上一个空守卫**：profile 曾恒占 `$1`，而 PATH wrapper 的拦截写的是 `[ "$1" = "logout" ]` ——
+那条「`codex logout` 会在服务端 revoke 当前号」的守卫**一直没生效**。去掉 profile 后才真命中。
+
+**闸**：`tests/test_cxp_profile_scope.py`（11 tests / 27 subtests，用 PATH stub 打印真实 argv；
+已变异验证：把黑名单改成永不命中 ⇒ 21 红，还原 ⇒ 全绿）。
+
+---
+
+### B39 · 打补丁的 codex 二进制炸掉**全部工具调用**，而 `codex doctor` 全绿 — 2026-09-08 ✅弃案
+
+**症状**：`codex exec` 里模型一个工具都调不动。`codex doctor` 全绿、`config.toml parse ok`、
+auth ok、MCP 8 个都在 —— **没有任何「配置坏了」的迹象**，于是第一反应去翻配置，白查一轮。
+
+**真因**（只有真跑一次 `codex exec` 看 stderr 才拿得到）：
+
+```
+OpenAI Codex v0.153.4+codexbar.1
+ERROR codex_core::tools::router: error=failed to spawn code-mode host
+  …/native-codex/codex-code-mode-host: No such file or directory (os error 2)
+```
+
+codex 按**自己可执行文件的同级目录**解析辅助进程。官方 vendor 是 4 件套
+（`codex` / `codex-code-mode-host` / `codex-resources/` / `codex-path/`），而
+`scripts/native-resume/build.py` 只 `shutil.copy2` 了 `codex` 一个文件 ⇒ **残缺安装**。
+`code_mode_host` 是 stable/enabled，spawn 不到就 **fail closed**。
+
+**★ 判据教训**：`codex features list` 的第三列是**默认值不是有效值**（`--disable X` 之后仍显示 `true`）。
+我一度据此推断 `unified_exec = false` 是元凶 —— **方向完全相反**。
+
+**处置：整条路弃案**（用户拍板：「不要弄补丁的，改为官方版」，理由是它挡后续官方版更新）。
+除 ① 之外还有两条独立理由：② 补丁对 0.153.4 而 npm 已到 0.154，`codex update` 更新 npm 那份、
+跑的却是被钉住的补丁，**无声**越差越远；③ 每次官方发版都要重 apply + 重编 + 重验。
+
+`proxy/cxp` 现在**只有一条 `exec command codex`**。闸 `tests/test_resume_routing.py::NoPatchedBinaryEntry`。
+二进制归档 `~/archive/codex-account-rotator/native-codex-dropped-20260908/`；`scripts/native-resume/` 仅存档。
+⚠️ 拆补丁时我把 `CODEX_ROTATE_STORE` 也一起删了 —— 它是**全仓统一的数据目录变量**，不是补丁残留。
+闸里现在**断言它必须在**。
+
+---
+
+### B40 · 「rotateproxy 占比只增不减」是错的 — 2026-09-08 ✅已改正文档
+
+B36 修 B 系列老注释（89:1 过期三个月）时，我写下的替代数据「实测 2026-09-07，最近 50 个里
+rotateproxy 占 **76%**、最近 500 个占 64%、往后只增不减」**本身就是错的**。
+
+**2026-09-08 只读复核**（picker 口径 `archived=0` + `has_user_event=1` + `source in ('cli','vscode')`）：
+
+| provider | 总量 | picker 可见 |
+|---|---|---|
+| `openai` | 2677 | **238** |
+| `rotateproxy` | 1553（其中 1344 是 `codex exec`） | **2** |
+
+最近 50 条里 rotateproxy 只有 2 条；**2026-08 及以前每月都是 0**。
+
+**两个都能解释同一份数据的假说，分不干净，别当已知事实用**：① wrapper 里那个已删的
+`repair_codex_session_visibility()` 一直在把 DB 的 rotateproxy 改写成 openai（238 这个数
+基本就是它的产物）；② 69 条 VS Code 会话那条路根本不经过 cxp。
+**可确认的只有**：repair 移除后新交互会话稳稳戳 rotateproxy（当天 14:22 / 14:30 两条已验），
+所以 238 是**存量、不再增长**。
+✅ 删 repair 不伤官方 picker：openai 的 cli / vscode 会话**自然带 `has_user_event` 的比例是 98.3% / 94.2%**。
+
+**★ 这条错误是「结论要带证据和日期」那条规矩的最好例证** —— 它带了日期，所以才被查出来。
+规矩管不住写错，只管得住「错了没人发现」。
+
+---
+
+### 定稿 · 两条入口的会话列表分裂**不统一** — 2026-09-08
+
+用户问「能不能让 `codex resume` 同时看到 2 + 238」。**答案：不能（无补丁），且这是终态。**
+
+| 入口 | provider | 行为 | picker 里能看到 |
+|---|---|---|---|
+| `codex`（alias→cxp） | `rotateproxy` | 逐请求轮换、WS 关 | 新会话（持续累积） |
+| `\codex` / `cx` | `openai`（内置） | 单号直连，`/usage` 有意义 | 238 条存量档案 |
+
+**用户主动选择保持分裂**，理由是**「需要单号入口跑 `/usage` 看重置卡」** —— 走代理时每个请求
+可能落在不同号上，那个数就没意义了。技术上**能**统一（profile 与 provider 解耦，两个 profile 可指向
+同一个 `model_provider`；`env_http_headers` 在 0.154 二进制里确实存在，可让单号入口也走代理但按 header
+钉号），**用户否了**。
+
+**「让一个 picker 同时列两个 provider」= 不可能（0.154 实测）**：
+- 真渲染实测（`scratch/picker_render_probe.py`）：cxp `1 / 5`；官方 `1 / 25` → `1 / 75` 仍在加载。
+  picker 顶栏筛选器只有 `Cwd / Status / Sort`，**没有 provider 这一维**。
+- SQL 仍是 ` AND threads.model_provider IN (`；二进制里所有含 `provider` 的键都列过一遍，
+  唯一沾边的 `allow_provider_model_fallback` 是选模型不是选列表。
+- `--all` 只解 cwd；0.154 新增的 `--include-non-interactive` 只解 `has_user_event`。
+- 仍不能把自建 provider 命名为 `openai`：`model_providers contains reserved built-in provider IDs:`。
+
+**⚠️ 探针陷阱**：pty 不设窗口大小（`TIOCSWINSZ`）时 TUI 什么都不画，**和「列表真的是空的」长得一模一样**。
+我第一次就得到了「两边都 0 条」的假结论。探针与坑留在 `scratch/picker_render_probe.py` 文件头。
+
+---
+
+### B41 · 接入「中转站」路由 + 分账 + agy 额度实时（Phase 0–5） — 2026-09-09 ✅
+
+用户要在 CodexBar 里接第三方 OpenAI 协议中转站：监控用量 · 人工增改 key/base_url ·
+一键把 codex 切过去。用户明确**接受**"多一个 provider = 多一份、且一开始为空的 resume 列表"。
+
+**★★ 实测单次成本 $0.0863**（一句 `reply with exactly RELAY_OK`，tokens used 39,513 ——
+系统提示 + 工具定义就这么大，prompt 多短都没用）。我事前估 $0.001，**差 86 倍**。
+
+**Phase 0/1（引擎 + 路由）**
+`relay/store.py` 托管区标记（codex **也往 profile overlay 回写** 12 行 hooks 信任哈希 /
+项目信任 / NUX 计数器 —— 整文件覆盖会抹掉）· `relay/relay-key` 走 `auth.command`
+（`env_key` 下中转站回 401 会让 codex **去刷账号池 active 号的 refresh_token** 并喊
+"log out and sign in again"，而 `codex logout` 在本仓是杀号）· 六态路由 ·
+`cxp` 读路由 + **profile 文件硬检查**（codex 对缺失**不报错**、静默退回 base 配置 ——
+闸必须在 exec 那一刻，不能只在 UI）· `health` 的 `relay_route_gate()`。
+
+**★ 三重核验的真实计费实验**：`provider: tokendun` → `RELAY_OK`；10:20 后走账号池的
+`POST /responses` = **0 条**；中转站 `today.requests` 0→1；新会话戳记 `provider=tokendun`。
+**tokendun 确实支持 `/v1/responses`** —— 这是唯一只能靠真请求回答的未知量。
+⚠️ 判据我第一次也判错了：数 proxy.log **总行数**，多出的 4 行其实是 `GET /models`（免费、
+且早于那次 exec）。换成数 `POST /responses` 才有判别力。
+
+**Phase 2（CLI + Rust + 打包）**
+`relay-ctl`（key 走 **stdin 不走 argv**、退出码恒 0、payload 只出指纹）· 3 个 Rust 命令
+（NET/STORE 两把锁 —— 一把的话中转站不可达时 25–100s 的网络调用会堵住"保存"，
+而那**恰恰是用户最想改配置的时刻**）· 打包清单 + `test_bundled_scripts.py`
+（从 `lib.rs` 正则解析所有 `script_dir()` 引用，09-05 同款事故的闸）。
+★ `command` 是**可执行文件路径不是 shell 字符串**，参数必须走 `args = [...]`；
+写错时报 `failed to start: No such file or directory` —— **看起来像脚本不存在**，而路径完全正确。
+
+**Phase 3（RelayPage）**
+六态路由卡（每个非正常态都含可执行动作 + 生效范围声明）· 两个成本口径**分列**
+（`cost` 牌价 / `actual_cost` 实扣，实测差 3.85 倍）· 日实扣柱状（稀疏离散用柱不用面积）·
+模型表 · 表单（key `type=password`、编辑留空=沿用）· **「切到此中转站」是全 app 第二个
+花钱控件**（第一个是 ProbeButton），两段确认 + 💰按量付费角标。
+
+**Phase 4（分账，消除双重计价）**
+经中转站的会话**照样写 rollout**，那批 token 既进「AI用量」的 Codex 桶（按 OpenAI 牌价折算的
+**等效**成本），又在中转站**真金实扣过一次** —— 同一批 token 以两个价出现在两页上。
+`_scan_codex_file` 按 ordinal 跟踪 `cur_provider`（**一份 rollout 可有两条 `session_meta`**）·
+row 加第 8 位 · `PARSER_V` 8→9 · `by_provider` **旁挂，总量一个字节不动** ·
+`PlatformPage` 加路由行 + 费用口径脚注。
+**★★ 跨源对账**：`by_provider.tokendun.total` 与中转站 `/usage` 的 `today.total_tokens`
+**逐 token 相等（39,513 = 39,513，0.00%）** —— 两个完全独立的来源。
+⚠️ 我第一版把累加放在窗口判断**之前** ⇒ `days` 119M 而 `by_provider` 9,004M。
+**同一页上的两个数必须同窗口。**
+
+**Phase 5（agy 额度实时）**
+改之前是**两个独立轮询者**打同一个 RPC，而 app 那条**只在有人看着那一页时才前进**
+（切走再回来最坏等 2.5 分钟，两个 webview 各看各的）。现在：采样器是**唯一抓取者兼唯一写者**
+（同一份响应写账本 + sidecar，带 `--prev` 让 last_good 跨进程连续）· Rust 1s 循环看 mtime →
+`emit("agy-quota-updated")` · 前端监听后**只读 sidecar 不发 RPC、不受 `enabled` 约束** ·
+跨重置立刻取 · app 在锁文件不存在时**补拉采样器**（从 IDE/VS Code 起的 agy 没有 wrapper ⇒
+原本根本没有采样器，而 UI 只知道"数据旧了"，看不出"没人在采"）。
+
+**★★★ 我先写错了一条结论，已更正（留档防再犯）**
+我写的是「agy 不在任何地方落 token 计数」，依据是"扫遍 261 个 db 只有 3 处命中"。
+**那是假阴性**：`gen_metadata.data` 是 **protobuf wire format，里面根本没有字段名**，
+`grep promptTokenCount` 永远 0 命中 —— **用一个看不见目标的探针得出"目标不存在"**。
+盲解后逐条比对 69 个 conv：`f5`=cache_read **69/69**、`f9`=thinking **69/69**、
+`f2`/`f3` 63/69，`f1.f19`=模型名。=>「agy 交互式 token 永久拿不到」**被推翻**；
+另有 192 个 db、约 **2.59 亿 token** 可追溯回收（覆盖率 15.9% -> ~100%，不依赖 wrapper）。
+**尚未接入**，Phase 5 本身只做了额度% 的实时化。
+
+**★★ Phase 5 我还亲手造了一个永续空转**（Fable 抓到）：agy 没在跑时 app 每 60s 补拉采样器，
+它快轮询 90s、**每次失败的 fetch 照样写 sidecar** => 广播 => 两个 webview 各读一次，
+**每 ~4.5 分钟约 40 次 python 起停**。已两道堵住（起手探活 0.00s 退出 + 写前比内容，
+**比较时剔掉每次都变的 `fetched_at`/`pid`**）。
+
+**测试**：全量 **751 passed / 397 subtests**（本批新增 ~120 条）。
+每个 Phase 都做了变异验证；**其中三轮各抓到我自己一个空守卫**：
+① 「页面不许渲染完整 key」——夹具里根本没有完整 key（已加诱饵 `sk-DECOY-…`）；
+② 「路由行存在」——断言的字符串在**组件定义**里，删掉调用点照样绿（已补调用点断言 + 真 DOM 闸）；
+③ `auth_command`/`auth_args` 进比对——前面几条其实都被"文件存在性"抓到的（已补 2 条）。
+
+---
+
 ## 已知待办 / cleanup
+- ⏳ **`Selected model is at capacity` 未定案**（2026-09-08 用户报）。**已排除本仓改动**：当轮只改了
+  `proxy/cxp` 的 argv 路由（diff 里 model / `service_tier` 一个都没碰），两个 config 的 mtime 都早于
+  第一次编辑；额度链正常（当天 429 六次全部被代理接住换号）。**当场用现状配置真跑 `codex exec` 成功**
+  ⇒ 间歇性，未复现。两个都成立的假说与判别实验见 `memory.md` §0a-bis（一句话：同一时刻跑
+  `codex exec -c service_tier='"default"'`，成功=fast 通道满，也失败=模型整体容量）。**不在这里展开，
+  免得同一件事有两个家。**
+- ~~`scratch/codex-native-resume-0.153.4` 占 25G（B39 弃案后的构建树）~~ → **2026-09-09 已删，回收 24.4 G**。
+  99.5% 是 cargo 构建产物、0.5% 是官方源码解包，**无独一无二信息**（补丁 + 34 个文件锚点哈希 +
+  上游 commit 全在 `scripts/native-resume/`）。删除用点名 `rm -rf <dir>`、**不带通配符**，
+  并做逐名比对确认只少目标一项。
+- ⏳ **`resume_provenance.mark_proxy_session` 全仓无调用者** —— marker 从来没人写，`.proxy-sessions-v1/` 是空的。
+  归属判定实际全靠 `payload.model_provider == "rotateproxy"` 这条主判据。模块与 `codex-rotate:399` 的
+  接线留着（无害、测试全绿），但**别当它在工作**。
 - ~~`_run_codex_ping`/`_codex_running`/`CODEX_BIN`/`LOCK` dead code~~ → B21 已删。
 - ~~代理刷新与 keepalive 并发刷同一号~~ → B9 已加 `.refresh.lock` 跨进程串行解决。
 - ~~`auth_dead` 被 autosync 竞争清掉~~ → B17 指纹门控 + B15 state 锁双重解决。

@@ -32,7 +32,7 @@
 |---|---|---|
 | `codex-rotate` | 账号池 CLI，单文件，最重要 | 解释器**绝不由 PATH 决定**（TLS 指纹问题） |
 | `proxy/proxy.py` | 轮换代理 `127.0.0.1:8011` | 对 live 号**只读**，过期就 failover；绝不刷 active 号的 token |
-| `proxy/cxp` | 日常入口 = `codex --profile rotateproxy` | **所有子命令一律走代理**，没有例外分支 |
+| `proxy/cxp` | 日常入口 = `codex --profile rotateproxy` | **所有*运行时*子命令一律走代理**，没有例外分支；`doctor`/`update`/`plugin` 等本地工具子命令原样透传（codex 0.154 起对它们带 `--profile` 会硬报错） |
 | `daemon/quota_daemon.py` | 让 `state.json` 的额度持续准确 | 三条循环全部零额度成本（GET） |
 
 ### 为什么必须走代理，而不只是"能轮换就行"

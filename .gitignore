@@ -6,6 +6,9 @@ state.json
 .keepalive.lock
 .refresh.lock
 .state.lock
+.proxy-sessions-v1/
+native-codex/
+output/
 state.json.corrupt-*
 __pycache__/
 scratch/
@@ -71,3 +74,11 @@ SETUP.md
 # 且带着本机的 response_id 与账号 label。
 .rotation-cache.json
 .rotation-latest.json
+
+# 中转站（relay）配置:含 API key,与 state.json 同级敏感。
+# 路由开关不含密钥但也是本机状态,一并不入库。
+relay/relays.local.json
+relay/relays.local.json.corrupt-*
+relay/route.local.json
+relay/.relays.lock
+.relay-usage.json
