@@ -228,7 +228,7 @@ class TheScopeOfTheSwitchIsStated(unittest.TestCase):
     def test_the_page_says_which_entrypoints_are_affected(self):
         page = (ROOT / "codexbar" / "src" / "components" / "RouteBar.tsx").read_text(encoding="utf-8")
         self.assertIn("生效范围", page)
-        self.assertIn("不受此开关影响", page)
+        self.assertIn("不受此选择影响", page)
 
 
 if __name__ == "__main__":

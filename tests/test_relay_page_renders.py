@@ -202,7 +202,7 @@ class RelayPageRenders(unittest.TestCase):
         然后奇怪为什么账号池还在掉。"""
         d = self.page("relay")
         self.assertIn("生效范围", d)
-        self.assertIn("不受此开关影响", d)
+        self.assertIn("不受此选择影响", d)
 
     def test_the_usage_block_mirrors_the_ai_usage_page(self):
         """★★ 用户 2026-09-09：「用量你也没有1:1复刻我的ai用量信息」。
