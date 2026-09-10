@@ -268,3 +268,61 @@ class TheRouteRowActuallyRenders(unittest.TestCase):
         出现在两页上,而两页都没标注。"""
         self.assertIn("data-route-footnote", self.rawdom)
         self.assertIn("不适用", self.d)
+
+
+class RelayAttributionSurvivedTheArchitectureChange(unittest.TestCase):
+    """★★★ 2026-09-10「一个 provider、两种上游」把路由分账**打断了**，Fable 评审抓到。
+
+    中转站流量现在也由本地代理转发，而 codex 写进 rollout 的 `model_provider`
+    **恒为 `rotateproxy`** —— `by_provider` 再也分不出中转站。后果不是"少一行"：
+    那批 token 被算进「账号池」，并被 `rates.ts` 按 OpenAI 牌价折进「总费用」，
+    而它们是中转站**真金实扣**过的。实测当天就有 1.9M token / 实扣 $0.94 落错栏。
+
+    代理知道真相但戳记是 codex 写的，改不了。所以归属**换源**：读中转站自己的账单
+    （`.relay-usage.json`，monitor 拉自对方 `/usage`）。不是估算 —— 2026-09-09
+    逐 token 核过：rollout 解析 39,513 == 中转站账单 39,513。
+
+    ⚠️ 这批 token **同时也在** `by_provider.rotateproxy` 里。**绝不做减法**
+    （两个来源、两个窗口，相减会在窗口边缘变成负数），页面如实说明"别相加"。
+    """
+
+    ROOT = Path(__file__).resolve().parents[1]
+
+    def test_scan_emits_relay_billing_from_the_relay_snapshot(self):
+        src = (self.ROOT / "traffic" / "scan.py").read_text(encoding="utf-8")
+        self.assertIn("relay_billed", src)
+        self.assertIn(".relay-usage.json", src,
+                      "★ 归属没换源 —— rollout 里已经没有中转站戳记了")
+
+    def test_it_is_trimmed_to_the_same_window_as_days(self):
+        """★ 同一页两个数必须同窗口 —— 本仓在 scan 侧栽过（119M vs 9,004M）。"""
+        src = (self.ROOT / "traffic" / "scan.py").read_text(encoding="utf-8")
+        blk = src[src.index('entry["relay_billed"]') - 400:src.index('entry["relay_billed"]') + 200]
+        self.assertIn("if d in picked", blk, "没按输出窗口裁剪")
+
+    def test_the_page_says_it_must_not_be_added(self):
+        """★★ 最要紧的一句话：这批已含在「账号池」那一行里。
+        不写出来，读者会把总量算两遍 —— 而两个数都来自我们自己的页面。"""
+        page = (self.ROOT / "codexbar" / "src" / "pages" / "PlatformPage.tsx").read_text(encoding="utf-8")
+        self.assertIn("已经含在上面「账号池」那一行里", page)
+        self.assertIn("不要相加", page)
+        self.assertIn("中转站账单", page)
+
+    def test_the_pool_rows_never_reference_the_relay_bill(self):
+        """★ 真正的不变量：账号池那几行只由 `by_provider`（rollout）算出，
+        **绝不减去**中转站账单。跨源相减会在窗口边缘产生负数，
+        而负 token 在堆叠图上会画出一个不存在的事实。
+
+        ⚠️ 第一版判据是 `"total -" not in blk` —— 命中了**排序比较器**
+           `b.total - a.total`，一个纯假阳性。子串匹配挡不住"减法"这个语义，
+           要钉的是**数据流**：`rows` 的计算里不许出现 `billed`/`relay_billed`。
+        """
+        page = (self.ROOT / "codexbar" / "src" / "pages" / "PlatformPage.tsx").read_text(encoding="utf-8")
+        rows_blk = page[page.index("const rows:"):page.index("const sum =")]
+        for bad in ("billed", "relay_billed"):
+            self.assertNotIn(bad, rows_blk,
+                             "★ 账号池那几行引用了中转站账单 —— 两个来源被混算了")
+        # 反向:中转站那几行也只由账单算出,不碰 by_provider。
+        billed_blk = page[page.index("const billed ="):page.index("const billedTok")]
+        self.assertNotIn("by_provider", billed_blk)
+        self.assertIn("relay_billed", billed_blk)

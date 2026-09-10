@@ -131,9 +131,26 @@ function RouteSplit({ t, p, labels, rangeTxt }: {
   //    而它一分钱中转站的账都没走过。
   //    判据改成**是不是登记在册的中转站**（`provider_labels` 里有），
   //    而不是"排除法"。排除法的清单永远追不上现实。
+  // ★ 2026-09-10 起 rollout 里再没有中转站戳记（全是 rotateproxy），所以这一栏
+  //   恒为空 —— 保留判据只为兼容改动前的历史数据。中转站的归属见下面的 `billed`。
   const isRelay = (id: string): boolean => Boolean(p?.provider_labels?.[id]);
   const isPool = (id: string): boolean => id === "rotateproxy" || id === "openai";
   const relayTok = rows.filter((r) => isRelay(r.id)).reduce((a, r) => a + r.total, 0);
+  // ★★ 中转站账单，按当前档位求和。与上面的 `rows` **不同源**：那边是本机 rollout，
+  //    这边是中转站自己的 `/usage`。两者**不可相加** —— 这批 token 也在 rotateproxy 里。
+  const billed = Object.entries(p?.relay_billed ?? {})
+    .map(([id, perDay]) => {
+      let total = 0, cost = 0;
+      for (const [d, b] of Object.entries(perDay)) {
+        if (!want.has(d)) continue;
+        total += b.total; cost += b.actual_cost;
+      }
+      return { id, total, cost };
+    })
+    .filter((r) => r.total > 0)
+    .sort((a, b) => b.total - a.total);
+  const billedTok = billed.reduce((a, r) => a + r.total, 0);
+  const billedCost = billed.reduce((a, r) => a + r.cost, 0);
   return (
     // ★★ 2026-09-09 用户定稿：整块折叠进一个角标，**悬浮才展开**。
     //    页面上常驻四行路由明细 + 一条费用免责，占了 KPI 之前最贵的一段版面，
@@ -169,10 +186,30 @@ function RouteSplit({ t, p, labels, rangeTxt }: {
             <span style={{ opacity: 0.7 }}> · {((r.total / sum) * 100).toFixed(1)}%</span>
           </span>
         ))}
-        {relayTok > 0 && (
+        {billed.length > 0 && (
+          <>
+            <span style={{ fontWeight: 600, color: t.text, marginTop: 4 }}>
+              中转站账单 · {rangeTxt}
+            </span>
+            {billed.map((r) => (
+              <span key={r.id} style={{ fontFamily: "'JetBrains Mono', monospace",
+                                        fontVariantNumeric: "tabular-nums" }}>
+                {nameOf(r.id)} <b style={{ color: "#E0A21C" }}>{fmtTok(r.total)}</b>
+                <span style={{ opacity: 0.7 }}> · 实扣 {fmtUSD(r.cost)}</span>
+              </span>
+            ))}
+          </>
+        )}
+        {(relayTok > 0 || billedTok > 0) && (
           <span data-route-footnote style={{ color: "#E0A21C", whiteSpace: "normal" }}>
-            ⚠️ 其中 {fmtTok(relayTok)} 经中转站 —— <b>下面的「总费用」对它们不适用</b>
-            （那是按 OpenAI 牌价折算的等效成本），真实扣款见「中转站」页。
+            {/* ★★ 两个来源、两个口径,必须同时说清楚"是什么"和"别加两遍"。 */}
+            ⚠️ 其中 {fmtTok(relayTok + billedTok)} 经中转站（真实扣款
+            {fmtUSD(billedCost)}）—— <b>下面的「总费用」对它们不适用</b>
+            （那是按 OpenAI 牌价折算的等效成本）。
+            {billedTok > 0 && (
+              <> 这批数来自中转站自己的账单，<b>已经含在上面「账号池」那一行里</b>
+              （代理转发时 codex 只记 <code>rotateproxy</code>），<b>不要相加</b>。</>
+            )}
           </span>
         )}
       </div>

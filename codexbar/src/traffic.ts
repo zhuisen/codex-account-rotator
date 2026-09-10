@@ -41,6 +41,16 @@ export interface Platform {
    *  ⚠️ 它**不参与任何费用计算**：经中转站的 token 是真金按中转站价扣的，
    *  `rates.ts` 那张 OpenAI 牌价表对它们没有意义。费用见中转站页的「实扣」。 */
   by_provider?: Record<string, Record<string, Bucket>>;
+  /** ★★ 中转站的**账单**（relay id → 日期 → 量）。来源是中转站自己的 `/usage`，
+   *  不是 rollout。
+   *
+   *  2026-09-10 起中转站也由本地代理转发，codex 写进 rollout 的 `model_provider`
+   *  **恒为 `rotateproxy`** —— `by_provider` 再也分不出中转站。所以归属换源。
+   *  实测两源逐 token 相等（39,513 == 39,513）。
+   *
+   *  ⚠️ **这批 token 同时也在 `by_provider.rotateproxy` 里**，两者**不可相加**。
+   *  页面必须写出这一点，否则读者会把总量算两遍。 */
+  relay_billed?: Record<string, Record<string, { total: number; actual_cost: number; requests: number }>>;
   /** 中转站 id → 用户起的显示名。账号池那两个 id（`rotateproxy`/`openai`）不在里面，
    *  前端自己有文案。拿不到时用 id 当名字（scan 侧整体 fail-open）。 */
   provider_labels?: Record<string, string>;

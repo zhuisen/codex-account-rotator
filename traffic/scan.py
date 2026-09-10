@@ -141,6 +141,12 @@ def _num(d, key):
     return v if isinstance(v, int) and not isinstance(v, bool) and v >= 0 else 0
 
 
+def _num_or_zero(v):
+    """数值化。**只用于账单明细行**（行存在就说明有活动），与顶层读数的
+    「读不到给 None」是两条口径 —— 别混用。"""
+    return v if isinstance(v, (int, float)) and not isinstance(v, bool) else 0
+
+
 def _sig(st):
     """缓存的「这个文件变了没」签名。
 
@@ -1365,6 +1371,42 @@ def scan(days=90, use_cache=True, only=None, exclude=None):
     except Exception:
         pass
 
+    # ★★★ **中转站的归属只能来自中转站自己的账单**（2026-09-10 修，Fable 评审抓到）。
+    #
+    #   2026-09-10 起「一个 provider、两种上游」：中转站流量也由本地代理转发，而 codex
+    #   写进 rollout 的 `model_provider` **恒为 `rotateproxy`** —— 于是 `by_provider`
+    #   再也分不出中转站，那批 token 被算进「账号池」，并被 `rates.ts` 按 OpenAI 牌价
+    #   折进「总费用」。而它们是中转站**真金实扣**过的，那张牌价表对它们没有意义。
+    #   （实测当天就有 1.9M token / 实扣 $0.94 落在错的那一栏。）
+    #
+    #   代理知道真相，但戳记是 codex 写的，改不了。所以换源:直接读中转站的账单
+    #   （`.relay-usage.json`，由 monitor 拉自对方 `/usage`）。这不是估算 ——
+    #   2026-09-09 逐 token 核过一次：rollout 解析 39,513 == 中转站账单 39,513。
+    #
+    #   ⚠️ **这批 token 同时也在 `by_provider.rotateproxy` 里**（rollout 照样记了它们）。
+    #      **绝不在这里做减法** —— 两个来源、两个窗口，相减会在窗口边缘变成负数。
+    #      前端如实说明"已含在账号池那一行里"，让读者自己知道别重复计。
+    #   ★ 整体 fail-open，与上面 `relay_labels` 同一条纪律。
+    relay_billed = {}
+    try:
+        _snap = json.loads((_STORE / ".relay-usage.json").read_text(encoding="utf-8"))
+        for _r in (_snap.get("relays") or []):
+            _rid, _d = _r.get("id"), (_r.get("data") or {})
+            if not _rid or not isinstance(_d, dict):
+                continue
+            _per = {}
+            for _row in (_d.get("daily") or []):
+                _dt = _row.get("date")
+                if isinstance(_dt, str) and _dt:
+                    _per[_dt] = {"total": _num_or_zero(_row.get("total_tokens")),
+                                 "actual_cost": _num_or_zero(_row.get("actual_cost")),
+                                 "requests": _num_or_zero(_row.get("requests"))}
+            if _per:
+                relay_billed[_rid] = _per
+                relay_labels.setdefault(_rid, _r.get("label") or _rid)
+    except Exception:
+        relay_billed = {}
+
     cur_h = int(strftime("%H", localtime(now_ts)))
     for pk, (days_b, hours_b) in acc.items():
         picked = {}
@@ -1393,6 +1435,15 @@ def scan(days=90, use_cache=True, only=None, exclude=None):
             entry["by_provider"] = {p2: v for p2, v in entry["by_provider"].items() if v}
             # ★ 只给**中转站**标签(账号池那两个 id 是内部名,前端自己有文案)。
             entry["provider_labels"] = {k: v for k, v in relay_labels.items() if k in bp}
+        # ★ 中转站账单（只挂在 codex 上 —— 只有它会走代理）。**与 `days` 同窗口裁剪**。
+        if pk == "codex" and relay_billed:
+            _rb = {rid: {d: b for d, b in per.items() if d in picked}
+                   for rid, per in relay_billed.items()}
+            _rb = {rid: v for rid, v in _rb.items() if v}
+            if _rb:
+                entry["relay_billed"] = _rb
+                entry.setdefault("provider_labels", {}).update(
+                    {rid: relay_labels.get(rid, rid) for rid in _rb})
         cov = coverage.get(pk)
         if cov:
             entry["coverage"] = cov
