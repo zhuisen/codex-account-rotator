@@ -6,7 +6,7 @@
 ## 为什么在 Python 而不是 Rust
 
 需要**把 codex rollout 的 token 记账接进来**,而 rollout 解析的基建(以及那一堆口径坑)已经在
-`traffic/scan.py` 里。在 Rust 里再写一份 codex 解析器,正是本仓 `CLAUDE.md` §5 明令禁止的
+`traffic/scan.py` 里。在 Rust 里再写一份 codex 解析器,正是本仓 `.claude/rules/traffic.md` 明令禁止的
 「别再按平台各写一份扫描器」。Rust 侧只负责起进程 + 缓存。
 
 ## ★★ token 归属靠 `response_id` **精确 join**,不是按时间推断

@@ -885,7 +885,7 @@ fn read_logs() -> Result<String, String> {
 //    2026-09-07 的第一版把 proxy.log 的解析写在了 Rust 里,跑得很好 —— 直到用户的新设计稿
 //    要求「按请求把 token 与模型归属到当时在岗的账号」。那需要读 codex 的 rollout,
 //    而 rollout 解析(以及它那一堆口径坑:累计 vs 单次、去重键、时区)已经整套在
-//    `traffic/scan.py` 里。在 Rust 里再写一份 = 本仓 `CLAUDE.md` §5 明令禁止的
+//    `traffic/scan.py` 里。在 Rust 里再写一份 = 本仓 `.claude/rules/traffic.md` 明令禁止的
 //    「别再按平台各写一份扫描器」,两份迟早在边界上互相矛盾。
 //    所以旧的 Rust 解析器**整块删掉**,不是留着做快速路径 —— 同一件事留两份实现,
 //    就是在等下一次"两个页面显示不同的数"。

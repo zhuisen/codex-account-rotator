@@ -360,7 +360,7 @@ export default function LogsPage({ t }: { t: Theme }): React.ReactElement {
           //   ★ 稿子写的 `#5b6470` 只有 **2.92**，连图形线的 3.0 都够不着，照抄就是把
           //   本仓已经判过死刑的 `faint` 换个写法请回来。
           //   ★ 修法是**改用三级里对的那一级**，不是新造一个色 —— 这个问题此前被
-          //   「就地留一句注释换个色」绕过两次（CLAUDE.md §5），第三次才做成闸。
+          //   「就地留一句注释换个色」绕过两次（`.claude/rules/ui.md`），第三次才做成闸。
           color: t.text2, textTransform: "uppercase",
         }}>
           <span>账号</span>

@@ -31,7 +31,7 @@ const GROK_WIN = "周";
  *   直接违反项目铁律「读不到 ≠ 确实没有」。
  *
  * ★ 颜色**由调用方传入**（`colorOf(traffic, "grok")`），不在这里写死 `#8b7cf6`：
- * 用户在设置页能给平台改色，写死就跟不上（CLAUDE.md §5 的既有铁律）。
+ * 用户在设置页能给平台改色，写死就跟不上（`.claude/rules/ui.md` 的既有铁律）。
  */
 export default function GrokCard({ t, color, snap, privacy, busy, err, disabled, winSlots, onOpen, onRefresh }: {
   t: Theme;

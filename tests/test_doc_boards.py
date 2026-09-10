@@ -57,6 +57,19 @@ NOT_DONE = ("未修", "未做", "未验", "未定", "未复现", "未拍板",
 # CHANGELOG 分卷阀。今天 2455 行 —— 阀设在这之上，它是**绊线**不是当下的活。
 CHANGELOG_MAX_LINES = 3000
 
+# `CLAUDE.md` 的字节阀。
+#
+# ★ 参照物是 **Codex 的 `project_doc_max_bytes`（131,072）**：本仓有 `AGENTS.md`，
+#   Codex 平时读的是它；但 `~/.codex/config.toml` 设了
+#   `project_doc_fallback_filenames = ["CLAUDE.md"]` —— `AGENTS.md` 一旦被删/改名，
+#   Codex 就会去读 `CLAUDE.md` 并**静默截断**（截断的指令文件 = 失败的配置，不是"小一点"）。
+#   另一半代价是 Claude 每次触碰本项目都要吃掉它。
+#
+# 2026-09-10 拆分：162 KB → 92 KB（§5 按内容拆成 `.claude/rules/{ui,traffic}.md`）。
+# 阀留在 110 KB：在还有余量时就响，不是等撞上 131 才响。
+# ⚠️ 调高它之前先问：这些内容**是不是路径相关**？是就该进 `.claude/rules/` 而不是抬阀。
+CLAUDE_MAX_BYTES = 110 * 1024
+
 
 def _sections(text):
     """-> [(行号, 标题)]，只取 `##` / `###`。"""
@@ -105,6 +118,62 @@ class TheBoardStaysABoard(unittest.TestCase):
               "\n     durable 的规则/口径搬进 CLAUDE.md。"
               "\n   ⚠️ 搬之前先确认它**独有的知识**有别的家 —— "
               "删掉一条同时记着某个未解安全问题的 TODO 是净损失。")
+
+
+class TheProjectDocStaysUnderCodexBudget(unittest.TestCase):
+    """`CLAUDE.md` 不许长回去。
+
+    ★ 它 gitignored（含本机事实），干净 checkout 上不存在 —— 那时**跳过并说出原因**。
+    """
+
+    def test_it_fits_with_room_to_spare(self):
+        f = ROOT / "CLAUDE.md"
+        if not f.exists():
+            self.skipTest("CLAUDE.md 不存在（gitignored，CI 的干净 checkout 上没有）")
+        n = len(f.read_bytes())
+        self.assertLessEqual(
+            n, CLAUDE_MAX_BYTES,
+            f"★ CLAUDE.md {n/1024:.0f} KB（阀 {CLAUDE_MAX_BYTES/1024:.0f} KB，"
+            f"Codex 的硬上限 128 KB）。\n"
+            f"   先问**这些内容是不是路径相关**：是就搬进 `.claude/rules/<名>.md` 加 "
+            f"`paths:` frontmatter，\n"
+            f"   写对应文件时自动加载、平时不占上下文。抬阀是最后手段。\n"
+            f"   ⚠️ 按**内容**分，不按它原来住在哪 —— 2026-09-10 差点把 `scan.py` 的口径"
+            f"归进 UI 那份，\n"
+            f"     那样编辑 `scan.py` 时它正好不加载。")
+
+
+class TheCommittedRulesCarryNoLocalFacts(unittest.TestCase):
+    """★★ `.claude/rules/*.md` **是入库的**，而 `CLAUDE.md` / `AGENTS.md` / `memory.md` 不是。
+
+    本机先例：`skill-hub` 与 `erp-system-v3` 都提交它们的 rules —— 因为 rules 是
+    **路径相关的工程规范**（共享行为），而项目 `CLAUDE.md` 在本仓还兼着本机事实与凭证细节。
+    所以从 `CLAUDE.md` 往 rules 搬东西时，**边界跟着变了**：搬过去 = 公开。
+    这条闸盯着那条边界，不靠"我搬的时候看过一眼"。
+    """
+
+    PATTERNS = {
+        "邮箱": r"[\w.+-]+@[\w-]+\.[\w.]+",
+        "account_id/UUID": r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b",
+        "api key": r"\bsk-[A-Za-z0-9_-]{12,}",
+        "token 赋值": r"(?i)\b(bearer|refresh_token|access_token)\b\s*[:=]\s*\S{8,}",
+        "账号标签": r"\b(plus[0-9]+|Pro[0-9]+)\b",
+        "绝对家目录": r"/Users/[a-z]+/",
+    }
+
+    def test_no_local_facts_leaked_into_the_committed_rules(self):
+        rules = sorted((ROOT / ".claude" / "rules").glob("*.md"))
+        self.assertTrue(rules, "一条 rule 都没有 —— 探针坏了，不是规则没了")
+        bad = []
+        for f in rules:
+            t = f.read_text(encoding="utf-8")
+            for name, pat in self.PATTERNS.items():
+                hits = sorted(set(re.findall(pat, t)))
+                if hits:
+                    bad.append(f"    {f.name} · {name}: {hits[:3]}")
+        self.assertEqual(bad, [],
+                         "★★ 入库的 rule 里有本机事实/凭证痕迹：\n" + "\n".join(bad)
+                         + "\n   → 那类内容留在 gitignored 的 `CLAUDE.md`，别跟着搬。")
 
 
 class TheChangelogIsSplitNotSummarised(unittest.TestCase):

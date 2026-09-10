@@ -115,7 +115,7 @@ class GrokQuotaDirectionAndColor(unittest.TestCase):
                                  "{}:环/条又用回了语义色,用户定稿是恒紫".format(name))
 
     def test_platform_colour_is_injected_not_hardcoded(self):
-        """写死 `#8b7cf6` 会让"用户在设置页给平台改色"失效(CLAUDE.md §5 的既有铁律)。"""
+        """写死 `#8b7cf6` 会让"用户在设置页给平台改色"失效(`.claude/rules/ui.md` 的既有铁律)。"""
         for name, (_, code) in self.files.items():
             with self.subTest(f=name):
                 self.assertRegex(code, r"color:\s*string",
