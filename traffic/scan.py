@@ -812,15 +812,24 @@ def _pb(buf):
 
 
 def _agy_db_sig(path, st):
-    """(有效 mtime, 缓存签名)。**必须把 `-wal` / `-shm` 算进去。**
+    """(有效 mtime, 缓存签名)。**算主库与 `-wal`，绝不算 `-shm`。**
 
     ★★ agy 的库是 `journal_mode=wal`（实测 261/261 都有 `-wal`）。写入落在 WAL 上时
        **主库的 mtime 与 size 原地不动** —— 只看主库会同时犯两个错：被 `cut` 判成
        "太旧、跳过"，以及命中旧缓存。两个错的症状都是**数字停在旧值上、零报错**。
     """
+    # ★★★ **`-shm` 绝不能进签名**（2026-09-10 修，Fable 评审抓到）。
+    #    它是 WAL 的共享内存索引：**每一个读者**（包括我们自己的 `mode=ro` 连接）
+    #    都会往里写 read-mark，于是一次纯只读扫描就把它的 mtime 推了。
+    #    实测同一个库、一次 `_scan_agy_db` 前后：shm mtime 从 ...106756 变成 ...113770，
+    #    而主库与 `-wal` 一个字节没动。后果是 **261 个库的缓存永不命中**：
+    #    每次扫描全量重解析、重写 18.5MB 缓存，而且**零报错**（只是慢）。
+    #    ⚠️ 我原来的闸只测了「wal 变 ⇒ 签名变」，没测「什么都没变 ⇒ 签名不变」——
+    #      少的正是能发现这条的那一半。空守卫的又一种形态：**只验了一个方向**。
+    #    `-wal` 保留:真正的写入落在那里,只读不动它。
     parts = [st.st_mtime_ns, st.st_size]
     newest = st.st_mtime
-    for suffix in ("-wal", "-shm"):
+    for suffix in ("-wal",):
         try:
             w = os.stat(str(path) + suffix)
         except OSError:

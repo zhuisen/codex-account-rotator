@@ -105,9 +105,15 @@ class RelayPageRenders(unittest.TestCase):
         """
         return dom(BASE + f"/harness.html?nav=relay&rail=open&relay={mode}&rtab=用量")
 
-    def usage_q(self, extra):
-        """带额外参数的用量版块（`rrange` / `rmode` / `riso`，都按文字/身份点）。"""
-        return dom(BASE + f"/harness.html?nav=relay&rail=open&relay=relay&rtab=用量&{extra}")
+    def usage_q(self, extra, mode="relay"):
+        """带额外参数的用量版块（`rrange` / `rmode` / `riso`，都按文字/身份点）。
+
+        ★ 夹具走 `mode=` 形参，**不能**在 `extra` 里再写一个 `relay=`：
+          `URLSearchParams.get` 取的是**第一个**值，重复的同名参数会被静默丢掉。
+          实测踩过：`extra="relay=sparse&rrange=7d"` 实际跑的仍是稠密夹具，
+          而"轴上 7 个日期"那条断言在两份夹具下**都绿** —— 闸看着通过，其实没测到。
+        """
+        return dom(BASE + f"/harness.html?nav=relay&rail=open&relay={mode}&rtab=用量&{extra}")
 
     def test_the_nav_click_actually_landed_on_this_page(self):
         """★ 先证导航真的点到了这一页。侧栏原来是**按位置**点的，插入/删除页都会静默点错 ——
@@ -305,6 +311,53 @@ class RelayPageRenders(unittest.TestCase):
         # ★ 构成条也要**按模型分层**，与其它档位同一套颜色/身份。
         self.assertTrue(self.layers(today), "构成条没有分层")
         self.assertIn("与上图同窗口（今日）", today, "模型表没跟到今日档")
+
+    def test_the_window_is_calendar_days_not_days_with_data(self):
+        """★★★ 档位必须按**自然日**切，不是"最近 N 个有数据的日期"（Fable 评审抓到）。
+
+        中转站的 `daily` 只含有请求的日子。按"有数据的天"截，7d 档实测跨了 **23 个
+        自然日**、页面却标「7d」，而 `日均 = 总量 ÷ 7` 虚高 **3.3×**。
+        这与 CLAUDE.md 对 `scan.py` 判过死刑的是同一类错，而这一页自称与
+        「AI用量信息」1:1 —— 那边一直是自然日口径。
+
+        ⚠️ **必须用稀疏夹具**（`?relay=sparse`：只有 5 天有数据，散布在 24 个自然日里）。
+           稠密夹具下两种实现结果**完全一样**，闸换任何档位都绿 —— 空守卫。
+        """
+        d = self.usage_q("rrange=7d", mode="sparse")
+        axis = sorted(set(re.findall(r">(\d\d-\d\d)<", d)))
+        self.assertEqual(len(axis), 7,
+                         f"7d 档轴上有 {len(axis)} 个日期 —— 不是 7 个自然日: {axis}")
+        # 日均 = 窗口总量 ÷ **自然日数**。夹具每个有数据的日子恰好 1,000,000 token，
+        # 7d 窗口里有 2 天（今天 / 2 天前）⇒ 2M ÷ 7 = 285.7K，而按"有数据的天"是 1M。
+        self.assertIn("285.7K", d, "★ 日均用了「有数据的天」当分母 —— 会虚高数倍")
+        self.assertNotIn("日均 1M", d)
+
+    def test_the_previous_window_must_be_equal_length_and_fully_observed(self):
+        """★★★ 环比的上一窗口必须**等长、不与当前窗口重叠、且整段可观测**。
+
+        原实现 `slice(Math.max(0, len-2n), len-n)` 有两个洞：`len-n` 为负时 JS `slice`
+        把负数 end 当**从尾部倒数** ⇒ "上一窗口"落在当前窗口**内部**（总量和自己的
+        子集比）；且没有等长校验 ⇒ 1 天可以冒充 7 天的上期。
+        实测本机真快照：7d 档「环比 ↑148757.6%」、14d 档「↑87.7%」，
+        而注释一直承诺"样本不够就说 —"。
+
+        补零之后还有第三种：某天没有行 = **观测过、当天为 0**，还是**根本没观测过**？
+        后者不能入分母 —— 拿没观测过的日子当 0 去比，涨幅是凭空的。
+        """
+        # ★★ 判据档位必须选**部分重叠**的那一档，不能随手挑一档。
+        #    30d 档看着也是「—」，但那是被 `mk()` 的 `if (!before) return null` 兜住的
+        #    （上期一条数据都没有），**根本没走到**这条守卫 —— 拿它当判据是空守卫，
+        #    实测：删掉守卫后 30d 档照样绿。
+        #    稀疏夹具有数据的日子是 今天 / 2 / 9 / 16 / 23 天前，
+        #    14d 档的上期（14~27 天前）里恰好只有「23 天前」那一天被观测过 ⇒ 部分重叠，
+        #    正是守卫要挡的形状。删掉守卫会拿 1M 当 14 天的上期，算出 ↑200%。
+        d14 = self.usage_q("rrange=14d", mode="sparse")
+        self.assertIn("环比 —", d14,
+                      "★ 上一窗口只有 1/14 天被观测过，却拿它当整段基数比 —— 涨幅是凭空的")
+        # 反向：7d 档的上期（7~13 天前）整段落在观测范围内且有数据 ⇒ 必须给真数，
+        # 否则"修法"退化成了永远显「—」，那同样是假的。
+        d7 = self.usage_q("rrange=7d", mode="sparse")
+        self.assertRegex(d7, r"环比 [↑↓]", "★ 上期可观测却拒绝比较 —— 修法退化成了永远显 —")
 
     def test_an_empty_config_says_so_instead_of_rendering_nothing(self):
         """★ 「没配过」必须有一句话。一片空白和"加载失败"长得一样。"""

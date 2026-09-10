@@ -102,13 +102,37 @@ export default function RelayUsage({ t }: { t: Theme }): React.ReactElement {
   const view = useMemo(() => {
     const dates = new Set<string>();
     for (const r of rows) for (const d of r.u.data?.daily ?? []) dates.add(d.date);
-    let labels = [...dates].sort();
-    if (range === "today") {
-      // ★ 取**轴上最后一天**而不是本机日历的今天：中转站按它自己的时区结算，
-      //   两者跨午夜时会差一天，而"今天没有数据"和"时区对不上"长得一模一样。
-      labels = labels.slice(-1);
-    } else if (range !== 0) {
-      labels = labels.slice(-range);
+    const present = [...dates].sort();
+    // ★★★ **窗口按自然日切，不是"最近 N 个有数据的日期"**（2026-09-10 修）。
+    //
+    //   中转站的 `daily` 只含**有请求**的日子。原来 `present.slice(-range)` 取的是
+    //   最近 N 个**有数据**的日子 —— 实测 7d 档跨了 **23 个自然日**，页面却标「7d」；
+    //   `days = labels.length = 7` 让「日均」虚高 **3.3×**。中转站是"撞额度才切过来的
+    //   备胎"，用得越稀疏偏得越多。
+    //   这与本仓 CLAUDE.md 对 `scan.py` 判过死刑的是**同一类错**，而这一页自称
+    //   与「AI用量信息」1:1 —— 那边一直是自然日口径，两页同名 KPI 本来不可比。
+    //
+    //   补零之后空档会如实画成 0（本仓 UI 规范：空档是真的没用），
+    //   `days` 也就等于真正的自然日数。
+    const labels: string[] = [];
+    if (present.length) {
+      if (range === "today") {
+        // ★ 取**轴上最后一天**而不是本机日历的今天：中转站按它自己的时区结算，
+        //   两者跨午夜时会差一天，而"今天没有数据"和"时区对不上"长得一模一样。
+        labels.push(present[present.length - 1]);
+      } else {
+        const end = new Date(present[present.length - 1] + "T00:00:00Z");
+        const first = new Date(present[0] + "T00:00:00Z");
+        const span = range === 0
+          ? Math.round((end.getTime() - first.getTime()) / 86400000) + 1
+          : range;
+        for (let k = span - 1; k >= 0; k--) {
+          const d = new Date(end.getTime() - k * 86400000);
+          const iso = d.toISOString().slice(0, 10);
+          if (range === 0 && iso < present[0]) continue;
+          labels.push(iso);
+        }
+      }
     }
     const idx = new Map(labels.map((d, i) => [d, i]));
 
@@ -166,10 +190,35 @@ export default function RelayUsage({ t }: { t: Theme }): React.ReactElement {
     if (range === 0 || range === "today" || view.labels.length === 0) return null;
     const all = new Set<string>();
     for (const r of rows) for (const d of r.u.data?.daily ?? []) all.add(d.date);
-    const sorted = [...all].sort();
     const n = range as number;
-    const prev = new Set(sorted.slice(Math.max(0, sorted.length - n * 2), sorted.length - n));
-    if (prev.size === 0) return null;
+    // ★★★ **上一窗口必须等长且与当前窗口零交集**（2026-09-10 修）。
+    //
+    //   原来是 `sorted.slice(Math.max(0, len - 2n), len - n)` + 只判 `size === 0`。
+    //   两个洞：`len - n` 为负时 JS `slice` 把负数 end 当**从尾部倒数** ⇒ 取到的
+    //   "上一窗口"落在当前窗口**内部**（拿总量和自己的子集比）；以及没有等长校验 ⇒
+    //   1 天可以冒充 7 天的上期。实测本机真快照：7d 档显示「环比 ↑148757.6%」，
+    //   14d 档「↑87.7%」，而注释一直承诺"样本不够就说 —"。
+    //   参考实现 `TrafficPage.tsx` / `PlatformPage.tsx` 都有 `win.length === n` 守卫，
+    //   这一页抄了口径没抄守卫。
+    //
+    //   现在按**自然日**回退一个等长窗口，并要求它与当前窗口不相交。
+    if (!view.labels.length) return null;
+    const endPrev = new Date(view.labels[0] + "T00:00:00Z").getTime() - 86400000;
+    const prev = new Set<string>();
+    for (let k = 0; k < n; k++) {
+      prev.add(new Date(endPrev - k * 86400000).toISOString().slice(0, 10));
+    }
+    // ★ 只有当上一窗口**真的有观测**时才比 —— 否则那是"我们还没看过"，不是"降到 0"。
+    const cur = new Set(view.labels);
+    if ([...prev].some((d) => cur.has(d))) return null;      // 与当前窗口重叠 ⇒ 不比
+    // ★★ 上一窗口必须**整段落在观测范围内**。
+    //    补零之后"某天没有行"有两种含义：**观测过、当天为 0**，与**根本没观测过**。
+    //    前者可以入分母，后者不行 —— 拿没观测过的日子当 0 去比，得到的涨幅是凭空的。
+    //    只挡"整段早于观测"不够：部分重叠时（本机夹具 14d 档实测 6/14 天有观测）
+    //    仍会算出 ↑522.2%。判据是 `prev` 的**最早一天** ≥ 我们最早的观测。
+    const sorted = [...all].sort();
+    const prevFirst = [...prev].sort()[0];
+    if (!sorted.length || prevFirst < sorted[0]) return null;
     let ptok = 0, pcost = 0;
     for (const r of rows) {
       for (const d of r.u.data?.daily ?? []) {

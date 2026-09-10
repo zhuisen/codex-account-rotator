@@ -71,7 +71,14 @@ class _Resp(io.BytesIO):
 
 
 def fake_urlopen(routes, seen=None):
-    """routes: {path: (status, body)}。未登记的 path 一律 404。"""
+    """routes: {path: (status, body)}。未登记的 path 一律 404。
+
+    ★★ **打桩点是 `monitor._OPENER.open`,不是 `urllib.request.urlopen`。**
+       2026-09-10 起 `_get` 走自建 opener（装了同源重定向 handler,防止 key 被
+       302 带给第三方）。继续打 `urllib.request.urlopen` 的话桩**根本不生效**,
+       测试会去真的连 `api.example-relay.test` —— 这次是响亮地红了,
+       但换个断言方向就会变成"静默走真网络还全绿"。
+       打桩点必须跟着被测代码的调用路径走。"""
     def _open(req, timeout=None):
         path = req.full_url.split("/v1", 1)[1] if "/v1" in req.full_url else req.full_url
         if seen is not None:
@@ -95,7 +102,7 @@ class UserAgentIsMandatory(unittest.TestCase):
         """★ 常量对了不代表发出去了 —— 本仓的老形态:「名字出现 ≠ 真的接上」。
         所以判据是**打桩看到的 header**,不是源码里有没有那个字符串。"""
         seen = []
-        with mock.patch("urllib.request.urlopen",
+        with mock.patch.object(monitor._OPENER, "open",
                         fake_urlopen({"/usage": (200, json.dumps(SAMPLE))}, seen)):
             monitor.fetch(RELAY, remember_path=False)
         self.assertTrue(seen)
@@ -105,12 +112,12 @@ class UserAgentIsMandatory(unittest.TestCase):
 
     def test_a_403_is_reported_as_auth_with_its_own_wording(self):
         """403（策略/UA 闸）和 401（key 错）下一步动作不同,不许压成一句话。"""
-        with mock.patch("urllib.request.urlopen",
+        with mock.patch.object(monitor._OPENER, "open",
                         fake_urlopen({"/models": (403, "error code: 1010")})):
             r = monitor.test_connection(RELAY)
         self.assertEqual(r["state"], "auth")
         self.assertEqual(r["http"], 403)
-        with mock.patch("urllib.request.urlopen",
+        with mock.patch.object(monitor._OPENER, "open",
                         fake_urlopen({"/models": (401, '{"code":"INVALID_API_KEY"}')})):
             r401 = monitor.test_connection(RELAY)
         self.assertEqual(r401["http"], 401)
@@ -192,24 +199,24 @@ class BillingPathIsProbedNotAssumed(unittest.TestCase):
     """★★ 见模块 docstring ③。"""
 
     def test_it_finds_the_one_that_answers(self):
-        with mock.patch("urllib.request.urlopen",
+        with mock.patch.object(monitor._OPENER, "open",
                         fake_urlopen({"/dashboard/billing/usage": (200, '{"a":1}')})):
             self.assertEqual(monitor.probe_billing_path(RELAY), "/dashboard/billing/usage")
 
     def test_a_200_that_is_not_json_is_not_accepted(self):
         """★ 有的站对未知路径返回 200 + HTML。只看状态码会认错端点,
         之后每次拉用量都拿到一坨 HTML 而「看起来是通的」。"""
-        with mock.patch("urllib.request.urlopen",
+        with mock.patch.object(monitor._OPENER, "open",
                         fake_urlopen({"/usage": (200, "<html>not found</html>")})):
             self.assertIsNone(monitor.probe_billing_path(RELAY))
 
     def test_a_200_json_array_is_not_accepted_either(self):
-        with mock.patch("urllib.request.urlopen",
+        with mock.patch.object(monitor._OPENER, "open",
                         fake_urlopen({"/usage": (200, "[1,2,3]")})):
             self.assertIsNone(monitor.probe_billing_path(RELAY))
 
     def test_no_endpoint_reports_its_own_state_not_a_zero_balance(self):
-        with mock.patch("urllib.request.urlopen", fake_urlopen({})):
+        with mock.patch.object(monitor._OPENER, "open", fake_urlopen({})):
             r = monitor.fetch({**RELAY, "usage_path": None}, remember_path=False)
         self.assertFalse(r["ok"])
         self.assertEqual(r["state"], "no_billing_endpoint")
@@ -219,12 +226,12 @@ class BillingPathIsProbedNotAssumed(unittest.TestCase):
 class FailuresAreDistinguishable(unittest.TestCase):
     def test_unreachable_auth_and_bad_payload_are_three_states(self):
         cases = {}
-        with mock.patch("urllib.request.urlopen",
+        with mock.patch.object(monitor._OPENER, "open",
                         mock.Mock(side_effect=urllib.error.URLError("no route"))):
             cases["unreachable"] = monitor.fetch(RELAY, remember_path=False)["state"]
-        with mock.patch("urllib.request.urlopen", fake_urlopen({"/usage": (401, "nope")})):
+        with mock.patch.object(monitor._OPENER, "open", fake_urlopen({"/usage": (401, "nope")})):
             cases["auth"] = monitor.fetch(RELAY, remember_path=False)["state"]
-        with mock.patch("urllib.request.urlopen", fake_urlopen({"/usage": (200, "not json")})):
+        with mock.patch.object(monitor._OPENER, "open", fake_urlopen({"/usage": (200, "not json")})):
             cases["bad_payload"] = monitor.fetch(RELAY, remember_path=False)["state"]
         self.assertEqual(len(set(cases.values())), 3, cases)
 
@@ -248,7 +255,7 @@ class CollectNeverLeaksKeys(unittest.TestCase):
                 os.environ[k] = v
 
     def test_the_whole_payload_is_key_free(self):
-        with mock.patch("urllib.request.urlopen",
+        with mock.patch.object(monitor._OPENER, "open",
                         fake_urlopen({"/usage": (200, json.dumps(SAMPLE))})):
             blob = json.dumps(monitor.collect(), ensure_ascii=False)
         self.assertNotIn(RELAY["key"], blob)
@@ -263,7 +270,7 @@ class CollectNeverLeaksKeys(unittest.TestCase):
 
     def test_collect_carries_the_route_status(self):
         """路由那条静默失败的闸必须跟着数据一起送到 UI,否则没人看得见。"""
-        with mock.patch("urllib.request.urlopen",
+        with mock.patch.object(monitor._OPENER, "open",
                         fake_urlopen({"/usage": (200, json.dumps(SAMPLE))})):
             out = monitor.collect()
         self.assertIn("route", out)

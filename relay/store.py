@@ -46,6 +46,7 @@ import re
 import sys
 import stat
 import time
+import urllib.parse
 from contextlib import contextmanager
 from hashlib import sha256
 from pathlib import Path
@@ -60,6 +61,17 @@ POOL_PROFILE = "rotateproxy"
 # id 直接当文件名用（`~/.codex/<id>.config.toml`）也当 codex 的 provider id 用,
 # 所以字符集要卡死:既防路径穿越,也防 TOML 里需要转义的字符。
 ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{1,30}$")
+
+_LOOPBACK = {"localhost", "127.0.0.1", "::1"}
+
+
+def _is_loopback(url):
+    """host 是不是回环。★ 用 `urlsplit().hostname` 而不是切字符串:
+    它会正确剥掉端口和 IPv6 的方括号（`http://[::1]:3000` → `::1`）。"""
+    try:
+        return (urllib.parse.urlsplit(url).hostname or "").lower() in _LOOPBACK
+    except ValueError:                      # 畸形 URL —— 当成非回环,从严
+        return False
 # codex 的内置 provider id 不可覆盖（0.154 仍硬报
 # `model_providers contains reserved built-in provider IDs:`）,而 `rotateproxy`
 # 是账号池自己的,被中转站占用会把两条路由搅在一起。
@@ -176,6 +188,14 @@ def validate(relay):
     url = (relay.get("base_url") or "").strip()
     if not url.startswith(("http://", "https://")):
         errs.append("base_url 必须以 http:// 或 https:// 开头")
+    # ★★ 远端明文 http 在这里就挡掉。中转站 key 是**按量扣钱的凭证**,明文发一次,
+    #    沿途任何一跳都能拿去刷余额。此前这条只校验"是不是 http(s) 开头",
+    #    远端 http 一路放行到 `monitor._get()` 才有人管 —— 而 `proxy.py` 那侧一直要求
+    #    https。同一条规则三处实现,这里曾是最宽的那处。
+    #    回环仍然放行:自建 one-api 跑 `http://127.0.0.1:3000` 是正常用法,流量不出网卡。
+    elif url.startswith("http://") and not _is_loopback(url):
+        errs.append("base_url 用明文 http 只允许指向回环地址（localhost / 127.0.0.1 / ::1）;"
+                    "远端请改成 https:// —— 否则 api key 会明文上网")
     elif url.rstrip("/").endswith("/chat/completions"):
         # 很常见的粘贴错误:把完整端点当 base_url 填进来。
         errs.append("base_url 填的是完整端点,应该只到 /v1")

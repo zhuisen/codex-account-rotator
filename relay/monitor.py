@@ -22,15 +22,22 @@
    CodexBar 现有的「AI用量」页显示的是**按牌价折算的等效成本**,把这两个数堆进
    同一张图会直接骗人。本模块两个都返回,**永不相加、永不互相替代**。
 
+④ **urllib 跟随重定向时会原样带上 `Authorization`。** `HTTPRedirectHandler` 只剥
+   内容类头（Content-Length / Content-Type）。对端回一句 `302 Location: https://别人家/`,
+   中转站 key 就主动送出去了,而调用方只看到一个正常的 200。所以本模块**不用**
+   `urllib.request.urlopen`,走自建的 `_OPENER`（见 `_SameOriginRedirect`）。
+   ⚠️ 打桩测试要打 `monitor._OPENER.open`;打 `urllib.request.urlopen` 不生效。
+
 ## 为什么不用 requests
 
 本仓的 python 依赖保持零外部包（`traffic/*` 同）。stdlib 的 urllib 够用,
-且能显式控制 UA —— 恰好是坑 ① 要的。
+且能显式控制 UA —— 恰好是坑 ① 要的。代价是坑 ④ 要自己补。
 """
 import json
 import ssl
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 from . import store
@@ -48,18 +55,86 @@ BILLING_PATHS = [
 ]
 
 
+LOOPBACK = {"localhost", "127.0.0.1", "::1"}
+
+
+def _origin(url):
+    """`(scheme, host, port)` —— 判"还是不是同一个对端"用的三元组。
+
+    ★ 必须带端口。`https://a.com` 与 `https://a.com:8443` 是两个对端,
+      只比 hostname 会把跨端口跳转当成同源放过去。"""
+    p = urllib.parse.urlsplit(url)
+    host = (p.hostname or "").lower()
+    return p.scheme.lower(), host, p.port or (443 if p.scheme == "https" else 80)
+
+
+def _key_is_safe_to_send(url):
+    """能不能把 `Authorization: Bearer <key>` 发给这个 URL。
+
+    ★★ **明文 http 只允许回环。** 中转站的 key 是**按量扣钱的凭证**,发一次明文
+       等于沿途任何一跳都能拿去刷余额。`store.py` 的校验只挡了"不是 http(s) 开头",
+       远端 `http://` 是放行的 —— 而 `proxy.py::_relay_upstream()` 那侧要求 https。
+       同一条规则两份实现分叉,这里是宽的那份。
+    ★ 但不能一刀切禁 http:自建的 one-api 跑在 `http://127.0.0.1:3000` 是正常用法,
+      回环流量不出网卡。判据是**回环**,不是"本地"这种模糊说法。
+    """
+    scheme, host, _ = _origin(url)
+    return scheme == "https" or (scheme == "http" and host in LOOPBACK)
+
+
+class _SameOriginRedirect(urllib.request.HTTPRedirectHandler):
+    """只允许**同源**跳转。跨源一律拒绝,不是"跳过去但去掉 header"。
+
+    ★★★ urllib 默认跟随重定向,并且 `HTTPRedirectHandler.redirect_request` 只剥掉
+       **内容类头**（Content-Length / Content-Type）—— `Authorization` 是**原样带过去**的。
+       所以对端（或任何能改对端响应的人）回一句 `302 Location: https://attacker/`,
+       我们就把中转站 key 主动送上门,而调用方只看到一个正常的 200。
+       这不需要对端有恶意:一个被接管的域名、一个配错的 CDN 规则就够了。
+
+    ★ 为什么不用"跨源时删掉 Authorization 再跟过去":那样会拿到一个**没带凭证**的
+      响应,而它长得和"key 失效"一模一样 —— 把一次安全事件伪装成一次凭证问题。
+      拒绝并把原因说出来,是本仓「读不到 ≠ 没有」的同一条纪律。
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if _origin(req.full_url) != _origin(newurl) or not _key_is_safe_to_send(newurl):
+            raise urllib.error.HTTPError(
+                req.full_url, code,
+                f"拒绝跨源跳转（会把中转站 key 带给第三方）: {newurl.split('?')[0]}",
+                headers, fp)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+# ★ 建一次复用。`build_opener` 会用我们这个 handler **顶掉**默认的 HTTPRedirectHandler
+#   （同类替换),不会两个都在。
+_OPENER = urllib.request.build_opener(_SameOriginRedirect())
+
+
 def _get(base_url, path, key):
     """返回 (status, body_text)。网络层异常统一成 (None, 原因) —— 但**保留原因**,
     别把「连不上」和「404」压成同一个值。"""
+    url = base_url.rstrip("/") + path
+    # ★ 在**发出去之前**挡住,而不是发完再后悔。
+    if not _key_is_safe_to_send(url):
+        return None, ("InsecureTransport: 拒绝用明文 http 把中转站 key 发给非回环地址"
+                      f"（{_origin(url)[1]}）—— 请把 base_url 改成 https://")
     req = urllib.request.Request(
-        base_url.rstrip("/") + path,
-        headers={"Authorization": f"Bearer {key}", "User-Agent": USER_AGENT},
+        url, headers={"Authorization": f"Bearer {key}", "User-Agent": USER_AGENT},
     )
     try:
-        with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
+        with _OPENER.open(req, timeout=TIMEOUT) as r:
             return r.status, r.read().decode("utf-8", "replace")
     except urllib.error.HTTPError as e:
-        return e.code, e.read(2000).decode("utf-8", "replace")
+        # ★ 被 `_SameOriginRedirect` 拒掉时 `e.read()` 读的是**原响应体**,不是错误说明;
+        #   要显示的原因在 `e.reason` 里。两者都留:调用方要能说出到底发生了什么。
+        body = ""
+        try:
+            body = e.read(2000).decode("utf-8", "replace")
+        except Exception:
+            pass
+        if str(e.reason).startswith("拒绝跨源跳转"):
+            return e.code, str(e.reason)
+        return e.code, body
     except (urllib.error.URLError, ssl.SSLError, TimeoutError, OSError) as e:
         return None, f"{type(e).__name__}: {e}"
 

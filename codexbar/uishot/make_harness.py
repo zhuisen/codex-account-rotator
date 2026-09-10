@@ -508,8 +508,33 @@ function relayRoute() {
   var m = relayMode();
   return RELAY_ROUTES[m] || RELAY_ROUTES[m === 'never' || m === 'unreachable' || m === 'auth' || m === 'nobill' || m === 'empty' ? 'relay' : 'relay'];
 }
+// ★★ **稀疏夹具**：只在少数几天有请求，散布在一大段自然日里 ——
+//    还原真实快照的形状（中转站是"撞额度才切过来的备胎"）。
+//    稠密夹具下「窗口按自然日切」与「按最近 N 个有数据的日子切」**结果完全一样**，
+//    那条闸换任何档位都绿，是个空守卫。这份夹具专门让两者分开。
+function relaySparseDaily() {
+  var out = [], offsets = [0, 2, 9, 16, 23];   // 今天/2/9/16/23 天前
+  for (var i = 0; i < offsets.length; i++) {
+    var d = new Date(Date.now() - offsets[i] * 86400000);
+    out.push({ date: d.toISOString().slice(0, 10), requests: 10,
+               total_tokens: 1000000, input_tokens: 200000, output_tokens: 20000,
+               cache_read_tokens: 780000, cache_write_tokens: 0,
+               cost: 5, actual_cost: 1.25,
+               models: [{ model: 'gpt-5.5', requests: 10, total_tokens: 1000000,
+                          input_tokens: 200000, output_tokens: 20000,
+                          cache_read_tokens: 780000, cache_write_tokens: 0,
+                          cost: 5, actual_cost: 1.25 }] });
+  }
+  return out.sort(function (a, b) { return a.date < b.date ? -1 : 1; });
+}
+
 function relayEntry() {
   var m = relayMode();
+  if (m === 'sparse') {
+    return { id: 'tokendun', label: 'TokenDun', base_url: RELAY_ROW.base_url,
+             key_fp: RELAY_ROW.key_fp, ok: true, state: 'ok',
+             data: Object.assign({}, RELAY_USAGE_OK, { daily: relaySparseDaily() }) };
+  }
   var base = { id: 'tokendun', label: 'TokenDun', base_url: RELAY_ROW.base_url, key_fp: RELAY_ROW.key_fp };
   // ★ `disabled` 是**用户的选择**,不是故障 —— `collect()` 对它返回的 payload 没有 `ok`,
   //   页面原来把它渲染成"用量读不到（disabled）：undefined"。这个态必须有夹具。

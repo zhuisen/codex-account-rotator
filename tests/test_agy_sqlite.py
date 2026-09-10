@@ -15,7 +15,9 @@
 agy 换一版协议就可能挪位，而**挪位之后的症状是"数字变小"，不是报错** ——
 所以这里有一条真数据 canary：本机有库时必须解得出行、且量级站得住。
 """
+import inspect
 import os
+import re
 import sqlite3
 import sys
 import tempfile
@@ -172,6 +174,59 @@ class TheWalFileIsPartOfTheSignature(unittest.TestCase):
         eff, _ = scan._agy_db_sig(self.db, self.db.stat())
         self.assertGreaterEqual(eff, future,
                                 "★ 有效 mtime 没跟上 -wal ⇒ 活跃会话会被 cut 跳过")
+
+    def test_a_read_only_scan_does_not_change_the_signature(self):
+        """★★★ **闸缺的那一半**（2026-09-10 Fable 评审抓到）。
+
+        原来只测了「wal 变 ⇒ 签名变」。反方向没测，于是漏掉了真正的缺陷：
+        `-shm` 是 WAL 的共享内存索引，**每一个读者**（含我们自己的 `mode=ro` 连接）
+        都会往里写 read-mark。把它算进签名 ⇒ 一次纯只读扫描就让签名变化 ⇒
+        **261 个库的缓存永不命中**，每次全量重解析 + 重写 18.5MB 缓存，而且零报错。
+
+        空守卫的又一种形态：**只验了一个方向**。「会变」和「该不变时不变」是两条性质。
+        """
+        # ★★ 判据只看**那个 suffix 元组**，不做整段源码匹配 —— 今天第四次被
+        #    "闸命中自己的说明文字"判红（函数里正解释着"绝不能加 -shm"）。
+        #    行为断言在下面，这条只是把结构也钉住。
+        src = inspect.getsource(scan._agy_db_sig)
+        m = re.search(r'for suffix in \(([^)]*)\)', src)
+        self.assertIsNotNone(m, "找不到 suffix 元组 —— 判据失效了")
+        self.assertNotIn("shm", m.group(1),
+                         "★ `-shm` 又进签名了 —— 只读也会推它的 mtime，缓存必然永不命中")
+        self.assertIn("wal", m.group(1), "★ `-wal` 掉了 —— 新写入读不进来")
+        # 行为侧:造一个真 SQLite（WAL 模式），只读查询一次，签名必须不变。
+        # ★ **必须让 `-wal` 常驻**：SQLite 在最后一个连接关闭时会删掉 `-wal`/`-shm`，
+        #   于是下一次只读打开会把它们**创建**出来、签名当然会变一次。
+        #   而真实场景里 agy 持着连接，261/261 个库的 `-wal` 都是常驻的（实测）——
+        #   夹具不还原这个稳态，测的就不是要测的那件事。
+        db = Path(self.tmp.name) / "wal-ro.db"
+        con = sqlite3.connect(db)
+        con.execute("PRAGMA journal_mode=WAL")
+        con.execute("CREATE TABLE t (x INTEGER)")
+        con.execute("INSERT INTO t VALUES (1)")
+        con.commit()
+        self.addCleanup(con.close)          # 全程持有 ⇒ -wal / -shm 常驻
+        before = scan._agy_db_sig(db, db.stat())[1]
+        ro = sqlite3.connect("file:%s?mode=ro" % db, uri=True)
+        ro.execute("SELECT * FROM t").fetchall()
+        ro.close()
+        self.assertEqual(before, scan._agy_db_sig(db, db.stat())[1],
+                         "★ 只读查询改变了签名 —— 缓存会永不命中")
+
+    def test_a_real_write_still_changes_the_signature(self):
+        """★ 反向对照。少了这条，一个「签名恒定」的实现也能让上面那条绿 ——
+        而那会让**新数据永远读不进来**，比缓存失效严重得多。"""
+        db = Path(self.tmp.name) / "wal-rw.db"
+        con = sqlite3.connect(db)
+        con.execute("PRAGMA journal_mode=WAL")
+        con.execute("CREATE TABLE t (x INTEGER)")
+        con.commit()
+        self.addCleanup(con.close)
+        before = scan._agy_db_sig(db, db.stat())[1]
+        con.execute("INSERT INTO t VALUES (42)")
+        con.commit()
+        self.assertNotEqual(before, scan._agy_db_sig(db, db.stat())[1],
+                            "★ 真写入没让签名变 —— 新数据永远读不进来")
 
     def test_a_missing_wal_is_not_an_error(self):
         eff, sig = scan._agy_db_sig(self.db, self.db.stat())
