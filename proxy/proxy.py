@@ -355,7 +355,11 @@ def _relay_upstream():
                         # base_url 到 `/v1` 为止；请求路径(`/responses`)由 codex 给出。
                         "base": u.path.rstrip("/"),
                         "key": str(row["key"]),
-                        "model": row.get("model") or None,
+                        # ★ `model` **不再装进来**（2026-09-10）。它从来没有读者:
+                        #   `_open()` 把 body 原样透传，模型是 codex 在请求体里给的。
+                        #   一个装好却没人读的字段会让下一个人以为"覆盖已经生效了"——
+                        #   而 UI 那半（表单里的「模型」输入框）正是因此被去掉的。
+                        #   `relays.local.json` 里的键保留，老配置不受影响。
                     }
     except Exception as e:
         _plog(f"relay route unreadable ({e}) — 退回账号池")

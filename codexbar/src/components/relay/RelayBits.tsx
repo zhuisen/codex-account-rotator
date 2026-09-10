@@ -53,12 +53,26 @@ export function RelayForm({ t, editing, setEditing, onSave, acting }: {
 }): React.ReactElement {
   const card = relayCard(t);
   const btn = relayBtn(t);
+  /**
+   * ★★ **「模型」字段已从表单去掉**（用户 2026-09-10 拍板）。
+   *
+   *    它曾经能填、会落盘、还被 `_relay_upstream()` 装进 `up["model"]` ——
+   *    但代理**从没有任何读者**（`_open` 把 body 原样透传），而提示语写着
+   *    「留空 = 沿用 config.toml 里的 model」，反过来暗示填了会生效。
+   *    一个能填却没用的输入框正是本仓反复栽过的**孤儿字段**：用户按它做判断，
+   *    而它什么也不做，且不会报错。
+   *
+   *    ⚠️ `relays.local.json` 里的 `model` 键**保留**（老配置不该因为一次 UI 改动
+   *    就被静默丢弃），但不再收集、不再展示。真要做「按站覆盖模型」时，
+   *    必须同时在页面上标出「已被 X 覆盖」—— 悄悄改掉用户要的模型 =
+   *    行为与计费都变了却看不见。
+   */
   const [f, setF] = useState<Record<string, string>>({});
   useEffect(() => {
     if (editing) {
       setF({
         id: editing.id ?? "", label: editing.label ?? "",
-        base_url: editing.base_url ?? "", model: editing.model ?? "", key: "",
+        base_url: editing.base_url ?? "", key: "",
       });
     }
   }, [editing]);
@@ -89,9 +103,6 @@ export function RelayForm({ t, editing, setEditing, onSave, acting }: {
             中转站当场 401，而症状与「key 真的过期了」一模一样。 */}
         <input data-f="key" type="password" style={input} value={f.key ?? ""} onChange={set("key")}
                placeholder={editing?.id ? "留空 = 沿用原 key" : "sk-…"} />
-        <label style={{ fontSize: 11.5, color: t.muted }}>模型</label>
-        <input data-f="model" style={input} value={f.model ?? ""} onChange={set("model")}
-               placeholder="留空 = 沿用 ~/.codex/config.toml 里的 model" />
       </div>
       <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
         {/* ★★ 只有**成功**才退出编辑态。原来无条件退出：保存失败后表单照样翻回

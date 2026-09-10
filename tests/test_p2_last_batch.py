@@ -216,3 +216,42 @@ class TheRelayLaneHasItsOwnCounters(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TheFormNeverOffersAFieldNobodyReads(unittest.TestCase):
+    """★★★ 表单里能填的每一个字段，**必须有人读**。
+
+    2026-09-10 用户拍板去掉中转站的「模型」输入框：它能填、会落盘、还被
+    `_relay_upstream()` 装进 `up["model"]`，但代理**从没有任何读者**
+    （`_open()` 把 body 原样透传），而提示语写着「留空 = 沿用 config.toml 里的 model」，
+    反过来暗示填了会生效。
+
+    一个能填却没用的输入框是本仓反复栽过的**孤儿字段**：用户按它做判断，
+    而它什么也不做，且不会报错。这条闸把「去掉」钉住 —— 不然下次谁顺手加回来，
+    症状仍然是零。
+    """
+
+    FORM = (ROOT / "codexbar" / "src" / "components" / "relay"
+            / "RelayBits.tsx").read_text(encoding="utf-8")
+    PROXY = (ROOT / "proxy" / "proxy.py").read_text(encoding="utf-8")
+
+    def test_the_form_does_not_collect_a_model(self):
+        fields = re.findall(r'data-f="([^"]+)"', self.FORM)
+        self.assertTrue(fields, "解析不出表单字段 —— 探针坏了")
+        self.assertNotIn("model", fields,
+                         f"★ 「模型」输入框回来了，而代理仍然不读它: {fields}")
+        # ★ 反向：其余字段必须还在，别把"去掉一个"做成"表单塌了"。
+        for must in ("id", "label", "base_url", "key"):
+            self.assertIn(must, fields, f"表单缺了 {must}")
+
+    def test_the_proxy_does_not_pack_an_unread_model(self):
+        """★ 代理侧也不许再装 `up["model"]` —— 装好却没人读，
+        下一个人会以为覆盖已经生效。"""
+        import ast
+        tree = ast.parse(self.PROXY)
+        fn = next(n for n in ast.walk(tree)
+                  if isinstance(n, ast.FunctionDef) and n.name == "_relay_upstream")
+        keys = [k.value for d in ast.walk(fn) if isinstance(d, ast.Dict)
+                for k in d.keys if isinstance(k, ast.Constant)]
+        self.assertTrue(keys, "解析不出 up 的键 —— 探针坏了")
+        self.assertNotIn("model", keys, f"★ `up` 里又装了没人读的 model: {keys}")
