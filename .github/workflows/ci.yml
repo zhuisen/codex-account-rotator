@@ -13,7 +13,13 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: '3.12' }
-      - run: python3 -m unittest discover -s tests -p 'test_*.py' -v
+      # ★★ **必须与本机同一条命令。** 此前 CI 跑 `unittest discover`(856 条)、
+      #    而本地跑 pytest(879 条) —— **23 条从来没被 CI 守过**，且 pytest 才收
+      #    plain `Test*` 类。两条不同的命令 = 两个不同的门，而只有一个会红。
+      #    （2026-09-10：`test_proxy_relay_upstream` 因 `import pytest` 在 CI 直接
+      #    ImportError，而本地一直绿。）
+      - run: python3 -m pip install --quiet pytest
+      - run: python3 -m pytest tests/ -q
 
   build:
     strategy:

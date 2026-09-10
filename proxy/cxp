@@ -128,4 +128,12 @@ else
   cxp_profile=()
 fi
 
-exec command codex "${cxp_profile[@]}" "$@"
+# ★ 这里**不用** `command`。`exec command codex` 在 macOS 上能跑只是因为它恰好有
+#   `/usr/bin/command` 这个可执行文件 —— `exec` 从不运行 shell 内建，它要的是一个真文件。
+#   Linux 上没有那个文件，于是 `exec: command: not found`（CI 因此红了 33 条，
+#   而本机 macOS 全绿：**同一份脚本，两个平台两种结果**）。
+#   `command` 原本的用意是绕开同名的 alias/function，但脚本里**两者都不会被继承**
+#   （alias 不进非交互 shell，function 要 `export -f`），所以去掉它零语义变化。
+#   ⚠️ 这里解析到的 `codex` 是 PATH 上的 wrapper（有意为之）：它看到已有 `--profile`
+#      就不再注入，然后 exec 绝对路径的真二进制 —— 不会成环。
+exec codex "${cxp_profile[@]}" "$@"

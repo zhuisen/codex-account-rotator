@@ -26,7 +26,7 @@ codex_wants_profile() {
   local -a argv=("$@")
   local i=0
 
-  # ★ 已经有 `--profile` 就不再注入。cxp 注入之后 `exec command codex` 会**再次**
+  # ★ 已经有 `--profile` 就不再注入。cxp 注入之后 `exec codex` 会**再次**
   #   经过 PATH wrapper —— 不查这一条会变成 `--profile x --profile x`。
   local a
   for a in "${argv[@]}"; do

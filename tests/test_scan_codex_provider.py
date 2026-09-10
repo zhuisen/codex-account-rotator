@@ -178,7 +178,12 @@ class TheLabelLookupFailsOpen(unittest.TestCase):
             self.assertEqual(r.returncode, 0, r.stderr[-300:])
             d = json.loads(r.stdout)
             c = d["platforms"].get("codex") or {}
-            self.assertTrue(c.get("days"), "扫描整个塌了")
+            # ★ 这条依赖**本机真有 codex rollout**。CI 的干净 runner 上一条都没有，
+            #   于是 `days` 为空 —— 那时这个断言测的是"有没有数据"，与被测的
+            #   fail-open 分支毫无关系。没有数据就跳过，并**说出原因**（别静默通过）。
+            if not c.get("days"):
+                self.skipTest("本机没有 codex rollout，`days` 为空 —— "
+                              "这条测的是 fail-open 分支，不是数据是否存在")
             self.assertEqual(c.get("provider_labels", {}), {},
                              "找不到 relay 模块却还有标签 —— fail-open 没走到")
         finally:

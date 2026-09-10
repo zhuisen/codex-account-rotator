@@ -256,9 +256,20 @@ class NoPatchedBinaryEntry(unittest.TestCase):
                          if not l.lstrip().startswith("#"))
 
     def test_the_only_exec_target_is_the_installed_codex(self):
+        """★ 不变量是「**只有一条** exec 分支，且它交给 PATH 上装好的 codex」。
+
+        ⚠️ 锚点从 `exec command codex` 改成 `exec codex`（2026-09-10）：
+           `command` 在这里从来不是语义的一部分 —— `exec` 从不运行 shell 内建，
+           它要一个真文件，而 `/usr/bin/command` **只有 macOS 有**。
+           同一份脚本因此在 Linux 上 `exec: command: not found`（CI 红了 33 条，
+           本机全绿）。去掉它零语义变化：alias 不进非交互 shell，function 要 `export -f`。
+        """
         execs = re.findall(r"^\s*exec .*", self._src(), re.M)
         self.assertEqual(len(execs), 1, f"多了一条 exec 分支:{execs}")
-        self.assertIn("exec command codex", execs[0])
+        self.assertIn("exec codex", execs[0])
+        # ★ 反向：`command` 不许回来 —— 它会让这个脚本重新变成 macOS 专属。
+        self.assertNotIn("exec command", execs[0],
+                         "`exec command` 依赖 macOS 专属的 /usr/bin/command")
 
     def test_no_patched_binary_hook_survives(self):
         """★ 逐个点名 —— 只查 `native-codex` 会漏掉换个目录名重新接回来的情况。"""

@@ -24,6 +24,7 @@ import plistlib
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -34,8 +35,14 @@ WINDOWS = ROOT / "scripts" / "install-windows.ps1"
 VAR = "CODEX_ROTATE_STORE"
 
 
+@unittest.skipUnless(sys.platform == "darwin",
+                     "launchd + plutil 是 macOS 专属；Windows 那半由下面的任务表闸覆盖")
 class TheLaunchdPlistsCarryTheStore(unittest.TestCase):
     """★ 真的跑一遍安装脚本，读**生成出来的 plist**。
+
+    ⚠️ **这一组只能在 macOS 上跑**（`plutil` / `launchctl`）。CI 的不变量作业跑在
+       ubuntu 上，不加这个 skip 会红 —— 而红的原因与被测的不变量毫无关系。
+       Windows 任务表那一组是纯文本解析，任何平台都跑。
 
     静态 grep 只能证明脚本里有那个字符串；真正要证的是「每一份 plist 的
     EnvironmentVariables 里都有它」。`launchctl` 打桩（绝不碰真服务），
