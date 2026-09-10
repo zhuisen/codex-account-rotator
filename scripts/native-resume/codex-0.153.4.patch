@@ -1,0 +1,578 @@
+--- a/codex-rs/tui/src/app_server_session/rollout_history.rs
++++ b/codex-rs/tui/src/app_server_session/rollout_history.rs
+@@ -69,6 +69,19 @@
+             self.remote_cwd_override.as_deref(),
+             model_settings,
+         );
++        if self.uses_embedded_app_server() && config.model_provider_id == "rotateproxy" {
++            let store = std::env::var_os("CODEX_ROTATE_STORE").ok_or_else(|| {
++                std::io::Error::other("CodexBar resume requires CODEX_ROTATE_STORE")
++            })?;
++            crate::codexbar_resume::mark_proxy_resume(
++                std::path::Path::new(&store),
++                &config.codex_home,
++                thread_id,
++            )?;
++            if model_settings != ResumeModelSettings::PreserveExistingThread {
++                params.model_provider = Some("rotateproxy".to_string());
++            }
++        }
+         self.thread_tool_transport()
+             .configure_mcp(&mut params.config);
+         let mut rollout_maintenance_guard = None;
+--- a/codex-rs/tui/src/chatwidget/rendering_tests.rs
++++ b/codex-rs/tui/src/chatwidget/rendering_tests.rs
+@@ -169,7 +169,7 @@
+ 
+     insta::assert_snapshot!(header.replace(&cwd, &normalized_cwd), @r"
+     ╭───────────────────────────────────────╮
+-    │ >_ OpenAI Codex (v<VERSION>)              │
++    │ >_ OpenAI Codex (v<VERSION>) │
+     │                                       │
+     │ model:     loading   /model to change │
+     │ directory: /tmp/project               │
+--- a/codex-rs/tui/src/history_cell/snapshots/codex_tui__history_cell__tests__pnpm_update_available_history_cell_snapshot.snap
++++ b/codex-rs/tui/src/history_cell/snapshots/codex_tui__history_cell__tests__pnpm_update_available_history_cell_snapshot.snap
+@@ -2,10 +2,10 @@
+ source: tui/src/history_cell/tests.rs
+ expression: rendered
+ ---
+-╭─────────────────────────────────────────────────╮
+-│ ✨ Update available! 0.0.0 -> 9.9.9             │
+-│ Run pnpm add -g @openai/codex to update.        │
+-│                                                 │
+-│ See full release notes:                         │
+-│ https://github.com/openai/codex/releases/latest │
+-╰─────────────────────────────────────────────────╯
++╭──────────────────────────────────────────────────╮
++│ ✨ Update available! 0.153.4+codexbar.1 -> 9.9.9 │
++│ Run pnpm add -g @openai/codex to update.         │
++│                                                  │
++│ See full release notes:                          │
++│ https://github.com/openai/codex/releases/latest  │
++╰──────────────────────────────────────────────────╯
+--- a/codex-rs/tui/src/history_cell/snapshots/codex_tui__history_cell__tests__session_info_availability_nux_tooltip_snapshot.snap
++++ b/codex-rs/tui/src/history_cell/snapshots/codex_tui__history_cell__tests__session_info_availability_nux_tooltip_snapshot.snap
+@@ -2,11 +2,11 @@
+ source: tui/src/history_cell.rs
+ expression: rendered
+ ---
+-╭─────────────────────────────────────╮
+-│ >_ OpenAI Codex (v0.0.0)            │
+-│                                     │
+-│ model:     gpt-5   /model to change │
+-│ directory: /tmp/project             │
+-╰─────────────────────────────────────╯
++╭───────────────────────────────────────╮
++│ >_ OpenAI Codex (v0.153.4+codexbar.1) │
++│                                       │
++│ model:     gpt-5   /model to change   │
++│ directory: /tmp/project               │
++╰───────────────────────────────────────╯
+ 
+   Tip: Model just became available
+--- a/codex-rs/tui/src/history_cell/snapshots/codex_tui__history_cell__tests__standalone_unix_update_available_history_cell_snapshot.snap
++++ b/codex-rs/tui/src/history_cell/snapshots/codex_tui__history_cell__tests__standalone_unix_update_available_history_cell_snapshot.snap
+@@ -3,7 +3,7 @@
+ expression: rendered
+ ---
+ ╭─────────────────────────────────────────────────────────────────────────────────────────────────────╮
+-│ ✨ Update available! 0.0.0 -> 9.9.9                                                                 │
++│ ✨ Update available! 0.153.4+codexbar.1 -> 9.9.9                                                    │
+ │ Run sh -c 'curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 sh' to update. │
+ │                                                                                                     │
+ │ See full release notes:                                                                             │
+--- a/codex-rs/tui/src/history_cell/snapshots/codex_tui__history_cell__tests__standalone_windows_update_available_history_cell_snapshot.snap
++++ b/codex-rs/tui/src/history_cell/snapshots/codex_tui__history_cell__tests__standalone_windows_update_available_history_cell_snapshot.snap
+@@ -3,7 +3,7 @@
+ expression: rendered
+ ---
+ ╭────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+-│ ✨ Update available! 0.0.0 -> 9.9.9                                                                        │
++│ ✨ Update available! 0.153.4+codexbar.1 -> 9.9.9                                                           │
+ │ Run powershell -ExecutionPolicy Bypass -c '$env:CODEX_NON_INTERACTIVE=1; irm                               │
+ │ https://chatgpt.com/codex/install.ps1 | iex' to update.                                                    │
+ │                                                                                                            │
+--- a/codex-rs/tui/src/history_cell/snapshots/codex_tui__history_cell__tests__vite_plus_update_available_history_cell_snapshot.snap
++++ b/codex-rs/tui/src/history_cell/snapshots/codex_tui__history_cell__tests__vite_plus_update_available_history_cell_snapshot.snap
+@@ -2,10 +2,10 @@
+ source: tui/src/history_cell/tests.rs
+ expression: rendered
+ ---
+-╭─────────────────────────────────────────────────╮
+-│ ✨ Update available! 0.0.0 -> 9.9.9             │
+-│ Run vp install -g @openai/codex to update.      │
+-│                                                 │
+-│ See full release notes:                         │
+-│ https://github.com/openai/codex/releases/latest │
+-╰─────────────────────────────────────────────────╯
++╭──────────────────────────────────────────────────╮
++│ ✨ Update available! 0.153.4+codexbar.1 -> 9.9.9 │
++│ Run vp install -g @openai/codex to update.       │
++│                                                  │
++│ See full release notes:                          │
++│ https://github.com/openai/codex/releases/latest  │
++╰──────────────────────────────────────────────────╯
+--- a/codex-rs/tui/src/lib.rs
++++ b/codex-rs/tui/src/lib.rs
+@@ -3,6 +3,7 @@
+ // alternate‑screen mode starts; that file opts‑out locally via `allow`.
+ #![deny(clippy::print_stdout, clippy::print_stderr)]
+ #![deny(clippy::disallowed_methods)]
++mod codexbar_resume;
+ use crate::legacy_core::config::Config;
+ use crate::legacy_core::config::ConfigBuilder;
+ use crate::legacy_core::config::ConfigOverrides;
+--- a/codex-rs/tui/src/resume_picker.rs
++++ b/codex-rs/tui/src/resume_picker.rs
+@@ -1991,7 +1991,9 @@
+         sort_direction: None,
+         model_providers: match provider_filter {
+             ProviderFilter::Any => None,
+-            ProviderFilter::MatchDefault(default_provider) => Some(vec![default_provider]),
++            ProviderFilter::MatchDefault(default_provider) => {
++                Some(crate::codexbar_resume::provider_filter(default_provider))
++            }
+         },
+         source_kinds: Some(crate::resume_source_kinds(include_non_interactive)),
+         archived: Some(status == SessionStatus::Archived),
+--- a/codex-rs/tui/src/snapshots/codex_tui__startup_draft__tests__startup_draft_fresh_session_transitions.snap
++++ b/codex-rs/tui/src/snapshots/codex_tui__startup_draft__tests__startup_draft_fresh_session_transitions.snap
+@@ -5,7 +5,7 @@
+ resume lookup fallback:
+ before:
+ ╭───────────────────────────────────────╮
+-│ >_ OpenAI Codex (v<VERSION>)              │
++│ >_ OpenAI Codex (v<VERSION>) │
+ │                                       │
+ │ model:     loading   /model to change │
+ │ directory: loading                    │
+@@ -17,7 +17,7 @@
+ 
+ after:
+ ╭───────────────────────────────────────╮
+-│ >_ OpenAI Codex (v<VERSION>)              │
++│ >_ OpenAI Codex (v<VERSION>) │
+ │                                       │
+ │ model:     loading   /model to change │
+ │ directory: loading                    │
+@@ -31,7 +31,7 @@
+ fork lookup fallback:
+ before:
+ ╭───────────────────────────────────────╮
+-│ >_ OpenAI Codex (v<VERSION>)              │
++│ >_ OpenAI Codex (v<VERSION>) │
+ │                                       │
+ │ model:     loading   /model to change │
+ │ directory: loading                    │
+@@ -43,7 +43,7 @@
+ 
+ after:
+ ╭───────────────────────────────────────╮
+-│ >_ OpenAI Codex (v<VERSION>)              │
++│ >_ OpenAI Codex (v<VERSION>) │
+ │                                       │
+ │ model:     loading   /model to change │
+ │ directory: loading                    │
+@@ -59,7 +59,7 @@
+ hidden while picker owns input
+ after:
+ ╭───────────────────────────────────────╮
+-│ >_ OpenAI Codex (v<VERSION>)              │
++│ >_ OpenAI Codex (v<VERSION>) │
+ │                                       │
+ │ model:     loading   /model to change │
+ │ directory: loading                    │
+@@ -75,7 +75,7 @@
+ hidden while picker owns input
+ after:
+ ╭───────────────────────────────────────╮
+-│ >_ OpenAI Codex (v<VERSION>)              │
++│ >_ OpenAI Codex (v<VERSION>) │
+ │                                       │
+ │ model:     loading   /model to change │
+ │ directory: loading                    │
+--- a/codex-rs/tui/src/snapshots/codex_tui__startup_draft__tests__startup_draft_full_frames.snap
++++ b/codex-rs/tui/src/snapshots/codex_tui__startup_draft__tests__startup_draft_full_frames.snap
+@@ -4,7 +4,7 @@
+ ---
+ empty (48 columns):
+ ╭───────────────────────────────────────╮
+-│ >_ OpenAI Codex (v<VERSION>)              │
++│ >_ OpenAI Codex (v<VERSION>) │
+ │                                       │
+ │ model:     loading   /model to change │
+ │ directory: loading                    │
+@@ -17,7 +17,7 @@
+ ---
+ resuming (48 columns):
+ ╭───────────────────────────────────────╮
+-│ >_ OpenAI Codex (v<VERSION>)              │
++│ >_ OpenAI Codex (v<VERSION>) │
+ │                                       │
+ │ model:     loading   /model to change │
+ │ directory: loading                    │
+@@ -30,7 +30,7 @@
+ ---
+ forking (48 columns):
+ ╭───────────────────────────────────────╮
+-│ >_ OpenAI Codex (v<VERSION>)              │
++│ >_ OpenAI Codex (v<VERSION>) │
+ │                                       │
+ │ model:     loading   /model to change │
+ │ directory: loading                    │
+@@ -43,7 +43,7 @@
+ ---
+ multiline (48 columns):
+ ╭───────────────────────────────────────╮
+-│ >_ OpenAI Codex (v<VERSION>)              │
++│ >_ OpenAI Codex (v<VERSION>) │
+ │                                       │
+ │ model:     loading   /model to change │
+ │ directory: loading                    │
+--- a/codex-rs/tui/src/snapshots/codex_tui__startup_draft__tests__startup_draft_onboarding_transition.snap
++++ b/codex-rs/tui/src/snapshots/codex_tui__startup_draft__tests__startup_draft_onboarding_transition.snap
+@@ -6,7 +6,7 @@
+ ---
+ after onboarding:
+ ╭───────────────────────────────────────╮
+-│ >_ OpenAI Codex (v<VERSION>)              │
++│ >_ OpenAI Codex (v<VERSION>) │
+ │                                       │
+ │ model:     loading   /model to change │
+ │ directory: loading                    │
+--- a/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_cached_limits_hide_credits_without_flag.snap
++++ b/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_cached_limits_hide_credits_without_flag.snap
+@@ -5,7 +5,7 @@
+ /status
+ 
+ ╭─────────────────────────────────────────────────────────────────────────────╮
+-│  >_ OpenAI Codex (v0.0.0)                                                   │
++│  >_ OpenAI Codex (v0.153.4+codexbar.1)                                      │
+ │                                                                             │
+ │ Visit https://chatgpt.com/codex/settings/usage for up-to-date               │
+ │ information on rate limits and credits                                      │
+--- a/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_includes_credits_and_limits.snap
++++ b/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_includes_credits_and_limits.snap
+@@ -5,7 +5,7 @@
+ /status
+ 
+ ╭─────────────────────────────────────────────────────────────────────────────╮
+-│  >_ OpenAI Codex (v0.0.0)                                                   │
++│  >_ OpenAI Codex (v0.153.4+codexbar.1)                                      │
+ │                                                                             │
+ │ Visit https://chatgpt.com/codex/settings/usage for up-to-date               │
+ │ information on rate limits and credits                                      │
+--- a/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_includes_enterprise_monthly_credit_limit.snap
++++ b/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_includes_enterprise_monthly_credit_limit.snap
+@@ -5,7 +5,7 @@
+ /status
+ 
+ ╭───────────────────────────────────────────────────────────────────────────────────╮
+-│  >_ OpenAI Codex (v0.0.0)                                                         │
++│  >_ OpenAI Codex (v0.153.4+codexbar.1)                                            │
+ │                                                                                   │
+ │ Visit https://chatgpt.com/codex/settings/usage for up-to-date                     │
+ │ information on rate limits and credits                                            │
+--- a/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_includes_forked_from.snap
++++ b/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_includes_forked_from.snap
+@@ -5,7 +5,7 @@
+ /status
+ 
+ ╭─────────────────────────────────────────────────────────────────────────────╮
+-│  >_ OpenAI Codex (v0.0.0)                                                   │
++│  >_ OpenAI Codex (v0.153.4+codexbar.1)                                      │
+ │                                                                             │
+ │ Visit https://chatgpt.com/codex/settings/usage for up-to-date               │
+ │ information on rate limits and credits                                      │
+--- a/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_includes_monthly_limit.snap
++++ b/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_includes_monthly_limit.snap
+@@ -5,7 +5,7 @@
+ /status
+ 
+ ╭─────────────────────────────────────────────────────────────────────────────╮
+-│  >_ OpenAI Codex (v0.0.0)                                                   │
++│  >_ OpenAI Codex (v0.153.4+codexbar.1)                                      │
+ │                                                                             │
+ │ Visit https://chatgpt.com/codex/settings/usage for up-to-date               │
+ │ information on rate limits and credits                                      │
+--- a/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_includes_reasoning_details.snap
++++ b/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_includes_reasoning_details.snap
+@@ -5,7 +5,7 @@
+ /status
+ 
+ ╭───────────────────────────────────────────────────────────────────────────╮
+-│  >_ OpenAI Codex (v0.0.0)                                                 │
++│  >_ OpenAI Codex (v0.153.4+codexbar.1)                                    │
+ │                                                                           │
+ │ Visit https://chatgpt.com/codex/settings/usage for up-to-date             │
+ │ information on rate limits and credits                                    │
+--- a/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_shows_active_user_defined_profile.snap
++++ b/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_shows_active_user_defined_profile.snap
+@@ -5,7 +5,7 @@
+ /status
+ 
+ ╭───────────────────────────────────────────────────────────────────────╮
+-│  >_ OpenAI Codex (v0.0.0)                                             │
++│  >_ OpenAI Codex (v0.153.4+codexbar.1)                                │
+ │                                                                       │
+ │ Visit https://chatgpt.com/codex/settings/usage for up-to-date         │
+ │ information on rate limits and credits                                │
+--- a/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_shows_auto_review_permissions.snap
++++ b/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_shows_auto_review_permissions.snap
+@@ -5,7 +5,7 @@
+ /status
+ 
+ ╭───────────────────────────────────────────────────────────────────────╮
+-│  >_ OpenAI Codex (v0.0.0)                                             │
++│  >_ OpenAI Codex (v0.153.4+codexbar.1)                                │
+ │                                                                       │
+ │ Visit https://chatgpt.com/codex/settings/usage for up-to-date         │
+ │ information on rate limits and credits                                │
+--- a/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_shows_chatgpt_plan_without_email.snap
++++ b/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_shows_chatgpt_plan_without_email.snap
+@@ -5,7 +5,7 @@
+ /status
+ 
+ ╭──────────────────────────────────────────────────────────────────────────╮
+-│  >_ OpenAI Codex (v0.0.0)                                                │
++│  >_ OpenAI Codex (v0.153.4+codexbar.1)                                   │
+ │                                                                          │
+ │ Visit https://chatgpt.com/codex/settings/usage for up-to-date            │
+ │ information on rate limits and credits                                   │
+--- a/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_shows_missing_limits_message.snap
++++ b/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_shows_missing_limits_message.snap
+@@ -5,7 +5,7 @@
+ /status
+ 
+ ╭─────────────────────────────────────────────────────────────────────────────╮
+-│  >_ OpenAI Codex (v0.0.0)                                                   │
++│  >_ OpenAI Codex (v0.153.4+codexbar.1)                                      │
+ │                                                                             │
+ │ Visit https://chatgpt.com/codex/settings/usage for up-to-date               │
+ │ information on rate limits and credits                                      │
+--- a/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_shows_refreshing_limits_notice.snap
++++ b/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_shows_refreshing_limits_notice.snap
+@@ -5,7 +5,7 @@
+ /status
+ 
+ ╭─────────────────────────────────────────────────────────────────────────────╮
+-│  >_ OpenAI Codex (v0.0.0)                                                   │
++│  >_ OpenAI Codex (v0.153.4+codexbar.1)                                      │
+ │                                                                             │
+ │ Visit https://chatgpt.com/codex/settings/usage for up-to-date               │
+ │ information on rate limits and credits                                      │
+--- a/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_shows_stale_limits_message.snap
++++ b/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_shows_stale_limits_message.snap
+@@ -5,7 +5,7 @@
+ /status
+ 
+ ╭─────────────────────────────────────────────────────────────────────────────╮
+-│  >_ OpenAI Codex (v0.0.0)                                                   │
++│  >_ OpenAI Codex (v0.153.4+codexbar.1)                                      │
+ │                                                                             │
+ │ Visit https://chatgpt.com/codex/settings/usage for up-to-date               │
+ │ information on rate limits and credits                                      │
+--- a/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_shows_unavailable_limits_message.snap
++++ b/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_shows_unavailable_limits_message.snap
+@@ -5,7 +5,7 @@
+ /status
+ 
+ ╭─────────────────────────────────────────────────────────────────────────────╮
+-│  >_ OpenAI Codex (v0.0.0)                                                   │
++│  >_ OpenAI Codex (v0.153.4+codexbar.1)                                      │
+ │                                                                             │
+ │ Visit https://chatgpt.com/codex/settings/usage for up-to-date               │
+ │ information on rate limits and credits                                      │
+--- a/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_treats_refreshing_empty_limits_as_unavailable.snap
++++ b/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_treats_refreshing_empty_limits_as_unavailable.snap
+@@ -5,7 +5,7 @@
+ /status
+ 
+ ╭─────────────────────────────────────────────────────────────────────────────╮
+-│  >_ OpenAI Codex (v0.0.0)                                                   │
++│  >_ OpenAI Codex (v0.153.4+codexbar.1)                                      │
+ │                                                                             │
+ │ Visit https://chatgpt.com/codex/settings/usage for up-to-date               │
+ │ information on rate limits and credits                                      │
+--- a/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_truncates_halfwidth_kana_in_narrow_terminal.snap
++++ b/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_truncates_halfwidth_kana_in_narrow_terminal.snap
+@@ -5,7 +5,7 @@
+ /status
+ 
+ ╭────────────────────────────────────────╮
+-│  >_ OpenAI Codex (v0.0.0)              │
++│  >_ OpenAI Codex (v0.153.4+codexbar.1) │
+ │                                        │
+ │ Visit                                  │
+ │ https://chatgpt.com/codex/settings/usa │
+--- a/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_truncates_in_narrow_terminal.snap
++++ b/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_truncates_in_narrow_terminal.snap
+@@ -5,7 +5,7 @@
+ /status
+ 
+ ╭────────────────────────────────────────────────────────────────────╮
+-│  >_ OpenAI Codex (v0.0.0)                                          │
++│  >_ OpenAI Codex (v0.153.4+codexbar.1)                             │
+ │                                                                    │
+ │ Visit https://chatgpt.com/codex/settings/usage for up-to-date      │
+ │ information on rate limits and credits                             │
+--- a/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_uses_default_reasoning_when_config_empty.snap
++++ b/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_uses_default_reasoning_when_config_empty.snap
+@@ -5,7 +5,7 @@
+ /status
+ 
+ ╭─────────────────────────────────────────────────────────────────────────────╮
+-│  >_ OpenAI Codex (v0.0.0)                                                   │
++│  >_ OpenAI Codex (v0.153.4+codexbar.1)                                      │
+ │                                                                             │
+ │ Visit https://chatgpt.com/codex/settings/usage for up-to-date               │
+ │ information on rate limits and credits                                      │
+--- a/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_uses_generic_limit_labels_for_unsupported_windows.snap
++++ b/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_uses_generic_limit_labels_for_unsupported_windows.snap
+@@ -5,7 +5,7 @@
+ /status
+ 
+ ╭──────────────────────────────────────────────────────────────────────────────╮
+-│  >_ OpenAI Codex (v0.0.0)                                                    │
++│  >_ OpenAI Codex (v0.153.4+codexbar.1)                                       │
+ │                                                                              │
+ │ Visit https://chatgpt.com/codex/settings/usage for up-to-date                │
+ │ information on rate limits and credits                                       │
+--- a/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_wraps_enterprise_monthly_credit_details_in_narrow_terminal.snap
++++ b/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_wraps_enterprise_monthly_credit_details_in_narrow_terminal.snap
+@@ -5,7 +5,7 @@
+ /status
+ 
+ ╭────────────────────────────────────────────╮
+-│  >_ OpenAI Codex (v0.0.0)                  │
++│  >_ OpenAI Codex (v0.153.4+codexbar.1)     │
+ │                                            │
+ │ Visit                                      │
+ │ https://chatgpt.com/codex/settings/usage   │
+--- a/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__transcript_overlay_status_rate_limit_refresh.snap
++++ b/codex-rs/tui/src/status/snapshots/codex_tui__status__tests__transcript_overlay_status_rate_limit_refresh.snap
+@@ -7,7 +7,7 @@
+ /status
+ 
+ ╭──────────────────────────────────────────────────────────────────────────╮
+-│  >_ OpenAI Codex (v0.0.0)                                                │
++│  >_ OpenAI Codex (v0.153.4+codexbar.1)                                   │
+ │                                                                          │
+ │ Visit https://chatgpt.com/codex/settings/usage for up-to-date            │
+ │ information on rate limits and credits                                   │
+@@ -39,7 +39,7 @@
+ /status
+ 
+ ╭───────────────────────────────────────────────────────────────────────────╮
+-│  >_ OpenAI Codex (v0.0.0)                                                 │
++│  >_ OpenAI Codex (v0.153.4+codexbar.1)                                    │
+ │                                                                           │
+ │ Visit https://chatgpt.com/codex/settings/usage for up-to-date             │
+ │ information on rate limits and credits                                    │
+--- /dev/null
++++ b/codex-rs/tui/src/codexbar_resume.rs
+@@ -0,0 +1,64 @@
++//! CodexBar's local compatibility boundary; storage and execution providers stay distinct.
++
++use codex_protocol::ThreadId;
++use sha2::Digest;
++use sha2::Sha256;
++use std::fs;
++use std::io;
++use std::path::Path;
++
++pub(crate) fn provider_filter(default_provider: String) -> Vec<String> {
++    if default_provider == "rotateproxy" {
++        vec![default_provider, "openai".to_string()]
++    } else {
++        vec![default_provider]
++    }
++}
++
++pub(crate) fn mark_proxy_resume(
++    store: &Path,
++    codex_home: &Path,
++    thread_id: ThreadId,
++) -> io::Result<()> {
++    let home = fs::canonicalize(codex_home)?;
++    let home = home.to_string_lossy().into_owned();
++    #[cfg(windows)]
++    let home = if let Some(unc) = home.strip_prefix(r"\\?\UNC\") {
++        format!(r"\\{unc}").to_lowercase()
++    } else {
++        home.strip_prefix(r"\\?\").unwrap_or(&home).to_lowercase()
++    };
++    let key = format!("{:x}", Sha256::digest(home.as_bytes()));
++    let directory = store.join(".proxy-sessions-v1").join(key);
++    let mut builder = fs::DirBuilder::new();
++    builder.recursive(true);
++    #[cfg(unix)]
++    {
++        use std::os::unix::fs::DirBuilderExt;
++        builder.mode(0o700);
++    }
++    builder.create(&directory)?;
++    let path = directory.join(thread_id.to_string());
++    let mut options = fs::OpenOptions::new();
++    options.write(true).create_new(true);
++    #[cfg(unix)]
++    {
++        use std::os::unix::fs::OpenOptionsExt;
++        options.mode(0o600);
++    }
++    match options.open(&path) {
++        Ok(file) => file.sync_all(),
++        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
++            if fs::symlink_metadata(&path)?.file_type().is_file() {
++                Ok(())
++            } else {
++                Err(io::Error::other("Invalid CodexBar proxy session marker"))
++            }
++        }
++        Err(error) => Err(error),
++    }
++}
++
++#[cfg(test)]
++#[path = "codexbar_resume_tests.rs"]
++mod tests;
+--- /dev/null
++++ b/codex-rs/tui/src/codexbar_resume_tests.rs
+@@ -0,0 +1,36 @@
++use super::*;
++
++#[test]
++fn compatible_history_is_limited_to_the_rotation_provider() {
++    assert_eq!(
++        provider_filter("rotateproxy".into()),
++        ["rotateproxy", "openai"]
++    );
++    assert_eq!(provider_filter("openai".into()), ["openai"]);
++    assert_eq!(provider_filter("unrelated".into()), ["unrelated"]);
++}
++
++#[test]
++fn marker_is_idempotent_and_home_scoped() -> io::Result<()> {
++    let fixture = tempfile::tempdir()?;
++    let home = fixture.path().join("中文 home");
++    fs::create_dir(&home)?;
++    let store = fixture.path().join("store");
++    let id = ThreadId::new();
++    mark_proxy_resume(&store, &home, id)?;
++    mark_proxy_resume(&store, &home, id)?;
++    assert_eq!(fs::read_dir(store.join(".proxy-sessions-v1"))?.count(), 1);
++    let other = fixture.path().join("other");
++    fs::create_dir(&other)?;
++    mark_proxy_resume(&store, &other, id)?;
++    assert_eq!(fs::read_dir(store.join(".proxy-sessions-v1"))?.count(), 2);
++    Ok(())
++}
++
++#[test]
++fn corrupt_store_is_an_error_before_resume() -> io::Result<()> {
++    let fixture = tempfile::tempdir()?;
++    fs::write(fixture.path().join(".proxy-sessions-v1"), b"damaged")?;
++    assert!(mark_proxy_resume(fixture.path(), fixture.path(), ThreadId::new()).is_err());
++    Ok(())
++}
