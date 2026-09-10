@@ -10,4 +10,44 @@
 #
 # ⚠️ 这里**故意不带任何 profile**。加了就不是"直连"了，而它的整个存在理由就是直连。
 set -euo pipefail
+
+# ★★ **杀号守卫必须在这里再来一遍。**（2026-09-10 修，Fable 评审抓到）
+#    `cxd` 直连真二进制、绕过 PATH wrapper —— 于是也绕过了 wrapper 里那道
+#    「`codex logout` 会在服务端 revoke 当值号」的拦截。而 `cxd` 被定位成
+#    **单号直连入口**，正是最可能被敲 `logout` 的地方：一条命令永久杀掉当前活跃号
+#    （实测两次：2026-07-30 因此死了 plus3/plus4/plus7）。
+#    ⚠️ 这不是"重复实现" —— 判据函数与 wrapper 共用同一份 `codex-profile-scope.sh`，
+#    重复的只有调用点，而每个绕过 wrapper 的入口都必须有一个调用点。
+_cxd_store="${CODEX_ROTATE_STORE:-${HOME}/Projects/tools/codex-account-rotator}"
+_cxd_scope="${_cxd_store}/proxy/codex-profile-scope.sh"
+if [ -f "$_cxd_scope" ]; then
+  # shellcheck source=codex-profile-scope.sh
+  . "$_cxd_scope"
+  if codex_is_credential_command "$@"; then
+    case " $* " in
+      *" --force "*|*" --yes "*) ;;   # 与 wrapper 同一个逃生口
+      *)
+        printf '%s\n' \
+          "⛔ cxd 已拦截 \`$(codex_subcommand "$@")\`" \
+          "" \
+          "logout 会把【当前活跃号】的 token 在 OpenAI 服务端 revoke（不是本地登出）；" \
+          "login 会覆盖 ~/.codex/auth.json，把上一个号的最新 token 丢掉。" \
+          "本仓的号只存在于那一份文件里，两者都等于永久杀号。" \
+          "" \
+          "要加号 / 重登，请改用：  codex-rotate login" \
+          "" \
+          "真的要 revoke（几乎不需要）：cxd logout --force" >&2
+        exit 1 ;;
+    esac
+  fi
+else
+  # ⚠️ 判据文件不在 = 安装坏了。**凭证类命令一律不放行** —— 解析不出子命令
+  #   就等于没有守卫，而它守的是"会杀号"。其余命令照常直连（cxd 的存在理由）。
+  case "${1:-}" in
+    logout|login)
+      printf '%s\n' "⛔ cxd: 找不到判据文件 ${_cxd_scope} —— 拒绝执行会动凭证的命令。" >&2
+      exit 78 ;;
+  esac
+fi
+
 exec "${CODEX_NATIVE_BIN:-${HOME}/.local/npm-global/bin/codex}" "$@"

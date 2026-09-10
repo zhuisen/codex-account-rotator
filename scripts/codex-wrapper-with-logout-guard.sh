@@ -124,12 +124,39 @@ guard_automatic_session_resume "$@" || exit $?
 #
 # This guard lives in the PATH wrapper on purpose: a shell alias would be bypassed by `\codex logout`,
 # which is exactly how it keeps getting typed. Use `codex-rotate login` to add / re-login an account.
-if [ "$1" = "logout" ]; then
+# ★★ **判据文件必须在任何守卫之前 source。**（2026-09-10 修）
+#    改守卫用 `codex_is_credential_command` 时我把 `. "$_scope"` 留在了下面 ——
+#    函数未定义 ⇒ `if` 恒假 ⇒ **logout 直接放行**，比原来那个只看 `$1` 的版本更糟。
+#    一道"看起来更严"的闸如果跑在它依赖的定义之前，就是零。
+CODEX_ROTATE_STORE="${CODEX_ROTATE_STORE:-${HOME}/Projects/tools/codex-account-rotator}"
+export CODEX_ROTATE_STORE
+_scope="${CODEX_ROTATE_STORE}/proxy/codex-profile-scope.sh"
+if [ -f "$_scope" ]; then
+  # shellcheck source=/dev/null
+  . "$_scope"
+else
+  # ⚠️ 判据文件不在 = 安装坏了。**此时绝不能放行凭证类命令** ——
+  #    解析不出子命令就等于没有守卫，而它守的是"会杀号"。
+  printf '%s\n' \
+    "⛔ codex: 找不到判据文件 —— $_scope" \
+    "   没有它既判不了该不该走代理，也拦不住 \`logout\`/\`login\`（会杀号）。" \
+    "   修:确认 CODEX_ROTATE_STORE 指向仓库根，或重装 wrapper。" >&2
+  exit 78
+fi
+
+# ★★ **判据是解析出来的子命令，不是 `$1`**（2026-09-10 修）。clap 允许全局选项放在
+#    子命令前面，`codex -C /tmp logout` / `-c k=v logout` / `-m x logout` 的 `$1`
+#    都不是 `logout` —— 一条就能绕过这道闸，而它守的是"会杀号"。
+#    同文件的 resume 守卫早就会跳过带值选项，这里没复用，是**同一条规则的两份实现**。
+#    现在共用 `codex-profile-scope.sh` 里的 `codex_subcommand`。
+# ★ `login` 一并拦住：它覆盖 `~/.codex/auth.json`，把上一个号的最新 token 丢掉，
+#   而本仓的号只存在于那一份文件里。
+if codex_is_credential_command "$@"; then
   case " $* " in
     *" --force "*|*" --yes "*) ;;   # explicit escape hatch
     *)
       cat >&2 <<'WARN'
-⛔ 已拦截 `codex logout`
+⛔ 已拦截 `codex logout` / `codex login`
 
 logout 会把【当前活跃号】的 token 在 OpenAI 服务端 revoke（不是本地登出），
 该号立即永久失效、只能重新登录。这就是「每加一个号就死一个号」的原因。
@@ -165,13 +192,8 @@ fi
 # ★★ 判据与 `proxy/cxp` **共用同一份**（`proxy/codex-profile-scope.sh`）。
 #    同一条规则的两份实现必然在边界输入上分叉，而这条分叉的后果是
 #    **静默退回单号直连、不轮换** —— 失败不出声，最坏的那一类。
-CODEX_ROTATE_STORE="${CODEX_ROTATE_STORE:-${HOME}/Projects/tools/codex-account-rotator}"
-export CODEX_ROTATE_STORE
-_scope="${CODEX_ROTATE_STORE}/proxy/codex-profile-scope.sh"
 _profile=()
 if [ -f "$_scope" ]; then
-  # shellcheck source=/dev/null
-  . "$_scope"
   if codex_wants_profile "$@"; then
     # ★★ 保留这道硬闸:codex 对「`--profile X` 但 `X.config.toml` 不存在」**不报错**,
     #    直接静默退回 base 配置(直连单号、不轮换、WS 全开)—— 和正常运行长得一模一样。

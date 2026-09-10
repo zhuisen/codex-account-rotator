@@ -61,3 +61,39 @@ codex_wants_profile() {
       return 0 ;;                                   # 运行时子命令、裸 prompt、裸 codex
   esac
 }
+
+# ── 解析出真正的子命令 ───────────────────────────────────────────────────────
+#
+# ★★ **守卫必须用这个，不能看 `$1`。** clap 允许全局选项放在子命令**前面**，
+#    所以 `codex -C /tmp logout` / `codex -c k=v logout` / `codex -m x logout` 的
+#    `$1` 都不是 `logout`。PATH wrapper 的 logout 拦截原来正是 `[ "$1" = "logout" ]` ——
+#    一条 `codex -C /tmp logout` 就能绕过去，而 logout 会在**服务端 revoke 当值号**
+#    （实测两次：2026-07-30 因此死了 plus3/plus4/plus7 三个号）。
+#
+# 输出解析到的子命令（没有则输出空串）。带值的全局选项跳 2 个 token —— 这份清单
+# 与 `codex_wants_profile` 里那份**必须是同一份**，所以两者共用下面这个函数。
+codex_subcommand() {
+  local -a argv=("$@")
+  local i=0
+  while [ "$i" -lt "${#argv[@]}" ]; do
+    case "${argv[$i]}" in
+      -c|--config|--enable|--disable|--remote|--remote-auth-token-env|-i|--image|-m|--model|--local-provider|-p|--profile|-s|--sandbox|-C|--cd|--add-dir|-a|--ask-for-approval)
+        i=$((i + 2)) ;;
+      --*=*|-*)
+        i=$((i + 1)) ;;
+      *)
+        printf '%s' "${argv[$i]}"; return 0 ;;
+    esac
+  done
+  printf ''
+}
+
+# ★★ 会在**服务端**动凭证的子命令。两者都会让当值号的 token 失效：
+#    `logout` 直接 revoke；`login` 覆盖 `~/.codex/auth.json`，把上一个号的最新 token 丢掉
+#    （本仓的号只存在于那一份文件里）。加号/重登一律走 `codex-rotate login`。
+codex_is_credential_command() {
+  case "$(codex_subcommand "$@")" in
+    logout|login) return 0 ;;
+    *) return 1 ;;
+  esac
+}

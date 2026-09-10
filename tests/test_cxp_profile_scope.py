@@ -224,3 +224,107 @@ class TheProfileIsAlwaysRotateproxy(_Harness):
                            env=env, timeout=30)
         self.assertEqual(p.returncode, 78, "profile 缺失必须硬失败，不能静默跑起来")
         self.assertIn("rotateproxy.config.toml", p.stderr)
+
+
+class CredentialCommandsAreBlockedOnEveryEntrypoint(unittest.TestCase):
+    """★★★ `codex logout` 会在**服务端** revoke 当值号；`login` 覆盖 `~/.codex/auth.json`
+    把上一个号的最新 token 丢掉。本仓的号只存在于那一份文件里 —— 两者都等于永久杀号
+    （实测两次：2026-07-30 因此死了 plus3 / plus4 / plus7）。
+
+    Fable 评审 2026-09-10 抓到两个洞，都已修：
+      ① 守卫写的是 `[ "$1" = "logout" ]`，而 clap 允许全局选项放在子命令**前面** ——
+         `codex -C /tmp logout` 一条就绕过去。同文件的 resume 守卫早就会跳过带值选项，
+         logout 没复用，是同一条规则的两份实现。
+      ② 本轮新增的 `cxd` 直连真二进制、**整个绕过 PATH wrapper**，因而也绕过了那道闸。
+         而 `cxd` 被定位成"单号直连入口"，正是最可能被敲 `logout` 的地方。
+
+    ⚠️ **这个测试自己踩过一次坑**：第一版用 `bash wrapper $c`（`c="-C /tmp logout"`），
+       而本机 shell 是 **zsh —— 未加引号的变量不做词分割**，整串成了一个参数，
+       守卫当然解析不出子命令，于是报告"漏了"。**参数一律用列表传，别拼字符串。**
+    """
+
+    WRAPPER = str(ROOT / "scripts" / "codex-wrapper-with-logout-guard.sh")
+    CXD = str(ROOT / "proxy" / "cxd")
+
+    def _run(self, entry, argv):
+        env = dict(os.environ)
+        env["CODEX_NATIVE_BIN"] = "/bin/echo"      # 绝不真的调 codex
+        env["CODEX_ROTATE_STORE"] = str(ROOT)
+        # ★ 必须给一个**带 rotateproxy.config.toml 的** CODEX_HOME：wrapper 对
+        #   profile 缺失会 exit 78（那道闸是对的），否则正常命令的反向对照会假红。
+        env["CODEX_HOME"] = self._home
+        return subprocess.run(["bash", entry, *argv], capture_output=True, text=True,
+                              env=env, timeout=30)
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.mkdtemp(prefix="cred-guard-")
+        cls._home = cls._tmp
+        Path(cls._tmp, "rotateproxy.config.toml").write_text('model_provider = "rotateproxy"\n')
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls._tmp, ignore_errors=True)
+
+    BLOCKED = [
+        ["logout"], ["login"],
+        ["-C", "/tmp", "logout"], ["-c", "k=v", "logout"], ["-m", "x", "logout"],
+        ["--profile", "p", "login"], ["--cd", "/tmp", "logout"],
+    ]
+
+    def test_every_entrypoint_blocks_every_spelling(self):
+        for entry, name in ((self.WRAPPER, "wrapper"), (self.CXD, "cxd")):
+            for argv in self.BLOCKED:
+                with self.subTest(entry=name, argv=" ".join(argv)):
+                    p = self._run(entry, argv)
+                    self.assertNotEqual(p.returncode, 0,
+                                        f"{name} 放行了 `codex {' '.join(argv)}` —— 会杀号")
+                    self.assertIn("⛔", p.stderr)
+                    self.assertNotIn("logout", p.stdout,
+                                     "命令被转发给了真二进制")
+
+    def test_the_escape_hatch_still_works(self):
+        """★ `--force` 是刻意留的逃生口。少了它这道闸就变成"永远做不成这件事"，
+        而那会逼人绕过整个 wrapper —— 比放行更糟。"""
+        for entry, name in ((self.WRAPPER, "wrapper"), (self.CXD, "cxd")):
+            with self.subTest(entry=name):
+                p = self._run(entry, ["logout", "--force"])
+                self.assertEqual(p.returncode, 0)
+                self.assertIn("logout", p.stdout)
+
+    def test_normal_commands_are_not_caught(self):
+        """★ 反向对照。少了这条，一个"什么都拦"的实现也能让上面两条绿。"""
+        for entry, name in ((self.WRAPPER, "wrapper"), (self.CXD, "cxd")):
+            for argv in (["doctor"], ["resume"], ["exec", "hi"], ["-C", "/tmp", "doctor"]):
+                with self.subTest(entry=name, argv=" ".join(argv)):
+                    p = self._run(entry, argv)
+                    self.assertEqual(p.returncode, 0, p.stderr[:200])
+
+    def test_both_entrypoints_share_one_parser(self):
+        """★★ 判据函数只有一份（`codex-profile-scope.sh`）。两份实现必然在边界输入上
+        分叉，而这条分叉的后果是杀号。"""
+        for f in (self.WRAPPER, self.CXD):
+            src = Path(f).read_text(encoding="utf-8")
+            self.assertIn("codex_is_credential_command", src)
+            self.assertIn("codex-profile-scope.sh", src)
+            self.assertNotIn('[ "$1" = "logout" ]', src,
+                             "还留着只看 $1 的旧判据 —— 全局选项一放前面就绕过")
+
+    def test_a_missing_parser_refuses_credential_commands(self):
+        """★★ 判据文件不在 = 安装坏了。**此时绝不能放行凭证类命令** ——
+        解析不出子命令就等于没有守卫。
+
+        ⚠️ 我第一版改守卫时把 `. "$_scope"` 留在了守卫**下面**：函数未定义 ⇒
+           `if` 恒假 ⇒ logout 直接放行，比原来那个只看 `$1` 的版本更糟。
+           一道"看起来更严"的闸如果跑在它依赖的定义之前，就是零。
+        """
+        env = dict(os.environ)
+        env["CODEX_NATIVE_BIN"] = "/bin/echo"
+        env["CODEX_ROTATE_STORE"] = str(ROOT / "tests" / "_no_such_store")
+        for entry, name in ((self.WRAPPER, "wrapper"), (self.CXD, "cxd")):
+            with self.subTest(entry=name):
+                p = subprocess.run(["bash", entry, "logout"], capture_output=True,
+                                   text=True, env=env, timeout=30)
+                self.assertNotEqual(p.returncode, 0,
+                                    f"{name} 在判据缺失时放行了 logout")
+                self.assertNotIn("logout", p.stdout)
