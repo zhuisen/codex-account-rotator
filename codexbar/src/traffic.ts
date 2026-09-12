@@ -355,6 +355,28 @@ const EMPTY: Bucket = {
   uncached_in: 0, cache_read: 0, cache_write: 0, output: 0, total: 0, rounds: 0, models: {},
 };
 
+/**
+ * 横轴刻度文本。**三种桶形态共用一个判据**，别在组件里各写一份 `slice`。
+ *
+ * ★ 用户 2026-09-12：「年度的横轴不要 01、02、03，味道太重」——
+ *   `01` 是 `"2026-01".slice(5)` 的产物，那条 `slice` 本来是给日期档 `09-12` 写的，
+ *   月份档撞进来就成了一个没有单位的裸数字。中文月份自带单位，不需要读者去推。
+ */
+export function axisTick(d: string): string {
+  if (d.length > 10) return d.slice(11) + ":00";      // 2026-09-12T09 → 09:00
+  if (d.length === 7) return `${Number(d.slice(5))}月`; // 2026-01      → 1月
+  return d.slice(5);                                   // 2026-09-12   → 09-12
+}
+
+/**
+ * 浮层/标题里的完整写法。★ 月份档**必须带年份**：年度视图横跨一整年，
+ * 浮层上只写「1月」时，读者没有第二个地方能确认是哪一年。
+ */
+export function tickTitle(d: string): string {
+  if (d.length === 7) return `${d.slice(0, 4)}年${Number(d.slice(5))}月`;
+  return d;
+}
+
 /** 数据里最早/最晚的那一天（`YYYY-MM-DD`）。用来钳住日期选择器，别让用户选出一段空白。 */
 export function dayBounds(data: TrafficData | null): { min?: string; max?: string } {
   if (!data) return {};

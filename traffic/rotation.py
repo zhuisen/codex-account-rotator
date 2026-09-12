@@ -594,6 +594,23 @@ def collect(hours=24.0, now=None, store=None, use_cache=True):
     for m_ts, m_acc, m_kind in markers:
         accs.setdefault(m_acc, {"acc": m_acc, "tokens": 0, "requests": 0, "models": {}})
 
+    # ★★★ **已废弃的名字**（用户 2026-09-12：「修改代理轮换已废弃的名字」）。
+    #   `make_resolver` 把改过名的历史行并回了当前 label，但**号被移出池子**之后
+    #   （`remove`，或 autosync 造出来的幽灵槽被清掉）它的旧名在池子里永远查不到 ——
+    #   于是它继续以一条**看起来和真账号一模一样**的泳道出现，还没有 plan / 额度 / 配色。
+    #
+    #   ★ 两种情形处置**故意不同**，因为它们不是同一件事：
+    #     · 窗口内**零活动** → 整条丢掉。它什么都没证明，留着只是噪音。
+    #     · 窗口内**有活动** → **必须留下**并标记。那些消耗真的发生过，
+    #       丢掉会让合计悄悄变小 —— 本仓的老规矩：不许静默丢数据。
+    live = set(slots)                      # 当前池里的 label
+    for a in list(accs):
+        if a in live:
+            continue
+        r = accs[a]
+        if not r["requests"] and not r["tokens"] and not any(m[1] == a for m in markers):
+            del accs[a]                    # 零活动的退役名字：不占泳道
+
     colors = assign_colors(accs.keys())
     accounts = []
     for a in accs.values():
@@ -609,6 +626,10 @@ def collect(hours=24.0, now=None, store=None, use_cache=True):
             #   没归属上的那部分我们不知道它是什么模型,不能替它假设。
             "top_model": ({"model": top[0], "share": top[1] / a["tokens"]} if top and a["tokens"] else None),
             "quota_pct": _quota_pct(slots.get(a["acc"])),
+            # ★ 不在当前池里 = 已移除的号（或改名后没被认领的旧名）。
+            #   前端据此把名字画成中性色 —— **只换颜色不加徽章**：泳道名字列宽写死 152px
+            #   且刻意不加省略号，多一个徽章会把名字截成 `Pr…`，而那种缺陷 harness 抓不到。
+            "retired": a["acc"] not in live,
         })
     accounts.sort(key=lambda x: -x["tokens"])
 

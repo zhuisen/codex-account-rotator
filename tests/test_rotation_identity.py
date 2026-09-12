@@ -188,6 +188,56 @@ class RelayIsNeverAnAccount(unittest.TestCase):
                          {"plus6"})
 
 
+class RetiredNamesDoNotPoseAsAccounts(unittest.TestCase):
+    """★★ 用户 2026-09-12：「修改代理轮换已废弃的名字」。
+
+    `make_resolver` 把**改过名**的历史行并回了当前 label。但号被 `remove` 掉之后
+    （或 autosync 造出来的幽灵槽被清掉），它的旧名在池子里永远查不到 ——
+    于是它继续以一条**看起来和真账号一模一样**的泳道出现，没有 plan / 额度 / 配色。
+
+    ★ 两种情形处置**故意不同**，它们不是同一件事：
+      · 窗口内零活动 → 整条丢掉（什么都没证明，留着只是噪音）；
+      · 窗口内有活动 → **必须留下并标记**。那些消耗/失败真的发生过，
+        丢掉会让合计悄悄变小 —— 本仓不许静默丢数据。
+    """
+
+    SRC = (ROOT / "traffic" / "rotation.py").read_text(encoding="utf-8")
+
+    def test_the_two_cases_are_handled_differently(self):
+        i = self.SRC.index("live = set(slots)")
+        seg = self.SRC[i:i + 420]
+        self.assertIn("del accs[a]", seg, "★ 零活动的退役名字没有被丢掉")
+        self.assertIn("markers", seg,
+                      "★★ 判据只看了 requests/tokens —— 只有 marker 的号（比如全是 send err）"
+                      "会被当成零活动丢掉，而那正是它被移除的原因")
+
+    def test_activity_is_measured_on_all_three_signals(self):
+        """★ `requests` 对 GET 恒为 0（只有计费 POST 才切段）。只看它的话，
+        一个今天真的失败了 4 次的号会被判成「什么都没发生」。"""
+        i = self.SRC.index("live = set(slots)")
+        seg = self.SRC[i:i + 420]
+        for sig in ('r["requests"]', 'r["tokens"]', "m[1] == a"):
+            self.assertIn(sig, seg, f"★ 活动判据少了 {sig}")
+
+    def test_live_accounts_are_never_flagged(self):
+        i = self.SRC.index('"retired":')
+        self.assertIn('a["acc"] not in live', self.SRC[i:i + 80],
+                      "★ retired 的判据不是「不在当前池里」—— 会把在池号也标成退役")
+
+    def test_the_ui_only_recolours_and_never_adds_a_badge(self):
+        """★★ 泳道名字列宽写死 152px 且**刻意不加省略号**，多一个徽章会把名字截成 `Pr…`,
+        而这类缺陷 harness 抓不到（`textOverflow` 只改渲染，DOM 文本仍完整）。"""
+        ts = (ROOT / "codexbar" / "src" / "pages" / "LogsPage.tsx").read_text(encoding="utf-8")
+        # ⚠️ 第一版断言的是**字符串** `color:`，而把条件删成 `color: undefined` 之后
+        #    那个字符串还在 ⇒ 闸照样绿（变异工具当场拦下）。判据必须打在**绑定**上：
+        #    颜色是不是由 `retired` 决定，而不是"这行里出现过 color 这个词"。
+        self.assertRegex(ts, r"color:\s*l\.retired\s*\?",
+                         "★ 名字颜色不再由 retired 决定 —— 这个状态在界面上就不存在了")
+        i = ts.index("color: l.retired")
+        seg = ts[max(0, i - 400):i + 200]
+        self.assertNotIn("borderRadius", seg, "★ 加了徽章 —— 名字列会被挤到截断")
+
+
 def _store(slots):
     d = tempfile.mkdtemp(prefix="rot-ident-")
     Path(d, "state.json").write_text(json.dumps({"slots": slots}), encoding="utf-8")

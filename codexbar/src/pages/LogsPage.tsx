@@ -59,6 +59,9 @@ interface Acct {
   requests: number;
   top_model: { model: string; share: number } | null;
   quota_pct: number | null;
+  /** 这个名字已不在账号池里：号被 `remove` 掉，或是改名后没被 `alias` 认领的旧名。
+   *  ★ 零活动的退役名字在 `rotation.py` 的数据层就整条丢掉了，能走到这里的**都有活动**。 */
+  retired?: boolean;
 }
 interface Marker { acc: string; t: number; kind: string }
 interface Ev { t: number; type: string; from: string | null; to: string | null; reason: string; text: string; accs: string[] }
@@ -401,8 +404,16 @@ export default function LogsPage({ t }: { t: Theme }): React.ReactElement {
                 <span style={{ width: 8, height: 8, borderRadius: 2, background: l.color, flex: "none" }} />
                 {/* ★ `flexShrink: 0`：名字是这一行的**身份**，宁可徽章挤也不能把号名截掉。
                     列宽已按最坏情况（名字+PRO+当前）算过，正常不会触发收缩。 */}
-                <span style={{ fontSize: 14.5, fontWeight: 700, fontFamily: MONO,
-                               flexShrink: 0, whiteSpace: "nowrap" }}>{l.acc}</span>
+                {/* ★★ 已移除的号（或改名后没被认领的旧名）画成中性色 + 一个 `title`。
+                    **只换颜色，不加徽章** —— 名字列宽写死 152px 且刻意不加省略号，
+                    多一个徽章会把名字截成 `Pr…`，而这类缺陷 harness 抓不到（DOM 文本仍完整）。
+                    它**不会被丢掉**：那些消耗/失败真的发生过，丢掉就是静默让合计变小。
+                    （零活动的退役名字已在 `rotation.py` 的数据层整条丢弃，这里只剩有活动的。） */}
+                <span title={l.retired ? "这个名字已不在账号池里（号被移除，或是改名前的旧名）——"
+                                       + "用 `codex-rotate alias <旧名> <号>` 把它并回去" : undefined}
+                      style={{ fontSize: 14.5, fontWeight: 700, fontFamily: MONO,
+                               flexShrink: 0, whiteSpace: "nowrap",
+                               color: l.retired ? t.muted : undefined }}>{l.acc}</span>
                 {/* ★ PRO 徽章:一眼看出这条泳道是**保底档**,它有流量就意味着 Plus 池当时不可用。
                     不显示 PLUS —— 绝大多数号都是 Plus,画出来只是噪音(同卡片上 `PlanBadge` 的口径)。 */}
                 {l.plan === "pro" && (

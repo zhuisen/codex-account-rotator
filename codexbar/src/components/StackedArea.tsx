@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { axisTick, tickTitle } from "../traffic";
 import type { Theme } from "../theme";
 
 export interface Layer {
@@ -233,7 +234,7 @@ export default function StackedArea({
                                           : i === n - 1 ? "translateX(-100%)" : "translateX(-50%)",
                                  fontSize: 10, color: t.text2,
                                  whiteSpace: "nowrap", fontFamily: "'JetBrains Mono'" }}>
-            {d.length > 10 ? d.slice(11) + ":00" : d.slice(5)}
+            {axisTick(d)}
           </span>
         ) : null))}
       </div>
@@ -255,7 +256,7 @@ export default function StackedArea({
           fontFamily: "'JetBrains Mono'", color: t.text,
         }}>
           <div style={{ fontSize: 9.5, color: t.muted, marginBottom: 4 }}>
-            {tipTitle ? tipTitle(hv) : labels[hv]}
+            {tipTitle ? tipTitle(hv) : tickTitle(labels[hv])}
           </div>
           {/* layers 是自下而上的**降序**(大的贴基线),浮层直接按这个顺序列 = 大的先读 */}
           {layers.map((L, li) => {

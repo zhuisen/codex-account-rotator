@@ -33,7 +33,7 @@ LIB_RS = WEB / "src-tauri" / "src" / "lib.rs"
 USE_TRAFFIC = WEB / "src" / "hooks" / "useTraffic.ts"
 
 PROBE = r"""
-import { bucketsFor, daysNeeded, isMonthly, spanDays, WINDOW_TIERS }
+import { bucketsFor, daysNeeded, isMonthly, spanDays, WINDOW_TIERS, axisTick, tickTitle }
   from "%s";
 
 const B = (n) => ({ uncached_in: 0, cache_read: 0, cache_write: 0, output: 0,
@@ -67,6 +67,12 @@ out.span_inclusive = spanDays({ start: "2026-06-01", end: "2026-06-30" });
 out.monthly_at_90 = isMonthly("custom", { start: "2026-06-01", end: "2026-08-29" });
 out.monthly_at_91 = isMonthly("custom", { start: "2026-06-01", end: "2026-08-30" });
 out.tiers = [...WINDOW_TIERS];
+out.tick_hour  = axisTick("2026-09-12T09");
+out.tick_day   = axisTick("2026-09-12");
+out.tick_m1    = axisTick("2026-01");
+out.tick_m12   = axisTick("2026-12");
+out.title_m1   = tickTitle("2026-01");
+out.title_day  = tickTitle("2026-09-12");
 const NOW = Date.parse("2026-09-12T12:00:00");
 out.need_default = daysNeeded(14, undefined, NOW);
 out.need_90 = daysNeeded(90, undefined, NOW);
@@ -223,6 +229,41 @@ class TheWideWindowDoesNotRunTheHeartbeat(unittest.TestCase):
         i = self.TS.index('void emit("traffic-updated")')
         self.assertIn("isDefault", self.TS[max(0, i - 300):i],
                       "★ 非默认窗口也广播 ⇒ 对方白读一次默认快照")
+
+
+class TheMonthAxisReadsAsMonths(unittest.TestCase):
+    """★ 用户 2026-09-12：「年度的横轴不要 01、02、03，味道太重。1月、2月会不会好点？」
+
+    `01` 是 `"2026-01".slice(5)` 的产物 —— 那条 `slice` 本来是给日期档 `09-12` 写的，
+    月份档撞进来就成了一个**没有单位的裸数字**。三种桶形态现在共用一个判据（`axisTick`），
+    别再在组件里各写一份 slice。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.o = _probe()
+
+    def test_months_render_with_a_unit_and_no_leading_zero(self):
+        self.assertEqual(self.o["tick_m1"], "1月")
+        self.assertEqual(self.o["tick_m12"], "12月")
+
+    def test_the_other_two_shapes_are_unchanged(self):
+        """★ 反向闸。改月份档时把日期/小时档一起改掉，是同一条 `slice` 上最容易出的事故。"""
+        self.assertEqual(self.o["tick_day"], "09-12")
+        self.assertEqual(self.o["tick_hour"], "09:00")
+
+    def test_the_tooltip_keeps_the_year(self):
+        """★★ 浮层上只写「1月」时，读者**没有第二个地方**能确认是哪一年 ——
+        而年度视图横跨一整年，这正是最需要确认的时候。"""
+        self.assertEqual(self.o["title_m1"], "2026年1月")
+        self.assertEqual(self.o["title_day"], "2026-09-12")
+
+    def test_the_component_does_not_keep_its_own_slice(self):
+        """★ 判据打在**组件里还有没有那条 slice** 上：留着一份就是两套规则，
+        而它们只会在某个边界上才开始矛盾。"""
+        src = (ROOT / "codexbar" / "src" / "components" / "StackedArea.tsx").read_text(encoding="utf-8")
+        self.assertNotIn('d.slice(5)', src, "★ 组件里还留着自己的一份刻度格式化")
+        self.assertIn("axisTick(d)", src)
 
 
 class LoadingSaysNothingNotZero(unittest.TestCase):
