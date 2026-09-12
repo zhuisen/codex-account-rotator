@@ -42,6 +42,7 @@ app/**/.build_number
 # key 里带 account_id / grok account_key —— 敏感度同 .grok-quota.json,不入库。
 .quota-anchors.json
 .quota-anchors.json.tmp*
+.quota-anchors.json.lock
 *.bak
 # UI 验证 harness 的一次性夹具(含脱敏后的账号池快照,仍不入库)
 codexbar/src/_*_probe.json

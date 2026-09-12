@@ -1859,23 +1859,43 @@ def _billed_probe(aid, slot, is_active, model=PROBE_MODEL, effort=PROBE_EFFORT):
     }).encode()
     conn = http.client.HTTPSConnection("chatgpt.com", 443,
                                        context=ssl.create_default_context(), timeout=60)
+    # ★★★ **计费相位必须分开**（2026-09-12 修；四方评审 2026-09-07 #3，仅 codex 找到）。
+    #
+    #   原来 `request()` / `getresponse()` / `read()` 在**同一个 try** 里，全部塌成
+    #   `req err`，而调用方对 `req err` **会重试一次**。那段重试的注释写着
+    #   「那是连不上/握手断，**没有产生任何服务端判决**」—— **这个前提是假的**：
+    #   `getresponse()` 与 `read()` 的失败发生在请求**已经送达**之后，服务端很可能
+    #   已经 200 并**已经计费**。于是「读流超时」会变成**再发一次计费请求**。
+    #   注释把不变量说对了，代码没实现它。
+    #
+    #   这是全仓唯一自动花钱的路径（dawn-probe 每天 06:00，实测今天给 4 个号各发过一次），
+    #   也正是本仓 §8「计费相位分界」这条铁律存在的理由。
+    #
+    #   两个相位、两种前缀，调用方只许重试前者：
+    #     `send err`      —— 请求**没有完整送达**。`request()` 抛出意味着 body 没写完，
+    #                        服务端拿到的是个不完整的请求（它在等满 Content-Length），
+    #                        不会产生补全、也就不会计费。**可以重试。**
+    #     `committed err` —— 请求已送达，服务端**可能已判决并计费**。**绝不重试**，
+    #                        哪怕我们根本没读到那个判决 —— 「没读到」≠「没发生」。
     try:
-        conn.request("POST", RESPONSES_PATH, body=body, headers={
-            "Authorization": f"Bearer {tok.get('access_token', '')}",
-            "chatgpt-account-id": tok.get("account_id"),
-            "Content-Type": "application/json", "originator": "codex_cli_rs",
-            "User-Agent": "codex_cli_rs/0.146.0",
-            "Accept": "text/event-stream", "Content-Length": str(len(body))})
-        r = conn.getresponse()
-        h = {k.lower(): v for k, v in r.getheaders()}
-        status = r.status
-        raw = r.read(PROBE_READ_CAP)   # 读全:要从中抽出模型的实际回答,而不只是判状态码
-    except Exception as e:
-        # ★ 传输层失败 ≠ 账号不能用,而"把这两者分开"正是本工具存在的理由。实测 plus4 报过一次
-        # `SSL: UNEXPECTED_EOF_WHILE_READING`,紧接着连测三次全部 200 —— 纯抖动。不重试就会把一次
-        # 网络打嗝写成"这个号挂了",比不测更糟。只重试连接/TLS 层异常;HTTP 状态码是服务端的判决,
-        # 不在此列(见下面按 status 分支)。
-        return None, f"req err: {e}", ""
+        try:
+            conn.request("POST", RESPONSES_PATH, body=body, headers={
+                "Authorization": f"Bearer {tok.get('access_token', '')}",
+                "chatgpt-account-id": tok.get("account_id"),
+                "Content-Type": "application/json", "originator": "codex_cli_rs",
+                "User-Agent": "codex_cli_rs/0.146.0",
+                "Accept": "text/event-stream", "Content-Length": str(len(body))})
+        except Exception as e:
+            # ★ 实测 plus4 报过一次 `SSL: UNEXPECTED_EOF_WHILE_READING`，紧接着连测三次
+            #   全部 200 —— 纯抖动。不重试就会把一次网络打嗝写成"这个号挂了"，比不测更糟。
+            return None, f"send err: {e}", ""
+        try:
+            r = conn.getresponse()
+            h = {k.lower(): v for k, v in r.getheaders()}
+            status = r.status
+            raw = r.read(PROBE_READ_CAP)   # 读全:要从中抽出模型的实际回答,而不只是判状态码
+        except Exception as e:
+            return None, f"committed err: {e}", ""
     finally:
         conn.close()
 
@@ -2026,9 +2046,12 @@ def cmd_probe(args):
             before = (pre.get("primary") or {}).get("used_percent")
 
         q, msg, answer = _billed_probe(aid, slot, aid == active, model, effort)
-        # 传输层抖动重试一次。只对 `req err` 重试 —— 那是连不上/握手断,没有产生任何服务端判决;
-        # HTTP 4xx/5xx 是服务端明确回答了,重试只会白烧一次额度。
-        if not q and msg.startswith("req err"):
+        # ★★ **只对 `send err` 重试** —— 那是请求没完整送达，服务端不会计费。
+        #    `committed err`（已送达、可能已 200 已计费）与 HTTP 4xx/5xx 一样**不重试**：
+        #    前者重试会**真的多扣一次**，后者是服务端已经回答过了。
+        #    ⚠️ 这里原来判的是 `req err`，而那个前缀**三个相位共用** ——
+        #    读流超时因此会重发一次计费请求（四方评审 #3，2026-09-12 修）。
+        if not q and msg.startswith("send err"):
             time.sleep(3)
             q, msg2, answer = _billed_probe(aid, slot, aid == active, model, effort)
             msg = msg2 if q else f"{msg}(重试后:{msg2})"
@@ -2200,7 +2223,26 @@ def cmd_dawn_probe(args):
         return
 
     print(f"每日清晨探针 · {len(labels)} 个 Plus 号:{' '.join(labels)}")
-    ok_n, total = cmd_probe(labels)
+    # ★★★ **认领之后必须无条件释放**（四方评审 2026-09-07 #5，2026-09-12 修）。
+    #
+    #   原来 `cmd_probe()` 抛异常就走不到下面那个 `_save(state="done")`，于是
+    #   `state` 永久钉在 `"running"` **且带着今天的日期** —— 而 `_claim` 的判据是
+    #   「date == today 就算已被认领」。结果：**当天余下时间任何重试都被跳过**，
+    #   打印的还是「已被另一个进程认领,本次跳过(防双重计费)」。
+    #   那一整天的锚定静默失效，而日志上看起来像是防重复在正常工作。
+    #
+    #   ★ 释放成 `"failed"` 而不是抹掉这条记录：**「今天跑过但崩了」与「今天没跑过」
+    #     不是一回事** —— 前者可能已经花过钱了，抹掉会让下一次重跑变成二次计费。
+    #     `failed` 同样满足 `date == today`，所以它**仍然挡住重跑**，只是把真相说出来。
+    ok_n = total = 0
+    try:
+        ok_n, total = cmd_probe(labels)
+    except BaseException as e:
+        _save({"date": today, "at": int(time.time()), "state": "failed",
+               "ok": None, "total": len(labels),
+               "model": PROBE_MODEL, "effort": PROBE_EFFORT,
+               "note": f"{type(e).__name__}: {e}"[:200]})
+        raise
     _save({"date": today, "at": int(time.time()), "state": "done",
            "ok": ok_n, "total": total,
            "model": PROBE_MODEL, "effort": PROBE_EFFORT, "note": ""})

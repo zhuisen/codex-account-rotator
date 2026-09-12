@@ -44,6 +44,13 @@
 import json
 import os
 import time
+try:
+    import fcntl                       # POSIX
+except ModuleNotFoundError:            # Windows —— 语义等价的 LockFileEx 兼容层,见 portalock.py
+    import sys as _sys
+    _sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    import portalock as fcntl          # noqa: N813
+from contextlib import contextmanager
 from pathlib import Path
 
 #: 同一个锚点两次读出来允许差多少秒。上游给的是整秒截断值,加上时钟抖动,几秒量级。
@@ -300,6 +307,38 @@ def cycles(anchors, source, key, span, limit=8, now=None):
     return out[-limit:][::-1]
 
 
+@contextmanager
+def _ledger_lock(path):
+    """跨进程写锁。**`note()` 的 load→record→save 必须整段持有它。**
+
+    ★★★ 四方评审 2026-09-07 #6（四家一致），2026-09-12 修。
+       `save()` 是原子的（tmp + rename），所以文件**从不会坏** —— 正因如此这个 bug
+       完全不出声。坏的是**更新丢失**：quotad / app / CLI 三个进程都调 `note()`，
+       A 读 → B 读 → A 写 → B 写，A 那次观测就没了。
+       而这本账判的是「窗口锚定没锚定」，丢观测**直接改判**：`anchored` 会退回
+       `floating`，UI 于是在一次刚花过钱的探针之后反说「窗口未启动」。
+       ⚠️ 我当初在模块头声称的不变量 (d) 是假的 —— 它写着"同一份账本由多个来源安全共享"。
+
+    ★ **拿不到锁就照常写下去**（fail-open），与本模块「整体 fail-open,恒不抛」一致：
+      丢一次观测远好过让 `scan.py` 卡住 —— 2026-09-05 的事故形态正是一个纯附加功能
+      把与它无关的 token 统计整个搞挂。所以这里宁可退回到旧的竞态，也不阻塞调用方。
+    """
+    lf = None
+    try:
+        lf = open(path + ".lock", "a+")
+        fcntl.flock(lf, fcntl.LOCK_EX)
+    except Exception:
+        lf = None                      # 建不了/锁不上 —— 无保护地继续，别把调用方拖死
+    try:
+        yield
+    finally:
+        if lf is not None:
+            try:
+                lf.close()             # close 隐式释放 flock
+            except Exception:
+                pass
+
+
 def note(source, key, reset, used, now=None, path=None):
     """load → record → save → verdict 的一次性入口,给三个采集脚本用。
 
@@ -312,9 +351,13 @@ def note(source, key, reset, used, now=None, path=None):
       调用方永远拿到同一个形状,少一条 `if x is None` 就少一处能忘掉的分支。
     """
     try:
-        anchors = load(path)
-        if record(anchors, source, key, reset, used, now):
-            save(anchors, path)
-        return verdict(anchors, source, key, reset, now)
+        # ★★ 整段 load→record→save 在**同一把锁**里。只锁 save 是没用的：
+        #    竞态发生在"读到旧值"那一刻，不是写的那一刻。
+        target = path or default_path()
+        with _ledger_lock(target):
+            anchors = load(path)
+            if record(anchors, source, key, reset, used, now):
+                save(anchors, path)
+            return verdict(anchors, source, key, reset, now)
     except Exception:
         return {"state": "unknown", "held_secs": 0, "samples": 0, "slides": 0, "used_max": 0.0}
