@@ -115,13 +115,29 @@ class TheDawnProbeAlwaysReleasesItsClaim(unittest.TestCase):
     def test_failed_still_blocks_a_rerun_today(self):
         """★★★ 释放成 `failed` 而不是抹掉：**「跑过但崩了」与「没跑过」不是一回事** ——
         前者可能已经花过钱，抹掉会让重跑变成二次计费。
-        `failed` 仍然带今天的日期，所以仍然挡住重跑。"""
+        `failed` 仍然带今天的日期，所以仍然挡住重跑。
+
+        ⚠️ **这条闸自己踩过一次锚点不唯一**（2026-09-12）。原来是
+        `seg.index('"failed"')` 取**第一个**匹配再看前后 400 字符 —— 那天给
+        `--force` 加了一句 `if claimed["state"] == "failed"` 的提示文案，它排在
+        真正的 `_save(...)` 之前，窗口整个偏到新代码上，闸**假红**。
+        `tools/mutate.py` 第①条要求「锚点匹配数 == 1」，而它出现在闸自己身上。
+        现在按 AST 找 **except 处理器里的那个 `_save` 调用**，再核它的字典字面量：
+        位置无关、文案无关，只要那次写回真的带着今天的日期就绿。"""
         fn, src = _fn("cmd_dawn_probe")
-        seg = ast.get_source_segment(src, fn)
-        i = seg.index('"failed"')
-        window = seg[max(0, i - 400):i + 400]
-        self.assertIn('"date": today', window,
-                      "★ failed 那条没带今天的日期 ⇒ 不再挡重跑 ⇒ 可能二次计费")
+        saves = [n for h in ast.walk(fn) if isinstance(h, ast.ExceptHandler)
+                 for n in ast.walk(h)
+                 if isinstance(n, ast.Call) and getattr(n.func, "id", "") == "_save"]
+        self.assertEqual(len(saves), 1,
+                         "★ 异常路径里的 `_save` 调用不是恰好 1 个 —— 探针失准，先修闸")
+        d = saves[0].args[0]
+        self.assertIsInstance(d, ast.Dict, "★ `_save` 的实参不是字面量字典 —— 这条闸看不进去了")
+        kv = {k.value: v for k, v in zip(d.keys, d.values)
+              if isinstance(k, ast.Constant)}
+        self.assertEqual(getattr(kv.get("state"), "value", None), "failed",
+                         "★ 异常路径没把 state 写成 failed")
+        self.assertEqual(getattr(kv.get("date"), "id", None), "today",
+                         "★ failed 那条没带今天的日期 ⇒ 不再挡重跑 ⇒ 可能二次计费")
 
 
 class TheAnchorLedgerSurvivesConcurrentWriters(unittest.TestCase):

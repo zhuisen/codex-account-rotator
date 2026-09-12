@@ -137,12 +137,28 @@ class DayIdempotence(unittest.TestCase):
 
     def test_claim_is_written_before_probing(self):
         """★ 判据打在**源码顺序**上:占天的 `_mutate_state` 必须出现在 `cmd_probe(` 之前。
-        行为测试只能证明「这次没并发出问题」，顺序才是它成立的原因。"""
+        行为测试只能证明「这次没并发出问题」，顺序才是它成立的原因。
+
+        ⚠️ 原来硬编的是 `cmd_probe(labels)`。2026-09-12 把程序内调用改成
+        `cmd_probe([], aids=targets)`（让身份走 aid、不经过 argv）之后这条闸
+        `ValueError: substring not found` —— 它盯的是**实参长什么样**，而它要守的
+        是**两个调用谁先谁后**。现在按 AST 比行号，实参怎么写都与它无关。"""
+        import ast as _ast
         src = (ROOT / "codex-rotate").read_text(encoding="utf-8")
-        i = src.index("def cmd_dawn_probe")
-        body = "\n".join(l for l in src[i:src.index("\ndef ", i + 10)].splitlines()
-                         if not l.lstrip().startswith("#"))
-        self.assertLess(body.index("_mutate_state(_claim)"), body.index("cmd_probe(labels)"),
+        fn = next(n for n in _ast.walk(_ast.parse(src))
+                  if isinstance(n, _ast.FunctionDef) and n.name == "cmd_dawn_probe")
+        calls = {}
+        for n in _ast.walk(fn):
+            if not isinstance(n, _ast.Call):
+                continue
+            name = getattr(n.func, "id", "")
+            if name == "_mutate_state" and any(getattr(a, "id", "") == "_claim" for a in n.args):
+                calls.setdefault("claim", n.lineno)
+            elif name == "cmd_probe":
+                calls.setdefault("probe", n.lineno)
+        self.assertIn("claim", calls, "★ 找不到占天的 `_mutate_state(_claim)` —— 探针失准")
+        self.assertIn("probe", calls, "★ 找不到 `cmd_probe(...)` 调用 —— 探针失准")
+        self.assertLess(calls["claim"], calls["probe"],
                         "占天写在探测之后 —— 并发窗口里会双重计费")
 
 
@@ -207,3 +223,117 @@ class WiredIntoTheSystem(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ForceDoesNotJoinARunInFlight(unittest.TestCase):
+    """★★★ 四方评审 #1（2026-09-07，claude+agy+grok 三家找到）：
+    `--force` 原来是 `if claimed["n"] and not force:` —— 一律放行。
+
+    `--force` 的**本意**是「今天跑过了，我想再跑一次」。可同一行也会在
+    **另一个进程正跑到一半**时放行 ⇒ 两个进程同时给全池发计费请求 ⇒
+    **整池双重计费**。它恰好违反这个工具自己写着的那句：
+    「在"少跑一次"和"可能多花一次钱"之间，一律选前者」。
+
+    ⚠️ 但 `running` 不能无条件当"有人在跑"：进程被 `kill -9` 时连 `failed` 都写不下，
+    `running` 会永远钉在那里，`--force` 连**恢复**都做不到。所以判据是
+    **`running` 且未陈旧**，不是 `running`。下面四条把这个边界的两侧都钉住 ——
+    只测拒绝那一侧的话，一个"永远拒绝"的实现也能全绿。
+    """
+
+    def _dawn(self, state, age_sec):
+        import time as _t
+        return {"enabled": True, "date": __import__("datetime").date.today().isoformat(),
+                "at": int(_t.time()) - age_sec, "state": state, "ok": None, "total": 1}
+
+    ONE_PLUS = {"user-a": slot("plusA", "plus")}
+
+    def test_force_refuses_while_another_run_is_in_flight(self):
+        """★★ 这是全仓唯一一处**拒绝用户明确指令**的地方。
+        代价不对称：拒绝 = 少跑一次；放行 = 整池多扣一次。"""
+        d = store_with(self.ONE_PLUS, dawn=self._dawn("running", 30))
+        p = run(d, "--force")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertNotIn("每日清晨探针 ·", p.stdout,
+                         "★★★ `--force` 在别人正跑时放行了 ⇒ 整池双重计费")
+        self.assertIn("`--force` 也不放行", p.stdout,
+                      "★ 拒绝了但没说是 force 也拦 —— 用户会以为 force 没生效再敲一遍")
+
+    def test_force_can_still_take_over_a_stale_running(self):
+        """★★ 反向闸。`kill -9` 留下的 `running` 必须能被接管，
+        否则这个开关从"防重复计费"变成"永久卡死"，而用户手上没有别的办法。"""
+        d = store_with(self.ONE_PLUS, dawn=self._dawn("running", 7200))
+        p = run(d, "--force")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("每日清晨探针 ·", p.stdout,
+                      "★ 陈旧的 running 挡住了 --force —— 进程被 -9 之后就再也跑不了了")
+        self.assertIn("接管一条陈旧的 running", p.stdout,
+                      "★ 接管了但没说 —— 那次**可能已经花过钱**，用户有权知道")
+
+    def test_force_still_reruns_a_finished_day(self):
+        """★ `--force` 的本职工作不能被这次修复顺手废掉。"""
+        d = store_with(self.ONE_PLUS, dawn=self._dawn("done", 30))
+        p = run(d, "--force")
+        self.assertIn("每日清晨探针 ·", p.stdout, "★ `--force` 连正常重跑都做不到了")
+
+    def test_without_force_every_state_still_blocks(self):
+        """★ 不带 `--force` 时三种状态都挡 —— 这条本来就成立，钉住它防回归。"""
+        for st in ("running", "done", "failed"):
+            with self.subTest(state=st):
+                p = run(store_with(self.ONE_PLUS, dawn=self._dawn(st, 30)))
+                self.assertNotIn("每日清晨探针 ·", p.stdout,
+                                 f"★ state={st} 时不带 force 也跑了 ⇒ 可能二次计费")
+
+
+class TheProgramInternalCallDoesNotGoThroughArgv(unittest.TestCase):
+    """★★★ 四方评审 #4（2026-09-07）：`cmd_dawn_probe` 原来把每个号的 **label**
+    拼进 `args` 交给 `cmd_probe` 按 argv 解析，而 **label 是用户可以随便起的字符串**
+    （`cmd_add` 里 `label = args[0] if args else None`，零校验）。三种后果：
+
+      · label 叫 `--all`    ⇒ `take_all` 为真 ⇒ **给整个池子计费**，
+                              包括每日探针刻意排除的 Pro 号；
+      · label 叫 `--model`  ⇒ **吞掉它后面那个 label**，那个号这天漏探且无人知晓；
+      · 两个号重名          ⇒ `_resolve_slot` 只认一个 ⇒ 另一个被**重复计费**。
+
+    ★ 修法**不是拉黑这几个字符串** —— 那只堵住今天想得到的那几个。
+    是让程序内调用**根本不经过 argv**：身份是 `aid`，由我们生成、不可被起名。
+    所以下面第一条闸打在**结构**上（有没有走 aid 这条路），
+    第二条才用 `--all` 这个具体 label 做行为验证 —— 它是**症状**不是判据。
+
+    ⚠️ 本机今天一个都触发不到（labels 全是 `plusN`/`ProN`，无重名、无 `--` 开头），
+    所以这**不是**已发生的事故，是一条只要有人起个怪名字就会当场花钱的路径。
+    """
+
+    def test_dawn_probe_passes_aids_not_label_strings(self):
+        import ast as _ast
+        src = (ROOT / "codex-rotate").read_text(encoding="utf-8")
+        fn = next(n for n in _ast.walk(_ast.parse(src))
+                  if isinstance(n, _ast.FunctionDef) and n.name == "cmd_dawn_probe")
+        calls = [n for n in _ast.walk(fn) if isinstance(n, _ast.Call)
+                 and getattr(n.func, "id", "") == "cmd_probe"]
+        self.assertEqual(len(calls), 1, "★ `cmd_probe` 的调用不是恰好 1 处 —— 探针失准")
+        c = calls[0]
+        kw = {k.arg for k in c.keywords}
+        self.assertIn("aids", kw,
+                      "★★★ 没走 `aids=` ⇒ 又回到按 argv 解析 label ⇒ 怪名字能烧全池")
+        self.assertEqual(len(c.args), 1, "★ 位置参数不止一个 —— 判据看不懂了，先修闸")
+        self.assertIsInstance(c.args[0], _ast.List, "★ 第一个实参不是字面量列表")
+        self.assertEqual(c.args[0].elts, [],
+                         "★★ argv 那条路又被塞了东西 —— 必须是空列表，解析路径整条不走")
+
+    def test_a_slot_labelled_dash_dash_all_does_not_bill_the_whole_pool(self):
+        """★★ 行为验证。池子：两个 Plus（其中一个 label 就叫 `--all`）+ 一个 Pro。
+        每日探针的名单是那两个 Plus；Pro 号**绝不该**被碰到。"""
+        pool = {"user-a": slot("plusA", "plus"),
+                "user-b": slot("--all", "plus"),
+                "user-c": slot("proC", "pro")}
+        d = store_with(pool, dawn={"enabled": True})
+        p = run(d, "--force")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("计费探测 ·", p.stdout, "★ 没进到探测阶段，这条闸什么都没验到")
+        import re as _re
+        m = _re.search(r"· (\d+) 个号", p.stdout)
+        self.assertIsNotNone(m, "★ 读不到号数 —— 输出格式变了，先修闸")
+        self.assertEqual(int(m.group(1)), 2,
+                         "★★★ 一个叫 `--all` 的 label 把 take_all 打开了 ⇒ 整池计费\n" + p.stdout)
+        self.assertNotIn("proC", p.stdout,
+                         "★★★ Pro 号进了计费名单 —— 每日探针刻意排除它（它没有 5h 窗口）")

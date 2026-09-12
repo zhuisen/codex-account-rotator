@@ -1962,13 +1962,25 @@ def _write_last_probe(aid, **fields):
     _mutate_state(f)
 
 
-def cmd_probe(args):
+def cmd_probe(args, aids=None):
     """★ 计费探针:对指定号各发一次最小真实补全("hi" → "ok"),验证它**真的能用**,并顺带把
     响应头里的额度写回 state。
 
     用法:
         codex-rotate probe plus5 plus7      # 指定号
         codex-rotate probe --all            # 全池(需显式,防手滑烧全池)
+
+    ★★ **程序内调用一律传 `aids=`，不要把 label 塞进 `args`**（2026-09-12 修；
+       四方评审 2026-09-07 #4）。`cmd_dawn_probe` 原来把每个号的 **label** 拼进
+       `args` 再让这里按 argv 解析 —— 而 label 是**用户可以随便起的字符串**，
+       `cmd_add` 一个字符都不校验。后果：
+         · 一个叫 `--all` 的 label ⇒ `take_all` 为真 ⇒ **给整个池子计费**，
+           包括每日探针刻意排除的 Pro 号；
+         · 一个叫 `--model` / `--effort` 的 label ⇒ **吞掉它后面那个 label**，
+           那个号这天漏探而没人知道；
+         · 两个号重名 ⇒ `_resolve_slot` 只认一个 ⇒ 另一个被**重复计费**。
+       修法**不是拉黑这几个字符串**（那只堵住今天想得到的那几个），
+       而是**让程序内调用根本不经过 argv** —— 身份就是 aid，它由我们生成、不可被起名。
         codex-rotate probe --all --model gpt-5.5
 
     ★ 这会花真钱(周额度)。项目当初正是因为**自动**计费探测每天烧掉 17-18% 才把它废掉的 ——
@@ -1992,7 +2004,19 @@ def cmd_probe(args):
     labels = [a for a in args if not a.startswith("--")]
 
     s = _state()
-    if take_all:
+    if aids is not None:
+        # ★ 程序内入口：身份是 aid，不经过 argv，也不查 label。
+        #   仍然保留「暂停号拒探」这条闸 —— 它守的是钱，不是解析。
+        targets = []
+        for aid in aids:
+            sl = s["slots"].get(aid)
+            if not sl:
+                sys.exit(f"no slot for aid {aid[:8]}…")
+            if paused(sl):
+                lbl = sl.get("label") or aid
+                sys.exit(f"拒绝:[{lbl}] 处于暂停状态(不可调用),而 probe 会消耗它的周额度。")
+            targets.append(aid)
+    elif take_all:
         targets = [aid for aid, sl in s["slots"].items()
                    if not sl.get("auth_dead") and not paused(sl)]
         # ★★ 被跳过的死号也要留痕。否则「这个号没探过」和「这个号被跳过了」在
@@ -2105,6 +2129,10 @@ def cmd_probe(args):
 
 # ── 每日清晨探针 ───────────────────────────────────────────────────────────────
 DAWN_KEY = "dawn_probe"
+# ★ 超过这个秒数的 `running` 视为进程遗骸（`kill -9` 连 `failed` 都写不下）。
+#   取 30 分钟：实测一次全池探针 4 个号约 30–60s，留 30 倍余量 ——
+#   宁可让一次真卡住的运行多挡一会儿，也不要让 force 在别人正跑时插进来。
+DAWN_STALE_SECS = 1800
 
 def _dawn_targets(s):
     """今天该探哪些号 → [aid]。
@@ -2142,7 +2170,11 @@ def cmd_dawn_probe(args):
 
     ① ★★ **当天幂等**。launchd 定时和 app 内补跑**两条路都会调它**(用户 2026-09-06 选的
        「两条都要」,因为本项目的 launchd 日历定时有静默不运行的前科)。没有幂等就是双重计费。
-       判据是 `state[DAWN_KEY]["date"] == 今天`,`--force` 可绕过(手动重跑用)。
+       判据是 `state[DAWN_KEY]["date"] == 今天`。
+       ★ **`--force` 只绕得过"今天已跑完",绕不过"另一个进程正在跑"**(2026-09-12 修,
+       四方评审 #1)。前者是合理的手动重跑;后者放行就是**并发整池双重计费** ——
+       `--force` 的本意从来不是"允许两个进程同时扣钱"。唯一的例外是**陈旧的 `running`**
+       (超过 `DAWN_STALE_SECS`):`kill -9` 连 `failed` 都写不下,不给逃生口就永久卡死。
     ② **默认关闭**(`enabled` 缺省为假)。仓库已公开,一个默认开启的自动计费定时器
        会在别人机器上悄悄花钱。用 `--enable` 显式打开。
     ③ **每次运行都落痕**,成功失败都写。`runs = 0、从未运行过` 正是本项目
@@ -2199,6 +2231,7 @@ def cmd_dawn_probe(args):
         print("没有可探的 Plus 号(全是 Pro 或已失效)")
         return
 
+    # ★ 只用于打印。**绝不**再把它当参数传给 `cmd_probe` —— 见那里的「按 aid 调用」。
     labels = [s["slots"][a].get("label") or a for a in targets]
 
     # ★★ **先占天,再探。** 标记写在探测**之前**,不是之后。
@@ -2207,20 +2240,52 @@ def cmd_dawn_probe(args):
     #    `_mutate_state` 持跨进程互斥锁,所以这个「占坑」是原子的。
     #    ⚠️ 代价是显式的:探测中途崩了,今天这一次就**不会**重试(日期已占)。
     #      在"少跑一次"和"可能多花一次钱"之间,这个工具一律选前者。
-    claimed = {"n": 0}
+    # ★★★ **`--force` 必须区分「跑完了」和「正在跑」**（2026-09-12 修；
+    #    四方评审 2026-09-07 #1，claude+agy+grok 三家找到）。
+    #
+    #    原来是 `if claimed["n"] and not force:` —— `--force` 一律放行，
+    #    而 `--force` 的本意是「今天跑过了，我想再跑一次」。可它同样会在
+    #    **另一个进程正跑到一半**时放行 ⇒ 两个进程同时给全池发计费请求 ⇒
+    #    **整池双重计费**。这条恰好违反这个工具自己写着的那句：
+    #    「在"少跑一次"和"可能多花一次钱"之间，一律选前者」。
+    #
+    #    ⚠️ 但 `running` 不能无条件当成"有人在跑"：进程被 `kill -9` 时
+    #    连 `failed` 都写不下（那条路见上面 #5 的修法），`running` 会永远钉在那里，
+    #    于是 `--force` 连**恢复**都做不到。所以给一个陈旧阈值：
+    #    超过 `DAWN_STALE_SECS` 的 `running` 视为**遗骸**，force 可以接管并说明理由。
+    claimed = {"n": 0, "state": None, "age": 0}
 
     def _claim(st):
         cur = dict(st.get(DAWN_KEY) or {})
         if cur.get("date") == today:
             claimed["n"] = 1           # 别人已经占了
+            claimed["state"] = cur.get("state")
+            claimed["age"] = int(time.time()) - int(cur.get("at") or 0)
             return
         cur.update({"date": today, "at": int(time.time()), "state": "running",
                     "ok": None, "total": len(labels), "note": ""})
         st[DAWN_KEY] = cur
     _mutate_state(_claim)
-    if claimed["n"] and not force:
-        print(f"dawn-probe 今天({today})已被另一个进程认领,本次跳过(防双重计费)")
-        return
+    if claimed["n"]:
+        live = (claimed["state"] == "running" and claimed["age"] < DAWN_STALE_SECS)
+        if live:
+            # ★ **连 `--force` 都不放行。** 这是唯一"拒绝用户明确指令"的地方，
+            #   理由是它守的是钱而不是方便，且代价不对称：拒绝 = 少跑一次，
+            #   放行 = 整池多扣一次。要接管请等它跑完或超过陈旧阈值。
+            print(f"dawn-probe 正在另一个进程里运行({claimed['age']}s 前认领的),"
+                  f"本次跳过 —— **`--force` 也不放行**,并发会让整池双重计费。"
+                  f"等它跑完,或 {DAWN_STALE_SECS}s 后按遗骸接管。")
+            return
+        if not force:
+            why = ("上一次崩了" if claimed["state"] == "failed"
+                   else f"残留的 running({claimed['age']}s 前)" if claimed["state"] == "running"
+                   else "今天已跑过")
+            print(f"dawn-probe 今天({today})已被认领({why}),本次跳过(防双重计费)。"
+                  f"确实要重跑用 --force")
+            return
+        if claimed["state"] == "running":
+            print(f"⚠️ 接管一条陈旧的 running 记录({claimed['age']}s 前认领,"
+                  f"超过 {DAWN_STALE_SECS}s) —— 那次**可能已经花过钱**")
 
     print(f"每日清晨探针 · {len(labels)} 个 Plus 号:{' '.join(labels)}")
     # ★★★ **认领之后必须无条件释放**（四方评审 2026-09-07 #5，2026-09-12 修）。
@@ -2236,7 +2301,7 @@ def cmd_dawn_probe(args):
     #     `failed` 同样满足 `date == today`，所以它**仍然挡住重跑**，只是把真相说出来。
     ok_n = total = 0
     try:
-        ok_n, total = cmd_probe(labels)
+        ok_n, total = cmd_probe([], aids=targets)
     except BaseException as e:
         _save({"date": today, "at": int(time.time()), "state": "failed",
                "ok": None, "total": len(labels),
