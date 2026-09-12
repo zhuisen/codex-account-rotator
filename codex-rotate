@@ -1145,9 +1145,67 @@ def cmd_rename(args):
                 if aid != target and sl.get("label") == new), None)
     if dup:
         sys.exit(f"label '{new}' is already used by another account")
-    s["slots"][target]["label"] = new
+    sl = s["slots"][target]
+    prev = sl.get("label")
+    # ★★★ **改名必须留下旧名字。**（2026-09-12，用户报「代理轮换版块没匹配上我的名字，
+    #    变成新建名字」。）`proxy/proxy.log` 是**只追加的历史**：改名之前写下的行永远
+    #    停留在旧名字上，而「代理轮换」泳道按日志里的名字分组 ⇒ 同一个号被劈成两条，
+    #    且旧名那条在池子里查不到 ⇒ **plan / 额度 / 配色全丢**。
+    #    实测当时 `plus6`(10 req) 与 `Huo`(12 req) 就是同一个号的两条泳道。
+    #    ★ 新格式的日志行已经带 `#aid8` 了（`proxy.py::_acct_tag`），**这条历史是给
+    #      改格式之前那 8MB 日志用的** —— 它们只有裸名字，除了这张表没有别的办法认回去。
+    #    ⚠️ 不记时间戳：同一个 label 先后属于两个号时，按时间才能分对，但本仓的
+    #      `rename` 禁止与在池号重名，`remove` 之后旧名才可能被复用 —— 那种情况下
+    #      `make_resolver` 会看到两个候选并**放弃解析**（宁可不并，也不并错）。
+    if prev and prev != new:
+        h = [x for x in (sl.get("label_history") or []) if isinstance(x, str) and x != new]
+        if prev not in h:
+            h.append(prev)
+        sl["label_history"] = h[-16:]          # 有界：改名是低频动作，16 条足够
+    sl["label"] = new
     _save_state(s)
-    print(f"renamed → {new}")
+    print(f"renamed → {new}" + (f"（旧名 {prev} 已记入历史，代理轮换泳道会自动并回同一条）"
+                                if prev and prev != new else ""))
+
+
+def cmd_alias(args):
+    """把一个**历史上用过的**名字补记到某个号名下 —— 只补账，不改名。
+
+    用法：`codex-rotate alias <旧名> <当前label或aid>`
+
+    ★ 为什么需要它：`rename` 从 2026-09-12 起才记 `label_history`，在那之前改过的名字
+      没有任何地方留下线索 —— 旧日志行只有裸名字，`state.json` 里改完就没了。
+      这条命令让用户把自己知道的对应关系补进去，代理轮换泳道随即把历史并回同一条。
+
+    ★★ **绝不猜。** 从日志里「旧名最后出现时间 ≈ 新名首次出现时间」推的对应关系看着很准，
+      但它是归纳不是证据：同一分钟内改两个号就会配错，而配错的后果是把 A 的 token
+      记到 B 头上，画出来完全正常。只有用户知道自己改了什么。
+    """
+    if len(args) < 2:
+        sys.exit("usage: codex-rotate alias <old-label> <current-label-or-aid>")
+    old_lbl, key = args[0], args[1]
+    s = _state()
+    target = next((aid for aid, sl in s["slots"].items()
+                   if aid == key or sl.get("label") == key), None)
+    if not target:
+        sys.exit(f"no slot matching '{key}'")
+    cur = s["slots"][target].get("label")
+    if old_lbl == cur:
+        sys.exit(f"'{old_lbl}' 就是它现在的名字 —— 不需要别名")
+    clash = next((sl.get("label") for aid, sl in s["slots"].items()
+                  if aid != target and (sl.get("label") == old_lbl
+                                        or old_lbl in (sl.get("label_history") or []))), None)
+    if clash:
+        # ★ 判据打在**冲突**上而不是"先到先得":一个名字指向两个号时，`make_resolver`
+        #   会放弃解析，于是这条 alias 静默无效 —— 那比报错糟得多。
+        sys.exit(f"'{old_lbl}' 已经属于 [{clash}] —— 一个旧名只能指向一个号")
+    h = [x for x in (s["slots"][target].get("label_history") or [])
+         if isinstance(x, str) and x != cur]
+    if old_lbl not in h:
+        h.append(old_lbl)
+    s["slots"][target]["label_history"] = h[-16:]
+    _save_state(s)
+    print(f"[{cur}] 认领旧名 {old_lbl} —— 代理轮换泳道会把这段历史并回来")
 
 
 def cmd_rotate(args):
@@ -3001,7 +3059,7 @@ def cmd_ensure(args):
 
 CMDS = {"add": cmd_add, "login": cmd_login, "list": cmd_list, "switch": cmd_switch, "cool": cmd_cool,
         "uncool": cmd_uncool, "quota": cmd_quota, "current": cmd_current, "ensure": cmd_ensure,
-        "sync": cmd_sync, "rename": cmd_rename, "keepalive": cmd_keepalive, "refresh": cmd_refresh,
+        "sync": cmd_sync, "rename": cmd_rename, "alias": cmd_alias, "keepalive": cmd_keepalive, "refresh": cmd_refresh,
         "refresh-all": cmd_refresh_all, "health": cmd_health, "remove": cmd_remove,
         "ensure-live": cmd_ensure_live, "credits": cmd_credits, "probe": cmd_probe,
         "dawn-probe": cmd_dawn_probe, "rotate": cmd_rotate,
@@ -3011,7 +3069,7 @@ CMDS = {"add": cmd_add, "login": cmd_login, "list": cmd_list, "switch": cmd_swit
 # Disk-only commands run their whole load→mutate→save under the cross-process state mutex (lost-update
 # guard). refresh/keepalive do network and write back via _mutate_state instead; health/current are
 # read-only. Lock order is always state → cred, never the reverse (no deadlock).
-STATE_LOCKED = {"add", "list", "switch", "cool", "uncool", "quota", "sync", "rename", "ensure", "remove",
+STATE_LOCKED = {"add", "list", "switch", "cool", "uncool", "quota", "sync", "rename", "alias", "ensure", "remove",
                 # rotate 是纯 load→mutate→save:不进这个集合就会与 proxy/quotad 的并发写丢更新
                 "rotate"}
 

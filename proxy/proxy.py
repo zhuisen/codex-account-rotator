@@ -120,6 +120,34 @@ def _mutate_state(fn):
             raise
 
 
+def _acct_tag(aid, slot):
+    """日志里代表一个**账号**的标签：`label#aid8`。
+
+    ★★★ **label 不是身份。** 用户随时可以改名(`codex-rotate rename`,总览页那个按钮),
+      而 `proxy.log` 是**只追加的历史** —— 改名之前写下的行永远停留在旧名字上。
+      下游 `traffic/rotation.py` 按这个标签给「代理轮换」泳道分组,于是改一次名
+      就把同一个号劈成两条泳道:旧名那条还认不出 plan/额度/配色(它在池子里查不到)。
+      2026-09-12 实测:`plus6`(10 req) 与 `Huo`(12 req) 是同一个号的两条泳道。
+      这与四方评审 #4(dawn-probe 把 label 当 argv)是同一条根:**身份必须是 aid**。
+
+    ★ 仍然保留 label,因为日志首先是给人读的 —— `[b42e395c]` 没人认得出是哪个号。
+      aid 只取前 8 位:UUID 前 8 位在 20 个号的量级上碰撞概率可忽略,
+      而下游解析时会核对「只匹配到一个槽位」,撞了就不解析(见 rotation.py)。
+    """
+    return "%s#%s" % (slot.get("label") or aid[:6], (aid or "")[:8])
+
+
+def _relay_tag(label):
+    """中转站上游的标签：`name@relay`。
+
+    ★★ **中转站上游不是账号,但它以前和账号共用同一个 `[...]` 句式** ——
+      `→ POST /responses [TokenDun] relay ...` 与账号那条一模一样,于是
+      `rotation.py` 把 `TokenDun` 当成账号画进了泳道(2026-09-12 实测:5 个请求)。
+      两套东西共用一个没有类型的名字,下游**没有任何办法**分辨,只能靠这里加标记。
+    """
+    return "%s@relay" % label
+
+
 def _plog(msg, rid=None):
     """代理日志的唯一出口:时间戳 + 请求 ID。
 
@@ -902,7 +930,7 @@ class Handler(BaseHTTPRequestHandler):
             if not aid:
                 break
             tried.add(aid)
-            label = slot.get("label", aid[:6])
+            label = _acct_tag(aid, slot)      # ★ 带 aid 的标签,不是裸 label(见 `_acct_tag`)
             token, account_id = _slot_token(aid, slot)
             if not token:
                 _plog(f"skip [{label}]: live token expired (codex owns its refresh)", rid)
@@ -1002,7 +1030,7 @@ class Handler(BaseHTTPRequestHandler):
           （账号池档也从不转发它，全部内部消化）。转过去会触发 codex 的重新登录流程，
           而那正是上面那条要防的事。改回一个不可重试的 400 + 一句人话。
         """
-        label = up["label"]
+        label = _relay_tag(up["label"])       # ★ 标成中转站,别让下游当成账号
         conn = None
         streamed = False
         try:

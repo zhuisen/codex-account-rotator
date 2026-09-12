@@ -133,7 +133,7 @@ def _tail(path, max_bytes):
     return text, truncated
 
 
-def scan_proxy_log(text, now, start, end):
+def scan_proxy_log(text, now, start, end, resolve=None):
     """返回 (requests, resp_owner, markers, log_lines, undated, in_window)。
 
     * requests: [(ts, acc, billed)] —— 只有 billed=True 的用来切在岗段
@@ -157,7 +157,11 @@ def scan_proxy_log(text, now, start, end):
         if ts is None or ts < start or ts > end:
             continue
         in_window += 1
-        acc = _first_label(body)
+        name, aid8, kind = _first_tag(body)
+        # ★★ 中转站上游**不是账号**,绝不能进泳道。它以前和账号共用同一个 `[...]` 句式
+        #    (`→ POST /responses [TokenDun] relay ...`),于是 `TokenDun` 被当成账号画了出来
+        #    (2026-09-12 实测 5 个请求)。它仍然进事件日志 —— 那是真实流量,只是不出自账号池。
+        acc = None if kind != "acct" else (resolve(name, aid8) if resolve else name)
 
         if body.startswith("→ "):
             if acc:
@@ -194,18 +198,101 @@ def scan_proxy_log(text, now, start, end):
     return requests, resp_owner, markers, log_lines, undated, in_window
 
 
-def _first_label(body):
-    """一行里 `[label]` 形式的账号名。★ 只取**第一个**方括号组:
-    `stream err [plus5]: [Errno 32] Broken pipe` 里第二组是 errno 不是账号 ——
-    取错会造出一个叫 `Errno 32` 的幽灵账号,而它在泳道里长得和真账号一模一样。"""
+_AID8 = re.compile(r"^[0-9a-f]{8}$")
+
+
+def _first_tag(body):
+    """一行里第一个 `[...]` 组,解析成 `(name, aid8, kind)`。
+
+    ★ 只取**第一个**方括号组:`stream err [plus5]: [Errno 32] Broken pipe` 里第二组是 errno
+      不是账号 —— 取错会造出一个叫 `Errno 32` 的幽灵账号,在泳道里长得和真账号一模一样。
+
+    三种形态（2026-09-12 起,`proxy.py` 的 `_acct_tag` / `_relay_tag`）:
+
+        [Huo#b42e395c]   账号,带身份    -> ("Huo", "b42e395c", "acct")
+        [TokenDun@relay] 中转站上游      -> ("TokenDun", None,  "relay")
+        [plus6]          ★ 历史行        -> ("plus6",   None,   "acct")
+
+    ★★ **第三种永远不会消失。** `proxy.log` 是只追加的历史,改格式那一刻之前的行
+      (本机 8MB / 数万行)全是裸名字。所以解析必须三种都认,而不是"升级完就只剩新格式"。
+    """
     i = body.find("[")
     if i < 0:
-        return None
+        return None, None, None
     j = body.find("]", i + 1)
     if j < 0:
-        return None
-    s = body[i + 1:j]
-    return s if s and len(s) <= 40 and "\n" not in s else None
+        return None, None, None
+    t = body[i + 1:j]
+    # ★ 上限从 40 提到 64:标签现在多了 `#aid8`(9 字符)或 `@relay`(6 字符)。
+    #   忘了提会让长名字的号**整条行被静默丢掉**,表现为泳道莫名变短。
+    if not t or len(t) > 64 or "\n" in t:
+        return None, None, None
+    if t.endswith("@relay"):
+        return t[:-6], None, "relay"
+    # ★★ **历史行也认得出中转站,别只修未来。** `@relay` 后缀是 2026-09-12 才加的,
+    #    而本机 `proxy.log` 有 8MB 旧行 —— 只修未来的话,那 5 个被当成账号的
+    #    `TokenDun` 请求仍然画在泳道上,而用户看的正是历史窗口。
+    #    判据用**行自己的内容**:代理给中转站写的行,要么 reason 就是 `relay`
+    #    (`→ POST /responses [TokenDun] relay conv=…`),要么整行以 `relay ` 开头
+    #    (`relay stream err [...]` / `relay send failed [...]` / `relay 401 [...]`)。
+    #    ⚠️ `← 200 [TokenDun]` 认不出来 —— 它没有任何标记。但 `←` 行本来就被丢弃
+    #    (状态码这里用不到),所以不影响泳道。**这是"确实不需要"不是"没打中"。**
+    if body.startswith("relay ") or body[j + 1:].lstrip().startswith("relay"):
+        return t, None, "relay"
+    if "#" in t:
+        name, _, suf = t.rpartition("#")
+        # ★ 按**后缀形状**判,不是"含 # 就当身份" —— label 本身允许含 `#`
+        #   (`cmd_rename` 只禁空白),那种名字会被切掉一截,而切完仍是个合法名字,不报错。
+        if name and _AID8.match(suf):
+            return name, suf, "acct"
+    return t, None, "acct"
+
+
+def make_resolver(slots):
+    """`{aid: slot}` -> 把日志标签归一成**当前** label 的函数。
+
+    ## 为什么需要它
+
+    ★★★ 用户 2026-09-12 报:「总览里改了名字,代理轮换版块没匹配上,变成新建名字」。
+      实测同一个号被劈成两条泳道 —— `plus6`(10 req,改名前的行)与 `Huo`(12 req,改名后),
+      而旧名那条在池子里查不到 ⇒ **plan / 额度 / 配色全丢**。
+      根因和四方评审 #4 一字不差:**label 是用户可改的显示名,不是身份**。
+
+    ## 三条解析路径,优先级从硬到软
+
+      ① `aid8` 对得上唯一一个槽位  → 用那个槽位的**当前** label（最硬,与改名无关）
+      ② 裸 label 命中当前 label      → 原样（没改过名的号,占绝大多数）
+      ③ 裸 label 命中 `label_history`→ 该槽位的当前 label（改名前写下的历史行）
+      查不到就**原样返回**,不编造:号可能真的被删了,把它并进别的号是更糟的错。
+
+    ⚠️ ① 里的「唯一」不能省。aid8 是 UUID 前 8 位,两个槽位撞前缀时**不解析**比
+      解析到错的号好 —— 后者会把 A 的 token 记到 B 头上,而画出来完全正常。
+    """
+    cur = {}                       # 当前 label -> 当前 label（存在性查表）
+    by_aid8 = {}                   # aid8 -> [当前 label, ...]
+    hist = {}                      # 历史 label -> [当前 label, ...]
+    for aid, sl in (slots or {}).items():
+        lbl = sl.get("label")
+        if not lbl:
+            continue
+        cur[lbl] = lbl
+        by_aid8.setdefault((aid or "")[:8], []).append(lbl)
+        for old_lbl in (sl.get("label_history") or []):
+            if isinstance(old_lbl, str) and old_lbl and old_lbl != lbl:
+                hist.setdefault(old_lbl, []).append(lbl)
+
+    def resolve(name, aid8):
+        if aid8:
+            hit = by_aid8.get(aid8) or []
+            if len(hit) == 1:
+                return hit[0]
+        if name in cur:
+            return name
+        hit = hist.get(name) or []
+        if len(hit) == 1:
+            return hit[0]
+        return name
+    return resolve
 
 
 def _sig(path):
@@ -478,15 +565,20 @@ def collect(hours=24.0, now=None, store=None, use_cache=True):
         return {"ok": False, "reason": "no_log", "detail": "读不到 proxy/proxy.log"}
 
     # 账号 → 套餐。★ 必须在切段**之前**读:切入原因要靠它区分「Pro 保底」与普通轮换。
-    slots = {}
+    by_aid = {}
     try:
         with open(os.path.join(store, "state.json"), encoding="utf-8") as fh:
-            slots = {v.get("label"): v for v in (json.load(fh).get("slots") or {}).values()}
+            by_aid = dict((json.load(fh).get("slots") or {}))
     except (OSError, ValueError):
         pass
+    # ★ 解析器把日志里的历史名字归一成**当前** label,所以下面这些按当前 label 建的表
+    #   照旧可用 —— 改名不再把一个号劈成两条泳道。
+    resolve = make_resolver(by_aid)
+    slots = {v.get("label"): v for v in by_aid.values() if v.get("label")}
     plans = {k: (v.get("plan") or "") for k, v in slots.items()}
 
-    requests, resp_owner, markers, log_lines, undated, in_window = scan_proxy_log(text, now, start, end)
+    requests, resp_owner, markers, log_lines, undated, in_window = scan_proxy_log(
+        text, now, start, end, resolve=resolve)
     segs = classify_enter(build_segments(requests, now), markers, plans)
     usage = scan_rollouts(start, end, set(resp_owner), cache if use_cache else None, now) if resp_owner else {}
     matched, orphan = attribute(segs, resp_owner, usage)

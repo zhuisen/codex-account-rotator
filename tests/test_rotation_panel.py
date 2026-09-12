@@ -74,8 +74,11 @@ class LabelAndSegments(unittest.TestCase):
     def test_label_is_the_first_bracket_group(self):
         """★ `stream err [plus5]: [Errno 32] Broken pipe` 里第二组是 errno 不是账号 ——
         取错会造出一个叫 `Errno 32` 的幽灵账号,而它在泳道里长得和真账号一模一样。"""
-        self.assertEqual(R._first_label("stream err [plus5]: [Errno 32] Broken pipe"), "plus5")
-        self.assertIsNone(R._first_label("rotating proxy on 127.0.0.1:8011"))
+        # 2026-09-12：`_first_label` 改名为 `_first_tag`，返回 `(name, aid8, kind)` ——
+        # 标签现在带身份与类型（`Huo#b42e395c` / `TokenDun@relay`），见 `test_rotation_identity.py`。
+        # 这条断言本身不变：第二个方括号组永远不是账号。
+        self.assertEqual(R._first_tag("stream err [plus5]: [Errno 32] Broken pipe")[0], "plus5")
+        self.assertIsNone(R._first_tag("rotating proxy on 127.0.0.1:8011")[0])
 
     def test_only_billed_requests_create_a_segment(self):
         """★★ `GET /models` 是**纯探活**。把它也算成"在岗",一次探活就会在泳道上画出
