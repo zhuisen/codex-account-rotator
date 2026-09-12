@@ -34,6 +34,41 @@ import urllib.request
 
 CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 
+APP = __import__("pathlib").Path(__file__).resolve().parent / "app"
+
+
+def clickable_account():
+    """动作条那个视图要点的账号名 —— **从伺服出去的那份夹具里现取,绝不写死**。
+
+    ★★★ 这一行被改坏过**三次**,三次都是同一个病根:**把一个会变的值当成了常量**。
+      · 2026-08-26:点的是 hero 卡(没有 `onSelect`)⇒ 动作条不展开 ⇒ 恒绿**空测**;
+      · 2026-09-05:`Pro1` 变成死号 ⇒ 死号只在折叠区渲染 ⇒ 恒红,而布局仍然没被验过;
+      · 2026-09-12:用户把号**改了名**(`plus3` 不再存在)⇒ `click miss (共0个)` ⇒ 又是恒红。
+      前两次的修法都是「换一个当时正确的名字」,所以第三次照样坏。
+      名字是**用户随时可改的显示名**(这正是同一天修的 `proxy.log` 那条的根)——
+      任何写死它的地方都在等下一次改名。
+
+    判据不是名字,是**这张卡有没有 `onSelect`**:活号、且不是当值号(hero 卡没有)。
+    夹具就内联在 `harness.html` 里,所以选择器与被渲染的数据**不可能漂移**。
+    """
+    html = (APP / "harness.html").read_text(encoding="utf-8")
+    m = re.search(r"var STATE = (\{.*?\});\n", html, re.S)
+    if not m:
+        raise SystemExit("  ✗ 读不到 harness 里的 state 夹具 —— 先跑 make_harness.py。"
+                         "\n    这不是排版问题。")
+    st = json.loads(m.group(1))
+    active = st.get("active")
+    for aid, sl in (st.get("slots") or {}).items():
+        if aid != active and not sl.get("auth_dead") and sl.get("label"):
+            return sl["label"]
+    # ★ 找不到就**停下并说原因**,不要退回一个写死的名字 —— 那会把"夹具里没有可点的卡"
+    #   伪装成"点了但布局有问题"。
+    raise SystemExit("  ✗ 夹具里没有可点击的活号(全是死号或只有当值号)——"
+                     "\n    动作条视图验不到,这不是排版问题。")
+
+
+CLICK_ACC = clickable_account()
+
 # 同排卡片之间允许的最大错位。1px 是给亚像素取整留的，不是给"差一点点"留的。
 ALIGN_TOL = 1
 
@@ -59,10 +94,12 @@ VIEWS = [
     #    · 2026-08-26:点的是 hero 卡(名字有两份),hero 没有 onSelect ⇒ 动作条不展开 ⇒ 恒绿空测;
     #    · 2026-09-05:`Pro1` 已变成死号 —— 死号只在折叠的「失效账号」区渲染,同样没有 onSelect
     #      ⇒ `click` 恒匹配 0 个 ⇒ **恒红**,而要验的布局仍然没被验过。
-    #    现在点**活号**、序号 1(名字在当前布局里只出现一次,`~2` 那条理由已过时)。
+    #    · 2026-09-12:用户**改名** ⇒ `plus3` 不存在 ⇒ 又是恒红。
+    #    现在名字由 `clickable_account()` 从夹具现取(判据是"有没有 onSelect",不是名字),
+    #    序号 1(名字在当前布局里只出现一次,`~2` 那条理由已过时)。
     #    ★ 定这个目标前**正面验过它真的展开**:点击后动作词从 14 处涨到 22 处。
     #      「点中了」≠「展开了」—— 只看 click 不报错,就会退回上面那两种假装。
-    ("总览·动作条",      "/harness.html?nav=home&rail=open&grok=ok&click=plus3~1",    [1200, 1000, 960]),
+    ("总览·动作条",      "/harness.html?nav=home&rail=open&grok=ok&click=" + CLICK_ACC + "~1", [1200, 1000, 960]),
     ("总览·grok降级",    "/harness.html?nav=home&rail=open&grok=stale",               [1000, 960]),
     # ★ agy 卡让总览的格子从 4 张变 5 张 —— 换行位置整个变了,所以这几行不是"再验一遍",
     #   而是验一个**新的**布局。`agy=tight` 让数字进红区(位数与颜色都变),
