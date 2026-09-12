@@ -1,12 +1,13 @@
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { type Theme, modelColor, TABLE_TYPE as TZ } from "../theme";
 import { costOf, fmtUSD, priceOf, isPriced } from "../rates";
 import StackedArea, { type Layer } from "../components/StackedArea";
+import type { TrafficData, RangeState, CacheMode, Bucket, Platform } from "../traffic";
 import Seg from "../components/Seg";
-import type { TrafficData, Range, Span, CacheMode, Bucket, Platform } from "../traffic";
-import SpanPicker from "../components/SpanPicker";
-import { defaultSpan, dayBounds } from "../traffic";
-import { RANGES, rangeLabel, bucketsFor, sumBuckets, costOfBucket, savingOfBucket, fmtTok,
+import RangeBar from "../components/RangeBar";
+import Toast from "../components/Toast";
+import { todayOf, resolveRange, diffDays, prevTotals, prevNote, effGran, granLabel, md } from "../traffic";
+import { rangeLabel, bucketsFor, sumBuckets, costOfBucket, savingOfBucket, fmtTok,
          countsCacheRead, countsCacheWrite, countedClasses, mixParts, colorOf } from "../traffic";
 import KpiStrip, { type Kpi, UP, DOWN } from "../components/KpiStrip";
 import { useIntro, introEnabled } from "../hooks/useIntro";
@@ -219,7 +220,7 @@ function RouteSplit({ t, p, labels, rangeTxt }: {
   );
 }
 
-export default function PlatformPage({ t, data, raw, cacheMode, pk, range, setRange, span, setSpan, onBack, busy }: {
+export default function PlatformPage({ t, data, raw, cacheMode, pk, st, setSt, onBack, busy }: {
   t: Theme;
   /** 已按缓存口径重塑 —— 合计/图表/费用都用它 */
   data: TrafficData | null;
@@ -227,9 +228,8 @@ export default function PlatformPage({ t, data, raw, cacheMode, pk, range, setRa
   raw: TrafficData | null;
   cacheMode: CacheMode;
   pk: string;
-  range: Range; setRange: (r: Range) => void;
-  /** 自定义区间。★ 与总览页同一套控件（§5c：同一类页面必须长得一样）。 */
-  span: Span | null; setSpan: (s: Span) => void;
+  /** 时间范围。★ 与总览页**同一个控件、同一份状态**（§5c：同一类页面必须长得一样）。 */
+  st: RangeState; setSt: (s: RangeState) => void;
   onBack: () => void; busy: boolean;
 }): React.ReactElement {
   const [mode, setMode] = useState<"models" | "total">("models");
@@ -249,19 +249,24 @@ export default function PlatformPage({ t, data, raw, cacheMode, pk, range, setRa
   //   （实测：MiMo 的 90d 总量图整片是灰的）。分模型档因为用 modelColor 散列，一直没暴露。
   const c = colorOf(data, pk);
 
+  const [toast, setToast] = useState<string | null>(null);
+  const today = useMemo(() => todayOf(data), [data]);
+  const range = useMemo(() => resolveRange(st, today), [st, today]);
+  const rangeDays = diffDays(range.s, range.e);
+
   const v = useMemo(() => {
     if (!data?.platforms[pk]) return null;
-    const { labels, buckets } = bucketsFor(data, pk, range, span ?? undefined);
+    const { labels, buckets } = bucketsFor(data, pk, st, today);
     const agg = sumBuckets(buckets);
     const models = Object.entries(agg.models)
       .map(([m, mv]) => ({ m, ...mv, cost: costOf(mv, m, pk) }))
       .sort((a, b) => b.total - a.total);
     // 全池占比
     let grand = 0;
-    for (const k of Object.keys(data.platforms)) grand += sumBuckets(bucketsFor(data, k, range, span ?? undefined).buckets).total;
+    for (const k of Object.keys(data.platforms)) grand += sumBuckets(bucketsFor(data, k, st, today).buckets).total;
     return { labels, buckets, agg, models, cost: costOfBucket(agg, pk),
              saving: savingOfBucket(agg, pk), grand };
-  }, [data, pk, range, span]);
+  }, [data, pk, st, today]);
 
   /**
    * ★ 「总量」的三类**必须过缓存口径门**。不过门的话，切到「不含缓存」时图例会显示
@@ -287,19 +292,19 @@ export default function PlatformPage({ t, data, raw, cacheMode, pk, range, setRa
         values: (v?.buckets ?? []).map((b) => cl.pick(b)),
       }));
 
-  const isToday = range === "today";
+  const isToday = st.preset === "today";
   // 浮层标题原本写死「分模型」,总量档下会说错
   const modeWord = mode === "models" ? "分模型" : "总量";
 
   // 身份含平台与档位:换平台、换时间档、换分模型/总量都该重播;**自动刷新不该**。
   // ★ 依赖是**数据集身份**：自定义档下只改日期时档位字符串不变，不带区间会让动效不重播、
   //   浮层继续描述上一段数据（同 `key` 那条规则）。
-  const intro = useIntro(`${pk}:${range}:${mode}:${span?.start ?? ""}:${span?.end ?? ""}`);
-  const bounds = useMemo(() => dayBounds(data), [data]);
-  const pickRange = (r: Range) => {
-    if (r === "custom" && !span) setSpan(defaultSpan(data));
-    setRange(r);
-  };
+  const intro = useIntro(`${pk}:${st.preset}:${mode}:${range.s}:${range.e}:${st.gran}`);
+  const showToast = useCallback((m: string) => {
+    setToast(m);
+    window.clearTimeout((showToast as unknown as { _t?: number })._t);
+    (showToast as unknown as { _t?: number })._t = window.setTimeout(() => setToast(null), 1800);
+  }, []);
 
   /**
    * 费率卡脚注里的「缓存读 = 输入价 X%」。**必须实算**：新费率表下这个比值按平台差一个数量级
@@ -317,44 +322,39 @@ export default function PlatformPage({ t, data, raw, cacheMode, pk, range, setRa
   }, [v, pk]);
   const days = Math.max(1, v?.labels.length ?? 1);
   /**
-   * 环比基准 = **本平台**在等长上一段的量与费用。与总览同一套口径,只是把范围收到单个平台。
-   * App 恒取 `--days 90`,所以 7/14/30 档有完整上期;**90d 档没有上一个 90 天 → null → 显示「—」**,
-   * 不拿不足 90 天的一段冒充。今日档比昨日整天。
+   * 环比基准 = **本平台**在上一等长周期的量与费用。与总览同一套口径（`prevTotals`），
+   * 只是把范围收到单个平台 —— 各家单价不同，混起来乘一个平均价就是编数。
+   * 今日档比昨日整天。取不到上一周期一律 `null` → 显示「—」，不拿不完整的一段冒充。
    */
   const prev = useMemo(() => {
     if (!data) return null;
-    // ★★ 「年度」与「自定义」**没有已取到的上一段**（窗口只往回取到本段起点，见 `daysNeeded`）。
-    //    与总览页同一条判据，写成显式分支而不是靠 `range as number` 得到 NaN 再恰好落空。
-    if (range === "year" || range === "custom") return null;
+    if (!isToday) return prevTotals(data, st, today, pk);
     const p = data.platforms[pk];
     if (!p) return null;
     const dayKeys = Object.keys(p.days).sort();
-    let win: string[];
-    if (isToday) {
-      const yd = dayKeys[dayKeys.length - 2];
-      win = yd ? [yd] : [];
-    } else {
-      const n = range as number;
-      win = dayKeys.slice(-2 * n, -n);
-      if (win.length !== n) win = [];
-    }
-    if (!win.length) return null;
-    const agg = sumBuckets(win.map((d) => p.days[d]).filter(Boolean));
-    return { tok: agg.total, cost: costOfBucket(agg, pk) };
-  }, [data, pk, range, isToday]);
+    const yd = dayKeys[dayKeys.length - 2];
+    if (!yd || !p.days[yd]) return null;
+    return { tok: p.days[yd].total, cost: costOfBucket(p.days[yd], pk) };
+  }, [data, pk, st, today, isToday]);
 
   const delta = (now: number, base: number) =>
     base > 0 ? { up: now >= base, txt: `${now >= base ? "↑" : "↓"}${(Math.abs(now - base) / base * 100).toFixed(1)}%` } : null;
   const dTok = prev ? delta(v?.agg.total ?? 0, prev.tok) : null;
   const dCost = prev ? delta(v?.cost ?? 0, prev.cost) : null;
 
+  const capt = isToday
+    ? `今日 · ${v?.labels.length ?? 0} 格 · 每 2 小时`
+    : `${md(range.s)} → ${md(range.e)} · ${v?.labels.length ?? 0} 格 · ${granLabel(effGran(st, rangeDays))}`;
   const kpis: Kpi[] = [
     { k: "总 token", v: fmtTok(v?.agg.total ?? 0), n: v?.agg.total ?? 0, fmt: fmtTok,
       sub: dTok ? `环比 ${dTok.txt}` : "环比 —",
       subC: dTok ? (dTok.up ? UP : DOWN) : t.muted },
     { k: "请求轮数", v: (v?.agg.rounds ?? 0).toLocaleString(),
       n: v?.agg.rounds ?? 0, fmt: (x) => Math.round(x).toLocaleString() },
+    // ★ 交接稿 §1：日均列下方注明**比较区间** —— 环比只给百分比，
+    //   读者无从知道在跟哪一段比，而那正是判断它可不可信的依据。
     { k: isToday ? "小时均" : "日均", v: fmtTok((v?.agg.total ?? 0) / days),
+      sub: prev && !isToday ? prevNote(st, today) : undefined, subC: t.muted,
       n: (v?.agg.total ?? 0) / days, fmt: fmtTok },
     // 与总览同名。「等效 API」这个限定词不放在标签里 —— 页面底部费率卡最后一行有完整说明
     // (「费用 = 四类 token 分别乘单价求和,是等效 API 成本;订阅制下并非实付」),标签只留短名。
@@ -375,9 +375,9 @@ export default function PlatformPage({ t, data, raw, cacheMode, pk, range, setRa
   //   否则百分比加起来不到 100(不含缓存时只有 4%),比不显示更糟。
   const mix = useMemo(() => {
     if (!raw?.platforms[pk]) return null;
-    const parts = mixParts(sumBuckets(bucketsFor(raw, pk, range, span ?? undefined).buckets), cacheMode);
+    const parts = mixParts(sumBuckets(bucketsFor(raw, pk, st, today).buckets), cacheMode);
     return parts.length ? parts.map((p) => `${p.name} ${p.pct.toFixed(1)}%`).join(" · ") : null;
-  }, [raw, pk, range, span, cacheMode]);
+  }, [raw, pk, st, today, cacheMode]);
 
 
   return (
@@ -397,13 +397,11 @@ export default function PlatformPage({ t, data, raw, cacheMode, pk, range, setRa
         {/* ★ 路由分账角标**紧挨源路径**（用户 2026-09-09 指位）：两者是同一类信息 ——
             "这一页的数字从哪来"。单独占一行会把 KPI 往下推、且看着像一条告警。 */}
         <RouteSplit t={t} p={data?.platforms[pk]} labels={v?.labels ?? []}
-                    rangeTxt={rangeLabel(range)} />
+                    rangeTxt={st.preset === "custom" ? `${md(range.s)}→${md(range.e)}` : rangeLabel(st.preset)} />
         <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
           <Seg opts={["models", "total"] as const} cur={mode} on={setMode}
                label={(x) => (x === "models" ? "分模型" : "总量")} t={t} />
-          <Seg opts={RANGES} cur={range} on={pickRange} label={rangeLabel} t={t} />
-          {range === "custom" && (
-            <SpanPicker span={span} onChange={setSpan} min={bounds.min} max={bounds.max} t={t} />)}
+          <RangeBar st={st} today={today} onChange={setSt} onToast={showToast} t={t} />
         </div>
       </div>
 
@@ -416,6 +414,8 @@ export default function PlatformPage({ t, data, raw, cacheMode, pk, range, setRa
           ⚠️ 不要"顺手"再加回来：平台详情页的统一性规则见项目 `CLAUDE.md` §5c。 */}
 
 
+      {toast && <Toast msg={toast} t={t} />}
+
       <KpiStrip t={t} items={kpis} intro={intro} />
 
       {busy && !data && <div style={{ fontSize: 12, color: t.muted }}>扫描中…</div>}
@@ -423,12 +423,20 @@ export default function PlatformPage({ t, data, raw, cacheMode, pk, range, setRa
       {!!v?.labels.length && (
         // ★ key 同时带 `mode`:切「分模型 ↔ 总量」也是换了一整个数据集。不带 `iso` —— 隔离模型只改
         //    图层不改日期,hover 索引仍然指同一天,重建反而会把用户停着的浮层弄没。
-        <div className={introEnabled() ? "cb-wipe" : undefined} key={`w:${range}:${mode}:${v.labels[0]}`}>
-        <StackedArea key={`${range}:${mode}:${v.labels[0]}:${v.labels[v.labels.length - 1]}`}
+        <>
+        <div style={{ marginTop: 12, display: "flex", alignItems: "baseline", gap: 8,
+                      fontFamily: "'JetBrains Mono'", fontSize: 10, color: t.text2 }}>
+          {/* ★ 左边的 `token` 由 `StackedArea` 自己画（它定位在绘图区上沿 `top:-13`，
+              与刻度共用一套坐标）。这里**不再画第二个** —— 同一个词出现两次比没有更糟。 */}
+          <span style={{ marginLeft: "auto", color: t.muted }}>{capt}</span>
+        </div>
+        <div className={introEnabled() ? "cb-wipe" : undefined} key={`w:${st.preset}:${range.s}:${range.e}:${st.gran}:${mode}`}>
+        <StackedArea key={`${st.preset}:${range.s}:${range.e}:${st.gran}:${mode}:${v.labels[0]}`}
                      labels={v.labels} layers={layers} height={190} fmt={fmtTok} t={t}
                      tipTitle={(i) => (isToday ? `今日 ${v.labels[i].slice(11)}:00 · ${modeWord}`
                                                : `${v.labels[i]} · ${modeWord}`)} />
         </div>
+        </>
       )}
 
       {/* ★ 总量档的图例 —— **必须带占比数字**。这个档位的已知代价就是「缓存读占 ~95%，

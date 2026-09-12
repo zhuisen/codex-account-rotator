@@ -153,56 +153,130 @@ export function colorOf(data: TrafficData | null, key: string): string {
   return data?.platforms[key]?.color || platformColor(key);
 }
 
-export const RANGES = ["today", 7, 14, 30, 90, "year", "custom"] as const;
-export type Range = (typeof RANGES)[number];
-/** 自定义区间，`YYYY-MM-DD`，**含两端**。 */
-export interface Span { start: string; end: string }
-export const rangeLabel = (r: Range): string =>
-  r === "today" ? "今日" : r === "year" ? "年度" : r === "custom" ? "自定义" : `${r}d`;
-
 /**
- * 自定义区间超过这个跨度就按**月**分格。
+ * 时间范围模型（交接稿 `自定义范围-交接说明.md` §7，2026-09-12 用户定稿，1:1 复刻）。
  *
- * ★ 90 不是随手挑的:它是现有最大的日档，也就是「按天画仍然读得出来」的已知上界。
- *   再往上每格不足 1px，画出来是一片色块而不是一条可读的曲线。
+ * ★ 标题行的 pill 只剩 `今日 · 7d · 30d · 年度 · 范围▾`，**14d / 90d 退到弹层预设列**。
+ *   理由是标题行零挤压：日期控件要与 pill 同排，而 7 个 pill + 双日期在 960px 下会折行。
+ * ★ 默认 **30d**（此前是 14d）。
  */
-export const MONTH_CUTOVER_DAYS = 90;
+export type RangePreset = "today" | "7d" | "30d" | "year" | "custom";
+/** 标题行上那四个固定档（`custom` 不在其中，它是芯片/入口 pill）。 */
+export const PILLS: readonly RangePreset[] = ["today", "7d", "30d", "year"] as const;
+export const rangeLabel = (r: RangePreset): string =>
+  ({ today: "今日", "7d": "7d", "30d": "30d", year: "年度", custom: "范围" } as const)[r];
 
-/** 含两端的天数。`"2026-06-01" → "2026-06-30"` = 30。 */
-export function spanDays(s: Span): number {
-  const a = Date.parse(`${s.start}T00:00:00`), b = Date.parse(`${s.end}T00:00:00`);
-  if (!Number.isFinite(a) || !Number.isFinite(b) || b < a) return 0;
-  return Math.round((b - a) / 86400000) + 1;
+/** 闭区间，两端都含。`YYYY-MM-DD`。 */
+export interface DateRange { s: string; e: string }
+export type Granularity = "auto" | "day" | "week" | "month";
+
+export interface RangeState {
+  preset: RangePreset;
+  /** `preset === "custom"` 时生效 */
+  custom: DateRange | null;
+  /** ✕ 清除后保留，「范围」重开时预填 —— 交接稿 §6「记忆」那条 */
+  lastCustom: DateRange | null;
+  gran: Granularity;
+  /** 环比开关 */
+  compare: boolean;
+}
+export const DEFAULT_RANGE: RangeState = {
+  preset: "30d", custom: null, lastCustom: null, gran: "auto", compare: true,
+};
+/** 交接稿 §6：上限 365 天；越界红字 + 应用置灰，**不弹窗**。 */
+export const MAX_RANGE_DAYS = 365;
+/** 交接稿 §6：<7 天不显示环比（样本太少，百分比会剧烈跳动）。 */
+export const MIN_COMPARE_DAYS = 7;
+
+// ── 日期算术：全部在 `YYYY-MM-DD` 字符串上做 ───────────────────────────
+// ★★ 交接稿 §8 明写「用 UTC 日期计算避免时区偏移」。这不只是照抄:
+//    `p.days` 的键是 scan.py 按**本地日**分的桶，我们只拿它做**标签运算**（加减天数、
+//    比较先后），全程 UTC 就不会在夏令时那天多出或少掉一天。一旦中途转成本地 `Date`，
+//    +05:30 这类半小时偏移会让「加 1 天」偶尔变成同一天。
+const DAY_MS = 86400000;
+export const toD = (x: string): Date => new Date(`${x}T00:00:00Z`);
+export const toS = (d: Date): string => d.toISOString().slice(0, 10);
+export const addDays = (x: string, n: number): string => toS(new Date(toD(x).getTime() + n * DAY_MS));
+/** 含两端。`2026-06-01 → 2026-06-30` = 30。 */
+export const diffDays = (a: string, b: string): number =>
+  Math.round((toD(b).getTime() - toD(a).getTime()) / DAY_MS) + 1;
+/** `MM-DD` —— 芯片与图表用（交接稿 §6「日期格式」）。 */
+export const md = (x: string): string => x.slice(5);
+
+/** 这份数据的「今天」。★ 取**数据里最后一天**而不是 `new Date()` ——
+ *  桶是 scan.py 按本地日切的，用挂钟会在午夜前后与数据差一天。 */
+export function todayOf(data: TrafficData | null): string {
+  const { max } = dayBounds(data);
+  return max ?? toS(new Date());
 }
 
-/** 这个区间该按天还是按月画。**只有一处判据** —— 页面别各写一份。 */
-export function isMonthly(range: Range, span?: Span): boolean {
-  if (range === "year") return true;
-  if (range === "custom") return !!span && spanDays(span) > MONTH_CUTOVER_DAYS;
-  return false;
+/** 当前档位对应的闭区间。 */
+export function resolveRange(st: RangeState, today: string): DateRange {
+  switch (st.preset) {
+    case "today": return { s: today, e: today };
+    case "7d": return { s: addDays(today, -6), e: today };
+    case "30d": return { s: addDays(today, -29), e: today };
+    case "year": return { s: `${today.slice(0, 4)}-01-01`, e: today };
+    default: {
+      const c = st.custom ?? st.lastCustom;
+      return c ? { ...c } : { s: addDays(today, -29), e: today };
+    }
+  }
+}
+
+/** 弹层左列的 11 个预设（交接稿 §2，`—` 是分隔线）。 */
+export function presetList(today: string): ({ sep: true } | { sep: false; label: string; r: DateRange })[] {
+  const m = (label: string, s: string, e: string) => ({ sep: false as const, label, r: { s, e } });
+  const first = `${today.slice(0, 7)}-01`;
+  const lastMonthEnd = addDays(first, -1);
+  const q = Math.floor((Number(today.slice(5, 7)) - 1) / 3) * 3 + 1;   // 本季度首月
+  return [
+    m("今日", today, today),
+    m("昨日", addDays(today, -1), addDays(today, -1)),
+    m("近 7 天", addDays(today, -6), today),
+    m("近 14 天", addDays(today, -13), today),
+    m("近 30 天", addDays(today, -29), today),
+    m("近 90 天", addDays(today, -89), today),
+    { sep: true },
+    // 周一为一周起点（交接稿 §8）。`getUTCDay()` 周日=0，所以 `(d+6)%7` 把周一归 0。
+    m("本周", addDays(today, -((toD(today).getUTCDay() + 6) % 7)), today),
+    m("本月", first, today),
+    m("上月", `${lastMonthEnd.slice(0, 7)}-01`, lastMonthEnd),
+    m("本季度", `${today.slice(0, 4)}-${String(q).padStart(2, "0")}-01`, today),
+    m("年度", `${today.slice(0, 4)}-01-01`, today),
+  ];
+}
+
+/** 交接稿 §6：≤90 天按天，≤365 按周，更长按月。 */
+export function autoGran(days: number): Exclude<Granularity, "auto"> {
+  return days <= 90 ? "day" : days <= 365 ? "week" : "month";
+}
+/** 实际生效的粒度（手动选择覆盖 auto）。**判据只有这一处**，页面别各写一份。 */
+export function effGran(st: RangeState, days: number): Exclude<Granularity, "auto"> {
+  return st.gran === "auto" ? autoGran(days) : st.gran;
+}
+export const granLabel = (g: Exclude<Granularity, "auto">): string =>
+  ({ day: "按天", week: "按周", month: "按月" } as const)[g];
+
+/** 上一等长周期 `[s-n, s-1]`（交接稿 §7 的 `prev`）。 */
+export function prevRange(r: DateRange): DateRange {
+  const n = diffDays(r.s, r.e);
+  return { s: addDays(r.s, -n), e: addDays(r.s, -1) };
 }
 
 /**
- * 这一档需要多大的扫描窗口（天）。→ 量化到档，**不是精确天数**。
+ * 这一档需要多大的扫描窗口（天）→ **量化到档**，不是精确天数。
  *
- * ★★ 量化的理由是**快照按窗口分文件**（`lib.rs::snapshot_name`）：不量化的话，
- *   用户每拖一次日期就落一份新快照、且每份都要重扫一遍（365 天热路径 7.6s）。
- * ★ 默认档 90 必须原样返回 —— 它是热路径（心跳 / 菜单栏弹出）那一份，
- *   一旦被量化成别的数，整个 app 的常用路径会从 1.0s 掉到 7.6s。
+ * ★★ 量化的理由是快照按窗口分文件（`lib.rs::snapshot_name`）：不量化的话，用户每拖一次
+ *   日期就落一份新快照、且每份都要重扫一遍。
+ * ★ 开了环比就要**多往回取一个等长周期**，否则 KPI 那一行只能显示「—」。
+ * ★ 默认档必须原样返回 90 —— 它是热路径（心跳 / 菜单栏弹出）那一份。
  */
 export const WINDOW_TIERS = [90, 365, 1095] as const;
-export function daysNeeded(range: Range, span?: Span, now = Date.now()): number {
-  let need = 90;
-  if (range === "year") {
-    // 自然年:要覆盖到 1 月 1 日。12 月 31 日那天正好需要 365 天。
-    const d = new Date(now);
-    need = Math.floor((now - new Date(d.getFullYear(), 0, 1).getTime()) / 86400000) + 1;
-  } else if (range === "custom" && span) {
-    const st = Date.parse(`${span.start}T00:00:00`);
-    if (Number.isFinite(st)) need = Math.floor((now - st) / 86400000) + 1;
-  } else if (typeof range === "number") {
-    need = range;
-  }
+export function daysNeeded(st: RangeState, today: string): number {
+  const r = resolveRange(st, today);
+  const back = st.compare ? prevRange(r).s : r.s;
+  const need = Math.max(1, diffDays(back, today));
   return WINDOW_TIERS.find((t) => t >= need) ?? WINDOW_TIERS[WINDOW_TIERS.length - 1];
 }
 
@@ -391,61 +465,101 @@ export function dayBounds(data: TrafficData | null): { min?: string; max?: strin
 }
 
 /** 切到「自定义」时的起手区间：最近 30 天（钳在已有数据内）。空着会画出一张空图，像坏了。 */
-export function defaultSpan(data: TrafficData | null): Span {
-  const { min, max } = dayBounds(data);
-  const end = max ?? new Date().toISOString().slice(0, 10);
-  const back = new Date(`${end}T00:00:00`);
-  back.setDate(back.getDate() - 29);
-  const want = `${back.getFullYear()}-${String(back.getMonth() + 1).padStart(2, "0")}-${String(back.getDate()).padStart(2, "0")}`;
-  return { start: min && want < min ? min : want, end };
-}
-
-/** `YYYY-MM-DD` 按月合并。→ 月份升序的 (labels, buckets)。 */
-function byMonth(days: Record<string, Bucket>, keys: string[], fill?: string[]):
-  { labels: string[]; buckets: Bucket[] } {
+/**
+ * 把日桶按粒度合并。→ 标签升序的 (labels, buckets)。
+ *
+ * ★ 合并是**求和**不是抽样 —— 少加一天在一张月度图上完全看不出来。
+ * ★ 周以**周一**为起点（交接稿 §8），且第一格从区间起点算起，不回溯到区间外的周一：
+ *   回溯会把区间外的量算进来，而用户框的就是那个区间。
+ */
+function aggregate(days: Record<string, Bucket>, keys: string[],
+                   gran: Exclude<Granularity, "auto">): { labels: string[]; buckets: Bucket[] } {
+  if (gran === "day") return { labels: keys, buckets: keys.map((k) => days[k] ?? EMPTY) };
+  if (gran === "week") {
+    const labels: string[] = [], buckets: Bucket[] = [];
+    for (let i = 0; i < keys.length; i += 7) {
+      labels.push(keys[i]);
+      buckets.push(sumBuckets(keys.slice(i, i + 7).map((k) => days[k] ?? EMPTY)));
+    }
+    return { labels, buckets };
+  }
   const acc = new Map<string, Bucket[]>();
+  const order: string[] = [];
   for (const k of keys) {
     const m = k.slice(0, 7);
-    (acc.get(m) ?? acc.set(m, []).get(m)!).push(days[k] ?? EMPTY);
+    if (!acc.has(m)) { acc.set(m, []); order.push(m); }
+    acc.get(m)!.push(days[k] ?? EMPTY);
   }
-  // ★ `fill` 给自然年用:12 格**一格不少**，没数据的月份显式为 0。
-  //   不补的话 1~2 月没数据时横轴会从 3 月开始，看着像"今年从 3 月才开始用"，
-  //   而那是我们编的 —— 真相是那两个月确实是 0。
-  const labels = fill ?? [...acc.keys()].sort();
-  return { labels, buckets: labels.map((m) => sumBuckets(acc.get(m) ?? [])) };
+  return { labels: order, buckets: order.map((m) => sumBuckets(acc.get(m)!)) };
 }
 
-/** 该数据快照所属的自然年（按 `generated_at` 的**本地**年份 —— 与 scan.py 的按本地日分桶同源）。 */
-export function yearOf(data: TrafficData): number {
-  return new Date((data.generated_at || Date.now() / 1000) * 1000).getFullYear();
+/**
+ * 今日档：**每 2 小时**一格（交接稿 §5）。
+ *
+ * ★ `p.hours` 是逐小时的，这里两两合并。合并而不是隔一取一 —— 后者会丢掉一半的量，
+ *   而图形看上去只是"矮了一点"。
+ */
+function byTwoHours(hours: Record<string, Bucket>): { labels: string[]; buckets: Bucket[] } {
+  const ks = Object.keys(hours).sort();
+  const labels: string[] = [], buckets: Bucket[] = [];
+  for (let i = 0; i < ks.length; i += 2) {
+    labels.push(ks[i]);
+    buckets.push(sumBuckets(ks.slice(i, i + 2).map((k) => hours[k] ?? EMPTY)));
+  }
+  return { labels, buckets };
 }
 
-/** 取某平台在某时间段的 (labels, buckets)。scan.py 已补零,这里只做切片与合月。 */
-export function bucketsFor(data: TrafficData, key: string, range: Range, span?: Span):
+/** 取某平台在某区间的 (labels, buckets)。scan.py 已补零,这里只做切片与合并。 */
+export function bucketsFor(data: TrafficData, key: string, st: RangeState, today: string):
   { labels: string[]; buckets: Bucket[] } {
   const p = data.platforms[key];
   if (!p) return { labels: [], buckets: [] };
-  if (range === "today") {
-    const labels = Object.keys(p.hours).sort();
-    return { labels, buckets: labels.map((k) => p.hours[k] ?? EMPTY) };
-  }
-  const all = Object.keys(p.days).sort();
-  if (range === "year") {
-    const y = yearOf(data);
-    const months = Array.from({ length: 12 }, (_, i) => `${y}-${String(i + 1).padStart(2, "0")}`);
-    return byMonth(p.days, all.filter((k) => k.startsWith(`${y}-`)), months);
-  }
-  if (range === "custom") {
-    if (!span) return { labels: [], buckets: [] };
-    // ★ 字符串比较就够:`YYYY-MM-DD` 定宽且字典序 == 时间序。转 Date 反而会把时区带进来，
-    //   而 `p.days` 的键**已经是本地日**（scan.py 按本地日分桶）——再转一次就是转两遍。
-    const keys = all.filter((k) => k >= span.start && k <= span.end);
-    if (isMonthly(range, span)) return byMonth(p.days, keys);
-    return { labels: keys, buckets: keys.map((k) => p.days[k] ?? EMPTY) };
-  }
-  const labels = all.slice(-range);
-  return { labels, buckets: labels.map((k) => p.days[k] ?? EMPTY) };
+  if (st.preset === "today") return byTwoHours(p.hours);
+  const r = resolveRange(st, today);
+  // ★ 字符串比较就够:`YYYY-MM-DD` 定宽且字典序 == 时间序。转 Date 反而把时区带进来，
+  //   而 `p.days` 的键**已经是本地日**（scan.py 按本地日分桶）——再转一次就是转两遍。
+  const keys = Object.keys(p.days).sort().filter((k) => k >= r.s && k <= r.e);
+  return aggregate(p.days, keys, effGran(st, diffDays(r.s, r.e)));
 }
+
+/**
+ * 上一等长周期 `[s-n, s-1]` 的合计。→ `null` = **不该显示环比**，不是 0。
+ *
+ * ★★ 三种 `null` 合并成一个返回值是刻意的，因为调用方对它们的处置完全一样（显示「—」）：
+ *   ① 环比开关关着；② 区间 < 7 天（交接稿 §6，样本太少百分比会乱跳）；
+ *   ③ **取数窗口没覆盖到上一周期**。第三种最要命 —— 把缺的天当 0 算出来的环比在说
+ *   「上期没用过」，而事实是「我们没取到上期」，两句话的差别是一个 ↑∞。
+ * ★ 费用**按平台**累加：各家单价不同，混在一起乘一个平均价就是编数。
+ */
+export function prevTotals(data: TrafficData, st: RangeState, today: string, only?: string):
+  { tok: number; cost: number } | null {
+  const r = resolveRange(st, today);
+  const n = diffDays(r.s, r.e);
+  if (!st.compare || n < MIN_COMPARE_DAYS) return null;
+  const pr = prevRange(r);
+  const { min } = dayBounds(data);
+  if (!min || pr.s < min) return null;
+  let tok = 0, cost = 0;
+  for (const k of (only ? [only] : Object.keys(data.platforms))) {
+    const p = data.platforms[k];
+    if (!p) continue;
+    for (const day of Object.keys(p.days)) {
+      if (day < pr.s || day > pr.e) continue;
+      const b = p.days[day];
+      tok += b.total; cost += costOfBucket(b, k);
+    }
+  }
+  return { tok, cost };
+}
+
+/** 环比的说明文字：`vs 07-15 → 08-13`，一天时是 `vs 昨日`（交接稿 §1/§5）。 */
+export function prevNote(st: RangeState, today: string): string {
+  const r = resolveRange(st, today);
+  if (diffDays(r.s, r.e) === 1) return "vs 昨日";
+  const pr = prevRange(r);
+  return `vs ${md(pr.s)} → ${md(pr.e)}`;
+}
+
 
 export function sumBuckets(bs: Bucket[]): Bucket {
   const out: Bucket = { ...EMPTY, models: {} };

@@ -86,6 +86,9 @@ export const THEMES = {
     ghostBorder:"rgba(255,255,255,.12)", ghostText:"#aab3c0", ghostBg:"rgba(255,255,255,.02)",
     shadow:"0 28px 64px rgba(0,0,0,.5)",
     toastBg:"rgba(20,26,34,.94)", toastText:"#eef2f7", toastBorder:"rgba(45,212,191,.3)",
+    // 浮层（自定义范围日历）。★ 比 cardBg 更深一档 —— 它浮在卡片**之上**，
+    //   同色会让 580px 的弹层看起来"陷进"页面里（交接稿 §2 指定 #10161d）。
+    popBg:"#10161d", popShadow:"0 20px 50px rgba(0,0,0,.6)", popFieldBg:"#0c0f13",
     sunBg:"transparent", sunColor:"#6b7480", moonBg:"#2dd4bf", moonColor:"#06231f",
   },
   light: {
@@ -105,6 +108,7 @@ export const THEMES = {
     ghostBorder:"rgba(0,0,0,.12)", ghostText:"#4d5663", ghostBg:"#ffffff",
     shadow:"0 28px 64px rgba(0,0,0,.18)",
     toastBg:"rgba(255,255,255,.97)", toastText:"#161b22", toastBorder:"rgba(14,159,142,.35)",
+    popBg:"#ffffff", popShadow:"0 20px 50px rgba(0,0,0,.22)", popFieldBg:"#f2f5f8",
     sunBg:"#0e9f8e", sunColor:"#ffffff", moonBg:"transparent", moonColor:"#8a93a0",
   },
 };

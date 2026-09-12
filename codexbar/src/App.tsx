@@ -14,8 +14,8 @@ import LogsPage from "./pages/LogsPage";
 import RelayPage from "./pages/RelayPage";
 import TrafficPage from "./pages/TrafficPage";
 import PlatformPage from "./pages/PlatformPage";
-import type { Range, Span } from "./traffic";
-import { colorOf, daysNeeded } from "./traffic";
+import type { RangeState } from "./traffic";
+import { colorOf, daysNeeded, DEFAULT_RANGE, todayOf } from "./traffic";
 import SettingsPage, { getSettings, patchSettings, TRAY_STYLES } from "./pages/SettingsPage";
 import { useStore } from "./hooks/useStore";
 import { useExpiryWatch } from "./hooks/useExpiryWatch";
@@ -73,10 +73,9 @@ export default function App() {
   const [ver, setVer] = useState("");
   useEffect(() => { getVersion().then(setVer).catch(() => {}); }, []);
   const [page, setPage] = useState<Page>("overview");
-  const [trafficRange, setTrafficRange] = useState<Range>(14);
-  /** 自定义区间。★ 与 `trafficRange` 分开存:档位是"选了哪个按钮"，区间是"按钮里填了什么"，
-   *  合成一个联合类型会让 `Seg` 的当前项判断变成结构比较。`null` = 还没选过。 */
-  const [trafficSpan, setTrafficSpan] = useState<Span | null>(null);
+  /** 时间范围（交接稿 §7 的 `RangeState`）。★ **默认 30d**（v1.5 是 14d）。
+   *  总览与平台详情**共用这一份** —— 钻进详情再返回不该把档位重置。 */
+  const [trafficSt, setTrafficSt] = useState<RangeState>(DEFAULT_RANGE);
   const [drill, setDrill] = useState<string | null>(null);   // 平台详情:null = 停在总览
   const [detailModal, setDetailModal] = useState<AccountDetail | null>(null);
   const [selectedCard, setSelectedCard] = useState<string | null>(null);
@@ -166,12 +165,18 @@ export default function App() {
   //   底层数据本就一样;每换一档重调一次 IPC 等于白付一次全量扫描。
   //   进页面才取,不在启动时取 —— 账号池才是启动要的东西。
   //   取数走 `useTraffic`:先画上次的快照(一次文件读),再后台重扫,所以进页面不再有那 1~4 秒白屏。
+  // ★ 窗口由档位 + 环比开关决定（环比要往回多取一个等长周期），并**量化到档**（见 `daysNeeded`）。
+  //   ★ 这里刻意用**挂钟**而不是 `todayOf(traffic)`：后者要等数据到位，而窗口决定的正是
+  //     "去读哪一份数据"，循环依赖。差一天不会改变结果 —— 档位是 90/365/1095 三档，
+  //     只有恰好卡在档界上时才可能差一档，而那时下一次保鲜检查就会纠正过来。
+  //     **显示**一律用 `todayOf(data)`（桶按本地日切，挂钟在午夜前后会差一天）。
+  const trafficDays = daysNeeded(trafficSt, todayOf(null));
   const { data: traffic, raw: trafficRaw, cacheMode, prefs: platPrefs, busy: trafficBusy,
           err: trafficErr, refresh: refreshTraffic } = useTraffic({
             enabled: page === "traffic",
             // ★ 窗口由当前档位决定,且**量化到档**(90/365/1095) —— 见 `daysNeeded`。
             //   默认档原样返回 90,所以常用路径的行为一个字都没变。
-            days: daysNeeded(trafficRange, trafficSpan ?? undefined) });
+            days: trafficDays });
   /**
    * ★ 这是全 app 唯一一条会**主动联网**的数据路径(`useTraffic` 扫的是本机盘,零消耗不联网),
    *   所以 `enabled` 是白名单不是黑名单:**只有这两个页面**要看 grok 额度。
@@ -554,12 +559,10 @@ export default function App() {
 
           {page === "traffic" && (drill
             ? <PlatformPage t={t} data={traffic} raw={trafficRaw} cacheMode={cacheMode}
-                            pk={drill} range={trafficRange} span={trafficSpan}
-                            setRange={setTrafficRange} setSpan={setTrafficSpan}
+                            pk={drill} st={trafficSt} setSt={setTrafficSt}
                             onBack={() => setDrill(null)} busy={trafficBusy} />
             : <TrafficPage t={t} data={traffic} raw={trafficRaw} cacheMode={cacheMode} prefs={platPrefs}
-                           range={trafficRange} setRange={setTrafficRange}
-                           span={trafficSpan} setSpan={setTrafficSpan}
+                           st={trafficSt} setSt={setTrafficSt}
                            onDrill={setDrill} busy={trafficBusy} err={trafficErr}
                            onRefresh={refreshTraffic} />)}
           {page === "logs" && <LogsPage t={t} />}

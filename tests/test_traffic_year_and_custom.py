@@ -33,52 +33,93 @@ LIB_RS = WEB / "src-tauri" / "src" / "lib.rs"
 USE_TRAFFIC = WEB / "src" / "hooks" / "useTraffic.ts"
 
 PROBE = r"""
-import { bucketsFor, daysNeeded, isMonthly, spanDays, WINDOW_TIERS, axisTick, tickTitle }
+import { bucketsFor, daysNeeded, autoGran, effGran, resolveRange, presetList,
+         prevRange, prevTotals, diffDays, addDays, axisTick, tickTitle,
+         DEFAULT_RANGE, PILLS, WINDOW_TIERS, MAX_RANGE_DAYS, MIN_COMPARE_DAYS }
   from "%s";
 
 const B = (n) => ({ uncached_in: 0, cache_read: 0, cache_write: 0, output: 0,
                     total: n, rounds: 1, models: {} });
+const TODAY = "2026-09-12";
 
-/** 2026 年 1/1 ~ 9/12 每天 1，外加 2025-12-31 一天 999（用来抓"混进上一年"）。 */
+/** 2025-09-13 ~ 2026-09-12 每天 1（一整年都有数据，这样环比才能算）。 */
 function mk() {
-  const days = { "2025-12-31": B(999) };
-  for (const [m, n] of [[1,31],[2,28],[3,31],[4,30],[5,31],[6,30],[7,31],[8,31],[9,12]])
-    for (let d = 1; d <= n; d++)
-      days[`2026-${String(m).padStart(2,"0")}-${String(d).padStart(2,"0")}`] =
-        B(m >= 3 ? 1 : 0);           // 1、2 月**确实是 0**，但键存在
-  return { generated_at: Date.parse("2026-09-12T12:00:00") / 1000,
-           platforms: { codex: { name: "Codex", days, hours: {}, available: true } } };
+  const days = {}, hours = {};
+  for (let i = 0; i < 365; i++) days[addDays(TODAY, -i)] = B(1);
+  for (let h = 0; h < 24; h++) hours[`${TODAY}T${String(h).padStart(2,"0")}`] = B(10);
+  return { generated_at: Date.parse(TODAY + "T12:00:00") / 1000,
+           platforms: { codex: { name: "Codex", days, hours, available: true } } };
 }
 const data = mk();
+const R = (o) => ({ ...DEFAULT_RANGE, ...o });
 const out = {};
-const year = bucketsFor(data, "codex", "year");
-out.year_labels = year.labels;
-out.year_totals = year.buckets.map((b) => b.total);
 
-const short = bucketsFor(data, "codex", "custom", { start: "2026-06-01", end: "2026-06-30" });
-out.short_labels = short.labels;
-out.short_n = short.labels.length;
-
-const long = bucketsFor(data, "codex", "custom", { start: "2026-03-01", end: "2026-09-12" });
-out.long_labels = long.labels;
-out.long_total = long.buckets.reduce((s, b) => s + b.total, 0);
-
-out.span_inclusive = spanDays({ start: "2026-06-01", end: "2026-06-30" });
-out.monthly_at_90 = isMonthly("custom", { start: "2026-06-01", end: "2026-08-29" });
-out.monthly_at_91 = isMonthly("custom", { start: "2026-06-01", end: "2026-08-30" });
+out.pills = [...PILLS];
+out.default_preset = DEFAULT_RANGE.preset;
 out.tiers = [...WINDOW_TIERS];
-out.tick_hour  = axisTick("2026-09-12T09");
-out.tick_day   = axisTick("2026-09-12");
-out.tick_m1    = axisTick("2026-01");
-out.tick_m12   = axisTick("2026-12");
-out.title_m1   = tickTitle("2026-01");
-out.title_day  = tickTitle("2026-09-12");
-const NOW = Date.parse("2026-09-12T12:00:00");
-out.need_default = daysNeeded(14, undefined, NOW);
-out.need_90 = daysNeeded(90, undefined, NOW);
-out.need_year = daysNeeded("year", undefined, NOW);
-out.need_custom_recent = daysNeeded("custom", { start: "2026-08-01", end: "2026-09-01" }, NOW);
-out.need_custom_old = daysNeeded("custom", { start: "2024-01-01", end: "2026-09-01" }, NOW);
+out.max_days = MAX_RANGE_DAYS;
+out.min_cmp = MIN_COMPARE_DAYS;
+
+// 档位 → 区间
+out.r_today = resolveRange(R({ preset: "today" }), TODAY);
+out.r_7d = resolveRange(R({ preset: "7d" }), TODAY);
+out.r_30d = resolveRange(R({ preset: "30d" }), TODAY);
+out.r_year = resolveRange(R({ preset: "year" }), TODAY);
+
+// 粒度
+out.gran = [1, 90, 91, 365, 366].map(autoGran);
+out.gran_manual = effGran(R({ gran: "month" }), 10);
+
+// 今日 = 每 2 小时
+const td = bucketsFor(data, "codex", R({ preset: "today" }), TODAY);
+out.today_n = td.labels.length;
+out.today_sum = td.buckets.reduce((s, b) => s + b.total, 0);
+
+// 30d 按天；一年按周（≤365）
+const d30 = bucketsFor(data, "codex", R({ preset: "30d" }), TODAY);
+out.d30_n = d30.labels.length;
+out.d30_first = d30.labels[0];
+out.d30_last = d30.labels[d30.labels.length - 1];
+const yr = bucketsFor(data, "codex", R({ preset: "year" }), TODAY);
+out.year_n = yr.labels.length;
+out.year_sum = yr.buckets.reduce((s, b) => s + b.total, 0);
+
+// 自定义：含两端 + 合并不丢量
+const cu = R({ preset: "custom", custom: { s: "2026-06-01", e: "2026-06-30" } });
+const cb = bucketsFor(data, "codex", cu, TODAY);
+out.cu_n = cb.labels.length;
+out.cu_sum = cb.buckets.reduce((s, b) => s + b.total, 0);
+const wideCu = R({ preset: "custom", custom: { s: "2026-01-01", e: "2026-09-12" } });
+const wb = bucketsFor(data, "codex", wideCu, TODAY);
+out.wide_sum = wb.buckets.reduce((s, b) => s + b.total, 0);
+out.wide_days = diffDays("2026-01-01", "2026-09-12");
+
+// 环比
+out.prev_30d = prevRange(resolveRange(R({ preset: "30d" }), TODAY));
+out.cmp_on = prevTotals(data, R({ preset: "30d" }), TODAY) !== null;
+out.cmp_off = prevTotals(data, R({ preset: "30d", compare: false }), TODAY);
+out.cmp_short = prevTotals(data, R({ preset: "custom", custom: { s: "2026-09-10", e: "2026-09-12" } }), TODAY);
+out.cmp_uncovered = prevTotals(data, R({ preset: "custom", custom: { s: "2025-09-20", e: "2025-10-19" } }), TODAY);
+
+// 窗口档
+out.need_default = daysNeeded(DEFAULT_RANGE, TODAY);
+out.need_today = daysNeeded(R({ preset: "today" }), TODAY);
+out.need_year = daysNeeded(R({ preset: "year" }), TODAY);
+out.need_nocmp_90 = daysNeeded(R({ preset: "custom", compare: false,
+                                   custom: { s: addDays(TODAY, -89), e: TODAY } }), TODAY);
+
+// 预设列
+out.presets = presetList(TODAY).map((p) => p.sep ? "—" : p.label);
+out.week_start = presetList(TODAY).find((p) => !p.sep && p.label === "本周").r.s;
+out.last_month = presetList(TODAY).find((p) => !p.sep && p.label === "上月").r;
+
+// 刻度
+out.tick_hour = axisTick("2026-09-12T09");
+out.tick_day = axisTick("2026-09-12");
+out.tick_m1 = axisTick("2026-01");
+out.tick_m12 = axisTick("2026-12");
+out.title_m1 = tickTitle("2026-01");
+out.title_day = tickTitle("2026-09-12");
 console.log("JSON:" + JSON.stringify(out));
 """ % TRAFFIC_TS
 
@@ -96,87 +137,204 @@ def _probe():
     return json.loads(line[5:])
 
 
-class TheYearIsACalendarYear(unittest.TestCase):
-    """用户 2026-09-12 选的是**自然年**（不是滚动 12 个月）。"""
+class ThePillRowMatchesTheHandoff(unittest.TestCase):
+    """★ 交接稿 §1/§6：pill 集合 = `今日 · 7d · 30d · 年度 · 范围▾`，**默认 30d**。
+
+    14d / 90d **从 pill 移除**、退到弹层预设列 —— 理由是标题行零挤压：
+    7 个 pill + 双日期框在 960px 下必然折行，而这一行还要放「上次刷新」。
+    """
 
     @classmethod
     def setUpClass(cls):
         cls.o = _probe()
 
-    def test_twelve_slots_not_one_less(self):
-        self.assertEqual(self.o["year_labels"],
-                         [f"2026-{m:02d}" for m in range(1, 13)],
-                         "★ 自然年必须 12 格 —— 少一格就是把「那个月是 0」讲成「没有那个月」")
+    def test_exactly_four_fixed_pills(self):
+        self.assertEqual(self.o["pills"], ["today", "7d", "30d", "year"],
+                         "★ pill 集合与交接稿不一致（14d/90d 应在弹层预设列里）")
 
-    def test_empty_months_are_zero_not_absent(self):
-        self.assertEqual(self.o["year_totals"][0], 0)
-        self.assertEqual(self.o["year_totals"][1], 0)
-        self.assertGreater(self.o["year_totals"][2], 0, "3 月有数据，夹具没造对")
+    def test_the_default_is_30d(self):
+        self.assertEqual(self.o["default_preset"], "30d")
 
-    def test_future_months_are_zero(self):
-        self.assertEqual(self.o["year_totals"][9:], [0, 0, 0], "★ 10~12 月还没到，必须是 0")
-
-    def test_last_year_does_not_leak_in(self):
-        """★★ 夹具里 2025-12-31 是 999。它一旦混进来，任何一格都会异常地大 ——
-        而"异常地大"在一张按月的图上看不出来。"""
-        self.assertNotIn(999, self.o["year_totals"])
-        # 3~9 月每天 1：31+30+31+30+31+31+12。
-        # ⚠️ 这个数我第一版写成 135（漏了两个月）—— 是**闸算错**不是代码算错。
-        self.assertEqual(sum(self.o["year_totals"]), 31 + 30 + 31 + 30 + 31 + 31 + 12,
-                         "★ 年度合计对不上 3~9 月的天数")
+    def test_each_pill_resolves_to_the_documented_window(self):
+        self.assertEqual(self.o["r_today"], {"s": "2026-09-12", "e": "2026-09-12"})
+        self.assertEqual(self.o["r_7d"], {"s": "2026-09-06", "e": "2026-09-12"})
+        self.assertEqual(self.o["r_30d"], {"s": "2026-08-14", "e": "2026-09-12"})
+        self.assertEqual(self.o["r_year"], {"s": "2026-01-01", "e": "2026-09-12"},
+                         "★ 年度是**自然年**（1 月 1 日起），不是滚动 12 个月")
 
 
-class CustomSwitchesGranularityBySpan(unittest.TestCase):
-    """用户选的是「按跨度自动切换」：≤90 天按天，>90 天按月。"""
+class GranularityFollowsTheSpan(unittest.TestCase):
+    """★ 交接稿 §6：≤90 天按天，≤365 **按周**，更长按月；手动可覆盖。
+
+    ⚠️ 「周」这一档是这一版**新增**的 —— v1.5 只有天/月，一年的数据按天画是 365 格
+    （每格不足 1px），按月又只有 12 格、丢掉了周内节奏。
+    """
 
     @classmethod
     def setUpClass(cls):
         cls.o = _probe()
 
-    def test_a_short_span_stays_daily(self):
-        self.assertEqual(self.o["short_n"], 30)
-        self.assertEqual(self.o["short_labels"][0], "2026-06-01")
-        self.assertEqual(self.o["short_labels"][-1], "2026-06-30",
-                         "★ 区间含两端 —— 少一天没人看得出来")
+    def test_the_three_tiers(self):
+        self.assertEqual(self.o["gran"], ["day", "day", "week", "week", "month"],
+                         "★ 分界不对：1/90 按天，91/365 按周，366 按月")
 
-    def test_a_long_span_becomes_monthly(self):
-        self.assertEqual(self.o["long_labels"], ["2026-03", "2026-04", "2026-05",
-                                                 "2026-06", "2026-07", "2026-08", "2026-09"])
+    def test_manual_overrides_auto(self):
+        self.assertEqual(self.o["gran_manual"], "month",
+                         "★ 手动选了「月」却仍按 auto 算 —— 那个分段控件就是摆设")
 
-    def test_merging_into_months_loses_nothing(self):
-        """★★ 合月是**求和**不是抽样。少加一天在一张月度图上完全看不出来。"""
-        self.assertEqual(self.o["long_total"], 31 + 30 + 31 + 30 + 31 + 31 + 12)
+    def test_a_year_becomes_weekly_not_daily(self):
+        self.assertLessEqual(self.o["year_n"], 53)
+        self.assertGreaterEqual(self.o["year_n"], 36)
 
-    def test_the_cutover_is_exactly_at_ninety_days(self):
-        """★ 两侧各钉一个。只钉一侧的话，判据从 `>` 改成 `>=` 也不会红。"""
-        self.assertEqual(self.o["span_inclusive"], 30)
-        self.assertFalse(self.o["monthly_at_90"], "90 天整该按天")
-        self.assertTrue(self.o["monthly_at_91"], "91 天该按月")
+    def test_merging_into_weeks_loses_nothing(self):
+        """★★ 合并是**求和**不是抽样。少加几天在一张周线图上完全看不出来。"""
+        self.assertEqual(self.o["year_sum"], 255, "2026-01-01~09-12 共 255 天，每天 1")
+        self.assertEqual(self.o["wide_sum"], self.o["wide_days"])
+
+
+class CustomSpansAreInclusive(unittest.TestCase):
+
+    @classmethod
+    def setUpClass(cls):
+        cls.o = _probe()
+
+    def test_both_ends_are_included(self):
+        self.assertEqual(self.o["cu_n"], 30, "★ 6/1→6/30 是 30 天 —— 少一天没人看得出来")
+        self.assertEqual(self.o["cu_sum"], 30)
+
+    def test_the_30d_pill_is_29_days_back(self):
+        self.assertEqual(self.o["d30_n"], 30)
+        self.assertEqual(self.o["d30_first"], "2026-08-14")
+        self.assertEqual(self.o["d30_last"], "2026-09-12")
+
+
+class TodayIsBucketedEveryTwoHours(unittest.TestCase):
+    """★ 交接稿 §5：今日档按**每 2 小时**分格（`今日 · 12 格 · 每 2 小时`）。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.o = _probe()
+
+    def test_twelve_buckets(self):
+        self.assertEqual(self.o["today_n"], 12)
+
+    def test_no_token_is_dropped_in_the_merge(self):
+        """★★ 合并而不是隔一取一 —— 后者丢掉一半的量，而图形看上去只是"矮了一点"。"""
+        self.assertEqual(self.o["today_sum"], 240, "24 小时 × 10")
+
+
+class CompareSaysNothingRatherThanZero(unittest.TestCase):
+    """★★★ 交接稿 §1/§6：环比 = 与**上一等长周期**比；<7 天不显示。
+
+    三种「不该显示」合并成一个 `null`，因为调用方处置一样（显示「—」）：
+    开关关着 / 区间太短 / **取数窗口没覆盖到上一周期**。
+    第三种最要命 —— 把缺的天当 0 算出来的环比在说「上期没用过」，
+    而事实是「我们没取到上期」，两句话差一个 ↑∞。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.o = _probe()
+
+    def test_the_previous_window_is_the_equal_length_one_before(self):
+        self.assertEqual(self.o["prev_30d"], {"s": "2026-07-15", "e": "2026-08-13"})
+
+    def test_it_has_a_value_when_covered(self):
+        """★ 先证基线。没有这一条，下面三条测的可能是「它永远返回 null」。"""
+        self.assertTrue(self.o["cmp_on"], "★ 环比恒为空 —— 下面的断言全都无效")
+
+    def test_switch_off_means_none(self):
+        self.assertIsNone(self.o["cmp_off"])
+
+    def test_under_seven_days_means_none(self):
+        self.assertIsNone(self.o["cmp_short"], "★ 3 天也给环比 —— 百分比会剧烈跳动")
+
+    def test_an_uncovered_previous_window_means_none_not_zero(self):
+        self.assertIsNone(self.o["cmp_uncovered"],
+                          "★★★ 把没取到的上期当 0 ⇒ 环比说成 ↑∞，而那是我们编的")
+
+
+class ThePresetColumnMatchesTheHandoff(unittest.TestCase):
+    """★ 交接稿 §2：`今日 昨日 近7 近14 近30 近90 ─ 本周 本月 上月 本季度 年度`。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.o = _probe()
+
+    def test_eleven_presets_and_one_separator(self):
+        self.assertEqual(self.o["presets"],
+                         ["今日", "昨日", "近 7 天", "近 14 天", "近 30 天", "近 90 天", "—",
+                          "本周", "本月", "上月", "本季度", "年度"])
+
+    def test_the_week_starts_on_monday(self):
+        """★ 交接稿 §8 明写周一为起点。2026-09-12 是周六 → 本周起于 09-07（周一）。"""
+        self.assertEqual(self.o["week_start"], "2026-09-07")
+
+    def test_last_month_is_a_whole_month(self):
+        """★ 「上月」是**整月**，不是"往回 30 天" —— 后者跨月时会切掉月初几天。"""
+        self.assertEqual(self.o["last_month"], {"s": "2026-08-01", "e": "2026-08-31"})
 
 
 class TheHotPathWindowIsNotWidened(unittest.TestCase):
-    """★★★ 实测 `--days 90` 1.06s vs `--days 365` 7.65s。"""
+    """★★★ 实测：交替窗口时 `--days 365` 曾要 5.2~8.3s（见 `test_scan_cache_merge.py`）。
+    默认档必须仍落在 90 —— 它是心跳与菜单栏弹出走的那一份。"""
 
     @classmethod
     def setUpClass(cls):
         cls.o = _probe()
 
-    def test_the_default_tier_is_returned_verbatim(self):
-        self.assertEqual(self.o["need_default"], 90,
-                         "★★★ 默认档被量化成了别的窗口 ⇒ 心跳与菜单栏弹出从 1.0s 掉到 7.6s")
-        self.assertEqual(self.o["need_90"], 90)
+    def test_the_default_still_fits_the_hot_tier(self):
+        """★★ 注意默认**开着环比**，所以 30d 实际要往回取 60 天 —— 仍在 90 档内。
+        这正是把环比的回溯算进 `daysNeeded` 之后必须复验的那一条。"""
+        self.assertEqual(self.o["need_default"], 90)
+        self.assertEqual(self.o["need_today"], 90)
 
     def test_the_year_needs_a_wider_tier(self):
-        self.assertEqual(self.o["need_year"], 365)
+        self.assertIn(self.o["need_year"], [365, 1095])
 
-    def test_a_recent_custom_span_stays_on_the_hot_tier(self):
-        """★ 选「上个月」不该把窗口撑到 365 —— 那是一次 7.6s 的扫描换零收益。"""
-        self.assertEqual(self.o["need_custom_recent"], 90)
+    def test_turning_compare_off_keeps_a_90d_span_on_the_hot_tier(self):
+        """★ 反向闸：环比关掉时 90 天区间不该被撑到 365 档 —— 那是一次无谓的宽窗扫描。"""
+        self.assertEqual(self.o["need_nocmp_90"], 90)
 
-    def test_windows_are_quantised_not_exact(self):
-        """★★ 不量化的话，用户每拖一次日期就落一份新快照、每份都要重扫一遍。"""
-        self.assertIn(self.o["need_custom_old"], self.o["tiers"])
+    def test_windows_are_quantised(self):
         self.assertEqual(self.o["tiers"][0], 90, "第一档必须是热路径那一档")
+
+
+class TheLimitsMatchTheHandoff(unittest.TestCase):
+
+    @classmethod
+    def setUpClass(cls):
+        cls.o = _probe()
+
+    def test_max_365_and_min_compare_7(self):
+        self.assertEqual(self.o["max_days"], 365)
+        self.assertEqual(self.o["min_cmp"], 7)
+
+
+class TheMonthAxisReadsAsMonths(unittest.TestCase):
+    """★ 用户 2026-09-12：「年度的横轴不要 01、02、03，味道太重。1月、2月会不会好点？」"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.o = _probe()
+
+    def test_months_render_with_a_unit_and_no_leading_zero(self):
+        self.assertEqual(self.o["tick_m1"], "1月")
+        self.assertEqual(self.o["tick_m12"], "12月")
+
+    def test_the_other_two_shapes_are_unchanged(self):
+        """★ 反向闸。改月份档时把日期/小时档一起改掉，是同一条 `slice` 上最容易出的事故。"""
+        self.assertEqual(self.o["tick_day"], "09-12")
+        self.assertEqual(self.o["tick_hour"], "09:00")
+
+    def test_the_tooltip_keeps_the_year(self):
+        self.assertEqual(self.o["title_m1"], "2026年1月")
+        self.assertEqual(self.o["title_day"], "2026-09-12")
+
+    def test_the_component_does_not_keep_its_own_slice(self):
+        src = (ROOT / "codexbar" / "src" / "components" / "StackedArea.tsx").read_text(encoding="utf-8")
+        self.assertNotIn('d.slice(5)', src, "★ 组件里还留着自己的一份刻度格式化")
+        self.assertIn("axisTick(d)", src)
 
 
 class TheSnapshotIsKeyedByWindow(unittest.TestCase):
@@ -216,11 +374,30 @@ class TheWideWindowDoesNotRunTheHeartbeat(unittest.TestCase):
         head = self.TS[max(0, i - 400):i]
         self.assertIn("isDefault", head, "★ 心跳没有按窗口设闸 ⇒ 停在年度视图上每 2 分钟扫 7.6s")
 
-    def test_switching_window_clears_the_old_data(self):
+    def test_switching_window_never_keeps_the_previous_ones_data(self):
         """★★★ `adopt` 只在 `generated_at` 更新时换数据。换窗口时新快照**可能更旧**
-        ⇒ 被拒绝 ⇒ 页面继续画 90 天的数，而横轴已经写着「年度」。"""
-        self.assertRegex(self.TS, r"lastDays[\s\S]{0,400}setData\(null\)",
-                         "★★★ 换窗口没清空旧数据 —— 会拿 90 天的数配「年度」的轴")
+        ⇒ 被拒绝 ⇒ 页面继续画 90 天的数，而横轴已经写着「年度」。
+
+        ★ 2026-09-13 起命中内存缓存时直接换上那一份（用户：「不要每次选择都重新加载」），
+          **没命中才清空** —— 清空这一步不能省，省掉就是"拿 A 的数配 B 的轴"。
+          所以判据是 `setData(命中 ?? null)`：两条路都不会留着上一个窗口的数据。"""
+        self.assertRegex(self.TS, r"lastDays[\s\S]{0,600}setData\(hit \?\? null\)",
+                         "★★★ 换窗口时没有「命中就换、没命中就清空」—— "
+                         "留着上一个窗口的数据就是拿 A 的数配 B 的轴")
+
+    def test_the_per_window_cache_exists(self):
+        """★★ 用户 2026-09-13：「不要每次选择都是要重新刷新加载」。
+        扫描侧已修（`scan.py::_merge_cache`），但没有这张表的话，来回切档仍然每次都看骨架屏。
+
+        ⚠️ 第一版断言的是「源码里出现过 `byWindow` 这个词」—— 把声明删掉之后其它引用还在，
+        闸照样绿（变异工具当场拦下）。判据必须打在**完整链路**上：写进去、读出来、喂给 setData。
+        """
+        self.assertRegex(self.TS, r"byWindow\.current\.set\(\s*lastDays\.current\s*,\s*data\s*\)",
+                         "★ 数据到手时没有写进缓存 —— 那张表永远是空的")
+        self.assertRegex(self.TS, r"const hit = byWindow\.current\.get\(days\)",
+                         "★ 换窗口时没有查缓存 —— 每次切档都要重新加载")
+        self.assertRegex(self.TS, r"const hit = byWindow[\s\S]{0,120}setData\(hit \?\? null\)",
+                         "★★ 查了缓存却没把结果喂给 setData —— 查了等于没查")
 
     def test_only_the_default_window_broadcasts(self):
         """⚠️ 这条闸第一版锚在 `emit("traffic-updated")` 的**第一个**出现处，
@@ -300,31 +477,30 @@ class LoadingSaysNothingNotZero(unittest.TestCase):
                       "★ 缓存那一格没跟着加载态走")
 
 
-class EveryBucketsForCallCarriesTheSpan(unittest.TestCase):
-    """★★★ 漏传 `span` 的后果**不是报错，是静默算成 0**。
+class EveryBucketsForCallCarriesTheRangeState(unittest.TestCase):
+    """★★★ 漏传参数的后果**不是报错，是静默算成 0**。
 
-    `bucketsFor(..., "custom")` 拿不到区间时返回空切片。调用点漏传一个参数，
-    那一格就从真值变成 0 —— 而 `0.0%` 会被读成「没用到缓存」，与事实相反。
+    `bucketsFor(data, key, st, today)` —— 漏掉 `st` 或 `today`，那一格就从真值变成 0，
+    而 `0.0%` 会被读成「没用到缓存」，与事实相反。
 
-    2026-09-12 真踩到：像素上年度档 96.3%、自定义档 **0.0%**，tsc 与全部单测**全绿**。
-    同一格此前已经因为**另一个**原因显示过 0.0%（拿重塑后的 `data` 去算），
-    源码里那条注释还在。**同一格、两个原因、同一个假值** —— 所以这条闸打在「所有调用点」上，
-    而不是打在某一个已知的坑上。
+    2026-09-12 真踩到（当时的签名带 `span`）：像素上年度档 96.3%、自定义档 **0.0%**，
+    tsc 与全部单测**全绿**。同一格此前已因**另一个**原因显示过 0.0%（拿重塑后的 `data` 去算）。
+    **同一格、两个原因、同一个假值** —— 所以这条闸打在「所有调用点」上，不是某个已知的坑上。
     """
 
     FILES = ["codexbar/src/pages/TrafficPage.tsx", "codexbar/src/pages/PlatformPage.tsx"]
 
-    def test_no_call_site_forgets_the_span(self):
+    def test_no_call_site_drops_an_argument(self):
         bad = []
         for rel in self.FILES:
             src = (ROOT / rel).read_text(encoding="utf-8")
-            for m in re.finditer(r"bucketsFor\(([^;]*?)\)\.?", src):
+            for m in re.finditer(r"bucketsFor\(([^;]*?)\)", src):
                 args = m.group(1)
-                if "span" not in args:
+                if "st," not in args or "today" not in args:
                     ln = src[:m.start()].count("\n") + 1
                     bad.append(f"    {rel}:{ln}  bucketsFor({args[:60]}…")
         self.assertEqual(bad, [],
-                         "★★★ 这些调用点没传 span ⇒ 自定义档下静默返回空切片:\n" + "\n".join(bad))
+                         "★★★ 这些调用点少传了 `st` 或 `today` ⇒ 静默返回空切片:\n" + "\n".join(bad))
 
     def test_the_probe_can_actually_find_call_sites(self):
         """★ 反向自检:上面那条断言在"一个调用点都没找到"时也会通过。"""

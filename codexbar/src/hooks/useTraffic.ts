@@ -119,20 +119,38 @@ export function useTraffic(opts: {
   }, []);
 
   /**
-   * ★★★ **换窗口必须先把 `data` 清掉。**
+   * 每个窗口一份**内存缓存**。→ 来回切档不再重新加载。
    *
-   * `adopt` 只在 `generated_at` 更新时才换数据 —— 那是为"广播/快照谁更新"设计的。
-   * 但换窗口时新那份快照**可能更旧**（年度快照是几小时前扫的，90 天那份刚扫过），
-   * 于是 `adopt` 会拒绝它，页面继续画 90 天的数据、而横轴和标题已经写着「年度」。
-   * 图照画、数字照变，**一个字都不报错** —— 本仓反复记过的那种形态。
-   * 清空之后先出骨架再出数据，慢一点，但说的是真话。
+   * ★★ 用户 2026-09-12：「不要每次选择都是要重新刷新加载，这样会影响使用」。
+   *   扫描侧的真因已经修掉了（`scan.py::_merge_cache`，交替窗口 5.2~8.3s → 1.1s），
+   *   但只修那一半还不够：换窗口时这里会把 `data` 清空，于是**每次**切档都要看一次骨架屏。
+   *   有了这张表，切回去是**零等待**（内存命中，连读盘都省）。
+   *
+   * ★ 放 `useRef` 不放 state：它不该触发渲染，且两次渲染之间必须是同一张表。
+   */
+  const byWindow = useRef(new Map<number, TrafficData>());
+  useEffect(() => {
+    if (data) byWindow.current.set(lastDays.current, data);
+  }, [data]);
+
+  /**
+   * ★★★ **换窗口时，要么换上这个窗口的数据，要么清空 —— 绝不能留着上一个窗口的。**
+   *
+   * `adopt` 只在 `generated_at` 更新时才换数据（那是为"广播/快照谁更新"设计的）。
+   * 换窗口时新那份**可能更旧**（年度快照是几小时前扫的，90 天那份刚扫过），
+   * 于是 `adopt` 会拒绝它，页面继续画 90 天的数、而横轴和标题已经写着「年度」——
+   * 图照画、数字照变，**一个字都不报错**。
+   *
+   * 所以命中缓存就直接换上（无骨架屏），没命中才清空。**清空这一步不能省** ——
+   * 省掉它就是上面那种"拿 A 的数配 B 的轴"。
    */
   const lastDays = useRef(days);
   useEffect(() => {
     if (lastDays.current === days) return;
     lastDays.current = days;
-    setData(null);
-    primed.current = false;
+    const hit = byWindow.current.get(days);
+    setData(hit ?? null);
+    primed.current = false;      // 仍要后台校验新鲜度，只是不再让用户等
   }, [days]);
 
   /**

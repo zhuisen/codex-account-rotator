@@ -33,6 +33,8 @@ app/**/.build_number
 .claude-tokens-cache.json
 .traffic-cache.json
 .traffic-latest.json
+# 非默认窗口（年度/自定义）的成品快照，见 lib.rs::snapshot_name
+.traffic-d*.json
 # grok 周额度 sidecar:含 email + user_id + account_key,与 state.json 同级敏感
 .grok-quota.json
 # agy 额度 sidecar。★ 与上面那条不同,它**不含凭证** —— agy 的额度接口无鉴权,

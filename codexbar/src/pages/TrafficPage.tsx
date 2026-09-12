@@ -1,15 +1,16 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { type Theme, modelColor } from "../theme";
 import { fmtUSD } from "../rates";
 import StackedArea, { type Layer } from "../components/StackedArea";
-import Seg from "../components/Seg";
 import KpiStrip, { type Kpi, UP, DOWN } from "../components/KpiStrip";
 import CacheChip from "../components/CacheChip";
 import { useIntro, introEnabled } from "../hooks/useIntro";
-import type { TrafficData, Bucket, Range, Span, CacheMode, PlatformPrefs } from "../traffic";
-import SpanPicker from "../components/SpanPicker";
-import { defaultSpan, dayBounds } from "../traffic";
-import { RANGES, rangeLabel, bucketsFor, sumBuckets, costOfBucket, savingOfBucket, fmtTok, topModels, colorOf, countsCacheRead, orderedKeys, coveragePct, coverageNote } from "../traffic";
+import type { TrafficData, Bucket, RangeState, CacheMode, PlatformPrefs } from "../traffic";
+import RangeBar from "../components/RangeBar";
+import Toast from "../components/Toast";
+import { todayOf, resolveRange, diffDays, prevTotals, prevNote, effGran, granLabel, md,
+       } from "../traffic";
+import { rangeLabel, bucketsFor, sumBuckets, costOfBucket, savingOfBucket, fmtTok, topModels, colorOf, countsCacheRead, orderedKeys, coveragePct, coverageNote } from "../traffic";
 import type { Coverage } from "../traffic";
 
 const AMBER = "#E0A21C";
@@ -22,7 +23,7 @@ const IconRefresh = ({ spin }: { spin?: boolean }) => (
   </svg>
 );
 
-export default function TrafficPage({ t, data, raw, cacheMode, prefs, range, setRange, span, setSpan, onDrill, busy, err, onRefresh }: {
+export default function TrafficPage({ t, data, raw, cacheMode, prefs, st, setSt, onDrill, busy, err, onRefresh }: {
   t: Theme;
   /** 已按缓存口径重塑 —— 一切合计/图表/费用都用它 */
   data: TrafficData | null;
@@ -32,33 +33,38 @@ export default function TrafficPage({ t, data, raw, cacheMode, prefs, range, set
   cacheMode: CacheMode;
   /** 平台呈现偏好。**这里只用它的 `order` 排列表** —— 停用/改名/改色已在 `useTraffic` 出口生效。 */
   prefs: PlatformPrefs;
-  range: Range;
-  setRange: (r: Range) => void;
-  span: Span | null;
-  setSpan: (s: Span) => void;
+  st: RangeState;
+  setSt: (s: RangeState) => void;
   onDrill: (platform: string) => void;
   busy: boolean;
   err: string | null;
   onRefresh?: () => void;
 }): React.ReactElement {
   const [hoverKey, setHoverKey] = useState<string | null>(null);
-  const isToday = range === "today";
+  const [toast, setToast] = useState<string | null>(null);
+  const isToday = st.preset === "today";
+  /** 数据里的"今天"。★ 不用挂钟 —— 桶是 scan.py 按本地日切的，午夜前后会差一天。 */
+  const today = useMemo(() => todayOf(data), [data]);
+  const range = useMemo(() => resolveRange(st, today), [st, today]);
+  const days = diffDays(range.s, range.e);
+  const showToast = useCallback((m: string) => {
+    setToast(m);
+    // 1.8s（交接稿 §4）。★ 用 ref 存 timer 会在快速连点时留下一个野定时器把新 toast 提前灭掉，
+    //   所以每次都清掉上一个。
+    window.clearTimeout((showToast as unknown as { _t?: number })._t);
+    (showToast as unknown as { _t?: number })._t =
+      window.setTimeout(() => setToast(null), 1800);
+  }, []);
   // ★ 依赖是**数据集身份**不是数据 —— 拿 data 当依赖会让页面每 2 分钟自动刷新时重播一次动画。
   // ★ 依赖必须是**数据集身份**:自定义档下只改日期、档位字符串不变,不带上区间的话
   //   换了一整段数据却不重播入场动效,而 hover 浮层也会继续描述上一段（同 `key` 那条）。
-  const intro = useIntro(`${String(range)}:${span?.start ?? ""}:${span?.end ?? ""}`);
-  const bounds = useMemo(() => dayBounds(data), [data]);
-  /** 切到「自定义」时先给一段能看的默认区间 —— 空着的话页面是一张空图,像坏了。 */
-  const pickRange = (r: Range) => {
-    if (r === "custom" && !span) setSpan(defaultSpan(data));
-    setRange(r);
-  };
+  const intro = useIntro(`${st.preset}:${range.s}:${range.e}:${st.gran}`);
 
   const view = useMemo(() => {
     if (!data) return null;
     const keys = Object.keys(data.platforms);
     const series = keys.map((k) => {
-      const { labels, buckets } = bucketsFor(data, k, range, span ?? undefined);
+      const { labels, buckets } = bucketsFor(data, k, st, today);
       return { key: k, name: data.platforms[k].name, labels, buckets };
     });
     const labels = series[0]?.labels ?? [];
@@ -80,7 +86,7 @@ export default function TrafficPage({ t, data, raw, cacheMode, prefs, range, set
     const grandCost = per.reduce((s, p) => s + p.cost, 0);
     const grandSaving = per.reduce((s, p) => s + p.saving, 0);
     return { labels, per, list, grand, grandRounds, grandCost, grandSaving };
-  }, [data, range, span, prefs]);
+  }, [data, st, today, prefs]);
 
   /**
    * 环比基准 = **与当前窗口等长的上一段**(今日 → 昨日整天;7d → 再往前 7 天;以此类推)。
@@ -88,32 +94,30 @@ export default function TrafficPage({ t, data, raw, cacheMode, prefs, range, set
    * App 恒按 `--days 90` 取数,所以 7/14/30 档都有完整上期;**90d 档没有上一个 90 天,返回 null,
    * UI 显示「—」** —— 拿不足 90 天的一段当上期算出来的百分比是假的,宁可不给。
    */
+  /**
+   * 环比基准 = **上一等长周期** `[s-n, s-1]`（交接稿 §7）。
+   *
+   * ★★ 与 v1.5 的区别：**自定义档现在也有环比**。做法是取数窗口往回多要一个等长周期
+   *   （见 `daysNeeded`），这里再从同一份数据里切出来 —— 不是另发一次扫描。
+   * ★ 判据全在 `prevTotals` 里：关了开关 / <7 天 / 窗口没覆盖到，都返回 `null`，
+   *   页面一律显示「—」。**「没取到」绝不能算成 0**。
+   */
   const prev = useMemo(() => {
     if (!data) return null;
-    // ★★ 「年度」与「自定义」**没有已取到的上一段**:窗口只往回取到这一段的起点
-    //   (`daysNeeded`),上一年 / 上一段的数据根本不在手里。
-    //   原来这里靠 `range as number` 得到 NaN、再靠 `win.length === n` 恒假来落到 null ——
-    //   结果对,但**是靠 NaN 的运算规则对的**,改一行就会变成拿一段不完整的数据冒充上期。
-    //   写成显式分支：它现在说的是「没有」,而不是「碰巧算不出来」。
-    if (range === "year" || range === "custom") return null;
-    let tok = 0, cost = 0, ok = false;
-    for (const k of Object.keys(data.platforms)) {
-      const p = data.platforms[k];
-      const days = Object.keys(p.days).sort();
-      if (isToday) {
-        const yd = days[days.length - 2];
-        if (yd) { ok = true; tok += p.days[yd].total; cost += costOfBucket(p.days[yd], k); }
-      } else {
-        const n = range as number;
-        const win = days.slice(-2 * n, -n);
-        if (win.length === n) {
-          ok = true;
-          for (const d of win) { tok += p.days[d].total; cost += costOfBucket(p.days[d], k); }
-        }
+    if (isToday) {
+      const ks = Object.keys(data.platforms);
+      const days = ks.length ? Object.keys(data.platforms[ks[0]].days).sort() : [];
+      const yd = days[days.length - 2];
+      if (!yd) return null;
+      let tok = 0, cost = 0;
+      for (const k of ks) {
+        const b = data.platforms[k].days[yd];
+        if (b) { tok += b.total; cost += costOfBucket(b, k); }
       }
+      return { tok, cost };
     }
-    return ok ? { tok, cost } : null;
-  }, [data, range, isToday]);
+    return prevTotals(data, st, today);
+  }, [data, st, today, isToday]);
 
 
   const delta = (now: number, base: number) => {
@@ -149,11 +153,11 @@ export default function TrafficPage({ t, data, raw, cacheMode, prefs, range, set
     if (!raw) return null;
     let cache = 0, tot = 0;
     for (const k of Object.keys(raw.platforms)) {
-      const agg = sumBuckets(bucketsFor(raw, k, range, span ?? undefined).buckets);
+      const agg = sumBuckets(bucketsFor(raw, k, st, today).buckets);
       cache += agg.cache_read; tot += agg.total;
     }
     return tot ? (cache / tot) * 100 : null;
-  }, [raw, range, span]);
+  }, [raw, st, today]);
 
   /**
    * ★★★ **还没拿到数据时必须说「—」，不许说 0。**（2026-09-12）
@@ -174,18 +178,25 @@ export default function TrafficPage({ t, data, raw, cacheMode, prefs, range, set
     { k: "最大占比", v: "—" },
   ] : [
     { k: "总 token", v: fmtTok(view?.grand ?? 0), n: view?.grand ?? 0, fmt: fmtTok,
-      sub: dTok ? `环比 ${dTok.txt}` : "环比 —",
+      // 今日档环比行隐藏（§5：改注在「较昨日」那一格下面）
+      sub: isToday ? undefined : (dTok ? `环比 ${dTok.txt}` : "环比 —"),
       subC: dTok ? (dTok.up ? UP : DOWN) : t.muted },
     isToday
-      ? { k: "较昨日", v: dTok?.txt ?? "—", c: dTok ? (dTok.up ? UP : DOWN) : undefined }
+      ? { k: "较昨日", v: dTok?.txt ?? "—", c: dTok ? (dTok.up ? UP : DOWN) : undefined,
+          sub: "vs 昨日", subC: t.muted }
+      // ★ 交接稿 §1：**日均列下方注明比较区间**（`vs 07-15 → 08-13`）——
+      //   环比只给一个百分比，读者无从知道在跟哪一段比，而那正是判断它可不可信的依据。
       : { k: "日均", v: fmtTok((view?.grand ?? 0) / Math.max(1, view?.labels.length ?? 1)),
-          n: (view?.grand ?? 0) / Math.max(1, view?.labels.length ?? 1), fmt: fmtTok },
+          n: (view?.grand ?? 0) / Math.max(1, view?.labels.length ?? 1), fmt: fmtTok,
+          sub: prev ? prevNote(st, today) : undefined, subC: t.muted },
     { k: "总费用", v: fmtUSD(view?.grandCost ?? 0), n: view?.grandCost ?? 0, fmt: fmtUSD, c: AMBER,
       sub: view?.grandSaving ? `缓存已省 ${fmtUSD(view.grandSaving)}` : undefined },
     isToday
       ? { k: "费用较昨日", v: dCost?.txt ?? "—", c: dCost ? (dCost.up ? UP : DOWN) : undefined }
       : { k: "日均费用", v: fmtUSD((view?.grandCost ?? 0) / Math.max(1, view?.labels.length ?? 1)),
-          n: (view?.grandCost ?? 0) / Math.max(1, view?.labels.length ?? 1), fmt: fmtUSD, c: AMBER },
+          n: (view?.grandCost ?? 0) / Math.max(1, view?.labels.length ?? 1), fmt: fmtUSD, c: AMBER,
+          sub: dCost ? `环比 ${dCost.txt}` : undefined,
+          subC: dCost ? (dCost.up ? UP : DOWN) : t.muted },
     { k: "最大占比",
       v: top ? `${top.name} ${((top.total / Math.max(1, view!.grand)) * 100).toFixed(1)}%` : "—",
       c: top ? colorOf(data, top.key) : undefined },
@@ -232,22 +243,37 @@ export default function TrafficPage({ t, data, raw, cacheMode, prefs, range, set
               <StaleHint t={t} generatedAt={data.generated_at} />
             </span>
           )}
-          <Seg opts={RANGES} cur={range} on={pickRange} label={rangeLabel} t={t} />
-          {range === "custom" && (
-            <SpanPicker span={span} onChange={setSpan} min={bounds.min} max={bounds.max} t={t} />)}
+          <RangeBar st={st} today={today} onChange={setSt} onToast={showToast} t={t} />
         </div>
       </div>
+
+      {toast && <Toast msg={toast} t={t} />}
 
       <KpiStrip t={t} items={kpis} intro={intro} />
 
       {err && <div style={{ fontSize: 11, color: "#E0524D", marginBottom: 8 }}>✗ {err}</div>}
       {busy && !data && <div style={{ fontSize: 12, color: t.muted }}>首次扫描三家 transcript 中(约 18s,之后走缓存)…</div>}
 
+      {/* ★ 交接稿 §1：图表标题行右侧写 `08-14 → 09-12 · 30 格 · 按天`，
+          替代原来那句「30 天 · 按天分格（超过 90 天改按月）」的长解释 ——
+          规则说明属于做选择的地方（弹层），这里只报**当前事实**。 */}
+      {!!view?.labels.length && (
+        <div style={{ marginTop: 12, display: "flex", alignItems: "baseline", gap: 8,
+                      fontFamily: "'JetBrains Mono'", fontSize: 10, color: t.text2 }}>
+          {/* ★ 左边的 `token` 由 `StackedArea` 自己画（它定位在绘图区上沿 `top:-13`，
+              与刻度共用一套坐标）。这里**不再画第二个** —— 同一个词出现两次比没有更糟。 */}
+          <span style={{ marginLeft: "auto", color: t.muted }}>
+            {isToday
+              ? `今日 · ${view.labels.length} 格 · 每 2 小时`
+              : `${md(range.s)} → ${md(range.e)} · ${view.labels.length} 格 · ${granLabel(effGran(st, days))}`}
+          </span>
+        </div>
+      )}
       {!!view?.labels.length && (
         // ★ `key={range}` 不是可有可无的:图表的 hover 是"某个数据集里的索引",换档必须让实例作废。
         //    详见 StackedArea 里 `hv` 上方的注释(靠组件自清试过两次,都被用户实测推翻)。
-        <div className={introEnabled() ? "cb-wipe" : undefined} key={`w:${range}:${view.labels[0]}`}>
-        <StackedArea key={`${range}:${view.labels[0]}:${view.labels[view.labels.length - 1]}`}
+        <div className={introEnabled() ? "cb-wipe" : undefined} key={`w:${st.preset}:${range.s}:${range.e}:${st.gran}`}>
+        <StackedArea key={`${st.preset}:${range.s}:${range.e}:${st.gran}:${view.labels[0]}`}
                      labels={view.labels} layers={layers} height={156} fmt={fmtTok} t={t}
                      dimmed={hoverKey} onPick={onDrill}
                      tipTitle={(i) => (isToday ? `今日 ${view.labels[i].slice(11)}:00` : view.labels[i])} />
@@ -357,7 +383,7 @@ export default function TrafficPage({ t, data, raw, cacheMode, prefs, range, set
                         total={p.total} cost={p.cost} isToday={isToday}
                         yTotal={isToday ? yesterdayOf(data, p.key) : 0}
                         coverage={data?.platforms[p.key]?.coverage}
-                        onDrill={() => onDrill(p.key)} rangeTxt={rangeLabel(range)} />
+                        onDrill={() => onDrill(p.key)} rangeTxt={st.preset === "custom" ? `${md(range.s)}→${md(range.e)}` : rangeLabel(st.preset)} />
         ))}
         {/* ★ 占位卡只在**没坐满一行**时出现,而且文案是通用的:平台由 `traffic/scan.py` 的注册表
             决定,写死某一家的名字会在加/停平台后变成谎话(上一版写的是「Gemini 待接入」,
