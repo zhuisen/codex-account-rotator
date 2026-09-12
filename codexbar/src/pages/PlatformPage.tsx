@@ -3,7 +3,9 @@ import { type Theme, modelColor, TABLE_TYPE as TZ } from "../theme";
 import { costOf, fmtUSD, priceOf, isPriced } from "../rates";
 import StackedArea, { type Layer } from "../components/StackedArea";
 import Seg from "../components/Seg";
-import type { TrafficData, Range, CacheMode, Bucket, Platform } from "../traffic";
+import type { TrafficData, Range, Span, CacheMode, Bucket, Platform } from "../traffic";
+import SpanPicker from "../components/SpanPicker";
+import { defaultSpan, dayBounds } from "../traffic";
 import { RANGES, rangeLabel, bucketsFor, sumBuckets, costOfBucket, savingOfBucket, fmtTok,
          countsCacheRead, countsCacheWrite, countedClasses, mixParts, colorOf } from "../traffic";
 import KpiStrip, { type Kpi, UP, DOWN } from "../components/KpiStrip";
@@ -217,7 +219,7 @@ function RouteSplit({ t, p, labels, rangeTxt }: {
   );
 }
 
-export default function PlatformPage({ t, data, raw, cacheMode, pk, range, setRange, onBack, busy }: {
+export default function PlatformPage({ t, data, raw, cacheMode, pk, range, setRange, span, setSpan, onBack, busy }: {
   t: Theme;
   /** 已按缓存口径重塑 —— 合计/图表/费用都用它 */
   data: TrafficData | null;
@@ -225,7 +227,10 @@ export default function PlatformPage({ t, data, raw, cacheMode, pk, range, setRa
   raw: TrafficData | null;
   cacheMode: CacheMode;
   pk: string;
-  range: Range; setRange: (r: Range) => void; onBack: () => void; busy: boolean;
+  range: Range; setRange: (r: Range) => void;
+  /** 自定义区间。★ 与总览页同一套控件（§5c：同一类页面必须长得一样）。 */
+  span: Span | null; setSpan: (s: Span) => void;
+  onBack: () => void; busy: boolean;
 }): React.ReactElement {
   const [mode, setMode] = useState<"models" | "total">("models");
   const [iso, setIso] = useState<Set<string>>(new Set());   // §7 被隔离的模型
@@ -246,17 +251,17 @@ export default function PlatformPage({ t, data, raw, cacheMode, pk, range, setRa
 
   const v = useMemo(() => {
     if (!data?.platforms[pk]) return null;
-    const { labels, buckets } = bucketsFor(data, pk, range);
+    const { labels, buckets } = bucketsFor(data, pk, range, span ?? undefined);
     const agg = sumBuckets(buckets);
     const models = Object.entries(agg.models)
       .map(([m, mv]) => ({ m, ...mv, cost: costOf(mv, m, pk) }))
       .sort((a, b) => b.total - a.total);
     // 全池占比
     let grand = 0;
-    for (const k of Object.keys(data.platforms)) grand += sumBuckets(bucketsFor(data, k, range).buckets).total;
+    for (const k of Object.keys(data.platforms)) grand += sumBuckets(bucketsFor(data, k, range, span ?? undefined).buckets).total;
     return { labels, buckets, agg, models, cost: costOfBucket(agg, pk),
              saving: savingOfBucket(agg, pk), grand };
-  }, [data, pk, range]);
+  }, [data, pk, range, span]);
 
   /**
    * ★ 「总量」的三类**必须过缓存口径门**。不过门的话，切到「不含缓存」时图例会显示
@@ -287,7 +292,14 @@ export default function PlatformPage({ t, data, raw, cacheMode, pk, range, setRa
   const modeWord = mode === "models" ? "分模型" : "总量";
 
   // 身份含平台与档位:换平台、换时间档、换分模型/总量都该重播;**自动刷新不该**。
-  const intro = useIntro(`${pk}:${range}:${mode}`);
+  // ★ 依赖是**数据集身份**：自定义档下只改日期时档位字符串不变，不带区间会让动效不重播、
+  //   浮层继续描述上一段数据（同 `key` 那条规则）。
+  const intro = useIntro(`${pk}:${range}:${mode}:${span?.start ?? ""}:${span?.end ?? ""}`);
+  const bounds = useMemo(() => dayBounds(data), [data]);
+  const pickRange = (r: Range) => {
+    if (r === "custom" && !span) setSpan(defaultSpan(data));
+    setRange(r);
+  };
 
   /**
    * 费率卡脚注里的「缓存读 = 输入价 X%」。**必须实算**：新费率表下这个比值按平台差一个数量级
@@ -311,6 +323,9 @@ export default function PlatformPage({ t, data, raw, cacheMode, pk, range, setRa
    */
   const prev = useMemo(() => {
     if (!data) return null;
+    // ★★ 「年度」与「自定义」**没有已取到的上一段**（窗口只往回取到本段起点，见 `daysNeeded`）。
+    //    与总览页同一条判据，写成显式分支而不是靠 `range as number` 得到 NaN 再恰好落空。
+    if (range === "year" || range === "custom") return null;
     const p = data.platforms[pk];
     if (!p) return null;
     const dayKeys = Object.keys(p.days).sort();
@@ -360,9 +375,9 @@ export default function PlatformPage({ t, data, raw, cacheMode, pk, range, setRa
   //   否则百分比加起来不到 100(不含缓存时只有 4%),比不显示更糟。
   const mix = useMemo(() => {
     if (!raw?.platforms[pk]) return null;
-    const parts = mixParts(sumBuckets(bucketsFor(raw, pk, range).buckets), cacheMode);
+    const parts = mixParts(sumBuckets(bucketsFor(raw, pk, range, span ?? undefined).buckets), cacheMode);
     return parts.length ? parts.map((p) => `${p.name} ${p.pct.toFixed(1)}%`).join(" · ") : null;
-  }, [raw, pk, range, cacheMode]);
+  }, [raw, pk, range, span, cacheMode]);
 
 
   return (
@@ -386,7 +401,9 @@ export default function PlatformPage({ t, data, raw, cacheMode, pk, range, setRa
         <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
           <Seg opts={["models", "total"] as const} cur={mode} on={setMode}
                label={(x) => (x === "models" ? "分模型" : "总量")} t={t} />
-          <Seg opts={RANGES} cur={range} on={setRange} label={rangeLabel} t={t} />
+          <Seg opts={RANGES} cur={range} on={pickRange} label={rangeLabel} t={t} />
+          {range === "custom" && (
+            <SpanPicker span={span} onChange={setSpan} min={bounds.min} max={bounds.max} t={t} />)}
         </div>
       </div>
 
@@ -407,7 +424,7 @@ export default function PlatformPage({ t, data, raw, cacheMode, pk, range, setRa
         // ★ key 同时带 `mode`:切「分模型 ↔ 总量」也是换了一整个数据集。不带 `iso` —— 隔离模型只改
         //    图层不改日期,hover 索引仍然指同一天,重建反而会把用户停着的浮层弄没。
         <div className={introEnabled() ? "cb-wipe" : undefined} key={`w:${range}:${mode}:${v.labels[0]}`}>
-        <StackedArea key={`${range}:${mode}:${v.labels[0]}`}
+        <StackedArea key={`${range}:${mode}:${v.labels[0]}:${v.labels[v.labels.length - 1]}`}
                      labels={v.labels} layers={layers} height={190} fmt={fmtTok} t={t}
                      tipTitle={(i) => (isToday ? `今日 ${v.labels[i].slice(11)}:00 · ${modeWord}`
                                                : `${v.labels[i]} · ${modeWord}`)} />

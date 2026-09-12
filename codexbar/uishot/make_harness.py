@@ -597,6 +597,12 @@ function relayEntry() {
       //   真机上快照是 `invoke` 异步取的,内容会在挂载**之后**才长出来 —— harness 原本内联同步给,
       //   按设计绕开了这个竞态,也就**看不见**任何"挂载时量了一次、之后再没量"的缺陷。
       //   菜单栏高度钉死在 PANEL_H_MIN 那个 bug 就是这么漏掉的。
+      // ★ 宽窗口（年度 / 自定义 >90 天）的快照。**不打桩就是假绿**：落到 default 返回 null
+      //   ⇒ 换到年度档时 `data` 恒 null ⇒ 页面画骨架、零报错、sweep 报干净，
+      //   而我们要验的正是那一档画成什么样。同 `read_rotation_snapshot` 那条的教训。
+      //   ⚠️ 这里返回的是**同一份 90 天快照** —— 所以年度视图里 1~5 月是空格。
+      //   那不是 bug，正是本机今天的真实形态（数据从 2026-03 才开始），也正好验到补零那一路。
+      case 'read_traffic_snapshot_days':
       case 'read_traffic_snapshot':
       case 'run_traffic': {
         var dly = parseInt(p.get('snap_delay') || '0', 10);

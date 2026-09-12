@@ -6,7 +6,9 @@ import Seg from "../components/Seg";
 import KpiStrip, { type Kpi, UP, DOWN } from "../components/KpiStrip";
 import CacheChip from "../components/CacheChip";
 import { useIntro, introEnabled } from "../hooks/useIntro";
-import type { TrafficData, Bucket, Range, CacheMode, PlatformPrefs } from "../traffic";
+import type { TrafficData, Bucket, Range, Span, CacheMode, PlatformPrefs } from "../traffic";
+import SpanPicker from "../components/SpanPicker";
+import { defaultSpan, dayBounds } from "../traffic";
 import { RANGES, rangeLabel, bucketsFor, sumBuckets, costOfBucket, savingOfBucket, fmtTok, topModels, colorOf, countsCacheRead, orderedKeys, coveragePct, coverageNote } from "../traffic";
 import type { Coverage } from "../traffic";
 
@@ -20,7 +22,7 @@ const IconRefresh = ({ spin }: { spin?: boolean }) => (
   </svg>
 );
 
-export default function TrafficPage({ t, data, raw, cacheMode, prefs, range, setRange, onDrill, busy, err, onRefresh }: {
+export default function TrafficPage({ t, data, raw, cacheMode, prefs, range, setRange, span, setSpan, onDrill, busy, err, onRefresh }: {
   t: Theme;
   /** 已按缓存口径重塑 —— 一切合计/图表/费用都用它 */
   data: TrafficData | null;
@@ -32,6 +34,8 @@ export default function TrafficPage({ t, data, raw, cacheMode, prefs, range, set
   prefs: PlatformPrefs;
   range: Range;
   setRange: (r: Range) => void;
+  span: Span | null;
+  setSpan: (s: Span) => void;
   onDrill: (platform: string) => void;
   busy: boolean;
   err: string | null;
@@ -40,13 +44,21 @@ export default function TrafficPage({ t, data, raw, cacheMode, prefs, range, set
   const [hoverKey, setHoverKey] = useState<string | null>(null);
   const isToday = range === "today";
   // ★ 依赖是**数据集身份**不是数据 —— 拿 data 当依赖会让页面每 2 分钟自动刷新时重播一次动画。
-  const intro = useIntro(String(range));
+  // ★ 依赖必须是**数据集身份**:自定义档下只改日期、档位字符串不变,不带上区间的话
+  //   换了一整段数据却不重播入场动效,而 hover 浮层也会继续描述上一段（同 `key` 那条）。
+  const intro = useIntro(`${String(range)}:${span?.start ?? ""}:${span?.end ?? ""}`);
+  const bounds = useMemo(() => dayBounds(data), [data]);
+  /** 切到「自定义」时先给一段能看的默认区间 —— 空着的话页面是一张空图,像坏了。 */
+  const pickRange = (r: Range) => {
+    if (r === "custom" && !span) setSpan(defaultSpan(data));
+    setRange(r);
+  };
 
   const view = useMemo(() => {
     if (!data) return null;
     const keys = Object.keys(data.platforms);
     const series = keys.map((k) => {
-      const { labels, buckets } = bucketsFor(data, k, range);
+      const { labels, buckets } = bucketsFor(data, k, range, span ?? undefined);
       return { key: k, name: data.platforms[k].name, labels, buckets };
     });
     const labels = series[0]?.labels ?? [];
@@ -68,7 +80,7 @@ export default function TrafficPage({ t, data, raw, cacheMode, prefs, range, set
     const grandCost = per.reduce((s, p) => s + p.cost, 0);
     const grandSaving = per.reduce((s, p) => s + p.saving, 0);
     return { labels, per, list, grand, grandRounds, grandCost, grandSaving };
-  }, [data, range, prefs]);
+  }, [data, range, span, prefs]);
 
   /**
    * 环比基准 = **与当前窗口等长的上一段**(今日 → 昨日整天;7d → 再往前 7 天;以此类推)。
@@ -78,6 +90,12 @@ export default function TrafficPage({ t, data, raw, cacheMode, prefs, range, set
    */
   const prev = useMemo(() => {
     if (!data) return null;
+    // ★★ 「年度」与「自定义」**没有已取到的上一段**:窗口只往回取到这一段的起点
+    //   (`daysNeeded`),上一年 / 上一段的数据根本不在手里。
+    //   原来这里靠 `range as number` 得到 NaN、再靠 `win.length === n` 恒假来落到 null ——
+    //   结果对,但**是靠 NaN 的运算规则对的**,改一行就会变成拿一段不完整的数据冒充上期。
+    //   写成显式分支：它现在说的是「没有」,而不是「碰巧算不出来」。
+    if (range === "year" || range === "custom") return null;
     let tok = 0, cost = 0, ok = false;
     for (const k of Object.keys(data.platforms)) {
       const p = data.platforms[k];
@@ -122,17 +140,39 @@ export default function TrafficPage({ t, data, raw, cacheMode, prefs, range, set
   // ★★ 必须从 `raw` 算:`data` 已按口径重塑,里面 cache_read 恒为 0,拿它算缓存占比会永远得到
   //     0.0% —— 那不是"没有缓存",是"我把它减掉了",两回事。
   //     (只在计入缓存读时才会用到这个数,其余口径下这一格根本不渲染。)
-  const rawCacheShare = useMemo(() => {
-    if (!raw) return 0;
+  //     ★★ 2026-09-12 又踩一次同款，新原因:加「自定义」档时这里**漏传了 `span`**，
+  //     于是 `bucketsFor` 走 custom 分支拿不到区间 → 空切片 → 分母 0 → 又是 `0.0%`。
+  //     像素抓到的（年度 96.3% 而自定义 0.0%），tsc 和单测都不会响。
+  //     ⚠️ 顺带把 `: 0` 改成 `null`:没有分母时说「—」，不说「0.0%」——
+  //     后者是一句我们支持不了的断言，而它和真的 0% 长得一模一样。
+  const rawCacheShare = useMemo((): number | null => {
+    if (!raw) return null;
     let cache = 0, tot = 0;
     for (const k of Object.keys(raw.platforms)) {
-      const agg = sumBuckets(bucketsFor(raw, k, range).buckets);
+      const agg = sumBuckets(bucketsFor(raw, k, range, span ?? undefined).buckets);
       cache += agg.cache_read; tot += agg.total;
     }
-    return tot ? (cache / tot) * 100 : 0;
-  }, [raw, range]);
+    return tot ? (cache / tot) * 100 : null;
+  }, [raw, range, span]);
 
-  const kpis: Kpi[] = [
+  /**
+   * ★★★ **还没拿到数据时必须说「—」，不许说 0。**（2026-09-12）
+   *
+   * 下面全是 `view?.x ?? 0` —— 本仓记过的那条「`?? 默认值` 会把查不到伪装成正常」。
+   * 在 2026-09-12 之前这个洞几乎摸不到：`data` 只在**从来没扫过**时才为 null。
+   * 但「年度」「自定义」是**换取数窗口**，换窗口必须先清空旧数据（否则会拿 90 天的数
+   * 配「年度」的轴），于是这段空窗期从"一辈子一次"变成"每次切档都有"，
+   * 而年度那一档要扫 7.6s —— 用户会盯着一个写着 `总 token 0 · $0.000` 的面板看 8 秒。
+   * 那不是骨架屏，那是一句**错的陈述**。
+   */
+  const loading = !view;
+  const kpis: Kpi[] = loading ? [
+    { k: "总 token", v: "—", sub: "读取中", subC: t.muted },
+    { k: isToday ? "较昨日" : "日均", v: "—" },
+    { k: "总费用", v: "—", c: AMBER },
+    { k: isToday ? "费用较昨日" : "日均费用", v: "—", c: AMBER },
+    { k: "最大占比", v: "—" },
+  ] : [
     { k: "总 token", v: fmtTok(view?.grand ?? 0), n: view?.grand ?? 0, fmt: fmtTok,
       sub: dTok ? `环比 ${dTok.txt}` : "环比 —",
       subC: dTok ? (dTok.up ? UP : DOWN) : t.muted },
@@ -156,7 +196,7 @@ export default function TrafficPage({ t, data, raw, cacheMode, prefs, range, set
   //   前者会被读成"没用到缓存"(与事实相反),后者等于换个说法把这个指标请回来。
   //   KpiStrip 是 space-evenly,少一格自动重新均分,不会留空位。
   if (countsCacheRead(cacheMode)) {
-    kpis.push({ k: "缓存", v: raw ? `${rawCacheShare.toFixed(1)}%` : "—" });
+    kpis.push({ k: "缓存", v: !loading && rawCacheShare != null ? `${rawCacheShare.toFixed(1)}%` : "—" });
   }
 
   /**
@@ -192,7 +232,9 @@ export default function TrafficPage({ t, data, raw, cacheMode, prefs, range, set
               <StaleHint t={t} generatedAt={data.generated_at} />
             </span>
           )}
-          <Seg opts={RANGES} cur={range} on={setRange} label={rangeLabel} t={t} />
+          <Seg opts={RANGES} cur={range} on={pickRange} label={rangeLabel} t={t} />
+          {range === "custom" && (
+            <SpanPicker span={span} onChange={setSpan} min={bounds.min} max={bounds.max} t={t} />)}
         </div>
       </div>
 
@@ -205,7 +247,7 @@ export default function TrafficPage({ t, data, raw, cacheMode, prefs, range, set
         // ★ `key={range}` 不是可有可无的:图表的 hover 是"某个数据集里的索引",换档必须让实例作废。
         //    详见 StackedArea 里 `hv` 上方的注释(靠组件自清试过两次,都被用户实测推翻)。
         <div className={introEnabled() ? "cb-wipe" : undefined} key={`w:${range}:${view.labels[0]}`}>
-        <StackedArea key={`${range}:${view.labels[0]}`}
+        <StackedArea key={`${range}:${view.labels[0]}:${view.labels[view.labels.length - 1]}`}
                      labels={view.labels} layers={layers} height={156} fmt={fmtTok} t={t}
                      dimmed={hoverKey} onPick={onDrill}
                      tipTitle={(i) => (isToday ? `今日 ${view.labels[i].slice(11)}:00` : view.labels[i])} />

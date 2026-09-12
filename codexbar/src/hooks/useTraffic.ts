@@ -32,6 +32,16 @@ function autoRefreshEnabled(): boolean {
 const TICK_MS = 30 * 1000;
 
 /**
+ * 默认取数窗口。**热路径恒用它**（心跳 / 菜单栏弹出 / 进页面）。
+ *
+ * ★★ 实测 2026-09-12：热路径 `--days 90` **1.06s**，`--days 365` **7.65s**。
+ *   所以「年度」「自定义」不能靠把默认窗口调大来实现 —— 那会让每 2 分钟的心跳和
+ *   每次弹出托盘都慢 7 倍，代价压在**完全没用到年度视图**的那些时刻上。
+ *   非默认窗口走各自的快照文件（`lib.rs::snapshot_name`），**且不跑心跳、不广播**。
+ */
+export const DEFAULT_DAYS = 90;
+
+/**
  * 流量数据的统一入口:**先画快照,再后台校验**(stale-while-revalidate)。
  *
  * 为什么不直接 `run_traffic`:那条路要起 python、读 10MB 增量缓存、stat 8500 个文件再重新聚合,
@@ -50,7 +60,12 @@ const TICK_MS = 30 * 1000;
  * - 触发时机仍各自独立:菜单栏认 `menubar-shown`,主窗口认"进到用量页",各按自己的可见性跑心跳。
  * 最后一道保险在 Rust:`run_traffic` 有互斥锁 + 新鲜度双检,两边**同时**判定要扫时也只起一个 python。
  */
-export function useTraffic(opts: { enabled?: boolean } = {}): {
+export function useTraffic(opts: {
+  enabled?: boolean;
+  /** 取数窗口（天）。缺省 = `DEFAULT_DAYS`(90) 的热路径行为，一个字都没变。
+   *  非默认值走自己的快照文件、**不跑心跳、不广播** —— 见 `DEFAULT_DAYS` 上的说明。 */
+  days?: number;
+} = {}): {
   /**
    * **已按当前缓存口径重塑**的数据 —— 画面上一切 token 数与费用都该用它。
    * 重塑只在这一个出口做,下游读 `b.total` / `costOfBucket` 的 30 多处自动跟上。
@@ -75,12 +90,22 @@ export function useTraffic(opts: { enabled?: boolean } = {}): {
   /** 只在数据比 `maxAgeMs` 还旧时才重扫。给"界面刚被看到"这类时刻用。 */
   refreshIfStale: (maxAgeMs?: number) => void;
 } {
-  const { enabled = true } = opts;
+  const { enabled = true, days = DEFAULT_DAYS } = opts;
+  const isDefault = days === DEFAULT_DAYS;
   const [data, setData] = useState<TrafficData | null>(null);
+
+  /** 读**本窗口**那一份快照。两个命令而不是一个带可选参数的命令 —— 见 lib.rs 里的说明。 */
+  const readSnap = useCallback(
+    (): Promise<string | null> => (isDefault
+      ? invoke<string | null>("read_traffic_snapshot")
+      : invoke<string | null>("read_traffic_snapshot_days", { days })),
+    [isDefault, days]);
   const [busy, setBusy] = useState(false);
   const { remote: remoteBusy, announce } = useBusyMirror();
   const [err, setErr] = useState<string | null>(null);
   const running = useRef(false);
+  // ★ 声明提到这里:下面「换窗口清空」那个 effect 要复位它,而它原本声明在更靠后的位置。
+  const primed = useRef(false);
 
   const parse = (raw: string | null): TrafficData | null => {
     // 快照可能是上一个 PARSER_V 写的,或被中断写坏。解析失败当作没有,重扫即可自愈。
@@ -92,6 +117,23 @@ export function useTraffic(opts: { enabled?: boolean } = {}): {
     if (!d) return;
     setData((prev) => (prev && prev.generated_at >= d.generated_at ? prev : d));
   }, []);
+
+  /**
+   * ★★★ **换窗口必须先把 `data` 清掉。**
+   *
+   * `adopt` 只在 `generated_at` 更新时才换数据 —— 那是为"广播/快照谁更新"设计的。
+   * 但换窗口时新那份快照**可能更旧**（年度快照是几小时前扫的，90 天那份刚扫过），
+   * 于是 `adopt` 会拒绝它，页面继续画 90 天的数据、而横轴和标题已经写着「年度」。
+   * 图照画、数字照变，**一个字都不报错** —— 本仓反复记过的那种形态。
+   * 清空之后先出骨架再出数据，慢一点，但说的是真话。
+   */
+  const lastDays = useRef(days);
+  useEffect(() => {
+    if (lastDays.current === days) return;
+    lastDays.current = days;
+    setData(null);
+    primed.current = false;
+  }, [days]);
 
   /**
    * `force = true` 只给手动的 ↻ 用:用户明确要"现在重取",不看新鲜度。
@@ -107,14 +149,16 @@ export function useTraffic(opts: { enabled?: boolean } = {}): {
     setErr(null);
     try {
       if (!force) {
-        const snap = parse(await invoke<string | null>("read_traffic_snapshot"));
+        const snap = parse(await readSnap());
         if (snap && Date.now() - snap.generated_at * 1000 <= FRESH_MS) { adopt(snap); return; }
       }
-      const raw = await invoke<string>("run_traffic", { args: ["--days", "90", "--json"] });
+      const raw = await invoke<string>("run_traffic", { args: ["--days", String(days), "--json"] });
       adopt(parse(raw));
       // ★ 告诉另一个 webview:数据更新了,**去读盘,别自己再扫一遍**。
       //   两个窗口是独立 JS 上下文,localStorage 都不互通,只能走 Tauri 事件(同 usePrivacy 的范式)。
-      void emit("traffic-updated");
+      // ★ 只有默认窗口才广播。非默认窗口写的是另一份快照文件,广播出去只会让对方
+      //   白读一次默认快照(且因为更旧会被 `adopt` 丢掉)—— 一次无意义的往返。
+      if (isDefault) void emit("traffic-updated");
     } catch (e: unknown) {
       setErr(String(e).slice(0, 200));
     } finally {
@@ -122,25 +166,29 @@ export function useTraffic(opts: { enabled?: boolean } = {}): {
       setBusy(false);
       announce(null);
     }
-  }, [adopt, announce]);
+    // ★★ `days` / `readSnap` / `isDefault` 都必须在依赖里。漏掉的后果**不是不刷新**，
+    //    是**刷了错的那个窗口**:这个闭包会一直拿着切换之前的 `days` 去调 `run_traffic`，
+    //    然后把结果写进那个窗口的快照 —— 年度视图永远等不到自己的数据，
+    //    而页面只是安静地显示 0。
+  }, [adopt, announce, days, readSnap, isDefault]);
 
   // 对方扫完 → 读盘采纳。一次 ~1ms 的文件读,不起 python。
   useEffect(() => {
     if (!enabled) return;
+    if (!isDefault) return;          // 别拿默认窗口的数据去填年度视图
     const un = listen("traffic-updated", () => {
       void invoke<string | null>("read_traffic_snapshot").then((raw) => { adopt(parse(raw)); });
     });
     return () => { void un.then((f) => f()); };
-  }, [enabled, adopt]);
+  }, [enabled, adopt, isDefault]);
 
   // ★ 只跑一次:`data` 一旦有值就不再重入。主窗口钻进平台详情页再返回、菜单栏来回切 Tab,
   //   都不该触发新的扫描。
-  const primed = useRef(false);
   useEffect(() => {
     if (!enabled || primed.current) return;
     primed.current = true;
     let alive = true;
-    invoke<string | null>("read_traffic_snapshot")
+    readSnap()
       .then((raw) => {
         if (!alive) return;
         let snap: TrafficData | null = null;
@@ -157,7 +205,11 @@ export function useTraffic(opts: { enabled?: boolean } = {}): {
       })
       .catch(() => { if (alive) void scan(); });
     return () => { alive = false; };
-  }, [enabled, adopt, scan]);
+    // ★★★ `readSnap` 必须在依赖里。它随 `days` 变 —— 没有它，换窗口时上面那个
+    //    「清空 + primed 复位」的 effect 跑完之后**没有任何东西会再触发取数**：
+    //    effect 只在依赖变化时重跑，复位一个 ref 不会让 React 重跑它。
+    //    症状是切到年度档后页面恒为 0，而且零报错（实测 2026-09-12，harness 截图抓到的）。
+  }, [enabled, adopt, scan, readSnap]);
 
   // 岁数判断要读**最新**的 data,但不该让 `refreshIfStale` 每次 data 变就换引用(它挂在
   // 事件监听和定时器上,换引用 = 反复解绑重绑)。所以走 ref。
@@ -202,13 +254,15 @@ export function useTraffic(opts: { enabled?: boolean } = {}): {
    * - **tick 只是看一眼岁数**,没过 `FRESH_MS` 就什么都不做 —— 所以 30s 的节拍并不等于 30s 扫一次。
    */
   useEffect(() => {
-    if (!enabled) return;
+    // ★ 心跳**只给默认窗口**。年度那档一次扫描 7.6s,每 2 分钟自动跑一遍是纯浪费 ——
+    //   而且用户停在年度视图上时,数据本来就是按月看的,分钟级新鲜度没有意义。
+    if (!enabled || !isDefault) return;
     const id = setInterval(() => {
       if (!autoRefreshEnabled()) return;
       if (document.visibilityState === "visible") refreshIfStale();
     }, TICK_MS);
     return () => { clearInterval(id); };
-  }, [enabled, refreshIfStale]);
+  }, [enabled, refreshIfStale, isDefault]);
 
   // ★ 口径重塑放在**出口**,不进 state:扫描/快照/广播那套逻辑完全不知道有这回事,
   //   切口径也就不会触发任何重扫(它只是换个算法看同一份数据)。`full` 时返回原引用,零开销。

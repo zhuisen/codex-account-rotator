@@ -14,8 +14,8 @@ import LogsPage from "./pages/LogsPage";
 import RelayPage from "./pages/RelayPage";
 import TrafficPage from "./pages/TrafficPage";
 import PlatformPage from "./pages/PlatformPage";
-import type { Range } from "./traffic";
-import { colorOf } from "./traffic";
+import type { Range, Span } from "./traffic";
+import { colorOf, daysNeeded } from "./traffic";
 import SettingsPage, { getSettings, patchSettings, TRAY_STYLES } from "./pages/SettingsPage";
 import { useStore } from "./hooks/useStore";
 import { useExpiryWatch } from "./hooks/useExpiryWatch";
@@ -74,6 +74,9 @@ export default function App() {
   useEffect(() => { getVersion().then(setVer).catch(() => {}); }, []);
   const [page, setPage] = useState<Page>("overview");
   const [trafficRange, setTrafficRange] = useState<Range>(14);
+  /** 自定义区间。★ 与 `trafficRange` 分开存:档位是"选了哪个按钮"，区间是"按钮里填了什么"，
+   *  合成一个联合类型会让 `Seg` 的当前项判断变成结构比较。`null` = 还没选过。 */
+  const [trafficSpan, setTrafficSpan] = useState<Span | null>(null);
   const [drill, setDrill] = useState<string | null>(null);   // 平台详情:null = 停在总览
   const [detailModal, setDetailModal] = useState<AccountDetail | null>(null);
   const [selectedCard, setSelectedCard] = useState<string | null>(null);
@@ -164,7 +167,11 @@ export default function App() {
   //   进页面才取,不在启动时取 —— 账号池才是启动要的东西。
   //   取数走 `useTraffic`:先画上次的快照(一次文件读),再后台重扫,所以进页面不再有那 1~4 秒白屏。
   const { data: traffic, raw: trafficRaw, cacheMode, prefs: platPrefs, busy: trafficBusy,
-          err: trafficErr, refresh: refreshTraffic } = useTraffic({ enabled: page === "traffic" });
+          err: trafficErr, refresh: refreshTraffic } = useTraffic({
+            enabled: page === "traffic",
+            // ★ 窗口由当前档位决定,且**量化到档**(90/365/1095) —— 见 `daysNeeded`。
+            //   默认档原样返回 90,所以常用路径的行为一个字都没变。
+            days: daysNeeded(trafficRange, trafficSpan ?? undefined) });
   /**
    * ★ 这是全 app 唯一一条会**主动联网**的数据路径(`useTraffic` 扫的是本机盘,零消耗不联网),
    *   所以 `enabled` 是白名单不是黑名单:**只有这两个页面**要看 grok 额度。
@@ -547,10 +554,12 @@ export default function App() {
 
           {page === "traffic" && (drill
             ? <PlatformPage t={t} data={traffic} raw={trafficRaw} cacheMode={cacheMode}
-                            pk={drill} range={trafficRange}
-                            setRange={setTrafficRange} onBack={() => setDrill(null)} busy={trafficBusy} />
+                            pk={drill} range={trafficRange} span={trafficSpan}
+                            setRange={setTrafficRange} setSpan={setTrafficSpan}
+                            onBack={() => setDrill(null)} busy={trafficBusy} />
             : <TrafficPage t={t} data={traffic} raw={trafficRaw} cacheMode={cacheMode} prefs={platPrefs}
                            range={trafficRange} setRange={setTrafficRange}
+                           span={trafficSpan} setSpan={setTrafficSpan}
                            onDrill={setDrill} busy={trafficBusy} err={trafficErr}
                            onRefresh={refreshTraffic} />)}
           {page === "logs" && <LogsPage t={t} />}

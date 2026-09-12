@@ -369,11 +369,12 @@ async fn run_traffic(app: AppHandle, args: Vec<String>) -> Result<String, String
     }
     let script = format!("{}/traffic/scan.py", script_dir());
     let forced = args.iter().any(|a| a == "--no-cache");
+    let days = traffic_days(&args);      // ★ 决定读写哪一份快照,见 `snapshot_name`
     let out = tauri::async_runtime::spawn_blocking(move || {
         // 串行化:第二个调用者在这里等第一个扫完
         let _guard = SCAN_LOCK.lock();
         if !forced {
-            if let Some(fresh) = fresh_snapshot(SCAN_COALESCE_SECS) {
+            if let Some(fresh) = fresh_snapshot(days, SCAN_COALESCE_SECS) {
                 return Ok(Err(fresh)); // Err 分支借用来表示"复用快照",不是错误
             }
         }
@@ -395,7 +396,7 @@ async fn run_traffic(app: AppHandle, args: Vec<String>) -> Result<String, String
         //   其余样式刷一次也无害(只读 state.json)。
         refresh_tray(&app);
         let body = String::from_utf8_lossy(&out.stdout).to_string();
-        write_traffic_snapshot(&body);
+        write_traffic_snapshot(days, &body);
         Ok(body)
     } else {
         Err(format!(
@@ -413,6 +414,36 @@ async fn run_traffic(app: AppHandle, args: Vec<String>) -> Result<String, String
 /// 立刻出来"的东西 —— 交接稿 §5 明写「弹窗只读缓存,不重复解析」。所以在扫描之外再落一份**成品**,
 /// 读它就是一次 100KB 的文件读。
 const SNAPSHOT: &str = ".traffic-latest.json";
+
+/// app 的默认取数窗口。热路径(心跳 / 菜单栏弹出 / 进页面)恒用它。
+const DEFAULT_TRAFFIC_DAYS: u32 = 90;
+
+/// ★★★ **快照必须按窗口分文件。**（2026-09-12，为「年度」「自定义」两档加的。）
+///
+/// `run_traffic` 的合并逻辑(`fresh_snapshot`)只看快照的**时间戳**，不看它是多大的窗口扫出来的。
+/// 共用一个文件名的话，用户点「年度」会拿到 90 天那一份 —— 图照画、标题照写「年度」，
+/// **数据是错的而且一个字都不报错**。这正是本仓反复记过的那种形态:
+/// 「这一枪没打中」和「确实是这样」返回同一个值。
+///
+/// ★ 不给每个自定义区间各开一份:窗口先**量化到档**(90 / 365 / 1095)再来取，
+///   否则用户每拖一次日期就在 data_dir 里落一个新文件、且每个都要重扫一遍。
+fn snapshot_name(days: u32) -> String {
+    if days == DEFAULT_TRAFFIC_DAYS {
+        SNAPSHOT.to_string()
+    } else {
+        format!(".traffic-d{}.json", days)
+    }
+}
+
+/// 从 `--days N` 里取窗口;取不到就是默认档。★ 解析失败**不报错**只回默认 ——
+/// 这个值只决定"读写哪一份快照"，而 `scan.py` 自己也有默认，两边不一致最坏是多扫一次。
+fn traffic_days(args: &[String]) -> u32 {
+    args.iter()
+        .position(|a| a == "--days")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(DEFAULT_TRAFFIC_DAYS)
+}
 
 /// grok 周额度的 sidecar。**刻意不进 `state.json`** —— `slots` 里的每个 key 都被轮换器当池成员
 /// 遍历(`_pick`/`cmd_refresh_all`/`cmd_keepalive`),而 `cmd_keepalive` 就是拿 refresh_token 去刷的。
@@ -732,14 +763,14 @@ async fn run_grok_quota() -> Result<String, String> {
 /// 快照若比 `max_age_secs` 还新就返回它,否则 None。用于扫描前的合并判断。
 /// ★ 时间戳字段是 `generated_at`,不是额度链路那个 `fetched_at` —— 传错的话这里会
 /// 恒判过期,于是每次都重扫,不报错、只是慢。
-fn fresh_snapshot(max_age_secs: u64) -> Option<String> {
-    fresh_sidecar(SNAPSHOT, "generated_at", max_age_secs)
+fn fresh_snapshot(days: u32, max_age_secs: u64) -> Option<String> {
+    fresh_sidecar(&snapshot_name(days), "generated_at", max_age_secs)
 }
 
 /// 原子落盘:先写同目录临时文件再 `rename`。直接覆写会让并发的读者读到半截 JSON —— 主窗口在扫描、
 /// 用户同时点开菜单栏,是每天都会发生的时序。
-fn write_traffic_snapshot(body: &str) {
-    write_sidecar(SNAPSHOT, body);
+fn write_traffic_snapshot(days: u32, body: &str) {
+    write_sidecar(&snapshot_name(days), body);
 }
 
 /// 读快照。返回 `null` 表示"还没有任何一次成功扫描",调用方据此显示首扫提示而不是空图。
@@ -749,6 +780,14 @@ fn write_traffic_snapshot(body: &str) {
 #[tauri::command]
 fn read_traffic_snapshot() -> Result<Option<String>, String> {
     read_sidecar(SNAPSHOT)
+}
+
+/// 非默认窗口(年度 / 自定义)的快照。**与上面那条是两个命令，不是一个带参数的命令** ——
+/// 热路径那条被托盘和两个 webview 调，给它加一个可选参数等于让每个调用点都要做一次
+/// "传不传"的决定，而漏传的那个会静默读到另一个窗口的数据。
+#[tauri::command]
+fn read_traffic_snapshot_days(days: u32) -> Result<Option<String>, String> {
+    read_sidecar(&snapshot_name(days))
 }
 
 /// 查远端最新的 `vX.Y.Z` tag。
@@ -1841,6 +1880,7 @@ pub fn run() {
             run_discover,
             set_tray_style,
             read_traffic_snapshot,
+            read_traffic_snapshot_days,
             read_grok_quota,
             run_grok_quota,
             read_agy_quota,

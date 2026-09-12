@@ -153,9 +153,58 @@ export function colorOf(data: TrafficData | null, key: string): string {
   return data?.platforms[key]?.color || platformColor(key);
 }
 
-export const RANGES = ["today", 7, 14, 30, 90] as const;
+export const RANGES = ["today", 7, 14, 30, 90, "year", "custom"] as const;
 export type Range = (typeof RANGES)[number];
-export const rangeLabel = (r: Range): string => (r === "today" ? "今日" : `${r}d`);
+/** 自定义区间，`YYYY-MM-DD`，**含两端**。 */
+export interface Span { start: string; end: string }
+export const rangeLabel = (r: Range): string =>
+  r === "today" ? "今日" : r === "year" ? "年度" : r === "custom" ? "自定义" : `${r}d`;
+
+/**
+ * 自定义区间超过这个跨度就按**月**分格。
+ *
+ * ★ 90 不是随手挑的:它是现有最大的日档，也就是「按天画仍然读得出来」的已知上界。
+ *   再往上每格不足 1px，画出来是一片色块而不是一条可读的曲线。
+ */
+export const MONTH_CUTOVER_DAYS = 90;
+
+/** 含两端的天数。`"2026-06-01" → "2026-06-30"` = 30。 */
+export function spanDays(s: Span): number {
+  const a = Date.parse(`${s.start}T00:00:00`), b = Date.parse(`${s.end}T00:00:00`);
+  if (!Number.isFinite(a) || !Number.isFinite(b) || b < a) return 0;
+  return Math.round((b - a) / 86400000) + 1;
+}
+
+/** 这个区间该按天还是按月画。**只有一处判据** —— 页面别各写一份。 */
+export function isMonthly(range: Range, span?: Span): boolean {
+  if (range === "year") return true;
+  if (range === "custom") return !!span && spanDays(span) > MONTH_CUTOVER_DAYS;
+  return false;
+}
+
+/**
+ * 这一档需要多大的扫描窗口（天）。→ 量化到档，**不是精确天数**。
+ *
+ * ★★ 量化的理由是**快照按窗口分文件**（`lib.rs::snapshot_name`）：不量化的话，
+ *   用户每拖一次日期就落一份新快照、且每份都要重扫一遍（365 天热路径 7.6s）。
+ * ★ 默认档 90 必须原样返回 —— 它是热路径（心跳 / 菜单栏弹出）那一份，
+ *   一旦被量化成别的数，整个 app 的常用路径会从 1.0s 掉到 7.6s。
+ */
+export const WINDOW_TIERS = [90, 365, 1095] as const;
+export function daysNeeded(range: Range, span?: Span, now = Date.now()): number {
+  let need = 90;
+  if (range === "year") {
+    // 自然年:要覆盖到 1 月 1 日。12 月 31 日那天正好需要 365 天。
+    const d = new Date(now);
+    need = Math.floor((now - new Date(d.getFullYear(), 0, 1).getTime()) / 86400000) + 1;
+  } else if (range === "custom" && span) {
+    const st = Date.parse(`${span.start}T00:00:00`);
+    if (Number.isFinite(st)) need = Math.floor((now - st) / 86400000) + 1;
+  } else if (typeof range === "number") {
+    need = range;
+  }
+  return WINDOW_TIERS.find((t) => t >= need) ?? WINDOW_TIERS[WINDOW_TIERS.length - 1];
+}
 
 /**
  * 缓存计入口径(用户 2026-08-11 加,三档一次到位)。**token 数与费用同时跟着变** ——
@@ -306,8 +355,51 @@ const EMPTY: Bucket = {
   uncached_in: 0, cache_read: 0, cache_write: 0, output: 0, total: 0, rounds: 0, models: {},
 };
 
-/** 取某平台在某时间段的 (labels, buckets)。scan.py 已补零,这里只做切片。 */
-export function bucketsFor(data: TrafficData, key: string, range: Range):
+/** 数据里最早/最晚的那一天（`YYYY-MM-DD`）。用来钳住日期选择器，别让用户选出一段空白。 */
+export function dayBounds(data: TrafficData | null): { min?: string; max?: string } {
+  if (!data) return {};
+  let min: string | undefined, max: string | undefined;
+  for (const p of Object.values(data.platforms)) {
+    for (const k of Object.keys(p.days)) {
+      if (min === undefined || k < min) min = k;
+      if (max === undefined || k > max) max = k;
+    }
+  }
+  return { min, max };
+}
+
+/** 切到「自定义」时的起手区间：最近 30 天（钳在已有数据内）。空着会画出一张空图，像坏了。 */
+export function defaultSpan(data: TrafficData | null): Span {
+  const { min, max } = dayBounds(data);
+  const end = max ?? new Date().toISOString().slice(0, 10);
+  const back = new Date(`${end}T00:00:00`);
+  back.setDate(back.getDate() - 29);
+  const want = `${back.getFullYear()}-${String(back.getMonth() + 1).padStart(2, "0")}-${String(back.getDate()).padStart(2, "0")}`;
+  return { start: min && want < min ? min : want, end };
+}
+
+/** `YYYY-MM-DD` 按月合并。→ 月份升序的 (labels, buckets)。 */
+function byMonth(days: Record<string, Bucket>, keys: string[], fill?: string[]):
+  { labels: string[]; buckets: Bucket[] } {
+  const acc = new Map<string, Bucket[]>();
+  for (const k of keys) {
+    const m = k.slice(0, 7);
+    (acc.get(m) ?? acc.set(m, []).get(m)!).push(days[k] ?? EMPTY);
+  }
+  // ★ `fill` 给自然年用:12 格**一格不少**，没数据的月份显式为 0。
+  //   不补的话 1~2 月没数据时横轴会从 3 月开始，看着像"今年从 3 月才开始用"，
+  //   而那是我们编的 —— 真相是那两个月确实是 0。
+  const labels = fill ?? [...acc.keys()].sort();
+  return { labels, buckets: labels.map((m) => sumBuckets(acc.get(m) ?? [])) };
+}
+
+/** 该数据快照所属的自然年（按 `generated_at` 的**本地**年份 —— 与 scan.py 的按本地日分桶同源）。 */
+export function yearOf(data: TrafficData): number {
+  return new Date((data.generated_at || Date.now() / 1000) * 1000).getFullYear();
+}
+
+/** 取某平台在某时间段的 (labels, buckets)。scan.py 已补零,这里只做切片与合月。 */
+export function bucketsFor(data: TrafficData, key: string, range: Range, span?: Span):
   { labels: string[]; buckets: Bucket[] } {
   const p = data.platforms[key];
   if (!p) return { labels: [], buckets: [] };
@@ -316,6 +408,19 @@ export function bucketsFor(data: TrafficData, key: string, range: Range):
     return { labels, buckets: labels.map((k) => p.hours[k] ?? EMPTY) };
   }
   const all = Object.keys(p.days).sort();
+  if (range === "year") {
+    const y = yearOf(data);
+    const months = Array.from({ length: 12 }, (_, i) => `${y}-${String(i + 1).padStart(2, "0")}`);
+    return byMonth(p.days, all.filter((k) => k.startsWith(`${y}-`)), months);
+  }
+  if (range === "custom") {
+    if (!span) return { labels: [], buckets: [] };
+    // ★ 字符串比较就够:`YYYY-MM-DD` 定宽且字典序 == 时间序。转 Date 反而会把时区带进来，
+    //   而 `p.days` 的键**已经是本地日**（scan.py 按本地日分桶）——再转一次就是转两遍。
+    const keys = all.filter((k) => k >= span.start && k <= span.end);
+    if (isMonthly(range, span)) return byMonth(p.days, keys);
+    return { labels: keys, buckets: keys.map((k) => p.days[k] ?? EMPTY) };
+  }
   const labels = all.slice(-range);
   return { labels, buckets: labels.map((k) => p.days[k] ?? EMPTY) };
 }
