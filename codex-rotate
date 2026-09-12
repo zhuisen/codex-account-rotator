@@ -759,6 +759,61 @@ def _qfmt(q):
     return "  " + " ".join(bits) if bits else ""
 
 
+def _real_codex():
+    """解析出**真**的 codex 可执行文件 —— 绝不是本仓的 PATH wrapper。
+
+    ## ★★★ 为什么不能用 `shutil.which("codex")`（2026-09-12 回归复盘）
+
+    PATH 上的 `codex` 是**我们自己的 wrapper**（`~/.local/bin/codex`），
+    而 2026-09-10 的 `e59de75` 把 `login` 一并加进了它的拦截名单。
+    于是 `codex-rotate login` 走到这里 → 解析到 wrapper → **被自己的守卫拦下**，
+    exit 1，刚移走的 auth.json 被还原，加号这条路整个断掉。
+
+    最坏的是那条拦截文案自己写着「要加号 / 重登，请改用：`codex-rotate login`」——
+    **它把人指向的正是当时唯一坏掉的那条路**。一个把人送进死胡同的错误提示，
+    比没有提示更糟。
+
+    ★ 判据是**路径**不是标志位。用环境变量开后门（`CODEX_ROTATE_SANCTIONED=1`）
+      会让任何 export 过它的 shell 永久失去守卫；直接打真二进制则是构造上绕过，
+      不可能被误开。`cxd` 与 wrapper 自己早就是这么做的
+      （`exec "${CODEX_NATIVE_BIN:-$HOME/.local/npm-global/bin/codex}"`），
+      这里只是把同一条规则补齐 —— **同一条规则的三份实现，这份原来是漏的那份**。
+
+    顺序：`CODEX_NATIVE_BIN` → npm-global 的已知位置 → PATH 兜底（但**跳过 wrapper**）。
+    """
+    cand = os.environ.get("CODEX_NATIVE_BIN")
+    if cand and Path(cand).exists():
+        return cand
+    home = Path.home()
+    # ★ Windows 上 npm 装的是 `codex.cmd`,CreateProcess 不认无扩展名的那个。
+    for rel in ("npm-global/bin/codex", "npm-global/bin/codex.cmd",
+                "npm-global/codex", "npm-global/codex.cmd"):
+        c = home / ".local" / rel
+        if c.exists():
+            return str(c)
+    # 兜底：走 PATH，但**逐个跳过我们自己的 wrapper**。
+    # ★ 判据是文件内容里的 `codex-profile-scope.sh` —— 真二进制里不可能有这串。
+    #   用内容判而不是路径判:wrapper 装在哪由安装脚本决定,写死路径会漏。
+    path = os.environ.get("PATH", "")
+    for d in path.split(os.pathsep):
+        for name in ("codex", "codex.cmd", "codex.exe"):
+            c = Path(d) / name
+            if not c.is_file() or not os.access(c, os.X_OK):
+                continue
+            try:
+                # ★ 读 64 KiB，**不是 4 KiB**。第一版读 4 KiB，而标记在 wrapper 的
+                #   第 133 行（约 5.6 KB 处）—— 识别不出来，这条兜底等于没有。
+                #   它当时没出事只因为 npm-global 那条先命中了，**纯属运气**。
+                #   （是那条"先证前提成立"的断言把它抓出来的。）
+                head = c.read_bytes()[:65536]
+            except OSError:
+                continue
+            if b"codex-profile-scope.sh" in head:
+                continue                      # 这是我们的 wrapper,跳过
+            return str(c)
+    return shutil.which("codex") or "codex"
+
+
 def cmd_login(args):
     """Add / re-login an account with the smallest possible blast radius:  codex-rotate login
 
@@ -809,15 +864,19 @@ def cmd_login(args):
         if LIVE.exists():
             os.replace(LIVE, stash)
             moved = True
-    if prev_label:
-        print(f"已把 [{prev_label}] 的 auth.json 移开并存回槽位 —— 登录期间本机没有可被作废的 token")
+    # ★★ **只有真的移动了才能说移动了**（2026-09-12 修）。这两条打印原来都不看 `moved`：
+    #    `auth.json` 本来就不存在时，它照样说「已把 [X] 的 auth.json 移开」，
+    #    失败分支也照样说「已恢复原来的 auth.json」——**两句都是关于事实的假陈述**。
+    #    排查这次回归时我就被它误导过一轮：以为恢复成功了，而 LIVE 根本没被动过。
+    #    本仓 §7.0b 的同一条：「没做」与「做了」不许输出同一句话。
+    if moved:
+        print(f"已把 [{prev_label or '当前号'}] 的 auth.json 移开并存回槽位 —— "
+              f"登录期间本机没有可被作废的 token")
+    else:
+        print("本机当前没有 auth.json —— 无需移开，登录期间也没有可被作废的 token")
     print("launching `codex login`…")
 
-    # ★ Windows 上 npm 装的是 `codex.cmd`,CreateProcess 不认它 —— 直接传 "codex"
-    #   会抛 FileNotFoundError,而下面只接了 KeyboardInterrupt,异常会穿出去,
-    #   **让上面刚移走的 auth.json 永远不被还原**(本机从此没有任何可用凭证)。
-    #   shutil.which 会解析出带扩展名的真实路径。
-    codex_exe = shutil.which("codex") or "codex"
+    codex_exe = _real_codex()
     try:
         rc = subprocess.call([codex_exe, "login"])
     except (KeyboardInterrupt, OSError) as e:
@@ -827,12 +886,26 @@ def cmd_login(args):
     if rc != 0 or not LIVE.exists():
         # Failed or aborted: put the previous credentials back, otherwise plain codex / omc / the proxy
         # are left with NO auth at all until the next daily keepalive.
+        # ★★ **三种结果必须说三句不同的话**（2026-09-12 修）。原来无论如何都打
+        #    「已恢复原来的 auth.json」—— 包括**本来就没有** auth.json 可恢复、
+        #    以及**恢复失败**（stash 还躺在那儿）这两种。
+        #    排查这次回归时我就被它误导了一轮：以为恢复成功，而 LIVE 根本没被动过，
+        #    于是把"本机此刻没有任何可用凭证"这件事整整晚发现了几分钟。
+        #    本仓 §7.0b 同一条：**「没做」与「做了」不许输出同一句话。**
+        restored = False
         if moved:
             with _cred_lock():
                 if not LIVE.exists():
                     os.replace(stash, LIVE)
-                    moved = False
-        print(f"登录未完成 (exit {rc}) —— 已恢复原来的 auth.json")
+                    moved, restored = False, True
+        if restored:
+            tail = "已恢复原来的 auth.json"
+        elif moved:
+            tail = (f"⚠️ **原来的 auth.json 没能恢复** —— 它还在 {stash}。"
+                    f"本机此刻没有可用凭证，手动执行：mv {stash} {LIVE}")
+        else:
+            tail = "本机原本就没有 auth.json —— 无需恢复。用 `codex-rotate switch <label>` 装一个回去"
+        print(f"登录未完成 (exit {rc}) —— {tail}")
         sys.exit(1)
     if moved:
         with _cred_lock():
