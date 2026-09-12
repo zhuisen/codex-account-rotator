@@ -196,3 +196,99 @@ for i in range(40):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _load_rotate():
+    import importlib.machinery
+    import importlib.util
+    loader = importlib.machinery.SourceFileLoader("codex_rotate", str(ROTATE))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+class TheProbeRecordsTheWindowItJustStarted(unittest.TestCase):
+    """★★★ 四方评审 #2 的修法②（2026-09-12）。
+
+    计费探针**就是**那个把 5h 窗口锚定的动作。原来它把这个事实丢掉，
+    让判定再花 **897–1197 秒**从时间序列里推导一遍同一件事，而那十几分钟里
+    UI 对着刚花钱启动的窗口显示「窗口未启动」。
+
+    ⚠️ 这组闸盯的是**两个方向**：
+      · 记了没有（正向）——「没记」的症状是十几分钟的谎话；
+      · **证不到就不许开口**（反向）—— 这条更要紧。`anchored` 会让 UI 画出一个
+        言之凿凿的倒计时；在没证到请求真被计量时说它，就是把假钟说成真钟。
+    """
+
+    def test_the_call_passes_the_real_answered_flag_not_a_constant(self):
+        """★★ 守卫必须是**变量**。写死 `True`（或整个省掉这个参数）时，
+        代码照样跑、测试照样绿，而断言的门槛被悄悄拆掉了 —— 本仓 §7 的空心闸形态。"""
+        fn, src = _fn("cmd_probe")
+        calls = [n for n in ast.walk(fn) if isinstance(n, ast.Call)
+                 and getattr(n.func, "id", "") == "_mark_billed_anchor"]
+        self.assertEqual(len(calls), 1,
+                         "★★★ `cmd_probe` 没有(或重复)调用 `_mark_billed_anchor` —— "
+                         "探针启动了窗口却不记账，UI 会说它没启动")
+        args = calls[0].args
+        self.assertEqual(len(args), 3, "★ 实参个数变了 —— 判据看不懂了，先修闸")
+        self.assertIsInstance(args[2], ast.Name,
+                              "★★★ 第三个实参不是变量 ⇒ 守卫被写死 ⇒ "
+                              "证不到也会开口说 anchored")
+        self.assertEqual(args[2].id, "completion_ok",
+                         "★★ 守卫必须是「模型真的答了」那个量，别换成别的")
+
+    def test_it_refuses_to_mark_when_the_model_never_answered(self):
+        """★★★ 反向闸。`q` 为真**目前**蕴含「答了」，但那是 `_billed_probe`
+        **内部**的不变量 —— 它一改，这里就会在证不了计量的情况下断言 anchored，
+        且没有任何症状。所以守卫要显式，闸也要显式。"""
+        mod = _load_rotate()
+        q = {"primary": {"used_percent": 0, "window_minutes": 300,
+                         "resets_at": int(time.time()) + 18000},
+             "secondary": {"used_percent": None, "window_minutes": None, "resets_at": None},
+             "captured_at": time.time(), "source": "probe"}
+        self.assertIsNone(mod._mark_billed_anchor("aid-x", q, False),
+                          "★★★ 模型没吐字也标了 —— 证不到就不该开口")
+
+    def test_it_marks_the_reset_from_the_billed_response(self):
+        """★★ 正向 + **身份正确**。标的必须是计费响应头里那个 reset ——
+        探针**前**那次免费 GET 的 reset 可能还是闲置期的浮动假值，
+        拿它来标就是把另一个窗口标成了已锚定。"""
+        mod = _load_rotate()
+        d = tempfile.mkdtemp(prefix="billed-anchor-")
+        ledger = str(Path(d, "ledger.json"))
+        old = os.environ.get("CODEXBAR_QUOTA_ANCHORS")
+        os.environ["CODEXBAR_QUOTA_ANCHORS"] = ledger   # ★ 绝不碰真实账本
+        try:
+            now = time.time()
+            R = int(now) + 18000
+            q = {"primary": {"used_percent": 0, "window_minutes": 300, "resets_at": R},
+                 "secondary": {"used_percent": None, "window_minutes": None,
+                               "resets_at": None},
+                 "captured_at": now, "source": "probe"}
+            out = mod._mark_billed_anchor("aid-x", q, True)
+            self.assertIsNotNone(out, "★ 成功的探针没写出锚点判定")
+            self.assertEqual(out["300"]["state"], "anchored")
+            self.assertTrue(out["300"]["billed"])
+            self.assertEqual(out["300"]["reset"], R,
+                             "★★ 判定没自带它所描述的那个 reset —— "
+                             "前端会拿它去解释另一个窗口的倒计时")
+            saved = json.loads(Path(ledger).read_text(encoding="utf-8"))
+            row = saved["sources"]["codex"]["aid-x/300"][0]
+            self.assertEqual(int(row["reset"]), R)
+            self.assertGreater(row.get("billed_at", 0), 0)
+        finally:
+            if old is None:
+                os.environ.pop("CODEXBAR_QUOTA_ANCHORS", None)
+            else:
+                os.environ["CODEXBAR_QUOTA_ANCHORS"] = old
+
+    def test_a_window_too_short_to_be_real_is_not_marked(self):
+        """★ 沿用 `_win_real` 那条既有过滤。上游偶尔回一个 0 分钟的占位窗口，
+        给它标锚定等于给一个不存在的窗口发证。"""
+        mod = _load_rotate()
+        q = {"primary": {"used_percent": 0, "window_minutes": 0,
+                         "resets_at": int(time.time()) + 60},
+             "secondary": {"used_percent": None, "window_minutes": None, "resets_at": None},
+             "captured_at": time.time(), "source": "probe"}
+        self.assertIsNone(mod._mark_billed_anchor("aid-x", q, True))

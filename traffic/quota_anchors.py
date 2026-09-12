@@ -213,6 +213,67 @@ def record(anchors, source, key, reset, used, now=None):
     return True
 
 
+def mark_billed(anchors, source, key, reset, now=None):
+    """记下「**我们刚在这个窗口里发过一次计费请求**」。→ 账本是否变化。
+
+    ## 为什么需要它
+
+    2026-09-12 的实测（`scratch/measure_anchor_lag_20260912.py`）：一次计费探针之后，
+    `verdict()` 还要 **897–1197 秒**才肯说 `anchored`，这段时间 UI 照着 `floating`
+    渲染成「窗口未启动」—— 对着一个**我们刚花钱启动的窗口**。每次探针必现，与相位无关。
+
+    链条是：`cmd_probe` 在计费请求**之前**先调 `_probe_quota` 拿基线，而写账本这件事
+    就在它里面，于是探针前 ~3s 必有一条带**旧浮动 reset** 的记录；锚定后的 reset 与它
+    只差几秒（≤ `JITTER_SECS`）⇒ 合并进那一行 ⇒ `_slide_run` 的尾行仍是闲置期那条，
+    `slides` 恒 ≥ `MIN_SLIDES` ⇒ 只有 `held >= HOLD_SECS`(900s) 能救它，
+    而 `held` 只在 quotad 的 300s 扫描点上涨。
+
+    ★★ **真正的毛病不是阈值太大，是我们把已经知道的事实丢掉了。**
+       计费探针**就是**那个把窗口锚定的动作；它手里有判定需要的全部信息，
+       而现行代码把这份信息扔掉，再花十几分钟从观测里重新推导一遍同一件事。
+       所以修法不是放宽 `_slide_run`（那会让真正的浮动窗口被误认成锚定，
+       方向正好是这套判据存在的理由），而是**把那条事实直接记下来**。
+
+    ## 它**不是**一次采样
+
+    ⚠️ `_note_quota_anchors` 写着「只在 `/usage` 这条路径上记」，理由是混入别的来源会
+    **弄脏时间轴**（`first_seen`/`last_seen` 是滑动判据的坐标）。这里不违反那条：
+    命中已有行时**只加 `billed_at` 这一个键**，`first_seen`/`last_seen`/`n`/`max_used`
+    一个都不碰。它记的是另一类事实，不是又一个样本。
+
+    ## 边界
+
+    · **必须带它所描述的那个 `reset`**。计费响应头里的 reset 才是锚定后的值；
+      拿探针**前**那个（可能是闲置期的假值）来标，标的就是另一个窗口。
+    · 找不到匹配行时新开一行，`n=0` —— 诚实标注「还没有 `/usage` 样本落在它上面」。
+    · 标记是**按行**的，不是按桶。窗口走完之后新窗口是新的一行，不继承这个标记。
+    """
+    now = time.time() if now is None else float(now)
+    try:
+        reset = int(reset)
+    except (TypeError, ValueError):
+        return False
+    if reset <= 0:
+        return False
+
+    bucket = _bucket(anchors, source, key, create=True)
+    for row in bucket:
+        if not isinstance(row, dict):
+            continue
+        if abs(int(row.get("reset") or 0) - reset) <= JITTER_SECS:
+            if float(row.get("billed_at") or 0) >= now:
+                return False               # 已有更新的标记，别往回写
+            row["billed_at"] = now
+            return True
+
+    bucket.append({"reset": reset, "first_seen": now, "last_seen": now,
+                   "max_used": 0.0, "n": 0, "billed_at": now})
+    if len(bucket) > MAX_ROWS:
+        bucket.sort(key=lambda r: int(r.get("reset") or 0))
+        del bucket[:len(bucket) - MAX_ROWS]
+    return True
+
+
 def _slide_run(series):
     """尾部有多少个**连续**锚点是「reset 跟着时间一起往前挪」的。
 
@@ -262,20 +323,30 @@ def verdict(anchors, source, key, reset, now=None):
     held = 0.0
     samples = 0
     used_max = 0.0
+    billed_at = 0.0
     if cur:
         held = max(0.0, float(cur.get("last_seen") or 0) - float(cur.get("first_seen") or 0))
         samples = int(cur.get("n") or 0)
         used_max = float(cur.get("max_used") or 0.0)
+        billed_at = float(cur.get("billed_at") or 0.0)
 
     slides = _slide_run(series)
-    if held >= HOLD_SECS:
+    # ★★★ **自证优先于推导。** 见 `mark_billed()`：我们在这个窗口里亲手发过一次
+    #    计费请求，所以「它在跑」是一条**演绎**，不是从时间序列里归纳出来的猜测。
+    #    这一条必须排在 `slides` 前面 —— 计费探针刚跑完时尾部的滑动串仍然成立
+    #    （合并进探针前那条读数的行，`first_seen` 还是闲置期的），
+    #    让它先判就会得出 `floating`，即「我们刚花钱启动的窗口没启动」。
+    if billed_at > 0:
+        state = "anchored"
+    elif held >= HOLD_SECS:
         state = "anchored"
     elif slides >= MIN_SLIDES:
         state = "floating"
     else:
         state = "unknown"
     return {"state": state, "held_secs": int(held), "samples": samples,
-            "slides": slides, "used_max": round(used_max, 2)}
+            "slides": slides, "used_max": round(used_max, 2),
+            "billed": billed_at > 0}
 
 
 def cycles(anchors, source, key, span, limit=8, now=None):
@@ -361,3 +432,24 @@ def note(source, key, reset, used, now=None, path=None):
             return verdict(anchors, source, key, reset, now)
     except Exception:
         return {"state": "unknown", "held_secs": 0, "samples": 0, "slides": 0, "used_max": 0.0}
+
+
+def note_billed(source, key, reset, now=None, path=None):
+    """`mark_billed` 的一次性入口，护栏与 `note()` 逐条对齐：同一把锁里
+    load→mark→save→verdict，整体 fail-open 恒不抛，失败返回同一个形状。
+
+    ★ 不复用 `note()` 加个开关，是因为两者**参数就不同** —— `note()` 必须带 `used`，
+      而这里根本没有 `used` 可言（计费响应头的 used 是另一条路径记的样本）。
+      硬塞一个 `used=None` 进去，等于让调用方在一个共用入口上二选一，
+      而选错的那一支会**静默**记出一个 0% 的假样本。
+    """
+    try:
+        target = path or default_path()
+        with _ledger_lock(target):
+            anchors = load(path)
+            if mark_billed(anchors, source, key, reset, now):
+                save(anchors, path)
+            return verdict(anchors, source, key, reset, now)
+    except Exception:
+        return {"state": "unknown", "held_secs": 0, "samples": 0, "slides": 0,
+                "used_max": 0.0, "billed": False}

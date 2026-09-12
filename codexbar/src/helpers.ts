@@ -17,6 +17,9 @@ export interface Quota { primary?: Win; secondary?: Win; captured_at?: number; s
 export interface AnchorVerdict {
   state?: "anchored" | "floating" | "unknown";
   held_secs?: number; samples?: number; slides?: number; used_max?: number; reset?: number;
+  /** 这个窗口里落过一次**我们自己发的计费请求**（`codex-rotate probe`）⇒ `state` 是
+   *  演绎出来的，不是从时间序列归纳的。`anchored` 时它是比 `held_secs` 更硬的凭据。 */
+  billed?: boolean;
 }
 /** 按 `window_minutes` 索引，外加一个 `at` 时间戳。 */
 export type QuotaAnchor = Record<string, AnchorVerdict | number | undefined> & { at?: number };

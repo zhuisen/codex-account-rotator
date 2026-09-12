@@ -1822,6 +1822,49 @@ def _sse_answer(raw):
     return "".join(text).strip()
 
 
+def _mark_billed_anchor(aid, q, answered):
+    """计费探针刚成功 ⇒ 把「这个窗口是我们亲手启动的」直接记进账本 -> `quota_anchor` 的新值。
+
+    ★★ **这条路径与 `_note_quota_anchors` 记的不是同一类东西,别合并。**
+      后者记的是一次 `/usage` **采样**(进时间序列,参与滑动判据);
+      这里记的是一条**事实**(我们在这个窗口里发过一次计费请求),它不进时间序列 ——
+      `mark_billed()` 命中已有行时只加 `billed_at` 一个键。
+      所以「只在 `/usage` 这条路径上记」那条规矩在这里仍然成立:时间轴没被弄脏。
+
+    ★★ **`answered` 是必须显式传进来的守卫,不能省。** 眼下 `_billed_probe` 在模型
+      没吐字时就已经返回 `q=None`(见那里的 `HTTP 200 但模型没吐字`),所以
+      `q` 为真**目前**蕴含「答了」—— 但那是**另一个函数内部**的不变量,
+      它一改,这里就会在证不了「请求真的被计量了」的情况下开口说 `anchored`,
+      而且不会有任何症状。本仓 §8 的分界铁律是「没读到 ≠ 没发生」;
+      这里要的是它的**反面**:没证到就不下断言。少声称一次只是回退到慢的推导路径,
+      多声称一次是把一个假倒计时说成真的。
+
+    ★ 整体 fail-open:账本是纯附加功能(2026-09-05 的事故形态)。
+    """
+    try:
+        mod = _quota_anchors_mod()
+        if mod is None or not q or not answered:
+            return None
+        out = {}
+        now = q.get("captured_at") or time.time()
+        for wkey in ("primary", "secondary"):
+            w = q.get(wkey) or {}
+            mins = w.get("window_minutes") or 0
+            # ★ reset 必须取**计费响应头里**的那个 —— 探针**前**那次免费 GET 的 reset
+            #   可能还是闲置期的浮动假值,拿它来标就是标错了窗口。
+            if not _win_real(w) or not w.get("resets_at"):
+                continue
+            v = mod.note_billed("codex", "%s/%d" % (aid, int(mins)), w["resets_at"], now=now)
+            v["reset"] = int(w["resets_at"])      # 同 `_note_quota_anchors`:判定自带身份
+            out[str(int(mins))] = v
+        if not out:
+            return None
+        out["at"] = now
+        return out
+    except Exception:       # noqa: BLE001 — 见 docstring:纯附加,绝不冒泡
+        return None
+
+
 def _billed_probe(aid, slot, is_active, model=PROBE_MODEL, effort=PROBE_EFFORT):
     """★ 发一次真实(计费)补全,证明这个号**真的能干活**。-> (quota|None, msg, answer)。
 
@@ -2097,6 +2140,17 @@ def cmd_probe(args, aids=None):
         if q:
             _mutate_state(lambda st, a=aid, qq=q: st["slots"].setdefault(a, {}).update(
                 {"quota": qq, "quota_status": "ok"}))
+        # ★★★ 把「这个窗口是这次探针启动的」当场记下来。不记的话,判定要再花
+        #    **897–1197 秒**从时间序列里把同一件事推导一遍(2026-09-12 实测),
+        #    而那十几分钟里 UI 会对着一个刚花过钱启动的窗口显示「窗口未启动」。
+        #    探针存在的全部意义就是启动那个窗口 —— 启动完却说它没启动,是把目的搞反了。
+        banchor = _mark_billed_anchor(aid, q, completion_ok)
+        if banchor:
+            def _banch(st, a=aid, v=banchor):
+                sl = st.get("slots", {}).get(a)
+                if sl is not None:
+                    sl["quota_anchor"] = v
+            _mutate_state(_banch)
         delta = "" if before is None or after is None else f"  (Δ{after - before:+.0f}%)"
         # 把模型的原话打出来 —— 这才是"能答"的证据。答非所问(不含期望词)标 ⚠️ 但不算失败:
         # 模型偶尔加标点/换措辞,那不代表账号有问题,只是不该被静默当成完美通过。

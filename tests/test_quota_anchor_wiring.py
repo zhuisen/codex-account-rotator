@@ -55,7 +55,7 @@ class LoaderActuallyLoads(unittest.TestCase):
                 qa = mod._quota_anchors_mod()
                 self.assertIsNotNone(
                     qa, "%s 装载锚点账本失败 —— fail-open 把接线错误吞了" % name)
-                for fn in ("note", "record", "verdict", "cycles"):
+                for fn in ("note", "record", "verdict", "cycles", "mark_billed", "note_billed"):
                     self.assertTrue(callable(getattr(qa, fn, None)),
                                     "%s 拿到的模块缺 %s()" % (name, fn))
 

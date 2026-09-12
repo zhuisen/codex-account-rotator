@@ -272,3 +272,120 @@ class NoImportTimeSideEffects(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BilledAnchorOutranksDerivation(unittest.TestCase):
+    """★★★ 「自证」优先于「推导」（2026-09-12，四方评审 #2 的修法②）。
+
+    实测结论：一次计费探针之后，`verdict()` 还要 **897–1197s** 才肯说 `anchored`，
+    这段时间 UI 对着一个**我们刚花钱启动的窗口**显示「窗口未启动」。每次探针必现。
+
+    根因不是阈值太大，是**我们把已经知道的事实丢掉了**：探针就是那个把窗口锚定的动作，
+    它手里有判定需要的全部信息，现行代码却扔掉它、再从观测里推导十几分钟。
+
+    ★ 所以修法是加一条事实，**不是**放宽 `_slide_run` ——
+      放宽它会让真正的浮动窗口被误认成锚定，方向正好是这套判据存在的理由。
+      下面 `test_the_slide_judgement_itself_is_untouched` 就是钉这一点的。
+    """
+
+    SRC, KEY = "codex", "aid/300"
+
+    def _idle_then_probe(self, sweeps=6, sweep=300, eps=3):
+        """复刻真实时序：闲置漂移 → 探针**前**那次免费 GET → 计费请求锚定。
+        → (账本, 探针时刻, 锚定后的 reset)"""
+        a = QA.empty()
+        t = T0
+        for _ in range(sweeps):
+            QA.record(a, self.SRC, self.KEY, t + WIN_5H, 0.0, now=t)
+            t += sweep
+        probe_at = t
+        # ★ 这一条是整件事的枢纽：`_note_quota_anchors` 就写在 `_probe_quota` 里，
+        #   所以探针前必有一条带**旧浮动 reset** 的记录，锚定后的 reset 会合并进它。
+        QA.record(a, self.SRC, self.KEY, (probe_at - eps) + WIN_5H, 0.0, now=probe_at - eps)
+        return a, probe_at, probe_at + WIN_5H
+
+    def test_without_the_mark_it_still_says_floating(self):
+        """★ 先证**基线是红的**。没有这一条，下一条测的可能是「它永远说 anchored」。"""
+        a, p, R = self._idle_then_probe()
+        QA.record(a, self.SRC, self.KEY, R, 0.0, now=p + 12)
+        self.assertEqual(QA.verdict(a, self.SRC, self.KEY, R, now=p + 12)["state"],
+                         "floating", "★ 基线不成立 —— 这组闸下面全部无效")
+
+    def test_the_mark_makes_it_anchored_immediately(self):
+        a, p, R = self._idle_then_probe()
+        QA.mark_billed(a, self.SRC, self.KEY, R, now=p)
+        QA.record(a, self.SRC, self.KEY, R, 0.0, now=p + 12)
+        v = QA.verdict(a, self.SRC, self.KEY, R, now=p + 12)
+        self.assertEqual(v["state"], "anchored",
+                         "★★★ 刚花钱启动的窗口仍被判 floating ⇒ UI 说「未启动」")
+        self.assertTrue(v["billed"], "★ 没把凭据带出来 —— 结论有了但引证没了")
+
+    def test_the_slide_judgement_itself_is_untouched(self):
+        """★★ 这条闸守的是**修法的形状**，不是它的效果。
+        `slides` 必须一个都没少 —— 少了就说明有人顺手把滑动判据放宽了，
+        而那会让真正的浮动窗口被认成锚定（本仓在这上面栽过一次）。"""
+        a, p, R = self._idle_then_probe()
+        QA.record(a, self.SRC, self.KEY, R, 0.0, now=p + 12)
+        before = QA.verdict(a, self.SRC, self.KEY, R, now=p + 12)["slides"]
+        QA.mark_billed(a, self.SRC, self.KEY, R, now=p)
+        after = QA.verdict(a, self.SRC, self.KEY, R, now=p + 12)["slides"]
+        self.assertGreaterEqual(before, QA.MIN_SLIDES, "★ 夹具没造出滑动串 —— 探针失准")
+        self.assertEqual(before, after,
+                         "★★ 滑动判据被改动了 —— 修法应该是**加一条事实**，不是放宽判据")
+
+    def test_the_mark_adds_no_sample_to_the_time_axis(self):
+        """★★★ 这是「只在 `/usage` 这条路径上记」那条规矩仍然成立的**全部理由**。
+
+        那条规矩防的是**弄脏时间轴**（`first_seen`/`last_seen` 是滑动判据的坐标）。
+        `mark_billed` 命中已有行时只准加 `billed_at` 一个键 —— 碰了任何一个时间轴字段，
+        它就变成了一次来自另一个来源的采样，那条规矩当场被违反，而且不会有症状。
+        """
+        a, p, R = self._idle_then_probe()
+        row = [r for r in QA.rows(a, self.SRC, self.KEY)
+               if abs(r["reset"] - R) <= QA.JITTER_SECS][0]
+        watched = ("first_seen", "last_seen", "n", "max_used", "reset")
+        snap = {k: row.get(k) for k in watched}
+        QA.mark_billed(a, self.SRC, self.KEY, R, now=p + 999)
+        self.assertEqual({k: row.get(k) for k in watched}, snap,
+                         "★★★ 计费标记改动了时间轴字段 ⇒ 它变成了一次采样")
+        self.assertEqual(row.get("billed_at"), p + 999)
+
+    def test_the_mark_belongs_to_one_row_not_the_whole_window_key(self):
+        """★★ 标记按**行**，不按桶。两个方向都要钉，而它们不是同一件事：
+
+        · **往回**：标记的那一刻，桶里躺着闲置期那一串旧行。按桶标会把它们一起标掉，
+          于是那些**确实在漂**的窗口集体自称已锚定 —— 这是真正危险的方向。
+        · **往后**：窗口走完之后的新窗口是新的一行，不继承标记。
+
+        ⚠️ 这条闸第一版**只写了往后那半**，于是「按桶标记」这个变异照样绿
+        （新行是在标记之后才建的，当然没被标到）。变异工具当场拦下了它。
+        一条只覆盖单向的闸，在它没覆盖的那一向上等于不存在。
+        """
+        a, p, R = self._idle_then_probe()
+        older = QA.rows(a, self.SRC, self.KEY)[0]["reset"]
+        self.assertLess(older, R - QA.JITTER_SECS, "★ 夹具里没有更早的行 —— 探针失准")
+        QA.mark_billed(a, self.SRC, self.KEY, R, now=p)
+        self.assertFalse(QA.verdict(a, self.SRC, self.KEY, older, now=p)["billed"],
+                         "★★★ 闲置期的旧行也被标了 ⇒ 一串确实在漂的窗口集体自称已锚定")
+        nxt = R + WIN_5H                      # 下一个窗口，闲置
+        QA.record(a, self.SRC, self.KEY, nxt, 0.0, now=R + 10)
+        self.assertFalse(QA.verdict(a, self.SRC, self.KEY, nxt, now=R + 10)["billed"],
+                         "★★ 新窗口继承了上一个窗口的计费标记 ⇒ 此后永远自称已锚定")
+
+    def test_a_reset_never_seen_before_gets_its_own_row(self):
+        """★ 探针前那次免费 GET 失败时（或间隔超过容差），没有行可以命中 ——
+        必须新开一行，而不是静默什么都不做。`n=0` 诚实标注「还没有采样落在它上面」。"""
+        a = QA.empty()
+        self.assertTrue(QA.mark_billed(a, self.SRC, self.KEY, T0 + WIN_5H, now=T0))
+        rs = QA.rows(a, self.SRC, self.KEY)
+        self.assertEqual(len(rs), 1)
+        self.assertEqual(rs[0]["n"], 0, "★ 假装有过采样 —— 那是编一个我们没有的观测")
+        self.assertEqual(QA.verdict(a, self.SRC, self.KEY, T0 + WIN_5H, now=T0)["state"],
+                         "anchored")
+
+    def test_note_billed_is_fail_open_and_keeps_the_shape(self):
+        """★ 与 `note()` 同一条护栏：账本不可写时也不抛，且返回同一个形状。"""
+        v = QA.note_billed(self.SRC, self.KEY, T0 + WIN_5H, now=T0,
+                           path="/nonexistent-dir-xyz/ledger.json")
+        self.assertIn("state", v)
+        self.assertIn("billed", v)
