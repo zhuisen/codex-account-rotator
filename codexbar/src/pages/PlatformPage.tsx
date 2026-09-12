@@ -354,7 +354,11 @@ export default function PlatformPage({ t, data, raw, cacheMode, pk, st, setSt, o
     // ★ 交接稿 §1：日均列下方注明**比较区间** —— 环比只给百分比，
     //   读者无从知道在跟哪一段比，而那正是判断它可不可信的依据。
     { k: isToday ? "小时均" : "日均", v: fmtTok((v?.agg.total ?? 0) / days),
-      sub: prev && !isToday ? prevNote(st, today) : undefined, subC: t.muted,
+      // ★★ 判据是 `dTok` 不是 `prev`：上一周期**取到了但合计为 0** 时，
+      //   比值算不出来（`delta` 对 base=0 返回 null），页面会显示「环比 —」。
+      //   此时仍印着 `vs 04-20 → 12-31` 就是自相矛盾 —— 一边说没比成，一边说跟这段比的。
+      //   （2026-09-13 用户截图里就是这个形态。）
+      sub: dTok && !isToday ? prevNote(st, today) : undefined, subC: t.muted,
       n: (v?.agg.total ?? 0) / days, fmt: fmtTok },
     // 与总览同名。「等效 API」这个限定词不放在标签里 —— 页面底部费率卡最后一行有完整说明
     // (「费用 = 四类 token 分别乘单价求和,是等效 API 成本;订阅制下并非实付」),标签只留短名。
@@ -424,14 +428,9 @@ export default function PlatformPage({ t, data, raw, cacheMode, pk, st, setSt, o
         // ★ key 同时带 `mode`:切「分模型 ↔ 总量」也是换了一整个数据集。不带 `iso` —— 隔离模型只改
         //    图层不改日期,hover 索引仍然指同一天,重建反而会把用户停着的浮层弄没。
         <>
-        <div style={{ marginTop: 12, display: "flex", alignItems: "baseline", gap: 8,
-                      fontFamily: "'JetBrains Mono'", fontSize: 10, color: t.text2 }}>
-          {/* ★ 左边的 `token` 由 `StackedArea` 自己画（它定位在绘图区上沿 `top:-13`，
-              与刻度共用一套坐标）。这里**不再画第二个** —— 同一个词出现两次比没有更糟。 */}
-          <span style={{ marginLeft: "auto", color: t.muted }}>{capt}</span>
-        </div>
         <div className={introEnabled() ? "cb-wipe" : undefined} key={`w:${st.preset}:${range.s}:${range.e}:${st.gran}:${mode}`}>
-        <StackedArea key={`${st.preset}:${range.s}:${range.e}:${st.gran}:${mode}:${v.labels[0]}`}
+        <StackedArea caption={capt}
+                     key={`${st.preset}:${range.s}:${range.e}:${st.gran}:${mode}:${v.labels[0]}`}
                      labels={v.labels} layers={layers} height={190} fmt={fmtTok} t={t}
                      tipTitle={(i) => (isToday ? `今日 ${v.labels[i].slice(11)}:00 · ${modeWord}`
                                                : `${v.labels[i]} · ${modeWord}`)} />

@@ -47,7 +47,16 @@ export default function RangeBar({ st, today, onChange, onToast, t }: {
                   position: "relative" }}>
       {PILLS.map((p) => (
         <span key={p} style={seg(st.preset === p)}
-              onClick={() => { setOpen(false); onChange({ ...st, preset: p }); }}>
+              onClick={() => {
+                setOpen(false);
+                // ★★★ **切回固定档时把分格复位成 `auto`。**（2026-09-13 用户截图抓到。）
+                //   `gran` 是在弹层里**为某个自定义区间**选的，而 `RangeState` 把它存成全局字段
+                //   （交接稿 §7 的形状）。不复位的话它会粘在后面每一个档上：
+                //   实测用户的年度档显示 `9 格 · 按月`，而 256 天按 auto 该是**按周**；
+                //   更极端的是「30d 按月」—— 整整一个月缩成 1~2 格，图表等于没有。
+                //   ★ 固定档的分格**按定义就是自动的**（稿子只在弹层里给了那个分段控件）。
+                onChange({ ...st, preset: p, gran: "auto" });
+              }}>
           {rangeLabel(p)}
         </span>
       ))}

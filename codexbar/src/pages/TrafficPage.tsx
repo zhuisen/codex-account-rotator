@@ -169,6 +169,10 @@ export default function TrafficPage({ t, data, raw, cacheMode, prefs, st, setSt,
    * 而年度那一档要扫 7.6s —— 用户会盯着一个写着 `总 token 0 · $0.000` 的面板看 8 秒。
    * 那不是骨架屏，那是一句**错的陈述**。
    */
+  /** 图表标题行右侧的小字（交接稿 §1）。与 `token` 同一行，由 `StackedArea` 渲染。 */
+  const capt = isToday
+    ? `今日 · ${view?.labels.length ?? 0} 格 · 每 2 小时`
+    : `${md(range.s)} → ${md(range.e)} · ${view?.labels.length ?? 0} 格 · ${granLabel(effGran(st, days))}`;
   const loading = !view;
   const kpis: Kpi[] = loading ? [
     { k: "总 token", v: "—", sub: "读取中", subC: t.muted },
@@ -188,7 +192,11 @@ export default function TrafficPage({ t, data, raw, cacheMode, prefs, st, setSt,
       //   环比只给一个百分比，读者无从知道在跟哪一段比，而那正是判断它可不可信的依据。
       : { k: "日均", v: fmtTok((view?.grand ?? 0) / Math.max(1, view?.labels.length ?? 1)),
           n: (view?.grand ?? 0) / Math.max(1, view?.labels.length ?? 1), fmt: fmtTok,
-          sub: prev ? prevNote(st, today) : undefined, subC: t.muted },
+      // ★★ 判据是 `dTok` 不是 `prev`：上一周期**取到了但合计为 0** 时，
+      //   比值算不出来（`delta` 对 base=0 返回 null），页面会显示「环比 —」。
+      //   此时仍印着 `vs 04-20 → 12-31` 就是自相矛盾 —— 一边说没比成，一边说跟这段比的。
+      //   （2026-09-13 用户截图里就是这个形态。）
+          sub: dTok ? prevNote(st, today) : undefined, subC: t.muted },
     { k: "总费用", v: fmtUSD(view?.grandCost ?? 0), n: view?.grandCost ?? 0, fmt: fmtUSD, c: AMBER,
       sub: view?.grandSaving ? `缓存已省 ${fmtUSD(view.grandSaving)}` : undefined },
     isToday
@@ -253,27 +261,12 @@ export default function TrafficPage({ t, data, raw, cacheMode, prefs, st, setSt,
 
       {err && <div style={{ fontSize: 11, color: "#E0524D", marginBottom: 8 }}>✗ {err}</div>}
       {busy && !data && <div style={{ fontSize: 12, color: t.muted }}>首次扫描三家 transcript 中(约 18s,之后走缓存)…</div>}
-
-      {/* ★ 交接稿 §1：图表标题行右侧写 `08-14 → 09-12 · 30 格 · 按天`，
-          替代原来那句「30 天 · 按天分格（超过 90 天改按月）」的长解释 ——
-          规则说明属于做选择的地方（弹层），这里只报**当前事实**。 */}
-      {!!view?.labels.length && (
-        <div style={{ marginTop: 12, display: "flex", alignItems: "baseline", gap: 8,
-                      fontFamily: "'JetBrains Mono'", fontSize: 10, color: t.text2 }}>
-          {/* ★ 左边的 `token` 由 `StackedArea` 自己画（它定位在绘图区上沿 `top:-13`，
-              与刻度共用一套坐标）。这里**不再画第二个** —— 同一个词出现两次比没有更糟。 */}
-          <span style={{ marginLeft: "auto", color: t.muted }}>
-            {isToday
-              ? `今日 · ${view.labels.length} 格 · 每 2 小时`
-              : `${md(range.s)} → ${md(range.e)} · ${view.labels.length} 格 · ${granLabel(effGran(st, days))}`}
-          </span>
-        </div>
-      )}
       {!!view?.labels.length && (
         // ★ `key={range}` 不是可有可无的:图表的 hover 是"某个数据集里的索引",换档必须让实例作废。
         //    详见 StackedArea 里 `hv` 上方的注释(靠组件自清试过两次,都被用户实测推翻)。
         <div className={introEnabled() ? "cb-wipe" : undefined} key={`w:${st.preset}:${range.s}:${range.e}:${st.gran}`}>
-        <StackedArea key={`${st.preset}:${range.s}:${range.e}:${st.gran}:${view.labels[0]}`}
+        <StackedArea caption={capt}
+                     key={`${st.preset}:${range.s}:${range.e}:${st.gran}:${view.labels[0]}`}
                      labels={view.labels} layers={layers} height={156} fmt={fmtTok} t={t}
                      dimmed={hoverKey} onPick={onDrill}
                      tipTitle={(i) => (isToday ? `今日 ${view.labels[i].slice(11)}:00` : view.labels[i])} />

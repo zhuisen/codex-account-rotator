@@ -84,8 +84,9 @@ function bandPath(top: [number, number][], base: [number, number][]): string {
 const MAX_X_LABELS = 22;
 
 export default function StackedArea({
-  labels, layers, height = 224, fmt, t, dimmed, tipTitle, onPick, xTick,
-}: {
+  labels, layers, height = 224, fmt, t, dimmed, tipTitle, onPick, xTick, caption }: {
+  /** 图表标题行右侧的小字（交接稿 §1）。与 `token` **同一行** —— 不要在图表上方另起一行。 */
+  caption?: string;
   labels: string[];
   /** 自下而上:占比大的放前面(贴基线更稳定,细带被夹在中间会来回跳) */
   layers: Layer[];
@@ -213,6 +214,15 @@ export default function StackedArea({
       <div style={{ position: "absolute", inset: 0, pointerEvents: "none" }}>
         <span style={{ position: "absolute", left: 0, top: -13, fontSize: 9.5, color: t.muted,
                        fontFamily: "'JetBrains Mono'" }}>token</span>
+        {/* ★★ 交接稿 §1 的图表标题行是**一行**：左 `token`、右小字 `08-14 → 09-12 · 30 格 · 按天`。
+            2026-09-13 修：我上一版把右半边做成了图表**上方新起的一行**（margin 12 + 行高 14），
+            整页因此高了约 26px —— 用户在年度档看到窗口多出一条垂直滚动条。
+            两处都对、合起来就错：单看任一视图都像稿子，只有量高度才看得出来多了一行。
+            现在它与 `token` 共用同一条基线（`top:-13`），零额外高度。 */}
+        {caption && (
+          <span style={{ position: "absolute", right: 0, top: -13, fontSize: 9.5, color: t.muted,
+                         fontFamily: "'JetBrains Mono'", whiteSpace: "nowrap" }}>{caption}</span>
+        )}
         {ticks.map((f) => (
           // 峰值那档贴着顶线往下画、0 那档贴着基线往上画,否则会分别撞上「token」单位标签和横轴日期行
           <span key={f} style={{ position: "absolute", left: 0, top: `${(1 - f) * 100}%`,

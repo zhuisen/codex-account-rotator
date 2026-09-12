@@ -254,6 +254,75 @@ class CompareSaysNothingRatherThanZero(unittest.TestCase):
                           "★★★ 把没取到的上期当 0 ⇒ 环比说成 ↑∞，而那是我们编的")
 
 
+class TheChartCaptionShareTheTokenLine(unittest.TestCase):
+    """★★★ 交接稿 §1 的图表标题行是**一行**：左 `token`、右小字 `08-14 → 09-12 · 30 格 · 按天`。
+
+    2026-09-13 用户报「年度多了个右侧滑块」。真因是我上一版把右半边做成了图表**上方新起的
+    一行**（margin 12 + 行高 14），整页因此高了约 26px，把窗口推过了出滚动条的临界点。
+
+    ★ 两处都"对"、合起来就错：单看任一视图都像稿子，**只有量高度才看得出来多了一行**。
+      实测（1000×614，同一份夹具）：
+
+          改动之前  30d 836 / 年度 838
+          我上一版  30d 866 / 年度 868     ← +30
+          修复之后  30d 840 / 年度 842
+
+    所以判据打在**结构**上：caption 必须由 `StackedArea` 与 `token` 同行渲染，
+    页面里不许再有一个自带 `marginTop` 的标题行。
+    """
+
+    SA = (ROOT / "codexbar" / "src" / "components" / "StackedArea.tsx").read_text(encoding="utf-8")
+    PAGES = ["codexbar/src/pages/TrafficPage.tsx", "codexbar/src/pages/PlatformPage.tsx"]
+
+    def test_the_caption_sits_on_the_token_baseline(self):
+        i = self.SA.index(">token</span>")
+        seg = self.SA[i:i + 700]
+        self.assertIn("caption", seg, "★ caption 不在 `token` 那一行 —— 它会另起一行、整页变高")
+        self.assertIn("top: -13", seg, "★ caption 没有与 `token` 共用基线")
+
+    def test_no_page_renders_its_own_caption_row(self):
+        bad = [f for f in self.PAGES
+               if 'marginTop: 12, display: "flex", alignItems: "baseline"'
+               in (ROOT / f).read_text(encoding="utf-8")]
+        self.assertEqual(bad, [],
+                         f"★★★ {bad} 又在图表上方另起了一行标题 —— 整页会高 26px")
+
+    def test_both_pages_pass_the_caption_down(self):
+        """★ 反向闸：删掉那一行却忘了把 caption 传下去 = 说明文字整个消失，而页面看着很正常。"""
+        for f in self.PAGES:
+            with self.subTest(file=f):
+                self.assertIn("caption={capt}", (ROOT / f).read_text(encoding="utf-8"),
+                              "★ 没有把 caption 传给 StackedArea —— 那行小字消失了")
+
+
+class AFixedPresetResetsGranularity(unittest.TestCase):
+    """★★★ 分格是在弹层里**为某个自定义区间**选的，而 `RangeState` 把它存成全局字段。
+
+    不复位的话它会粘在后面每一个档上 —— 用户 2026-09-13 的截图里年度档显示
+    `9 格 · 按月`，而 256 天按 auto 该是**按周**；更极端的是「30d 按月」，
+    整整一个月缩成 1~2 格，图表等于没有。
+    """
+
+    TS = (ROOT / "codexbar" / "src" / "components" / "RangeBar.tsx").read_text(encoding="utf-8")
+
+    def test_clicking_a_pill_resets_gran_to_auto(self):
+        i = self.TS.index("PILLS.map(")
+        seg = self.TS[i:i + 1200]
+        self.assertRegex(seg, r'onChange\(\{ \.\.\.st, preset: p, gran: "auto" \}\)',
+                         "★★★ 切固定档时没复位分格 ⇒ 弹层里选的「月」会粘到 30d 上")
+
+    def test_applying_a_custom_range_still_honours_the_choice(self):
+        """★ 反向闸：复位得太狠就把弹层那个分段控件变成摆设了。
+
+        ⚠️ 第一版断言的是窗口里出现过 `gran,` —— 而 `onApply={({ range, gran, compare })`
+        这个**解构参数**里就有一个，把它从 `onChange(...)` 里删掉闸照样绿（变异工具拦下）。
+        判据必须打在**那次调用**上。"""
+        self.assertRegex(
+            self.TS,
+            r'onChange\(\{ \.\.\.st, preset: "custom", custom: range, lastCustom: range, gran, compare \}\)',
+            "★ 应用自定义区间时没有把用户选的分格写回状态 —— 那个分段控件是摆设")
+
+
 class ThePresetColumnMatchesTheHandoff(unittest.TestCase):
     """★ 交接稿 §2：`今日 昨日 近7 近14 近30 近90 ─ 本周 本月 上月 本季度 年度`。"""
 
