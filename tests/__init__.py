@@ -30,3 +30,9 @@ if not os.environ.get("CODEXBAR_QUOTA_ANCHORS"):
     _d = tempfile.mkdtemp(prefix="codexbar-test-anchors-")
     os.environ["CODEXBAR_QUOTA_ANCHORS"] = os.path.join(_d, ".quota-anchors.json")
     atexit.register(shutil.rmtree, _d, True)
+
+# ★★ agy 的真登录态在 **macOS 钥匙串**里（`agy/pool.py` 的 `KEYRING_SVC`），
+#   而钥匙串**没有临时目录这种东西** —— 换个 `AGY_TOKEN_FILE` 挡不住它。
+#   一条用例调到 `install_live()` 就会把用户当前的 agy 登录态覆盖掉，
+#   代价是重新走一遍浏览器 OAuth。所以整条通路在测试里**默认关死**。
+os.environ.setdefault("AGY_KEYRING", "0")

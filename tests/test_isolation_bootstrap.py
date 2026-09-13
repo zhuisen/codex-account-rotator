@@ -42,8 +42,21 @@ if not os.environ.get("CODEXBAR_QUOTA_ANCHORS"):
     os.environ["CODEXBAR_QUOTA_ANCHORS"] = os.path.join(_d, ".quota-anchors.json")
     atexit.register(shutil.rmtree, _d, True)
 
+# ★★ agy 的真登录态在 **macOS 钥匙串**里（`agy/pool.py` 的 `KEYRING_SVC`）。
+#   钥匙串**没有临时目录这种东西** —— 重定向 `AGY_TOKEN_FILE` 对它完全无效，
+#   一条用例调到 `install_live()` 就能覆盖掉用户当前的 agy 登录态，
+#   代价是重新走一遍浏览器 OAuth。所以整条通路在测试里默认关死。
+#   （与 2026-09-06 那次「夹具写进真账本」同族，只是这次的账本是系统钥匙串。）
+os.environ.setdefault("AGY_KEYRING", "0")
+
 
 class IsolationIsInPlace(unittest.TestCase):
+    def test_the_agy_keyring_path_is_disabled(self):
+        """★ 判据是**变量已设置**，不是"代码里有隔离逻辑" —— 后者正是上一次
+        让隔离只写在 `__init__.py` 里（discover 根本不导入它）而没被发现的原因。"""
+        self.assertEqual(os.environ.get("AGY_KEYRING"), "0",
+                         "agy 钥匙串通路没关 —— 测试可能覆盖用户真实的 agy 登录态")
+
     def test_ledger_is_redirected(self):
         p = os.environ.get("CODEXBAR_QUOTA_ANCHORS")
         self.assertTrue(p, "锚点账本没有被重定向 —— 测试会写进真实数据")

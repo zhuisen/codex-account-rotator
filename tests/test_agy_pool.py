@@ -225,7 +225,7 @@ class SwitchingProtectsTheOnlyLoginTheUserHas(unittest.TestCase):
     SRC = (ROOT / "agy" / "pool.py").read_text(encoding="utf-8")
 
     def test_install_backs_up_then_replaces_atomically(self):
-        i = self.SRC.index("def install_live(")
+        i = self.SRC.index("def _write_live_file(")
         seg = self.SRC[i:self.SRC.index("\ndef ", i + 10)]
         self.assertIn("codexbar-bak", seg, "★★★ 换号前没有备份")
         self.assertIn("os.replace(tmp, LIVE)", seg,
@@ -425,3 +425,261 @@ class QuotaGroupingKeysOffTheNumbersNotTheNames(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TheGoogleTabShowsThePoolNotAReadOnlyCard(unittest.TestCase):
+    """★★ 用户 2026-09-13：「google 的为什么灰色，只读？我们不是解决了吗？」
+
+    池是在 CLI 层建好的，但界面上**没有任何东西读 `.agy-pool.json`** ——
+    卡还是 2026-09-13 之前那张，写着「只读 · 不在轮换池」。
+    那两句当时是真的，池建起来之后就成了假话，而卡片本身看不出任何异常。
+    """
+
+    APP = (ROOT / "codexbar" / "src" / "App.tsx").read_text(encoding="utf-8")
+    CARD = (ROOT / "codexbar" / "src" / "components" / "AgyCard.tsx").read_text(encoding="utf-8")
+    RS = (ROOT / "codexbar" / "src-tauri" / "src" / "lib.rs").read_text(encoding="utf-8")
+
+    def test_one_card_per_account(self):
+        self.assertIn("agyPool.accounts.map((a)", self.APP,
+                      "★★ Google 档还是只画一张卡 —— 池里有几个号就该有几张")
+
+    def test_it_falls_back_to_the_read_only_card_when_there_is_no_pool(self):
+        """★ 池空时退回原来那张只读卡 —— 那条路 2026-09-13 之前一直成立，
+        而「还没建池」与「池里有号」是两个不同的事实，不能用同一张卡讲。"""
+        self.assertIn("agyPool.accounts.length > 0", self.APP)
+
+    def test_the_read_only_badge_is_conditional(self):
+        """★★★ 「只读」不能写死。它现在的意思是**还没建池**，不是"agy 不能轮换"。"""
+        # ⚠️ 锚点取**渲染形态** `}}>只读</span>`：上面的注释里正解释着这三态，
+        #    `index(">只读<")` 命中的是那段说明（本轮第四次踩到同一形状）。
+        # 判据是**三支链的结构**，不是"附近有没有出现某个词"：
+        #   `{isCurrent ? 当前 : onSwitch ? 切换 : 只读}` —— 三态各有各的意思，
+        #   合并任意两支都会回到用户问的那个问题：「不是解决了吗」。
+        i = self.CARD.index("{isCurrent ? (")
+        j = self.CARD.index("}}>只读</span>")
+        self.assertLess(i, j, "★★★ 「只读」不在那条三支链里 —— 它是写死的")
+        self.assertIn(") : onSwitch ? (", self.CARD[i:j], "★ 没有「切换」那一支")
+        self.assertIn(">当前</span>", self.CARD[i:j], "★ 没有「当前」那一支")
+
+    def test_the_footer_follows_the_pool(self):
+        """★ 「不在轮换池」同理 —— 它是事实陈述，跟着池走。"""
+        i = self.CARD.index('"Google 订阅 · 不在轮换池"')
+        self.assertIn("onSwitch || isCurrent", self.CARD[max(0, i - 400):i],
+                      "★ 页脚写死了「不在轮换池」")
+
+    def test_the_weekly_row_is_never_faked(self):
+        """★★★ 云端按账号只给 **5h**（实测 0.9566 == 本机 RPC 的 `gemini-5h` 95.66）。
+
+        给别的号补一格「周 100%」会让每张卡都显示满格周额度 ——
+        而上游 `remainingFraction` 的缺省值恰好也是 1.0，这条链路上
+        「没有」和「满格」只隔一个默认值。少一行是真话，补一行不是。
+        """
+        hook = (ROOT / "codexbar" / "src" / "hooks" / "useAgyPool.ts").read_text(encoding="utf-8")
+        i = hook.index("function toSnapshot(")
+        seg = hook[i:hook.index("\n}", i)]
+        self.assertNotIn('"weekly"', seg, "★★★ 给非当值号造了一个假的周窗口")
+        self.assertIn('window: "5h"', seg)
+
+    def test_the_live_account_keeps_the_local_rpc_snapshot(self):
+        """★ 只有本机 RPC 带周窗口，所以当值号优先用它 —— 那是真实存在的额度。"""
+        hook = (ROOT / "codexbar" / "src" / "hooks" / "useAgyPool.ts").read_text(encoding="utf-8")
+        self.assertIn("a.sub === liveSub && liveSnap?.available ? liveSnap", hook)
+
+    def test_failure_still_never_becomes_full(self):
+        """★★★ 取额度失败时 `quota` 必须是 `null`。返回空对象会让卡片画出一条
+        正常的条，而 agy 这条链路上"满格"正是上游的缺省值。"""
+        hook = (ROOT / "codexbar" / "src" / "hooks" / "useAgyPool.ts").read_text(encoding="utf-8")
+        self.assertIn("quota: ok ? ({ groups } as unknown as AgyQuota) : null", hook)
+
+    def test_the_gui_cannot_run_the_dangerous_subcommands(self):
+        """★★★ `agy-rotate` 里有 `login`（起一个交互式 agy，GUI 里必然挂死）
+        和 `remove`（不可逆）。界面能点的只有幂等的读/切。"""
+        i = self.RS.index("async fn run_agy_rotate(")
+        seg = self.RS[i:i + 700]
+        self.assertIn('ALLOWED: &[&str] = &["quota", "switch"]', seg,
+                      "★★★ 白名单不对 —— GUI 能跑 login/remove")
+
+    def test_the_scripts_are_bundled(self):
+        """★★★ 部署出去的 app 里必须有 `agy-rotate` 和它的模块，
+        否则界面上的按钮在**装机版**上全是「找不到脚本」，而开发机上一切正常。"""
+        import json as _j
+        conf = _j.loads((ROOT / "codexbar" / "src-tauri" / "tauri.conf.json").read_text(encoding="utf-8"))
+        res = conf["bundle"]["resources"]
+        for k in ("../../agy-rotate", "../../agy/pool.py"):
+            with self.subTest(script=k):
+                self.assertIn(k, res, f"★★★ {k} 没进打包清单")
+
+
+class _FakeSecurity:
+    """假的 `/usr/bin/security` —— 一个内存字典。
+
+    ★★ **绝不碰真钥匙串。** 钥匙串没有"临时目录"这种东西，用真的去测，
+      一条用例就能覆盖掉用户当前的 agy 登录态（代价 = 重走一遍浏览器 OAuth）。
+      所以这里连 `AGY_KEYRING_SERVICE` 换个名字都不做 —— 那仍然会在用户的
+      login.keychain 里留下条目。
+    """
+
+    def __init__(self, blob=None, writable=True):
+        self.blob, self.writable, self.calls = blob, writable, []
+
+    def run(self, argv, **kw):
+        self.calls.append((list(argv), kw))
+
+        class R:
+            pass
+        r = R()
+        r.stdout = r.stderr = ""
+        if argv[1] == "find-generic-password":
+            r.returncode = 0 if self.blob is not None else 44
+            r.stdout = self.blob or ""
+        elif argv[1] == "add-generic-password":
+            if self.writable:
+                # 密文在 `-w` 后面（stdin 那条路实测会截断到 128 字节，见测试里的说明）
+                self.blob = argv[argv.index("-w") + 1]
+                r.returncode = 0
+            else:
+                r.returncode = 45          # 实测里钥匙串写失败就是这个码
+        else:
+            r.returncode = 1
+        return r
+
+
+def _kr_blob(mod, cred):
+    import base64 as _b
+    return mod._KR_PREFIX + _b.b64encode(json.dumps(cred).encode()).decode()
+
+
+class TheRealLiveStoreIsTheKeychainNotTheFile(unittest.TestCase):
+    """★★★ 2026-09-13 实测：**agy 1.2.2 的登录态在 macOS 钥匙串里**，
+    `antigravity-oauth-token` 只是钥匙串写失败时的兜底。
+
+    agy 自己的日志（`~/.gemini/antigravity-cli/log/`）：
+
+        auth.go:148]  ChainedAuth: authenticated via keyring (effective: keyring)
+        composite_token_storage.go:237] Failed to save token to keyring, falling back to file: exit status 45
+
+    **判别实验**：文件里放 A 号、钥匙串里留 B 号，跑 `agy models` ⇒ 日志里是 B。
+    也就是说在这之前 `agy-rotate switch` 是**静默空操作** —— 我们写的那份 agy 根本不读，
+    而命令照常打印「已切到」。本仓最贵的那一课的又一例：
+    **写入侧说成功 ≠ 被作用对象真的变了。**
+    """
+
+    def _mod(self, fake, live_cred=None):
+        d = Path(tempfile.mkdtemp())
+        live = d / "tok.json"
+        if live_cred is not None:
+            live.write_text(json.dumps(live_cred), encoding="utf-8")
+        os.environ["AGY_KEYRING"] = "1"
+        self.addCleanup(os.environ.__setitem__, "AGY_KEYRING", "0")
+        m = _load_pool(d, live)
+        m.subprocess = fake
+        return m, live
+
+    def test_read_prefers_the_keychain_over_the_file(self):
+        """★★★ 核心不变量。两边不一致时读文件 ⇒ 报出一个 **agy 并不在用**的账号，
+        而那看起来完全正常（有邮箱、有额度、有徽章）。"""
+        fake = _FakeSecurity()
+        m, _ = self._mod(fake, _cred("file-acct", "file@x.y"))
+        fake.blob = _kr_blob(m, _cred("kc-acct", "kc@x.y"))
+        self.assertEqual(m.claims(m.read_live())["sub"], "kc-acct",
+                         "★★★ 读的是文件 —— 那不是 agy 在用的那个号")
+
+    def test_the_file_is_still_the_fallback_when_the_keychain_is_empty(self):
+        """★ 反方向：钥匙串空时必须回落到文件。只认钥匙串会让
+        「钥匙串写失败过」的机器整个读不到登录态。"""
+        m, _ = self._mod(_FakeSecurity(blob=None), _cred("file-acct", "file@x.y"))
+        self.assertEqual(m.claims(m.read_live())["sub"], "file-acct")
+
+    def test_install_writes_the_keychain_and_says_so(self):
+        fake = _FakeSecurity()
+        m, _ = self._mod(fake)
+        self.assertEqual(m.install_live(_cred("new", "new@x.y")), "keyring")
+        self.assertEqual(m.claims(m.read_live())["sub"], "new",
+                         "★★★ 写完之后读回来不是那个号 —— 换号没生效")
+
+    def test_a_failed_keychain_write_is_reported_not_swallowed(self):
+        """★★★ 只写成兜底文件 = agy 极可能仍在用原来那个号。
+        返回 `"file"` 是给调用方说实话用的；退化成 bool/None 就等于把它藏起来。"""
+        m, live = self._mod(_FakeSecurity(writable=False))
+        self.assertEqual(m.install_live(_cred("new", "new@x.y")), "file")
+        self.assertTrue(live.exists(), "★ 钥匙串写不进去时连兜底文件都没写")
+
+    def test_a_successful_keychain_write_does_not_manufacture_a_file(self):
+        """★★ 钥匙串写成功时**不要凭空建那个文件**。agy 只在写失败时建它 ——
+        我们造一份出来，等于给下一个人留下"它是主存储"的假象（正是这次踩的坑）。"""
+        m, live = self._mod(_FakeSecurity())
+        m.install_live(_cred("new", "new@x.y"))
+        self.assertFalse(live.exists(), "★★ 凭空造了一个兜底文件")
+
+    def test_an_existing_fallback_file_is_kept_in_sync(self):
+        """★ 但文件**已经存在**时要跟着更新：留一份指向别的号的陈旧兜底，
+        哪天钥匙串条目没了就会把那个号悄悄装回去。"""
+        m, live = self._mod(_FakeSecurity(), _cred("old", "old@x.y"))
+        m.install_live(_cred("new", "new@x.y"))
+        self.assertEqual(json.loads(live.read_text())["id_token"],
+                         _cred("new", "new@x.y")["id_token"])
+
+    def test_the_write_is_read_back_and_compared(self):
+        """★★★ 2026-09-13 实测：`security -w` 从 **stdin** 读时静默截断到 **128 字节**
+        （`readpassphrase` 的缓冲区），而我们的凭证约 2.2 KB。
+
+        当时全部症状都是"成功"：退出码 0、读回来还带着正确的 `go-keyring-base64:` 前缀 ——
+        只有 agy 自己说 `You are not logged into Antigravity`。那一版**当场把用户的
+        登录态截没了**（靠池里的备份复原）。
+
+        所以判据不是"调用成功"，是**写完再读回来逐字比**。
+        ⚠️ 这一条同时说明：密文只能走 argv（另一条路会截断），代价是它在这次调用期间
+        对 `ps` 可见 —— agy 自己用的 go-keyring 也是 argv，我们没有扩大暴露面。
+        """
+        fake = _FakeSecurity()
+        m, _ = self._mod(fake)
+        m.install_live(_cred("new", "new@x.y"))
+        kinds = [c[0][1] for c in fake.calls]
+        self.assertIn("find-generic-password", kinds[kinds.index("add-generic-password"):],
+                      "★★★ 写完没有读回来核对 —— 截断型损坏会原样留在那儿")
+
+    def test_a_truncated_write_is_caught(self):
+        """★★★ 正面把那次真实事故复现出来：钥匙串只存下前 128 字节。
+        **写入侧的一切仍然是成功的**，只有读回来比长度才发现得了。"""
+        class _Truncating(_FakeSecurity):
+            def run(self, argv, **kw):
+                r = _FakeSecurity.run(self, argv, **kw)
+                if argv[1] == "add-generic-password" and self.blob:
+                    self.blob = self.blob[:128]       # 真实的 readpassphrase 缓冲区
+                return r
+        m, live = self._mod(_Truncating())
+        self.assertEqual(m.install_live(_cred("new", "new@x.y")), "file",
+                         "★★★ 截断被当成写入成功 —— agy 会说「你没登录」而我们说「已切到」")
+
+    def test_the_current_account_is_saved_before_being_overwritten(self):
+        """★★★ 钥匙串**只有一格**，覆盖就没了。低层自己也要兜一道，
+        不能只指望 CLI 层的 `_adopt`。"""
+        fake = _FakeSecurity()
+        m, _ = self._mod(fake)
+        fake.blob = _kr_blob(m, _cred("cur", "cur@x.y"))
+        m.install_live(_cred("new", "new@x.y"))
+        self.assertIsNotNone(m.read_cred("cur"),
+                             "★★★ 被覆盖掉的那个号没有收进池 —— 用户要重走 OAuth")
+
+    def test_disabling_the_keyring_stops_every_call(self):
+        """★★★ `AGY_KEYRING=0` 必须**两个方向都断**。测试环境靠它保命 ——
+        只断读不断写的话，一条用例照样能覆盖用户真实的登录态。"""
+        d = Path(tempfile.mkdtemp())
+        os.environ["AGY_KEYRING"] = "0"
+        m = _load_pool(d, d / "tok.json")
+        fake = _FakeSecurity()
+        m.subprocess = fake
+        self.assertIsNone(m.keyring_read())
+        self.assertFalse(m.keyring_write(_cred("x")))
+        self.assertEqual(fake.calls, [], "★★★ 关了还在调 security")
+
+    def test_switch_tells_the_user_when_it_only_hit_the_fallback(self):
+        """★★ 命令层不许把落点吞掉：只写了文件时打印「已切到」而不说明，
+        就是这次缺陷的原样复活。"""
+        cli = (ROOT / "agy-rotate").read_text(encoding="utf-8")
+        i = cli.index("def cmd_switch(")
+        seg = cli[i:cli.index("\ndef ", i + 10)]
+        seg = "\n".join(l for l in seg.splitlines() if not l.lstrip().startswith("#"))
+        self.assertIn('where = P.install_live(', seg, "★ 落点被丢掉了")
+        self.assertIn('where != "keyring"', seg, "★★ 没有按落点分支")
+        self.assertIn("仍在用原来那个号", seg, "★★ 警告文案没说清后果")

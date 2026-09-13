@@ -57,6 +57,19 @@ def _accounts(pool):
     return pool.setdefault("accounts", {})
 
 
+def _mark_live(pool):
+    """把「当值号」记进池 -> sub。
+
+    ★ 池文件本身认不出谁在当值 —— 那个事实只写在 agy 的登录态文件里。
+      所以每条**知道**它的命令都顺手记一次，前端才不用自己去解 JWT。
+    ★ 它可能过时（用户在 agy 里 `/logout` 换了号而没跑我们的命令）。
+      所以字段名是 `live_seen` 不是 `live`：**上次我们看到的**，下次 `quota` 会纠正。
+    """
+    sub = (P.claims(P.read_live()) or {}).get("sub")
+    pool["live_seen"] = sub
+    return sub
+
+
 def _by_label(pool, key):
     """label 或 sub 前缀都认。★ 与 codex 池同一条教训：**label 是可改的显示名**，
     所以内部一律存 `sub`，只在查找时接受 label。"""
@@ -76,7 +89,9 @@ def _adopt(label=None, quiet=False):
     """把**当前登录**的号收进池 -> (sub, 是否新号)。收不了就退出并说清楚为什么。"""
     live = P.read_live()
     if not live:
-        sys.exit("读不到当前登录态（%s）—— 先在 agy 里登录一个号" % P.LIVE)
+        sys.exit("读不到当前登录态 —— 先在 agy 里登录一个号\n"
+                 "  （主存储是 macOS 钥匙串 %s/%s，兜底文件 %s）"
+                 % (P.KEYRING_SVC, P.KEYRING_ACCT, P.LIVE))
     cl = P.claims(live)
     sub, email = cl.get("sub"), cl.get("email")
     if not sub:
@@ -138,7 +153,10 @@ def cmd_login(args):
     after_cred = P.read_live()
     after = (P.claims(after_cred) or {}).get("sub")
     if not after:
-        print("\n✗ 回来之后读不到登录态 —— 可能登录没完成。"
+        # ★ 这条曾是**假阴性**（2026-09-13 用户实报）：登录其实成功了，
+        #   只是我们读的是文件、而 agy 把新凭证写进了钥匙串。`read_live()` 现在
+        #   钥匙串优先，所以走到这里才是真的没读到。措辞也跟着改成两种可能。
+        print("\n✗ 回来之后读不到登录态 —— 登录没完成，或者钥匙串读不出来。"
               "\n  池里那份没丢：`agy-rotate switch %s` 装回去。"
               % _accounts(pool).get(before, {}).get("label"))
         return
@@ -179,7 +197,7 @@ def cmd_quota(args):
     accs = _accounts(pool)
     if not accs:
         sys.exit("池是空的 —— 先 `agy-rotate adopt`")
-    live_sub = (P.claims(P.read_live()) or {}).get("sub")
+    live_sub = _mark_live(pool)
     out = []
     for sub, a in accs.items():
         cred, err = _refresh_one(sub, a, pool)
@@ -266,15 +284,23 @@ def cmd_switch(args):
     cred, err = _refresh_one(sub, _accounts(pool)[sub], pool)
     if err:
         sys.exit("✗ %s" % err)
-    live_sub = (P.claims(P.read_live()) or {}).get("sub")
+    live_sub = _mark_live(pool)
     if live_sub == sub:
         print("[%s] 已经是当前号，没动" % _accounts(pool)[sub].get("label"))
         return
-    P.install_live(cred)
+    where = P.install_live(cred)
+    _mark_live(pool)
     with P._lock(P.POOL):
         P.save(pool)
     print("已切到 [%s] —— ★ 只对**下一次启动的** agy 生效，已经开着的会话不受影响"
           % _accounts(pool)[sub].get("label"))
+    if where != "keyring":
+        # ★★ 不许静默。2026-09-13 之前这条路**一直**只写文件，而 agy 只读钥匙串 ——
+        #   换号是空操作，命令却照常打印「已切到」。宁可多说一句，也不能再让
+        #   「我们写成功了」冒充「agy 真的换了号」。
+        print("  ⚠️ 没能写进钥匙串（agy 的主存储），只写了兜底文件 —— "
+              "agy 很可能仍在用原来那个号。\n"
+              "     钥匙串被锁住时会这样：解锁登录钥匙串后重试一次。")
 
 
 def cmd_auto(args):
@@ -299,10 +325,15 @@ def cmd_auto(args):
         cred, err = _refresh_one(sub, a, pool)
         if err:
             return
-        P.install_live(cred)
+        where = P.install_live(cred)
+        _mark_live(pool)
         with P._lock(P.POOL):
             P.save(pool)
-        print("[codexbar] agy 自动切到 [%s]（剩余 %s）" % (a.get("label"), _fmt_pct(_score(a))),
+        # ★ 落点写进这一行：只写了文件的话这次自动切**没有生效**，
+        #   而 agy 照跑、用户看到的一切都正常 —— 那正是要避免的那种"成功"。
+        print("[codexbar] agy 自动切到 [%s]（剩余 %s）%s"
+              % (a.get("label"), _fmt_pct(_score(a)),
+                 "" if where == "keyring" else " ⚠️ 只写了兜底文件，可能未生效"),
               file=sys.stderr)
     except Exception:                                 # noqa: BLE001
         return

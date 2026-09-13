@@ -42,9 +42,11 @@
   现取的额外好处：agy 自动更新换了 client 也能自愈；代价是要扫一遍 180MB，
   所以按 `(mtime_ns, size)` 缓存进**已 gitignore** 的池文件。
 """
+import base64
 import json
 import os
 import re
+import subprocess
 import time
 import urllib.parse
 from http.client import HTTPSConnection
@@ -52,10 +54,39 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
-#: agy 自己的登录态。**这是用户唯一的凭证，写它必须原子且先备份** ——
-#: 写坏 = 用户要重新走一遍浏览器登录。
+#: agy 登录态的**文件**落点。★★★ 这**不是**主存储，见下面 `KEYRING_SVC`。
+#: **这是用户唯一的凭证，写它必须原子且先备份** —— 写坏 = 用户要重新走一遍浏览器登录。
 LIVE = Path(os.environ.get(
     "AGY_TOKEN_FILE", str(Path.home() / ".gemini" / "antigravity-cli" / "antigravity-oauth-token")))
+
+#: ★★★ **agy 1.2.2 的真登录态在 macOS 钥匙串里，不在上面那个文件里。**（2026-09-13 实测）
+#:
+#: 用户报 `agy-rotate login` 走完浏览器登录、回来却说「读不到登录态」。查 agy 自己的日志：
+#:
+#:     auth.go:148]  ChainedAuth: authenticated via keyring (effective: keyring)
+#:     keyring.go:64] keyringAuth: loaded token, expiry=…
+#:     composite_token_storage.go:237] Failed to save token to keyring, falling back to file: exit status 45
+#:
+#: 最后那行是关键：文件只是**钥匙串写失败时的兜底**。本机之所以一直有那个文件，
+#: 就是 09-13 11:23 发生过一次那种失败 —— 我们把兜底路径当成了主路径。
+#:
+#: ★★ **判别实验（已跑，别再推理）**：把 A 号写进文件、钥匙串里留 B 号，
+#:   跑 `agy models` 看日志 ⇒ `applyAuthResult: email=B`。**文件被完全忽略。**
+#:   也就是说在这之前 `agy-rotate switch` 一直是**静默空操作** ——
+#:   它写的那份 agy 根本不读，而界面、日志、退出码全都显示成功。
+#:   这正是本仓记了无数次的那一条：**写入侧的标志会撒谎，判据要由被作用对象自证**。
+#:
+#: go-keyring（agy 用的库）也是 shell 出 `/usr/bin/security`，所以我们用同一个命令读写，
+#: 格式完全一致：`go-keyring-base64:` + base64(JSON)。
+KEYRING_SVC = os.environ.get("AGY_KEYRING_SERVICE", "gemini")
+KEYRING_ACCT = os.environ.get("AGY_KEYRING_ACCOUNT", "antigravity")
+_KR_PREFIX = "go-keyring-base64:"
+
+#: `AGY_KEYRING=0` 完全关掉钥匙串通路。**测试必须设它** —— 否则一条用例就能把
+#: 用户真实的 agy 登录态覆盖掉（同 `CODEXBAR_QUOTA_ANCHORS` 那次事故的形状：
+#: 夹具数据写进了真账本）。闸在 `tests/test_isolation_bootstrap.py`。
+def _keyring_on():
+    return os.environ.get("AGY_KEYRING", "1") != "0"
 
 #: 池的落点。`AGY_POOL_STORE` 让测试整体换目录（同 `CODEX_ROTATE_STORE` 的角色）。
 STORE = Path(os.environ.get("AGY_POOL_STORE", str(ROOT)))
@@ -194,7 +225,6 @@ def remember_client(pool, cid, secret):
 def claims(cred):
     """从 `id_token` 里解出 `{sub, email, aud, exp}`。★ **只解不验签** ——
     我们不是在鉴权，只是要一个稳定的账号身份；签名由 Google 在用它的时候验。"""
-    import base64
     idt = (cred or {}).get("id_token") or ""
     if idt.count(".") != 2:
         return {}
@@ -206,8 +236,81 @@ def claims(cred):
         return {}
 
 
+def keyring_read():
+    """从钥匙串读 agy 的登录态。读不到/没装/被拒一律 None。"""
+    if not _keyring_on():
+        return None
+    try:
+        r = subprocess.run(
+            ["security", "find-generic-password", "-s", KEYRING_SVC, "-a", KEYRING_ACCT, "-w"],
+            capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if r.returncode != 0:
+        return None
+    raw = (r.stdout or "").strip()
+    if raw.startswith(_KR_PREFIX):
+        try:
+            raw = base64.b64decode(raw[len(_KR_PREFIX):]).decode("utf-8")
+        except Exception:                            # noqa: BLE001
+            return None
+    try:
+        return json.loads(raw)
+    except ValueError:
+        return None
+
+
+def keyring_write(cred):
+    """写回钥匙串。返回 **True 才表示真的写进去了** —— 调用方据此决定要不要走文件兜底。
+
+    ★★★ **密文只能走 argv，stdin 那条路会静默截断到 128 字节。**（2026-09-13 实测）
+      `security -w` 不带值时会在 TTY 上问两遍，喂两行也确实能写成功、退出码 0 ——
+      但存进去的只有 **128 字节**（`readpassphrase` 的缓冲区），而我们的凭证约 2.2 KB。
+      症状是 agy 报 `You are not logged into Antigravity`，**写入侧一切正常**：
+      命令成功、退出码 0、读回来还有正确的 `go-keyring-base64:` 前缀。
+      我第一版就是这么写的，当场把用户的登录态截没了（靠池里的备份复原）。
+      这条正是本仓那句「写入侧标志会撒谎，判据要由被作用对象自证」的第二次实证 ——
+      同一轮里踩了两次，第二次是我为了避开第一次的教训而引入的。
+
+    ⚠️ **已知代价**：`refresh_token` 在这次调用期间对 `ps` 可见。没有别的路
+      （`security` 只有 argv 与那个 128 字节的 prompt 两种入口），而 agy 自己用的
+      go-keyring 也是 argv —— 我们没有扩大暴露面，只是没有缩小它。
+    """
+    if not _keyring_on():
+        return False
+    blob = _KR_PREFIX + base64.b64encode(
+        json.dumps(cred, ensure_ascii=False).encode("utf-8")).decode("ascii")
+    try:
+        r = subprocess.run(
+            ["security", "add-generic-password", "-U",
+             "-s", KEYRING_SVC, "-a", KEYRING_ACCT, "-w", blob],
+            capture_output=True, text=True, timeout=20)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if r.returncode != 0:
+        return False
+    # ★★ **写完必须读回来核长度。** 上面那次截断的全部症状就是"写成功了"，
+    #    只有把存进去的东西再取出来比一遍才发现得了。不核 = 把一个已经发生过的
+    #    静默损坏留在原地。
+    try:
+        chk = subprocess.run(
+            ["security", "find-generic-password", "-s", KEYRING_SVC, "-a", KEYRING_ACCT, "-w"],
+            capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return chk.returncode == 0 and (chk.stdout or "").strip() == blob
+
+
 def read_live():
-    """当前 agy 登录态。读不到返回 None。"""
+    """当前 agy 登录态。读不到返回 None。
+
+    ★★ **钥匙串优先，文件兜底** —— 与 agy 自己的 `ChainedAuth` 同序（实测 13/13 次
+      日志都是 `effective: keyring`）。反过来读会在两边不一致时报出一个
+      **agy 并不在用**的账号，而那看起来完全正常。
+    """
+    cred = keyring_read()
+    if cred:
+        return cred
     try:
         with open(LIVE, encoding="utf-8") as fh:
             return json.load(fh)
@@ -238,12 +341,43 @@ def write_cred(sub, cred):
 
 
 def install_live(cred):
-    """把某个号的凭证装回 agy 的登录态。
+    """把某个号的凭证装回 agy 的登录态。返回 `"keyring"` / `"file"` —— **落在哪儿**。
 
     ★★★ **先备份再原子替换。** 这是用户唯一的 agy 登录凭证 ——
       写坏的代价是重新走一遍浏览器 OAuth，而那不是我们能替他做的。
       `os.replace` 保证读者要么看到旧的、要么看到新的，不会看到半截。
+
+    ★★★ **必须写钥匙串，只写文件等于什么都没做**（实测，见文件头 `KEYRING_SVC`）。
+      返回值不是装饰：调用方要把"到底换没换成"说给用户听。全仓最贵的一课就是
+      「写入侧说成功 ≠ 被作用对象真的变了」，所以这里**不返回 bool**，
+      而是返回落点本身 —— `"file"` 时 agy 极可能仍在用原来那个号。
     """
+    # ★ 换号前把**当前**这份收进池：钥匙串里只有一格，覆盖就没了。
+    #   `_adopt` 也做这件事，但那是 CLI 层；低层自己兜一道，手工调用同样安全。
+    cur = read_live()
+    cur_sub = (claims(cur) or {}).get("sub")
+    if cur and cur_sub and not cred_path(cur_sub).exists():
+        try:
+            write_cred(cur_sub, cur)
+        except OSError:
+            pass
+
+    if keyring_write(cred):
+        # 钥匙串写成功：顺手把**已存在**的兜底文件也同步过去。
+        # 不新建文件 —— agy 只在钥匙串写失败时才建它，我们凭空造一份
+        # 等于给未来的读者留一个"它是主存储"的假象（正是这次踩的坑）。
+        if LIVE.exists():
+            try:
+                _write_live_file(cred)
+            except OSError:
+                pass
+        return "keyring"
+
+    _write_live_file(cred)
+    return "file"
+
+
+def _write_live_file(cred):
     LIVE.parent.mkdir(parents=True, exist_ok=True)
     if LIVE.exists():
         try:
