@@ -7,6 +7,8 @@ import {
   agyShown, agyTightest, agyWinRows, agyQuotaVisible, agyReasonNote, agyReasonTone, agyResetText,
 } from "../agy";
 import { fmtAgo, winNumColor } from "../helpers";
+import { IconBtn, IcPen, IcTrash } from "./CardIcons";
+import { useState } from "react";
 
 const MONO = "'JetBrains Mono'";
 
@@ -32,6 +34,8 @@ const MONO = "'JetBrains Mono'";
  * ★ 颜色由调用方传入（`colorOf(traffic, "agy")`），不写死：用户在设置页能改平台色。
  */
 export default function AgyCard({ t, color, snap, busy, err, disabled, winSlots, onOpen, onRefresh,
+                                 isSelected, reserveActions, shortcut, isBest, bestPct,
+                                 onSelect, onRename, onRemove,
                                   label, email, isCurrent, onSwitch, switching }: {
   t: Theme;
   /** 与账号卡**同一份**窗口槽位表。agy 没有的窗口画一行隐藏等高行 —— 不占槽的话
@@ -56,6 +60,23 @@ export default function AgyCard({ t, color, snap, busy, err, disabled, winSlots,
    *  已经开着的会话不受影响。这条必须写进 `title`，否则用户会以为点一下就切走了正在跑的那个。 */
   onSwitch?: () => void;
   switching?: boolean;
+  // ── 与 codex 账号卡对齐（用户 2026-09-13：「gemini 的功能也没有 1:1 同步上 codex」）──
+  /** 卡被选中 ⇒ 展开动作条。 */
+  isSelected?: boolean;
+  /** 同排有别的卡展开 ⇒ 本卡渲染**同一条动作条但整条隐形**，高度由构造保证一致。
+   *  ★ 画一个"差不多高"的占位是行不通的：按钮尺寸一改就静默失准（账号卡实测差过 34px）。 */
+  reserveActions?: boolean;
+  /** ⌘N 角标。没有就不画 —— agy 不进 `alive`，快捷键另走一条路。 */
+  shortcut?: number;
+  /** 全池里余量最多的那个号 ⇒ 画 `最优` / `USE`。 */
+  isBest?: boolean;
+  /** 最优号的余量，用来算本卡的差值角标 `-N%`。 */
+  bestPct?: number;
+  onSelect?: () => void;
+  /** 改显示名。★ label 只是昵称，身份始终是 `sub`（同 codex 的 aid）。 */
+  onRename?: (next: string) => void;
+  /** 从池里移除。★ **不可逆** —— 这里有两段确认，CLI 侧另有一道拒绝删当值号的守卫。 */
+  onRemove?: () => void;
 }) {
   // 本机没有 agy / 已停用 ⇒ **零像素**。见 `agyQuotaVisible` 的注释。
   if (!agyQuotaVisible(snap, { disabled })) return null;
@@ -75,6 +96,12 @@ export default function AgyCard({ t, color, snap, busy, err, disabled, winSlots,
   const mine = rows.map(r => r.label);
   const slotRows = [...winSlots, ...mine.filter(l => !winSlots.includes(l))];
   const glow = rem != null && rem <= 20 ? (rem <= 10 ? "#E0524D" : "#E0901C") : undefined;
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [editing, setEditing] = useState<string | null>(null);
+  /** 与最优号的差值角标。★ 与账号卡同一套口径：**只在落后时画**，
+   *  领先/持平不画 —— 画一个 `+0%` 只是噪音。 */
+  const gap = rem != null && bestPct != null && bestPct - rem >= 1
+    ? -Math.round(bestPct - rem) : null;
 
   /** 这一格为什么读不到 —— 说清楚**原因**和**怎么才能看到**，不是只说"没有"。 */
   const missTitle = (label: string, cur?: boolean) =>
@@ -85,15 +112,18 @@ export default function AgyCard({ t, color, snap, busy, err, disabled, winSlots,
       : `${label} 窗口只有**当前登录**的号读得到（本机 RPC）——云端按账号那条只给 5h。切过去再刷新即可看到。`;
 
   return (
-    <div onClick={onOpen} style={{
-      position: "relative", background: t.cardBg,
-      border: `1px solid ${hexA(color, .30)}`, borderRadius: 12,
+    <div onClick={onSelect ?? onOpen} style={{
+      position: "relative", background: isSelected ? t.heroBg : t.cardBg,
+      border: `1px solid ${isSelected ? t.accent : hexA(color, .30)}`, borderRadius: 12,
       padding: "16px 14px 12px", display: "flex", flexDirection: "column",
-      cursor: onOpen ? "pointer" : "default", userSelect: "none",
+      cursor: (onSelect ?? onOpen) ? "pointer" : "default", userSelect: "none",
       transition: "background .2s ease, border-color .2s ease",
     }}>
+      {/* ★ 有快捷键就画 `⌘N`（与账号卡同位同字号），没有就退回 `CLI` ——
+          那个角标本来就是"这张卡怎么来的"，两种写法都在回答同一个问题。 */}
       <span style={{ position: "absolute", top: 6, left: 10, color,
-                     fontFamily: MONO, letterSpacing: ".04em", fontSize: Z.shortcut }}>CLI</span>
+                     fontFamily: MONO, letterSpacing: ".04em", fontSize: Z.shortcut }}>
+        {shortcut ? `⌘${shortcut}` : "CLI"}</span>
       {onRefresh && (
         // stopPropagation：点卡片是"进详情"，点 ↻ 是"重取额度"，两个动作叠在同一块区域上。
         <button onClick={(e) => { e.stopPropagation(); if (!busy) onRefresh(); }} disabled={busy}
@@ -117,8 +147,28 @@ export default function AgyCard({ t, color, snap, busy, err, disabled, winSlots,
 
         <div style={{ flex: 1, minWidth: 0, alignSelf: "stretch", display: "flex", flexDirection: "column", gap: 4 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
-            <span style={{ fontSize: Z.name, fontWeight: 700, color, minWidth: 0,
-                           overflow: "hidden", textOverflow: "ellipsis" }}>{label ?? "agy"}</span>
+            {editing !== null ? (
+              // ★ `onKeyDown` 必须 `stopPropagation`：全局 ⌘1~⌘9 是切号快捷键，
+              //   不拦的话在框里打数字会切号（与账号卡同一条教训）。
+              <input autoFocus value={editing}
+                     onClick={(e) => e.stopPropagation()}
+                     onChange={(e) => setEditing(e.target.value)}
+                     onKeyDown={(e) => {
+                       e.stopPropagation();
+                       if (e.key === "Enter" && editing.trim()) {
+                         onRename?.(editing.trim()); setEditing(null);
+                       }
+                       if (e.key === "Escape") setEditing(null);
+                     }}
+                     // ★ `onBlur` 一律**放弃**，不静默提交 —— 与账号卡同一条。
+                     onBlur={() => setEditing(null)}
+                     style={{ fontSize: Z.name, fontWeight: 700, color, minWidth: 0, flex: 1,
+                              background: "transparent", border: `1px solid ${hexA(color, .45)}`,
+                              borderRadius: 5, padding: "0 4px", fontFamily: "inherit" }} />
+            ) : (
+              <span style={{ fontSize: Z.name, fontWeight: 700, color, minWidth: 0,
+                             overflow: "hidden", textOverflow: "ellipsis" }}>{label ?? "agy"}</span>
+            )}
             {/* ★★ 徽章三态，**别合并**：
                 · 在池里且当值  → 「当前」（青底，与账号卡同一套语义）
                 · 在池里不当值  → 「切换」（可点）
@@ -143,6 +193,20 @@ export default function AgyCard({ t, color, snap, busy, err, disabled, winSlots,
             {degraded && snap && <StaleMark t={t} note={agyReasonNote(snap)} tone={tone} size={11} />}
             {/* 读**本机 sidecar** 失败(IO 层),与"额度读不到"是两回事,所以文案不同。 */}
             {!!err && <StaleMark t={t} note={`读不到本机的额度快照：${err}`} tone="red" size={11} />}
+            {/* ★ 与账号卡同一套语义：`最优` = 全池余量最多；`USE` = 最优**且不是当前号**
+                （已经在用最优号时再喊一句"用这个"只是噪音）。 */}
+            {isBest && (isCurrent
+              ? <span style={{ fontSize: Z.curBadge, fontWeight: 700, padding: "1px 5px", borderRadius: 5,
+                               color: "#27B26B", border: "1px solid #27B26B55" }}>最优</span>
+              : <span style={{ fontSize: Z.curBadge, fontWeight: 700, padding: "1px 5px", borderRadius: 5,
+                               color: t.accent, border: `1px solid ${t.accent}55` }}>USE</span>)}
+            {/* 差值角标：**只在落后时画**。领先/持平画一个 `+0%` 只是噪音。 */}
+            {gap != null && !isBest && (
+              <span title={`比最优的号少 ${-gap}%`}
+                    style={{ marginLeft: "auto", fontSize: Z.curBadge, fontWeight: 700,
+                             fontFamily: MONO, color: t.muted,
+                             fontVariantNumeric: "tabular-nums" }}>{gap}%</span>
+            )}
           </div>
           {/* grok 那行放的是账号邮箱;agy 的响应里**没有任何身份信息**(接口无鉴权),
               所以这里放"哪一组最紧"—— 环上那个数字来自哪个池子,否则 4 个桶压成 1 个数后
@@ -213,6 +277,64 @@ export default function AgyCard({ t, color, snap, busy, err, disabled, winSlots,
           </div>
         </div>
       </div>
+
+      {/* ★★ 动作条。与账号卡**同一条构造**：同排有别的卡展开时，本卡渲染同一条动作条
+          但整条隐形 —— 不是画一个"差不多高"的占位。账号卡那边手算过一次，sweep 当场
+          量出还差 34px；高度必须**由构造保证**，按钮尺寸一改自动跟上。
+          ★ 隐形那份必须 `pointerEvents: none` + `aria-hidden`，否则会出现看不见却点得到的按钮。
+          ⚠️ **没有「探针」和「轮换开关」** —— 探针跑的是 `codex-rotate probe`，扣的是
+             codex 的额度；而 agy 的自动切号发生在 `bin/agy` 拉起进程之前，不是按号的开关。
+             给一个点了没用的按钮，比没有这个按钮糟。 */}
+      {(isSelected || reserveActions) && (
+        <div onClick={(e) => e.stopPropagation()}
+             aria-hidden={!isSelected}
+             style={{ display: "flex", gap: 6, marginTop: 10, paddingTop: 8,
+                      borderTop: `1px solid ${isSelected ? t.divider : "transparent"}`,
+                      ...(isSelected ? null : { visibility: "hidden" as const, pointerEvents: "none" as const }),
+                      flexWrap: "wrap", rowGap: 6 }}>
+          {isCurrent ? (
+            <span style={{ flex: "1 1 auto", minWidth: 62, textAlign: "center", fontSize: 11,
+                           fontWeight: 600, whiteSpace: "nowrap", color: t.accent, padding: "5px 0" }}>✓ 当前</span>
+          ) : onSwitch ? (
+            <span onClick={() => { if (!switching) onSwitch(); }}
+                  title={`把当前号切到 ${label ?? "这个号"} —— ★ 只对**下一次启动的** agy 生效`}
+                  style={{ flex: "1 1 auto", minWidth: 62, textAlign: "center", fontSize: 11,
+                           fontWeight: 700, whiteSpace: "nowrap", color: t.accentText,
+                           background: t.accent, padding: "5px 8px", borderRadius: 6,
+                           cursor: switching ? "default" : "pointer", opacity: switching ? .5 : 1 }}>
+              {switching ? "切换中…" : "切换"}</span>
+          ) : null}
+          {onRefresh && (
+            <IconBtn title="重新取一次这一池的额度（云端按账号读，零消耗）"
+                     onClick={() => { if (!busy) onRefresh(); }}
+                     color={t.muted} border={t.ghostBorder}>
+              <span style={{ fontFamily: MONO, fontSize: 12, lineHeight: 1 }}>↻</span>
+            </IconBtn>
+          )}
+          {onRename && (
+            <IconBtn title="重命名 —— 改显示名。卡片、菜单栏、`agy --as` 都会跟着变（label 只是昵称，身份始终是 sub）"
+                     onClick={() => setEditing(label ?? "")} color={t.muted} border={t.ghostBorder}>
+              <IcPen />
+            </IconBtn>
+          )}
+          {onRemove && (!confirmDelete ? (
+            <IconBtn title={`从池里移除 ${label ?? ""}（会先要一次确认）`}
+                     onClick={() => setConfirmDelete(true)} color="#E0524D" border="#E0524D40">
+              <IcTrash />
+            </IconBtn>
+          ) : (
+            <>
+              {/* ★ 确认态**保留文字**：移除不可逆，把「确认删除」也压成图标等于让人凭记忆点。 */}
+              <span onClick={() => { setConfirmDelete(false); onRemove(); }}
+                    style={{ fontSize: 11, fontWeight: 700, color: "#fff", background: "#E0524D",
+                             padding: "5px 10px", borderRadius: 6, cursor: "pointer",
+                             whiteSpace: "nowrap", flexShrink: 0 }}>确认删除</span>
+              <span onClick={() => setConfirmDelete(false)}
+                    style={{ fontSize: 11, color: t.muted, padding: "5px 10px", cursor: "pointer" }}>取消</span>
+            </>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

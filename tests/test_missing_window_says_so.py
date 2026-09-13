@@ -43,11 +43,22 @@ def code(p):
 
 class NoWindowRowIsSilentlyBlank(unittest.TestCase):
 
+    #: 窗口行的渲染入口。判据要切到**这一段**，不能整文件扫 ——
+    #: `AgyCard` 的**动作条**也用 `visibility: hidden` 占位（那是对的：兄弟卡要等高），
+    #: 整文件断言会把它一起判红（实测假红一次）。
+    ROW_ENTRY = {"AgyCard": "slotRows.map", "AgyRow": "MB_WIN_SLOTS.map",
+                 "GrokCard": "slotRows.map", "GrokRow": "className=\"mb-row-meta\""}
+
+    def _rows_region(self, name):
+        c = code(TARGETS[name])
+        i = c.index(self.ROW_ENTRY[name])
+        return c[i:i + 1800]
+
     def test_no_invisible_placeholder_rows(self):
         """★★ `visibility: hidden` 是这个缺陷的**唯一写法**，四处都曾用它。"""
-        for name, p in TARGETS.items():
+        for name in TARGETS:
             with self.subTest(component=name):
-                self.assertNotIn('visibility: "hidden"', code(p),
+                self.assertNotIn('visibility: "hidden"', self._rows_region(name),
                                  f"★★ {name} 又用隐藏行占位了 —— 用户看到的是一整行空白")
 
     def test_every_component_can_render_a_dash(self):

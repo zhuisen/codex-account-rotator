@@ -870,6 +870,25 @@ function relayEntry() {
         }, 700);
       }
 
+      // ★★ `?pickcard=<名字>` 点一张**账号卡**把它选中，用来验展开的动作条。
+      //    ⚠️ 不能用第二个 `click=` —— 同名 query 重复时 `URLSearchParams.get` 只取
+      //    第一个（本仓空守卫形态⑨，稀疏夹具就是这么静默失效的）。
+      //    ★ 必须点**卡片本身**而不是名字那个 span：名字上没有 onClick，
+      //      点它靠冒泡才到卡上；名字要是被改成带子节点的结构，冒泡链就断了。
+      var pick = p.get('pickcard');
+      if (pick) {
+        setTimeout(function () {
+          var hit = 0, cards = document.querySelectorAll('[data-cards-grid] > div');
+          for (var q = 0; q < cards.length; q++) {
+            if ((cards[q].textContent || '').indexOf(pick) >= 0) {
+              cards[q].dispatchEvent(new MouseEvent('click', { bubbles: true })); hit++; break;
+            }
+          }
+          clicks.push('pickcard=' + pick + ' →命中 ' + hit);
+          if (!hit) errors.push('点不到账号卡 "' + pick + '"');
+        }, 900);
+      }
+
       // ★ `?mbshow=<ms>` 在指定时刻发 `menubar-shown` —— Rust 是在 `win.show()` 之后发它的
       //   (lib.rs 的 `toggle_menubar`)。菜单栏的高度靠这个事件在**窗口真正可见时**重量一次,
       //   所以要验那条路径,必须能在 harness 里模拟"用户点了托盘"。

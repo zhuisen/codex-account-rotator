@@ -22,7 +22,7 @@ import { useExpiryWatch } from "./hooks/useExpiryWatch";
 import { useDeadWatch } from "./hooks/useDeadWatch";
 import { useAutoSwitch } from "./hooks/useAutoSwitch";
 import { useKeyboard } from "./hooks/useKeyboard";
-import { fmtAgo, CARD_WARN_DAYS, maskId } from "./helpers";
+import { fmtAgo, CARD_WARN_DAYS, maskId, winNumColor } from "./helpers";
 import { usePrivacy } from "./hooks/usePrivacy";
 import { useTraffic } from "./hooks/useTraffic";
 import { useGrokQuota } from "./hooks/useGrokQuota";
@@ -32,6 +32,7 @@ import AgyCard from "./components/AgyCard";
 import ProviderTabs from "./components/ProviderTabs";
 import { POOL_PLATFORMS, loadPoolKey, savePoolKey, type PoolKey } from "./platforms";
 import { useAgyPool } from "./hooks/useAgyPool";
+import { agyWinRows, agyShown, agyResetText } from "./agy";
 import { IconTicket } from "./components/CardBadge";
 import ProbeButton from "./components/ProbeButton";
 import PlanBadge from "./components/PlanBadge";
@@ -218,6 +219,31 @@ export default function App() {
    */
   const { snap: agySnap, busy: agyBusy, err: agyErr, refresh: refreshAgy } =
     useAgyQuota({ enabled: page === "overview" });
+  // ★★ 这一段**必须排在 `agySnap` 之后**：它读 `agySnap`，而 `const` 有暂时性死区。
+  //    放在前面时页面**整页白屏**，只在 harness 的 `errors` 探针里留一句
+  //    `Cannot access 'je' before initialization`（压缩后的变量名）——
+  //    零渲染的页面量出来正好是「零溢出、零报错」，看着像通过（本仓记过的假阴性）。
+  /** Hero 上固定画这两格。★ 写死槽位而不是"有什么画什么" —— 非当值号读不到周窗口，
+   *  "有什么画什么"会让 Hero 时有两段时有一段，而那个少**没有任何地方解释**。 */
+  const agyHeroSlots = ["5h", "周"] as const;
+  /**
+   * 池里余量最多的那个号。★ 口径与 codex 的 hero **一致**：比的是各自**最紧**的那个窗口
+   * —— 拿 `windows[0]` 比等于把真正的约束藏起来（本仓 §8 的老规矩）。
+   * ★ 读不到额度的号**不参与**（`remaining` 取不到就跳过），否则"未知"会冒充满额被推荐。
+   */
+  const agyRank = agyPool.accounts.map((a) => {
+    const rows = agyWinRows(agyShown(agyPool.snapshotOf(a, agySnap))?.quota);
+    const pct = rows.length ? Math.min(...rows.map(r => r.remaining)) : null;
+    return { a, pct };
+  }).filter((x): x is { a: typeof agyPool.accounts[number]; pct: number } => x.pct != null);
+  // ★★ **打平时当前号赢。** `reduce` 取第一个最大值，于是两个号都是 96% 时
+  //   会推荐"切到另一个 96%"——那是一次零收益的换号，而换号在 agy 上的代价是
+  //   得重开一个会话。判据与差值角标同一条：**领先/持平不建议切**。
+  const agyTop = agyRank.length
+    ? agyRank.reduce((m, x) => (x.pct > m.pct
+        || (x.pct === m.pct && x.a.sub === agyPool.liveSub) ? x : m)) : null;
+  const agyBest = agyTop?.a ?? null;
+  const agyBestPct = agyTop?.pct ?? null;
 
   // ★ `name` 是展开态显示的中文名，`tip` 只在**折叠态**当悬浮提示 —— 展开后标签已经在那儿，
   //   再挂一个 title 是重复。原来 traffic 的 tip 写死「Claude / Codex / Grok」三家，
@@ -401,6 +427,27 @@ export default function App() {
                 </div>)}
                 {/* ★ 新鲜度数的是 **codex 池**的快照覆盖度（`6/7 新鲜`）——
                     在 Google 档上它描述的是另一家，与摘要那行同一条理由。 */}
+                {/* ★★ Gemini 档的动作条。与 Codex 档**同位同形**，但只放这一档真有的东西：
+                    · 「刷新全池」= `agy-rotate quota`，云端按账号读，零消耗
+                    · 「打开 Antigravity」= 换号只对**下一次启动**生效，这是这一档的关键代价
+                    ⚠️ **没有「检查 token」和「探针」**：前者 agy 没有对等物，
+                       后者跑的是 `codex-rotate probe`，扣的是 **codex** 的额度 ——
+                       挂在这一档上就是用户看着 agy 的卡按下去、花的是另一家的钱。
+                    ⚠️ 也**没有「自动切号」开关**：agy 的自动选号发生在 `bin/agy` 拉起进程
+                       之前（wrapper 里），不是 app 能开关的运行期行为。给一个点了没用的
+                       开关，比没有这个开关糟。 */}
+                {provider === "gemini" && (
+                <div style={{ display: "flex", gap: 7, alignItems: "center",
+                              flexWrap: "wrap", justifyContent: "flex-end", rowGap: 7 }}>
+                  <GhostButton t={t} onClick={() => { agyPool.refresh(); showToast(`已刷新 Gemini · ${agyPool.accounts.length} 个号`); }}
+                               loading={agyPool.busy} loadingText="刷新中…">
+                    <IconRefresh spin={agyPool.busy} />刷新全池
+                  </GhostButton>
+                  <GhostButton t={t} accent
+                               onClick={() => showToast("切号只对下一次启动的 agy 生效 —— 开一个新的 agy 会话即可")}>
+                    重启生效说明
+                  </GhostButton>
+                </div>)}
                 {provider === "codex" && (
                 <span style={{ fontSize: 10, color: t.muted, fontFamily: "'JetBrains Mono'" }}>
                   {/* ★★ 原文是「上次全池刷新 X 前」,而它取的是**全池最大值** —— 那句话本身就是假的:
@@ -549,6 +596,73 @@ export default function App() {
                     </div>
                     </>)}
                     {provider === "gemini" && (<>
+                    {/* ★★ Hero 区 —— 与 Codex 档**同构**（用户 2026-09-13：
+                        「gemini 的功能也没有 1:1 同步上 codex」）。
+                        ★ 三处刻意不同，都是因为 agy 没有对应的事实，不是漏做：
+                          · 没有 `PlanBadge`（agy 不分套餐）
+                          · 没有「订阅至」（云端那条只回额度，不回订阅期）
+                          · 「建议切到」后面写明**只对下一次启动生效** —— agy 只在启动时读凭证。 */}
+                    {(() => {
+                      const cur = agyPool.accounts.find(a => a.sub === agyPool.liveSub);
+                      if (!cur) return null;
+                      const snap = agyPool.snapshotOf(cur, agySnap);
+                      const rows = agyWinRows(agyShown(snap)?.quota);
+                      const tight = rows.length
+                        ? rows.reduce((m, r) => (r.remaining < m.remaining ? r : m)) : null;
+                      const c = colorOf(traffic, "agy");
+                      return (
+                        <div style={{ display: "flex", alignItems: "center", gap: 18, background: t.heroBg,
+                                      border: `1px solid ${t.heroBorder}`, borderRadius: 14,
+                                      padding: "15px 18px", marginBottom: 13, boxShadow: t.heroShadow,
+                                      transition: "background-color .35s ease, border-color .35s ease" }}>
+                          <Ring pct={tight?.remaining ?? 0} r={33} sw={6}
+                                color={tight ? c : t.ringTrack} track={t.ringTrack} size={80}>
+                            <span style={{ fontSize: 19, fontWeight: 700, color: t.text,
+                                           fontVariantNumeric: "tabular-nums", lineHeight: 1, marginTop: -1 }}>
+                              {tight ? Math.round(tight.remaining) : "—"}
+                              <span style={{ fontSize: 10, color: t.muted }}>%</span></span>
+                            <span style={{ fontSize: 8.5, color: t.muted, fontFamily: "'JetBrains Mono'",
+                                           lineHeight: 1, marginTop: 2 }}>{tight?.label ?? ""}</span>
+                          </Ring>
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: ".14em",
+                                          color: t.accent, fontFamily: "'JetBrains Mono'" }}>当前使用中</div>
+                            <div style={{ display: "flex", alignItems: "baseline", gap: 9, marginTop: 3 }}>
+                              <span style={{ fontSize: 24, fontWeight: 700, letterSpacing: "-.01em" }}>{cur.label}</span>
+                              <span style={{ fontSize: 12, color: t.text2, fontFamily: "'JetBrains Mono'" }}>
+                                {maskId(cur.email ?? "", privacy)}</span>
+                            </div>
+                            <div style={{ display: "flex", flexWrap: "wrap", gap: "2px 14px", marginTop: 6,
+                                          fontSize: 12, fontFamily: "'JetBrains Mono'", color: t.text2 }}>
+                              {/* ★ 每一段 nowrap、段与段之间才允许换行（同 codex hero）。 */}
+                              {agyHeroSlots.map((lab) => {
+                                const r = rows.find(x => x.label === lab);
+                                return (
+                                  <span key={lab} style={{ whiteSpace: "nowrap" }}
+                                        title={r ? undefined : `${lab} 窗口只有**当前登录**的号读得到（本机 RPC）`}>
+                                    {lab}{" "}
+                                    <b style={{ color: r ? winNumColor(r.remaining, t) : t.muted }}>
+                                      {r ? `${Math.round(r.remaining)}%` : "—"}</b>{" "}
+                                    <span style={{ color: t.muted }}>↻{r ? agyResetText(r).text : "—"}</span>
+                                  </span>
+                                );
+                              })}
+                            </div>
+                          </div>
+                          {agyBest && agyBest.sub !== cur.sub && (
+                            <div onClick={() => agyPool.switchTo(agyBest.label)}
+                                 title="切过去 —— ★ 只对**下一次启动的** agy 生效，已经开着的会话不受影响"
+                                 style={{ background: t.accent, color: t.accentText, borderRadius: 10,
+                                          padding: "10px 16px", cursor: "pointer", textAlign: "center",
+                                          flexShrink: 0 }}>
+                              <div style={{ fontSize: 11.5, fontWeight: 700 }}>
+                                建议切到 {agyBest.label}({Math.round(agyBestPct!)}%)</div>
+                              <div style={{ fontSize: 13, fontWeight: 700, marginTop: 2 }}>切换 →</div>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })()}
                     <div data-cards-grid style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 12, alignContent: "start" }}>
                       {/* ★★ 池里**有号就一号一卡**；一个都没有时退回原来那张只读卡
                           （`agy-rotate login --current` 之前就是这个状态，它仍然成立）。
@@ -566,6 +680,16 @@ export default function App() {
                                      disabled={!!platPrefs.by?.agy?.off} winSlots={winSlots}
                                      busy={agyPool.busy} err={agyPool.err}
                                      onRefresh={agyPool.refresh}
+                                     /* ── 与 codex 账号卡对齐（用户 2026-09-13）── */
+                                     isSelected={selectedCard === a.sub}
+                                     reserveActions={selectedCard !== null}
+                                     isBest={agyBest?.sub === a.sub} bestPct={agyBestPct ?? undefined}
+                                     onSelect={() => setSelectedCard(selectedCard === a.sub ? null : a.sub)}
+                                     onRename={(next) => agyPool.renameTo(a.label, next)}
+                                     /* ★ 移除**不可逆**：卡片上两段确认，`agy-rotate remove`
+                                        另有一道拒绝删当值号的守卫（删掉它 = 既不在池里、
+                                        也没有别的登录态可回）。 */
+                                     onRemove={() => agyPool.removeIt(a.label)}
                                      onOpen={() => { setDrill("agy"); setPage("traffic"); }} />
                           ))
                         : (

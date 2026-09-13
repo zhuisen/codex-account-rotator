@@ -80,6 +80,10 @@ export function useAgyPool(enabled: boolean): {
   err: string | null;
   refresh: () => void;
   switchTo: (label: string) => void;
+  /** 改显示名。★ 与 codex 同款：label 只是昵称，身份始终是 `sub`。 */
+  renameTo: (label: string, next: string) => void;
+  /** 从池里移除。★ **不可逆** —— 卡片上有两段确认，CLI 侧另有一道拒绝删当值号的守卫。 */
+  removeIt: (label: string) => void;
   switching: string | null;
 } {
   const [accounts, setAccounts] = useState<AgyPoolAccount[]>([]);
@@ -139,6 +143,16 @@ export function useAgyPool(enabled: boolean): {
       .finally(() => setSwitching(null));
   }, [read]);
 
+  /** `switch` 之外的写操作。都要重读池 —— 改完名字/删完号，卡片得跟着变。 */
+  const runThen = useCallback((args: string[]) => {
+    void invoke<string>("run_agy_rotate", { args })
+      .then(() => read())
+      .catch((e: unknown) => setErr(String(e).slice(0, 200)));
+  }, [read]);
+  const renameTo = useCallback((label: string, next: string) =>
+    runThen(["rename", label, next]), [runThen]);
+  const removeIt = useCallback((label: string) => runThen(["remove", label]), [runThen]);
+
   const snapshotOf = useCallback((a: AgyPoolAccount, liveSnap: AgySnapshot | null) => {
     // ★★★ **本机 RPC 那份只在能证明归属时才用。**（2026-09-13 三方评审共同指出）
     //   `agy-quota` 打的是「第一个应答的 agy 进程」，而本机常有多个长期存活的进程、
@@ -152,5 +166,6 @@ export function useAgyPool(enabled: boolean): {
     return mine ? liveSnap : toSnapshot(a);
   }, []);
 
-  return { accounts, liveSub, drifted, snapshotOf, busy, err, refresh, switchTo, switching };
+  return { accounts, liveSub, drifted, snapshotOf, busy, err, refresh, switchTo,
+           renameTo, removeIt, switching };
 }

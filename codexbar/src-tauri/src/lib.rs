@@ -695,10 +695,14 @@ fn read_agy_pool() -> Result<Option<String>, String> {
 ///   · `live`   —— 只读钥匙串，回答"**现在**到底是谁登录着"。★ 必须现读而不是用池里的
 ///     `live_seen`：那个槽被多个常驻 agy 进程并发写，实测 17:58 装进 B、18:23 被一个
 ///     身份为 A 的旧进程在自己 token 到期时写回，而 `live_seen` 毫不知情。
+///   · `rename` / `remove` —— 2026-09-13 用户要求 Gemini 档与 Codex 档**功能对齐**，
+///     而账号卡上本来就有这两个。`remove` **不可逆**，所以它与 codex 卡同款：
+///     卡片上是两段确认（先亮「确认删除」），CLI 侧另有一道守卫拒绝删掉当值号。
+///     ⚠️ `login` 仍然**不在**白名单里：它会起一个交互式 agy，GUI 里跑必然挂死。
 /// 与账号池那条 `ALLOWED_CMDS` 同一条理由：两套语义混一个白名单迟早加错。
 #[tauri::command]
 async fn run_agy_rotate(args: Vec<String>) -> Result<String, String> {
-    const ALLOWED: &[&str] = &["quota", "switch", "live"];
+    const ALLOWED: &[&str] = &["quota", "switch", "live", "rename", "remove"];
     let sub = args.first().cloned().unwrap_or_default();
     if !ALLOWED.contains(&sub.as_str()) {
         return Err(format!("disallowed agy-rotate subcommand: {:?}", sub));

@@ -515,9 +515,12 @@ class TheGoogleTabShowsThePoolNotAReadOnlyCard(unittest.TestCase):
         allowed = set(re.findall(r'"([a-z-]+)"', m.group(1)))
         # ★ 判据是**危险的那几个不在里面**，不是"清单逐字等于某个值"。
         #   写死清单的话，加一条幂等只读命令（`live`）也会变红 —— 会假红的闸等于没有。
-        self.assertEqual(allowed & {"login", "remove", "rename", "pick", "auto"}, set(),
-                         "★★★ 白名单放进了会挂死或不可逆的子命令")
-        self.assertTrue(allowed <= {"quota", "switch", "live", "list"},
+        # ⚠️ `rename`/`remove` 2026-09-13 起**是允许的**（用户要求 Gemini 档与 Codex 档
+        #    功能对齐，而账号卡上本来就有这两个）。`remove` 不可逆，靠卡片上的两段确认
+        #    与 CLI 侧「拒绝删当值号」那道守卫兜着。真正不能放的是会**挂死 GUI** 的那个。
+        self.assertEqual(allowed & {"login", "pick", "auto"}, set(),
+                         "★★★ 白名单放进了会挂死 GUI 的子命令")
+        self.assertTrue(allowed <= {"quota", "switch", "live", "rename", "remove", "list"},
                         f"★★ 白名单里有没审过的子命令: {sorted(allowed)}")
 
     def test_the_scripts_are_bundled(self):
@@ -735,7 +738,12 @@ class TheCurrentAccountIsProbedNotRemembered(unittest.TestCase):
 
     def test_the_probe_is_allowed_through_the_bridge(self):
         i = self.RS.index("async fn run_agy_rotate(")
-        self.assertIn('ALLOWED: &[&str] = &["quota", "switch", "live"]', self.RS[i:i + 500],
+        import re as _re
+        m = _re.search(r'ALLOWED: &\[&str\] = &\[([^\]]*)\]', self.RS[i:i + 500])
+        self.assertIsNotNone(m, "★ 白名单不见了")
+        # ★ 判据是「`live` 在里面」，不是「清单逐字等于某个值」——
+        #   后者在加一条幂等子命令时也会变红，而会假红的闸等于没有。
+        self.assertIn("live", _re.findall(r'"([a-z-]+)"', m.group(1)),
                       "★ `live` 不在白名单里 ⇒ 前端那次 invoke 必被拒")
 
     def test_a_failed_probe_does_not_erase_the_fallback(self):
@@ -774,41 +782,11 @@ class TheCurrentAccountIsProbedNotRemembered(unittest.TestCase):
         self.assertTrue(got["drifted"], "★ 钥匙串里是 A、我们记着 B，却没报漂移")
 
 
-class AMissingWindowSaysSoInsteadOfGoingBlank(unittest.TestCase):
-    """★★ 非当值号读不到周窗口，此前渲染成 `visibility: hidden` 的**一整行空白** ——
-    用户直接问「为什么这个号少了一个窗口」。
-
-    本仓 §5d 的规矩是「**读不到显 `—`，不显 `0`**」，而"什么都不显"比显 0 更糟：
-    它把「读不到」伪装成「没有这个窗口」，两者的下一步动作完全相反。
-    高度仍与真行同构（跨卡对齐靠它），只是把话说出来。
-    """
-
-    SRC = (ROOT / "codexbar" / "src" / "components" / "AgyCard.tsx").read_text(encoding="utf-8")
-
-    def _code(self):
-        return re.sub(r"\{?/\*[\s\S]*?\*/\}?", "", self.SRC)
-
-    def test_the_placeholder_row_is_no_longer_invisible(self):
-        self.assertNotIn('visibility: "hidden"', self._code(),
-                         "★★ 缺失窗口又变回了纯空白占位")
-
-    def test_it_renders_a_dash(self):
-        code = self._code()
-        i = code.index("const row = rows.find")
-        seg = code[i:i + 900]
-        self.assertIn(">—<", seg, "★ 缺失窗口没有显示 `—`")
-
-    def test_the_tooltip_says_why_and_what_to_do(self):
-        """★ 文案要说**原因**和**怎么才能看到**，不是只说"没有"（§5d 披露）。"""
-        code = self._code()
-        i = code.index("const missTitle")
-        # ⚠️ **不用定长切片**。第一版写 `code[i:i+500]`，变异把函数改名、把原体留在旁边，
-        #   窗口就滑进了下一段、断言照样命中 ⇒ 闸是空的（本仓 §7.-1 第 3 条）。
-        #   切到**结构边界**：下一个同级 `const`/`return`。
-        ends = [j for j in (code.find("\n  const ", i + 1), code.find("\n  return", i + 1)) if j > 0]
-        seg = code[i:min(ends)] if ends else code[i:]
-        self.assertIn("当前登录", seg, "★ 没说清为什么只有当值号有")
-        self.assertIn("切过去", seg, "★ 没给出可执行的下一步")
+# ⚠️ `AMissingWindowSaysSoInsteadOfGoingBlank` 已搬到
+#    `tests/test_missing_window_says_so.py`（2026-09-13）。搬的理由是它**必须切到
+#    窗口行那一段**再断言：`AgyCard` 的**动作条**也用 `visibility: hidden` 占位
+#    （那是对的 —— 兄弟卡要等高），整文件扫会把它一起判红，当场假红一次。
+#    留一个只能靠删真东西才能变绿的闸，人学会的是关掉它。
 
 
 class TheWeeklyReadingMustProveWhoItBelongsTo(unittest.TestCase):
