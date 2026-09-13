@@ -58,10 +58,15 @@ mkdir -p ~/.local/bin
 ln -sf "$PWD/codex-rotate" ~/.local/bin/codex-rotate   # 池管理 CLI
 ln -sf "$PWD/cx"           ~/.local/bin/cx             # 单号 wrapper
 ln -sf "$PWD/proxy/cxp"    ~/.local/bin/cxp            # 日常入口:经代理多号轮换
-chmod +x codex-rotate cx proxy/cxp proxy/auth-token
+ln -sf "$PWD/agy-rotate"   ~/.local/bin/agy-rotate     # agy(Antigravity)账号池 CLI
+chmod +x codex-rotate cx proxy/cxp proxy/auth-token agy-rotate
 ```
 
 把 `~/.local/bin` 放进 `PATH`。
+
+> ★ `agy-rotate` 与 §5「数据源」那个 **`bin/agy` wrapper 是两件事**，别混：
+> 前者是账号池 CLI（`login` / `switch` / `auto` / `quota`），**名字不与 agy 自身冲突**，
+> 放 `~/.local/bin` 安全；后者必须放在 `~/.local/bin` **之前**，否则被 agy 的自动更新抹掉。
 
 ---
 
