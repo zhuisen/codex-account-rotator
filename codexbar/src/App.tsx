@@ -29,7 +29,7 @@ import { useGrokQuota } from "./hooks/useGrokQuota";
 import GrokCard from "./components/GrokCard";
 import { useAgyQuota } from "./hooks/useAgyQuota";
 import AgyCard from "./components/AgyCard";
-import ProviderSection from "./components/ProviderSection";
+import ProviderTabs, { type ProviderKey } from "./components/ProviderTabs";
 import { IconTicket } from "./components/CardBadge";
 import ProbeButton from "./components/ProbeButton";
 import PlanBadge from "./components/PlanBadge";
@@ -77,6 +77,17 @@ export default function App() {
   /** 时间范围（交接稿 §7 的 `RangeState`）。★ **默认 30d**（v1.5 是 14d）。
    *  总览与平台详情**共用这一份** —— 钻进详情再返回不该把档位重置。 */
   const [trafficSt, setTrafficSt] = useState<RangeState>(DEFAULT_RANGE);
+  /** 总览当前看哪一家。★ 记进 localStorage：切到别的页再回来不该跳回第一档 ——
+   *  这一档是"我在管哪一家账号"，不是一次性的筛选。 */
+  const [provider, setProvider] = useState<ProviderKey>(() => {
+    try {
+      const v = localStorage.getItem("codexbar_provider");
+      return v === "google" || v === "xai" ? v : "codex";
+    } catch { return "codex"; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem("codexbar_provider", provider); } catch { /* 隐私模式下写不了，忽略 */ }
+  }, [provider]);
   const [drill, setDrill] = useState<string | null>(null);   // 平台详情:null = 停在总览
   const [detailModal, setDetailModal] = useState<AccountDetail | null>(null);
   const [selectedCard, setSelectedCard] = useState<string | null>(null);
@@ -338,13 +349,41 @@ export default function App() {
                   {/* ★ 标题**永不断字**。窄窗下曾被劈成「总 / 览」(用户 2026-08-24 截图)。 */}
                   <span style={{ fontSize: 20, fontWeight: 700, letterSpacing: "-.01em",
                                  whiteSpace: "nowrap", flexShrink: 0 }}>总览</span>
-                  {/* ★ 这行摘要是**第一个该让位**的:窄窗下它的信息价值最低(下面每张卡都写着状态),
-                      所以给 `minWidth:0` + 省略号,让它先缩,把空间让给按钮。 */}
-                  <span style={{ fontSize: 11.5, color: t.muted, fontFamily: "'JetBrains Mono'",
-                                 whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
-                                 minWidth: 0 }}>{summary}</span>
+                  <ProviderTabs t={t} cur={provider} on={setProvider}
+                    items={[
+                      { key: "codex", label: "Codex", color: colorOf(traffic, "codex"),
+                        // ★ 数的是**网格里渲染出来的**那些（死号在下面的折叠区里，不算）——
+                        //   与 `ProviderTab.count` 的定义一致：写"池里有几个"就是在说
+                        //   一件界面上看不到的事。
+                        count: accounts.filter((a) => a.status !== "dead").length,
+                        note: "账号池 · 经本地代理逐请求换号 · 5h/周双窗口" },
+                      { key: "google", label: "Google", color: colorOf(traffic, "agy"),
+                        count: 1, note: "Antigravity · 启动前换凭证（agy 只在启动时读）" },
+                      { key: "xai", label: "xAI", color: colorOf(traffic, "grok"),
+                        count: 1, note: "Grok · 单号只读 · 周窗口" },
+                    ]}
+                    onAdd={(k) => showToast(k === "codex"
+                      ? "加号：终端里跑 `codex-rotate login`"
+                      : k === "google"
+                        ? "加号：终端里跑 `agy-rotate login`"
+                        : "grok 是单号只读 —— 登录由 grok CLI 自己管")} />
+                  {/* ★ 这行摘要**只在 Codex 档显示**：它数的是 `accounts`（codex 池）——
+                      在 Google 档上写着「7 nodes · 6 活」是一句关于另一家的话，
+                      而它看起来完全像在描述眼前这一档。
+                      ★ 仍是**第一个该让位**的:窄窗下信息价值最低(每张卡都写着状态)，
+                      所以给 `minWidth:0` + 省略号，先缩它，把空间让给按钮。 */}
+                  {provider === "codex" && (
+                    <span style={{ fontSize: 11.5, color: t.muted, fontFamily: "'JetBrains Mono'",
+                                   whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
+                                   minWidth: 0 }}>{summary}</span>
+                  )}
                 </div>
                 <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 5 }}>
+                {/* ★★★ 这一排全是 **codex 池**的动作（刷新全池 / 检查 token / 探针全池 /
+                    自动切号 / 冷却），所以只在 Codex 档显示。
+                    最要命的是「探针 全池」——它**是花钱的**；挂在 Google 档上，
+                    用户看着 agy 的卡按下去，扣的是 codex 的额度。 */}
+                {provider === "codex" && (
                 <div style={{ display: "flex", gap: 7, alignItems: "center",
                               flexWrap: "wrap", justifyContent: "flex-end", rowGap: 7 }}>
                   <GhostButton t={t} onClick={() => void run("refresh-all", ["refresh-all", "--notify"], `已刷新全池 · ${counts.total} 个号`)} loading={loadingAction === "refresh-all"} loadingText="刷新中…"><IconRefresh spin={loadingAction === "refresh-all"} />刷新全池</GhostButton>
@@ -373,7 +412,10 @@ export default function App() {
                   <span style={{ width: 1, height: 18, background: t.divider, margin: "0 1px" }} />
                   <GhostButton t={t} onClick={() => void run("cool", ["cool", "300"], `已冷却 ${slots[currentNode ?? ""]?.label ?? "当前号"}`)} loading={loadingAction === "cool"} loadingText="冷却中…">冷却当前号</GhostButton>
                   <GhostButton t={t} onClick={() => void run("uncool", ["uncool", "all"], "已清除所有冷却")} loading={loadingAction === "uncool"} loadingText="解冻中…">清除冷却</GhostButton>
-                </div>
+                </div>)}
+                {/* ★ 新鲜度数的是 **codex 池**的快照覆盖度（`6/7 新鲜`）——
+                    在 Google 档上它描述的是另一家，与摘要那行同一条理由。 */}
+                {provider === "codex" && (
                 <span style={{ fontSize: 10, color: t.muted, fontFamily: "'JetBrains Mono'" }}>
                   {/* ★★ 原文是「上次全池刷新 X 前」,而它取的是**全池最大值** —— 那句话本身就是假的:
                       只要有一个号刚被刷新,它就显示「刚刚」,哪怕另一个号的快照已经陈旧 3.8 天。
@@ -394,11 +436,13 @@ export default function App() {
                           : `全池 ${total} 个都是新的 · ${fmtAgo(lastRefreshAt)}`;
                       })()
                     : "尚未刷新过全池"}
-                </span>
+                </span>)}
                 </div>
               </div>
 
-              {(() => {
+              {/* ★★ Hero 是 **codex 的当值号**。挂在 Google 档上会写着「当前使用中 Asen」，
+                  而那是另一家的账号 —— 与摘要那行同一条理由，且更显眼。 */}
+              {provider === "codex" && (() => {
                 const cur = accounts.find(a => a.aid === currentNode);
                 const betterExists = hero && hero.aid !== currentNode;
                 if (!cur) return null;
@@ -486,11 +530,13 @@ export default function App() {
                         改成 minmax(0,1fr) 之后,列能缩、省略号接手,布局不再受内容宽度摆布。 */}
                     {/* `data-cards-grid` 供 uishot 探针定位这一排卡片（对齐闸只看格子里的，
                         hero 卡也有同名窗口行，混进来会变成假红）。不参与样式。 */}
-                    {/* ★★ 分区按**供应商**，不是按卡片类型 —— 三家的账号语义不同
-                        （codex 热切 / agy 启动前切 / grok 只读），摆在一起会让读者
-                        拿同一套直觉去理解它们。见 `ProviderSection` 的说明。 */}
-                    <ProviderSection t={t} title="OpenAI" count={alive.length}
-                                     note="账号池 · 经本地代理逐请求换号 · 5h/周双窗口">
+                    {/* ★★ 一次只渲染**选中的那一档**。三家的账号语义不同
+                        （codex 逐请求热切 / agy 启动前换凭证 / grok 只读），
+                        竖着堆在一页里读者会拿同一套直觉去理解它们，而且每档只占三分之一屏。
+                        分档之后卡片能用满整行宽度 —— 用户 2026-09-13 给的样式就是这个。
+                        ★ 每档各自一张 `data-cards-grid`：uishot 的对齐闸按排比较，
+                          这样它只在同一档内比，不会拿 grok 卡去跟 codex 卡比高度。 */}
+                    {provider === "codex" && (<>
                     <div data-cards-grid style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 12, alignContent: "start" }}>
                       {alive.map((a) => {
                         const shortcutIdx = aliveByLabel.findIndex(x => x.aid === a.aid);
@@ -515,15 +561,8 @@ export default function App() {
                                 on ? `${a.node} 已恢复轮换` : `${a.node} 已停用轮换`)} />
                       );})}
                     </div>
-                    </ProviderSection>
-
-                    {/* ★ agy 卡**不进 `alive` 数组**,理由与 grok 完全一致
-                        （⌘1~⌘9 会"切"到一个切不了的东西上,且不报错）。
-                        闸在 tests/test_agy_not_in_pool_ui.py。
-                        ★ 没有 `privacy` prop:agy 的额度响应里**没有任何身份信息**
-                        （接口无鉴权、不返回账号），没有可遮的东西。 */}
-                    <ProviderSection t={t} title="Google"
-                                     note="Antigravity · 启动前换凭证（agy 只在启动时读）">
+                    </>)}
+                    {provider === "google" && (<>
                     <div data-cards-grid style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 12, alignContent: "start" }}>
                       <AgyCard t={t} color={colorOf(traffic, "agy")} snap={agySnap}
                                disabled={!!platPrefs.by?.agy?.off} winSlots={winSlots}
@@ -531,9 +570,8 @@ export default function App() {
                                onRefresh={refreshAgy}
                                onOpen={() => { setDrill("agy"); setPage("traffic"); }} />
                     </div>
-                    </ProviderSection>
-
-                    <ProviderSection t={t} title="xAI" note="Grok · 单号只读 · 周窗口">
+                    </>)}
+                    {provider === "xai" && (<>
                     <div data-cards-grid style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 12, alignContent: "start" }}>
                       {/* ★ grok 卡。**渲染在格子里,但绝不进 `alive` 数组** —— 那个数组同时驱动
                           ⌘1~⌘9 切号(`aliveByLabel[idx]` 直接 switch)、计数徽章、探针全池的号数、
@@ -545,8 +583,9 @@ export default function App() {
                                 onRefresh={refreshGrok}
                                 onOpen={() => { setDrill("grok"); setPage("traffic"); }} />
                     </div>
-                    </ProviderSection>
-                    {dead.length > 0 && (
+                    </>)}
+                    {/* ★ 失效账号也是 codex 池的 —— 别挂在别家的档上 */}
+                    {provider === "codex" && dead.length > 0 && (
                       <details style={{ marginTop: 12 }}>
                         <summary style={{ fontSize: 12, color: t.muted, cursor: "pointer", padding: "8px 14px", background: t.cardBg, borderRadius: 10, border: `1px solid ${t.cardBorder}`, userSelect: "none", display: "flex", alignItems: "center", gap: 6 }}>
                           <span style={{ width: 6, height: 6, borderRadius: "50%", background: "#E0524D" }} />
