@@ -226,13 +226,20 @@ class ButtonsNeverBreakMidWord(unittest.TestCase):
         self.assertRegex(m.group(0), r"minWidth:\s*[1-9]\d",
                          "账号名没有宽度下限")
 
-    def test_summary_yields_space_first(self):
-        """窄窗下该让位的是那行摘要(下面每张卡都写着状态),不是按钮。"""
-        m = re.search(r"\{summary\}", self.app)
-        self.assertIsNotNone(m, "找不到 summary —— 断言可能打空了")
-        block = self.app[max(0, m.start() - 400):m.start()]
-        self.assertIn("textOverflow", block, "summary 没有省略号,不会优雅地让位")
-        self.assertIn("minWidth: 0", block, "summary 没有 minWidth:0,flex 不会让它先缩")
+    def test_the_title_row_still_has_something_that_yields(self):
+        """窄窗下该让位的是**信息价值最低**的那一项，不是按钮。
+
+        ⚠️ 2026-09-13：原来让位的是 `7 nodes · 6 活 · 0 冷 · 1 死` 那行摘要，
+        用户要求删掉了它。所以这条闸改成盯**标题行里那个会缩的容器** ——
+        断言不能继续找一个已经不存在的东西，那样它测的是"我还在"而不是"它会让位"。
+        """
+        m = re.search(r"总览</span>", self.app)
+        self.assertIsNotNone(m, "找不到总览标题 —— 断言打空了")
+        block = self.app[max(0, m.start() - 500):m.start() + 900]
+        self.assertIn("minWidth: 0", block,
+                      "标题行没有任何可收缩的容器 —— 窄窗下会挤按钮")
+        self.assertIn("flexShrink: 0", block,
+                      "★ 标题本身没有 flexShrink:0 —— 窄窗下「总览」会被劈成「总 / 览」")
 
 
 class WideTableMinWidthIsDerivedNotMeasured(unittest.TestCase):

@@ -58,7 +58,10 @@
       "../../relay-ctl": "scripts/relay-ctl",
       "../../relay/__init__.py": "scripts/relay/__init__.py",
       "../../relay/store.py": "scripts/relay/store.py",
-      "../../relay/monitor.py": "scripts/relay/monitor.py"
+      "../../relay/monitor.py": "scripts/relay/monitor.py",
+      "../../agy-rotate": "scripts/agy-rotate",
+      "../../agy/__init__.py": "scripts/agy/__init__.py",
+      "../../agy/pool.py": "scripts/agy/pool.py"
     }
   }
 }

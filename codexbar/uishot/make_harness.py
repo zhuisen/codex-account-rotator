@@ -602,6 +602,30 @@ function relayEntry() {
       //   而我们要验的正是那一档画成什么样。同 `read_rotation_snapshot` 那条的教训。
       //   ⚠️ 这里返回的是**同一份 90 天快照** —— 所以年度视图里 1~5 月是空格。
       //   那不是 bug，正是本机今天的真实形态（数据从 2026-03 才开始），也正好验到补零那一路。
+      // ★ agy 账号池。**不打桩就是假绿**：落到 default 返回 null ⇒ 池恒为空 ⇒
+      //   Google 档永远退回那张只读卡，而"一号一卡 + 切换"整条路一个像素都验不到。
+      //   `?agypool=n` 造 n 个号（默认 0 = 没建池，就是退回只读卡那条路）。
+      case 'read_agy_pool': {
+        var n = parseInt(p.get('agypool') || '0', 10);
+        if (!n) return Promise.resolve(null);
+        var accs = {}, subs = [];
+        for (var i = 0; i < n; i++) {
+          var sub = 'sub' + i;
+          subs.push(sub);
+          accs[sub] = {
+            label: ['qq55', 'Asen', 'Huo', 'wing'][i] || ('acc' + i),
+            email: 'demo' + i + '@example.com',
+            // 第二个号刻意造成**低额度**：选号阈值那条线只有在有高有低时才看得出来。
+            quota: { gemini: { remaining: i === 1 ? 0.08 : 0.956,
+                               reset: new Date(__NOW__ * 1000 + 4300000).toISOString() },
+                     claude: { remaining: 1, reset: new Date(__NOW__ * 1000 + 18000000).toISOString() } },
+            quota_at: __NOW__,
+          };
+        }
+        return Promise.resolve(JSON.stringify({ accounts: accs, live_seen: subs[0] }));
+      }
+      case 'run_agy_rotate':
+        return Promise.resolve('ok');
       case 'read_traffic_snapshot_days':
       case 'read_traffic_snapshot':
       case 'run_traffic': {

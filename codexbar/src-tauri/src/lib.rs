@@ -462,6 +462,9 @@ const GROK_COALESCE_SECS: u64 = 300;
 /// 但 agy 这边更简单:它的额度接口**无鉴权**,我们手上根本没有 agy 的凭证可泄。
 /// 仍然单独落盘,是因为它和 grok 一样不是账号池成员,进 `slots` 就会被轮换器遍历。
 const AGY_SNAPSHOT: &str = ".agy-quota.json";
+/// agy 账号池。与 `.agy-quota.json` **是两份东西**：前者是本机 RPC 读到的
+/// 「当前登录那个号」的 4 个桶，这份是**池里每个号**的云端额度（5h 窗口）。
+const AGY_POOL: &str = ".agy-pool.json";
 
 /// 独立于 `GROK_LOCK`:两条额度链路互不相干,共用一把锁只会让一边等另一边。
 static AGY_LOCK: Mutex<()> = Mutex::new(());
@@ -663,6 +666,46 @@ async fn relay_ctl(sub: String, arg: Option<String>, payload: Option<String>) ->
 #[tauri::command]
 fn read_agy_quota() -> Result<Option<String>, String> {
     read_sidecar(AGY_SNAPSHOT)
+}
+
+/// agy 账号池（`.agy-pool.json`）。★ 只读、不解析 —— 前端自己解，同 `read_traffic_snapshot`。
+///
+/// ⚠️ 这份文件里有 **OAuth client 与账号元数据**（凭证本体在 `auth/agy/`），
+/// 它已 gitignore；这里只把它交给同机的前端，不经过任何网络。
+#[tauri::command]
+fn read_agy_pool() -> Result<Option<String>, String> {
+    read_sidecar(AGY_POOL)
+}
+
+/// 跑一条 `agy-rotate` 子命令。
+///
+/// ★★★ **白名单是这条命令存在的理由。** `agy-rotate` 里有 `login`（会起一个交互式 agy，
+/// GUI 里跑必然挂死）和 `remove`（不可逆）。界面上能点的只有这两条**幂等的读/切**：
+///   · `quota`  —— 零消耗、只读云端额度
+///   · `switch` —— 换凭证；它自己会拒绝"切到当前号"，也会先备份
+/// 与账号池那条 `ALLOWED_CMDS` 同一条理由：两套语义混一个白名单迟早加错。
+#[tauri::command]
+async fn run_agy_rotate(args: Vec<String>) -> Result<String, String> {
+    const ALLOWED: &[&str] = &["quota", "switch"];
+    let sub = args.first().cloned().unwrap_or_default();
+    if !ALLOWED.contains(&sub.as_str()) {
+        return Err(format!("disallowed agy-rotate subcommand: {:?}", sub));
+    }
+    // ★ `switch` 之后必须让前端重读池：`--json` 只有 quota 有，switch 回的是人话。
+    let script = format!("{}/agy-rotate", script_dir());
+    let out = tauri::async_runtime::spawn_blocking(move || {
+        let _guard = AGY_LOCK.lock();
+        py_cmd().arg(&script).args(&args).output()
+    })
+    .await
+    .map_err(|e| format!("join: {}", e))?
+    .map_err(|e: std::io::Error| format!("exec: {}", e))?;
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).to_string())
+    } else {
+        Err(format!("{}{}", String::from_utf8_lossy(&out.stdout),
+                    String::from_utf8_lossy(&out.stderr)))
+    }
 }
 
 /// 取一次 agy 额度。
@@ -1884,6 +1927,8 @@ pub fn run() {
             read_grok_quota,
             run_grok_quota,
             read_agy_quota,
+            read_agy_pool,
+            run_agy_rotate,
             run_agy_quota,
             read_relay_snapshot,
             run_relay_usage,

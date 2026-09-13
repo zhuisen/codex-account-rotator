@@ -31,7 +31,8 @@ const MONO = "'JetBrains Mono'";
  *
  * ★ 颜色由调用方传入（`colorOf(traffic, "agy")`），不写死：用户在设置页能改平台色。
  */
-export default function AgyCard({ t, color, snap, busy, err, disabled, winSlots, onOpen, onRefresh }: {
+export default function AgyCard({ t, color, snap, busy, err, disabled, winSlots, onOpen, onRefresh,
+                                  label, email, isCurrent, onSwitch, switching }: {
   t: Theme;
   /** 与账号卡**同一份**窗口槽位表。agy 没有的窗口画一行隐藏等高行 —— 不占槽的话
    *  它的「5h」会和别人的「周」画在同一条线上。 */
@@ -45,6 +46,16 @@ export default function AgyCard({ t, color, snap, busy, err, disabled, winSlots,
   disabled?: boolean;
   onOpen?: () => void;
   onRefresh?: () => void;
+  // ── 账号池（2026-09-13 起 agy 可轮换；没有这些 prop 时退回原来的只读形态）──
+  /** 池里的显示名。缺省 `agy` —— 池还没建起来时就是这个。 */
+  label?: string;
+  email?: string;
+  /** 这个号是不是 agy 当前的登录态。 */
+  isCurrent?: boolean;
+  /** 切到这个号。★ **只对下一次启动的 agy 生效** —— agy 只在启动时读凭证，
+   *  已经开着的会话不受影响。这条必须写进 `title`，否则用户会以为点一下就切走了正在跑的那个。 */
+  onSwitch?: () => void;
+  switching?: boolean;
 }) {
   // 本机没有 agy / 已停用 ⇒ **零像素**。见 `agyQuotaVisible` 的注释。
   if (!agyQuotaVisible(snap, { disabled })) return null;
@@ -98,10 +109,28 @@ export default function AgyCard({ t, color, snap, busy, err, disabled, winSlots,
 
         <div style={{ flex: 1, minWidth: 0, alignSelf: "stretch", display: "flex", flexDirection: "column", gap: 4 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
-            <span style={{ fontSize: Z.name, fontWeight: 700, color }}>agy</span>
-            <span title="Antigravity 不在轮换池,只显示额度,不参与切号"
-                  style={{ fontSize: Z.curBadge, fontWeight: 700, padding: "1px 5px", borderRadius: 5,
-                           color, border: `1px solid ${hexA(color, .45)}` }}>只读</span>
+            <span style={{ fontSize: Z.name, fontWeight: 700, color, minWidth: 0,
+                           overflow: "hidden", textOverflow: "ellipsis" }}>{label ?? "agy"}</span>
+            {/* ★★ 徽章三态，**别合并**：
+                · 在池里且当值  → 「当前」（青底，与账号卡同一套语义）
+                · 在池里不当值  → 「切换」（可点）
+                · 不在池里      → 「只读」——这是 2026-09-13 之前的形态，没建池时仍然成立。
+                把后两者合并成一个灰标签，就等于回到用户问的那个问题：「不是解决了吗」。 */}
+            {isCurrent ? (
+              <span style={{ fontSize: Z.curBadge, fontWeight: 700, padding: "1px 5px",
+                             borderRadius: 5, color: t.accentText, background: t.accent }}>当前</span>
+            ) : onSwitch ? (
+              <span onClick={(e) => { e.stopPropagation(); if (!switching) onSwitch(); }}
+                    title="切到这个号 —— ★ 只对**下一次启动的** agy 生效，已经开着的会话不受影响"
+                    style={{ fontSize: Z.curBadge, fontWeight: 700, padding: "1px 5px",
+                             borderRadius: 5, cursor: switching ? "default" : "pointer",
+                             color, border: `1px solid ${hexA(color, .45)}`,
+                             opacity: switching ? .5 : 1 }}>{switching ? "切换中…" : "切换"}</span>
+            ) : (
+              <span title="Antigravity 还没建账号池 —— `agy-rotate login --current` 收编当前号"
+                    style={{ fontSize: Z.curBadge, fontWeight: 700, padding: "1px 5px", borderRadius: 5,
+                             color, border: `1px solid ${hexA(color, .45)}` }}>只读</span>
+            )}
             {/* ★ 降级说明**只在这里**,一个字符 + 悬浮。理由见 StaleMark 的文件头。 */}
             {degraded && snap && <StaleMark t={t} note={agyReasonNote(snap)} tone={tone} size={11} />}
             {/* 读**本机 sidecar** 失败(IO 层),与"额度读不到"是两回事,所以文案不同。 */}
@@ -160,7 +189,10 @@ export default function AgyCard({ t, color, snap, busy, err, disabled, winSlots,
             <span style={{ fontSize: Z.exp, fontFamily: MONO, whiteSpace: "nowrap",
                          overflow: "hidden", textOverflow: "ellipsis" }}>{
               shown?.stale ? `${fmtAgo(shown.at ?? undefined)}的读数`
-                : shown ? "Google 订阅 · 不在轮换池"
+                // ★ 「在/不在轮换池」是**事实陈述**，跟着池走。写死"不在"是 2026-09-13
+                //   之前的事实，池建起来之后它就变成了一句假话。
+                : shown ? (email ?? (onSwitch || isCurrent ? "Google 订阅 · 在轮换池"
+                                                          : "Google 订阅 · 不在轮换池"))
                 : "额度暂时读不到"}</span>
             {/* agy 没有重置卡这个概念，占位只为让页脚与账号卡等高。 */}
             <span style={{ alignSelf: "flex-end" }}><CardBadgeGhost /></span>

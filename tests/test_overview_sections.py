@@ -70,12 +70,14 @@ class CodexOnlyThingsStayOnTheCodexTab(unittest.TestCase):
     """★★★ 分档之后，页面上的一切默认都在说「当前这一档」。
 
     但总览上大半是 codex 池专属的，挂在别家档上**看起来毫无异样**却说的是另一家的事。
+
+    ⚠️ 2026-09-13：`7 nodes · 6 活` 那行摘要已按用户要求整行删掉，所以它不在下面这张表里 ——
+      留着一条指向不存在的东西的断言，比没有断言更糟：它让人以为那件事还有人守着。
     """
 
     #: 每条：(说明, 必须被 `provider === "codex"` 包住的那段代码的锚点)
     GUARDED = [
         ("Hero（当值号）", "{provider === \"codex\" && (() => {"),
-        ("摘要 `7 nodes · 6 活`", "{provider === \"codex\" && (\n                    <span"),
         ("失效账号折叠区", "{provider === \"codex\" && dead.length > 0 && ("),
     ]
 

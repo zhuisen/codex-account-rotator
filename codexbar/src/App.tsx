@@ -30,6 +30,7 @@ import GrokCard from "./components/GrokCard";
 import { useAgyQuota } from "./hooks/useAgyQuota";
 import AgyCard from "./components/AgyCard";
 import ProviderTabs, { type ProviderKey } from "./components/ProviderTabs";
+import { useAgyPool } from "./hooks/useAgyPool";
 import { IconTicket } from "./components/CardBadge";
 import ProbeButton from "./components/ProbeButton";
 import PlanBadge from "./components/PlanBadge";
@@ -68,7 +69,7 @@ const IconEyeOff = () => <svg width="13" height="13" viewBox="0 0 24 24" fill="n
 const IconMoon = () => <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>;
 
 export default function App() {
-  const { accounts, hero, currentNode, slots, counts, tokens, lastRefreshAt, freshness, loadingAction, toast, refresh, run, showToast } = useStore();
+  const { accounts, hero, currentNode, counts, tokens, lastRefreshAt, freshness, loadingAction, toast, refresh, run, showToast } = useStore();
   const [theme, setTheme] = useState<"dark" | "light">("dark");
   // 版本号运行期从 tauri 取,别再写死(发版时漏改前端字符串是老毛病)
   const [ver, setVer] = useState("");
@@ -134,7 +135,6 @@ export default function App() {
   const win = useMemo(() => getCurrentWindow(), []);
   // 平台判定只影响窗口控制的位置与形状,不影响任何数据逻辑。
   const winUI = useMemo(() => isWindowsUI(), []);
-  const summary = `${counts.total} nodes · ${counts.live} 活 · ${counts.cool} 冷 · ${counts.dead} 死`;
 
   // ★ Dock 显示开关在 localStorage,Rust 侧读不到 —— 每次启动由主窗口 webview 应用一次,
   //   否则重启后 Dock 图标会消失(设置还开着,行为却回到纯菜单栏)。
@@ -182,6 +182,9 @@ export default function App() {
   //     "去读哪一份数据"，循环依赖。差一天不会改变结果 —— 档位是 90/365/1095 三档，
   //     只有恰好卡在档界上时才可能差一档，而那时下一次保鲜检查就会纠正过来。
   //     **显示**一律用 `todayOf(data)`（桶按本地日切，挂钟在午夜前后会差一天）。
+  // agy 账号池。★ 只在总览的 Google 档才读 —— 与 grok 额度同一条纪律：
+  //   不是每个页面都需要它，而"顺手读一下"会变成"每次开 app 都读"。
+  const agyPool = useAgyPool(page === "overview" && provider === "google");
   const trafficDays = daysNeeded(trafficSt, todayOf(null));
   const { data: traffic, raw: trafficRaw, cacheMode, prefs: platPrefs, busy: trafficBusy,
           err: trafficErr, refresh: refreshTraffic } = useTraffic({
@@ -358,7 +361,8 @@ export default function App() {
                         count: accounts.filter((a) => a.status !== "dead").length,
                         note: "账号池 · 经本地代理逐请求换号 · 5h/周双窗口" },
                       { key: "google", label: "Google", color: colorOf(traffic, "agy"),
-                        count: 1, note: "Antigravity · 启动前换凭证（agy 只在启动时读）" },
+                        // ★ 同 Codex：数的是**画出来几张**。池空时退回那张只读卡，也是 1 张。
+                        count: Math.max(1, agyPool.accounts.length), note: "Antigravity · 启动前换凭证（agy 只在启动时读）" },
                       { key: "xai", label: "xAI", color: colorOf(traffic, "grok"),
                         count: 1, note: "Grok · 单号只读 · 周窗口" },
                     ]}
@@ -367,20 +371,10 @@ export default function App() {
                       : k === "google"
                         ? "加号：终端里跑 `agy-rotate login`"
                         : "grok 是单号只读 —— 登录由 grok CLI 自己管")} />
-                  {/* ★ 这行摘要**只在 Codex 档显示**：它数的是 `accounts`（codex 池）——
-                      在 Google 档上写着「7 nodes · 6 活」是一句关于另一家的话，
-                      而它看起来完全像在描述眼前这一档。
-                      ★ 仍是**第一个该让位**的:窄窗下信息价值最低(每张卡都写着状态)，
-                      所以给 `minWidth:0` + 省略号，先缩它，把空间让给按钮。 */}
-                  {provider === "codex" && (
-                    <span style={{ fontSize: 11.5, color: t.muted, fontFamily: "'JetBrains Mono'",
-                                   whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
-                                   minWidth: 0 }}>{summary}</span>
-                  )}
                 </div>
                 <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 5 }}>
                 {/* ★★★ 这一排全是 **codex 池**的动作（刷新全池 / 检查 token / 探针全池 /
-                    自动切号 / 冷却），所以只在 Codex 档显示。
+                    自动切号），所以只在 Codex 档显示。
                     最要命的是「探针 全池」——它**是花钱的**；挂在 Google 档上，
                     用户看着 agy 的卡按下去，扣的是 codex 的额度。 */}
                 {provider === "codex" && (
@@ -410,8 +404,6 @@ export default function App() {
                     {autoSwitch ? "自动切号 开" : "自动切号"}
                   </span>
                   <span style={{ width: 1, height: 18, background: t.divider, margin: "0 1px" }} />
-                  <GhostButton t={t} onClick={() => void run("cool", ["cool", "300"], `已冷却 ${slots[currentNode ?? ""]?.label ?? "当前号"}`)} loading={loadingAction === "cool"} loadingText="冷却中…">冷却当前号</GhostButton>
-                  <GhostButton t={t} onClick={() => void run("uncool", ["uncool", "all"], "已清除所有冷却")} loading={loadingAction === "uncool"} loadingText="解冻中…">清除冷却</GhostButton>
                 </div>)}
                 {/* ★ 新鲜度数的是 **codex 池**的快照覆盖度（`6/7 新鲜`）——
                     在 Google 档上它描述的是另一家，与摘要那行同一条理由。 */}
@@ -564,11 +556,31 @@ export default function App() {
                     </>)}
                     {provider === "google" && (<>
                     <div data-cards-grid style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 12, alignContent: "start" }}>
-                      <AgyCard t={t} color={colorOf(traffic, "agy")} snap={agySnap}
-                               disabled={!!platPrefs.by?.agy?.off} winSlots={winSlots}
-                               busy={agyBusy} err={agyErr}
-                               onRefresh={refreshAgy}
-                               onOpen={() => { setDrill("agy"); setPage("traffic"); }} />
+                      {/* ★★ 池里**有号就一号一卡**；一个都没有时退回原来那张只读卡
+                          （`agy-rotate login --current` 之前就是这个状态，它仍然成立）。
+                          ★ 当值号的卡用**本机 RPC** 那份快照 —— 只有它带周窗口；
+                            其余号只有云端的 5h。少一行是真话，补一行假的「周 100%」不是。 */}
+                      {agyPool.accounts.length > 0
+                        ? agyPool.accounts.map((a) => (
+                            <AgyCard key={a.sub} t={t} color={colorOf(traffic, "agy")}
+                                     snap={agyPool.snapshotOf(a, agySnap)}
+                                     label={a.label} email={a.email ?? undefined}
+                                     isCurrent={a.sub === agyPool.liveSub}
+                                     onSwitch={a.sub === agyPool.liveSub ? undefined
+                                                                        : () => agyPool.switchTo(a.label)}
+                                     switching={agyPool.switching === a.label}
+                                     disabled={!!platPrefs.by?.agy?.off} winSlots={winSlots}
+                                     busy={agyPool.busy} err={agyPool.err}
+                                     onRefresh={agyPool.refresh}
+                                     onOpen={() => { setDrill("agy"); setPage("traffic"); }} />
+                          ))
+                        : (
+                            <AgyCard t={t} color={colorOf(traffic, "agy")} snap={agySnap}
+                                     disabled={!!platPrefs.by?.agy?.off} winSlots={winSlots}
+                                     busy={agyBusy} err={agyErr}
+                                     onRefresh={refreshAgy}
+                                     onOpen={() => { setDrill("agy"); setPage("traffic"); }} />
+                          )}
                     </div>
                     </>)}
                     {provider === "xai" && (<>
