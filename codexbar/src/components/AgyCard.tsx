@@ -76,6 +76,14 @@ export default function AgyCard({ t, color, snap, busy, err, disabled, winSlots,
   const slotRows = [...winSlots, ...mine.filter(l => !winSlots.includes(l))];
   const glow = rem != null && rem <= 20 ? (rem <= 10 ? "#E0524D" : "#E0901C") : undefined;
 
+  /** 这一格为什么读不到 —— 说清楚**原因**和**怎么才能看到**，不是只说"没有"。 */
+  const missTitle = (label: string, cur?: boolean) =>
+    cur
+      ? `${label} 窗口这次没读到`
+      // 云端 `fetchAvailableModels` 只返回 5h；周窗口只在本机 loopback RPC 里，
+      // 而那条**只看得到当前登录的那个号**。所以非当值号结构上就缺这一格。
+      : `${label} 窗口只有**当前登录**的号读得到（本机 RPC）——云端按账号那条只给 5h。切过去再刷新即可看到。`;
+
   return (
     <div onClick={onOpen} style={{
       position: "relative", background: t.cardBg,
@@ -150,12 +158,18 @@ export default function AgyCard({ t, color, snap, busy, err, disabled, winSlots,
           {rem != null && slotRows.map(label => {
             const row = rows.find(r => r.label === label);
             return !row ? (
-              // 没有这个窗口 ⇒ 同构隐藏行占位，高度由构造保证与真行一致。
-              <div key={label} aria-hidden style={{ display: "flex", alignItems: "center", gap: 6, visibility: "hidden" }}>
-                <span style={{ fontSize: Z.winLabel, fontFamily: MONO }}>{label}</span>
-                <div style={{ flex: 1, height: Z.bar }} />
-                <span style={{ fontSize: Z.pct, fontWeight: 600, fontFamily: MONO }}>00%</span>
-                <span style={{ fontSize: Z.eta, fontFamily: MONO }}>↻0d00h</span>
+              // ★★ 这一行以前是 `visibility: hidden` 的纯占位 —— 用户看到的是**一整行空白**，
+              //   连 `—` 都没有，于是直接问「为什么这个号少了一个窗口」。
+              //   本仓 §5d 的规矩是「**读不到显 `—`，不显 `0`**」，而"什么都不显"比显 0 还糟：
+              //   它把「读不到」伪装成了「没有这个窗口」，两者的下一步动作完全相反。
+              //   高度仍与真行同构（跨卡对齐靠它），只是把话说出来。
+              <div key={label} title={missTitle(label, isCurrent)}
+                   style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <span style={{ fontSize: Z.winLabel, color: t.muted, fontFamily: MONO }}>{label}</span>
+                <div style={{ flex: 1, height: Z.bar, borderRadius: 2, background: t.barTrack }} />
+                <span style={{ fontSize: Z.pct, fontWeight: 600, color: t.muted,
+                               fontFamily: MONO, fontVariantNumeric: "tabular-nums" }}>—</span>
+                <span style={{ fontSize: Z.eta, color: t.muted, fontFamily: MONO }}>↻—</span>
               </div>
             ) : (
               <div key={label} title={`${row.group ?? "?"} · 剩 ${row.remaining.toFixed(1)}%`}

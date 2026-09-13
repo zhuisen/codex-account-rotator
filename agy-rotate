@@ -290,6 +290,13 @@ def cmd_switch(args):
         return
     where = P.install_live(cred)
     _mark_live(pool)
+    if "--for-this-run" not in args:
+        # ★★★ 记下**用户显式要的那个号**。`live_seen` 回答"钥匙串里现在是谁"，
+        #   而这个回答"用户要的是谁" —— 两件事，合并就没法发现被劫持。
+        #   `auto` 据此在钥匙串被别的 agy 进程写回之后**把用户的选择装回去**，
+        #   而不是看到"当前号额度还够"就 return（那等于静默撤销用户的操作）。
+        #   `bin/agy` 的 `--as` 传 `--for-this-run`：那是一次性指定，不是长期偏好。
+        pool["live_wanted"] = sub
     with P._lock(P.POOL):
         P.save(pool)
     print("已切到 [%s] —— ★ 只对**下一次启动的** agy 生效，已经开着的会话不受影响"
@@ -315,6 +322,25 @@ def cmd_auto(args):
         if len(accs) < 2:
             return
         live_sub = (P.claims(P.read_live()) or {}).get("sub")
+        # ★★★ **先兑现用户显式要的那个号，再谈"够不够用"。**（2026-09-13 三方评审共同指出）
+        #   钥匙串是**一个槽**，被多个常驻 agy 进程并发写：用户 switch 到 B 之后，
+        #   一个身份为 A 的旧进程会在自己 token 到期时把 A 写回去。此时下面那条
+        #   「当前号额度还够就 return」会看到 A、且 A 健康 ⇒ **静默放弃用户的选择**，
+        #   新会话仍是 A。用户看到的是"我明明切过了"。这比显示错更严重：
+        #   它让工具**撤销**了一个明确的指令，而且不出声。
+        want = pool.get("live_wanted")
+        if want and want in accs and live_sub != want:
+            cred, err = _refresh_one(want, accs[want], pool)
+            if not err:
+                where = P.install_live(cred)
+                _mark_live(pool)
+                with P._lock(P.POOL):
+                    P.save(pool)
+                print("[codexbar] agy 恢复成你选的 [%s]（钥匙串被别的 agy 进程写回过）%s"
+                      % (accs[want].get("label"),
+                         "" if where == "keyring" else " ⚠️ 只写了兜底文件，可能未生效"),
+                      file=sys.stderr)
+                return
         cur = accs.get(live_sub)
         if cur is not None and _score(cur) >= P.LOW_WATER:
             return
@@ -380,8 +406,39 @@ def cmd_remove(args):
     print("已移除 [%s]" % lbl)
 
 
+def cmd_live(args):
+    """**现在**到底是谁登录着 —— 只读钥匙串，不联网、不改任何状态。
+
+    ★★★ 存在理由：`live_seen` 是**我们上次写进去时看到的值**，而钥匙串是一个
+      **被多个长期存活的 agy 进程并发写**的单槽。实测 2026-09-13：
+      17:58 我们装进 B，18:23:17 一个身份为 A 的常驻 agy 在它自己的 access token
+      到期（18:23:16）时刷新并把整份凭证写回钥匙串 —— B 被冲掉，而 `live_seen`
+      毫不知情，界面继续理直气壮地显示 B。用户看到的就是「界面说 B、agy 里是 A」。
+
+    所以 UI 的「当前」徽章必须由**这条现读**驱动，`live_seen` 降级成诊断字段。
+    两个事实都给出来，分歧就看得见，而不是被抹平成一个好看的谎。
+    """
+    pool = P.load()
+    cl = P.claims(P.read_live()) or {}
+    sub = cl.get("sub")
+    seen = pool.get("live_seen")
+    if "--json" in args:
+        print(json.dumps({"sub": sub, "email": cl.get("email"),
+                          "live_seen": seen, "drifted": bool(sub and seen and sub != seen)},
+                         ensure_ascii=False))
+        return
+    label = _accounts(pool).get(sub, {}).get("label") if sub else None
+    print("当前登录：%s" % (label or cl.get("email") or sub or "（读不到）"))
+    if sub and seen and sub != seen:
+        # ★ 不许静默吞掉分歧：它是"有别的 agy 进程把槽抢回去了"的唯一可见证据。
+        print("  ⚠️ 与我们上次装进去的 [%s] 不一致 —— 多半是某个**仍在跑**的 agy "
+              "在它自己 token 到期时把凭证写回了钥匙串。"
+              % (_accounts(pool).get(seen, {}).get("label") or seen[:8]))
+
+
 CMDS = {"login": cmd_login, "list": cmd_list, "quota": cmd_quota, "switch": cmd_switch,
-        "pick": cmd_pick, "auto": cmd_auto, "rename": cmd_rename, "remove": cmd_remove}
+        "pick": cmd_pick, "auto": cmd_auto, "rename": cmd_rename, "remove": cmd_remove,
+        "live": cmd_live}
 
 
 def main(argv):

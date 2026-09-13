@@ -81,9 +81,14 @@ def effective_model(conv, started):
     return None
 
 
-def passthrough() -> None:
-    """原样交给真身。用 execv 而不是 subprocess —— 交互态要保住 TTY、信号和退出码。"""
-    os.execv(str(REAL), [str(REAL)] + sys.argv[1:])
+def passthrough(argv=None) -> None:
+    """交给真身。用 execv 而不是 subprocess —— 交互态要保住 TTY、信号和退出码。
+
+    ★★★ **必须传已经剥掉 `--as` 的 argv，不能用 `sys.argv[1:]`。**（2026-09-13 评审指出）
+      `--as` 是**我们的** flag，agy 不认识它。而交互态正是走这条路的那一条，
+      也就是说 `agy --as B` 这个最主要的用法，此前会把 `--as B` 原样递给真身。
+    """
+    os.execv(str(REAL), [str(REAL)] + list(sys.argv[1:] if argv is None else argv))
 
 
 SAMPLER = Path(__file__).resolve().parent.parent / "traffic" / "agy_quota_sampler.py"
@@ -183,9 +188,13 @@ def select_account(argv):
       · 其余                                        → `agy-rotate auto`：
         当前号剩余低于阈值才换，够用就不动（换号会打断 prompt 缓存）
 
-    ★ 整体 **fail-open**：轮换器不在、池是空的、网断了，一律让 agy 用当前登录态照常跑。
-      轮换是增益不是前置条件 —— 做成前置条件就会出现「CodexBar 坏了导致 agy 用不了」，
-      而那比没有轮换糟得多。
+    ★ **fail-open 只覆盖 `auto` 这一路**：轮换器不在、池是空的、网断了，
+      让 agy 用当前登录态照常跑。轮换是增益不是前置条件。
+    ★★★ **但 `--as` 不在 fail-open 范围里 —— 它是一条显式指令，做不到必须拒绝启动。**
+      （2026-09-13 三方评审共同指出）原来 `check=False` + 裸 except 把失败全吞了，
+      于是 `agy --as B` 会**安静地用 A 跑起来**：用户以为在花 B 的额度，实际花的是 A 的，
+      而屏幕上没有任何异样。"采集失败不影响 CLI"那条策略不能套到账号选择上 ——
+      前者丢的是一条统计，后者用错的是钱。
     """
     rot = Path(__file__).resolve().parent.parent / "agy-rotate"
     if not rot.exists():
@@ -201,12 +210,27 @@ def select_account(argv):
             continue
         out.append(a)
         i += 1
+    if not want:
+        try:
+            subprocess.run([sys.executable, str(rot), "auto"], timeout=60, check=False)
+        except Exception:                               # noqa: BLE001
+            pass
+        return out
+    # ★★★ 显式指定号：失败一律**拒绝启动**，别拿另一个号的额度替他跑。
     try:
-        subprocess.run([sys.executable, str(rot), "switch", want] if want
-                       else [sys.executable, str(rot), "auto"],
-                       timeout=60, check=False)
-    except Exception:                                   # noqa: BLE001
-        pass
+        # ★ `--for-this-run`：`--as` 是**一次性**指定，不该变成长期偏好 ——
+        #   否则之后每次裸跑 `agy` 都会被 `auto` 拉回这个号。
+        r = subprocess.run([sys.executable, str(rot), "switch", want, "--for-this-run"],
+                           timeout=60, check=False)
+        rc = r.returncode
+    except Exception as e:                              # noqa: BLE001
+        sys.stderr.write("agy-wrap: 切到 [%s] 失败：%s —— 已中止（不替你用别的号跑）\n"
+                         % (want, e))
+        raise SystemExit(3)
+    if rc != 0:
+        sys.stderr.write("agy-wrap: 切到 [%s] 失败（exit %d）—— 已中止。\n"
+                         "  去掉 `--as` 可以用当前登录的号跑。\n" % (want, rc))
+        raise SystemExit(3)
     return out
 
 
@@ -229,7 +253,7 @@ def main() -> None:
     #   print + json          → 截获、记账、把原始 JSON 原样回吐（一次性输出，零差异）。
     #   print + text/缺省      → 截获、记账、把 response 还原成文本（调用方看到的与原来一致）。
     if not is_print or fmt == "stream-json":
-        passthrough()
+        passthrough(argv)          # ★ 剥过 `--as` 的那份，见 `passthrough` 的说明
     emit_raw = fmt == "json"
 
     run_argv, i = [str(REAL)], 0

@@ -680,13 +680,16 @@ fn read_agy_pool() -> Result<Option<String>, String> {
 /// 跑一条 `agy-rotate` 子命令。
 ///
 /// ★★★ **白名单是这条命令存在的理由。** `agy-rotate` 里有 `login`（会起一个交互式 agy，
-/// GUI 里跑必然挂死）和 `remove`（不可逆）。界面上能点的只有这两条**幂等的读/切**：
+/// GUI 里跑必然挂死）和 `remove`（不可逆）。界面上能点的只有这三条**幂等的读/切**：
 ///   · `quota`  —— 零消耗、只读云端额度
 ///   · `switch` —— 换凭证；它自己会拒绝"切到当前号"，也会先备份
+///   · `live`   —— 只读钥匙串，回答"**现在**到底是谁登录着"。★ 必须现读而不是用池里的
+///     `live_seen`：那个槽被多个常驻 agy 进程并发写，实测 17:58 装进 B、18:23 被一个
+///     身份为 A 的旧进程在自己 token 到期时写回，而 `live_seen` 毫不知情。
 /// 与账号池那条 `ALLOWED_CMDS` 同一条理由：两套语义混一个白名单迟早加错。
 #[tauri::command]
 async fn run_agy_rotate(args: Vec<String>) -> Result<String, String> {
-    const ALLOWED: &[&str] = &["quota", "switch"];
+    const ALLOWED: &[&str] = &["quota", "switch", "live"];
     let sub = args.first().cloned().unwrap_or_default();
     if !ALLOWED.contains(&sub.as_str()) {
         return Err(format!("disallowed agy-rotate subcommand: {:?}", sub));

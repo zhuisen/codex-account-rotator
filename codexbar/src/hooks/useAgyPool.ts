@@ -16,9 +16,21 @@ export interface AgyPoolAccount {
 
 interface PoolFile {
   accounts?: Record<string, Omit<AgyPoolAccount, "sub">>;
-  /** 上次我们看到的当值号。★ 名字带 `_seen` 是因为它**可能过时** ——
-   *  用户在 agy 里 `/logout` 换了号而没跑我们的命令时，下次 `quota` 才会纠正。 */
+  /** 上次**我们写进去**时看到的当值号。★★★ **绝不能拿它当"当前账号"显示。**
+   *  钥匙串是一个被多个常驻 agy 进程并发写的**单槽**：实测 2026-09-13 17:58 我们装进 B，
+   *  18:23:17 一个身份为 A 的旧 agy 在它自己 access token 到期（18:23:16）时刷新，
+   *  把整份凭证写回钥匙串 —— B 被冲掉，而这个字段毫不知情。用户看到的就是
+   *  「界面说 B、agy 里是 A」。真相只能**现读**，见 `live --json`。 */
   live_seen?: string | null;
+}
+
+/** `agy-rotate live --json` 的回答：**现在**钥匙串里是谁。 */
+interface LiveProbe {
+  sub: string | null;
+  email: string | null;
+  live_seen: string | null;
+  /** 现读的和我们上次装进去的不是同一个号 —— 有别的 agy 进程把槽抢回去了。 */
+  drifted: boolean;
 }
 
 /**
@@ -58,7 +70,10 @@ function toSnapshot(a: AgyPoolAccount): AgySnapshot {
  */
 export function useAgyPool(enabled: boolean): {
   accounts: AgyPoolAccount[];
+  /** **现在**钥匙串里是谁（现读，不是 `live_seen`）。 */
   liveSub: string | null;
+  /** 现读的号 ≠ 我们上次装进去的号 ⇒ 有别的 agy 进程把槽抢回去了。 */
+  drifted: boolean;
   /** 当值号的那张 `AgySnapshot`（含**周**窗口）——它只能来自本机 RPC。 */
   snapshotOf: (a: AgyPoolAccount, liveSnap: AgySnapshot | null) => AgySnapshot;
   busy: boolean;
@@ -69,6 +84,7 @@ export function useAgyPool(enabled: boolean): {
 } {
   const [accounts, setAccounts] = useState<AgyPoolAccount[]>([]);
   const [liveSub, setLiveSub] = useState<string | null>(null);
+  const [drifted, setDrifted] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [switching, setSwitching] = useState<string | null>(null);
@@ -84,9 +100,22 @@ export function useAgyPool(enabled: boolean): {
         // ★ 按 label 排，不按额度：位置一变，用户就得重新找他的号。
         //   "该用哪个"由「当前」徽章回答，不由顺序回答（同账号卡那条）。
         .sort((x, y) => (x.label || "").localeCompare(y.label || "")));
+      // ★★★ **先用 `live_seen` 兜底，再立刻用现读覆盖。** 只用 `live_seen` 就是这次
+      //   用户报的那个 bug；只用现读则会在 `live` 还没回来的那一帧丢掉「当前」徽章。
       setLiveSub(p.live_seen ?? null);
     } catch (e: unknown) {
       setErr(String(e).slice(0, 200));
+    }
+    try {
+      const out = await invoke<string>("run_agy_rotate", { args: ["live", "--json"] });
+      const probe = JSON.parse(out) as LiveProbe;
+      // ★ 读不到（`sub` 为 null）时**不要**把它写成 null 覆盖掉兜底值：
+      //   「这次没探到」和「确实没人登录」是两件事（本仓 §7.0b）。
+      if (probe.sub) setLiveSub(probe.sub);
+      setDrifted(!!probe.drifted);
+    } catch {
+      // 探不到当前号不该让整块卡片失败 —— 上面的池数据已经可用了。
+      setDrifted(false);
     }
   }, []);
 
@@ -110,10 +139,18 @@ export function useAgyPool(enabled: boolean): {
       .finally(() => setSwitching(null));
   }, [read]);
 
-  const snapshotOf = useCallback((a: AgyPoolAccount, liveSnap: AgySnapshot | null) =>
-    // ★ 当值号优先用**本机 RPC** 那份：只有它带周窗口，而周窗口是真实存在的额度。
-    //   本机那份不可用时退回云端的 5h —— 少一行，不是编一行。
-    (a.sub === liveSub && liveSnap?.available ? liveSnap : toSnapshot(a)), [liveSub]);
+  const snapshotOf = useCallback((a: AgyPoolAccount, liveSnap: AgySnapshot | null) => {
+    // ★★★ **本机 RPC 那份只在能证明归属时才用。**（2026-09-13 三方评审共同指出）
+    //   `agy-quota` 打的是「第一个应答的 agy 进程」，而本机常有多个长期存活的进程、
+    //   身份各不相同 —— 那份周额度属于**那个进程**，不属于"当前登录的号"。
+    //   实测：卡上 `user-b` 的「周 99%」实际来自 pid 24433（`user-a`，起于 09-07）。
+    //   ⚠️ 旧判据是 `a.sub === liveSub`，它问的是"这张卡是不是当值号"，
+    //     而该问的是"这份读数是不是这张卡的"。**归属要有证据，没证据就不归属** ——
+    //     宁可少一行（卡上显示 `—` 并说明原因），也不把 A 的数字画在 B 的卡上。
+    const mine = !!liveSnap?.available && !!liveSnap.pid_email && !!a.email
+      && liveSnap.pid_email === a.email;
+    return mine ? liveSnap : toSnapshot(a);
+  }, []);
 
-  return { accounts, liveSub, snapshotOf, busy, err, refresh, switchTo, switching };
+  return { accounts, liveSub, drifted, snapshotOf, busy, err, refresh, switchTo, switching };
 }

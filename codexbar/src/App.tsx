@@ -582,6 +582,19 @@ export default function App() {
                                      onOpen={() => { setDrill("agy"); setPage("traffic"); }} />
                           )}
                     </div>
+                    {/* ★★★ 分歧必须可见，不能抹平。钥匙串是**一个槽**，而本机常有多个
+                        长期存活的 agy 进程；它们各自在自己的 access token 到期时把**自己的身份**
+                        整份写回去（实测 2026-09-13：17:58 装进 B，18:23:17 被一个身份为 A 的
+                        旧进程冲掉）。这行只在真的对不上时出现 —— 常亮的灯会被学会忽略。
+                        ★ 文本说"要做什么"，不只说"坏了"（§5d 披露）。 */}
+                    {agyPool.drifted && (
+                      <div style={{ marginTop: 10, fontSize: 11.5, fontFamily: "'JetBrains Mono'",
+                                    color: "#E0901C", lineHeight: 1.5 }}>
+                        ⚠️ 当前登录的号与你上次切换的不一致 —— 某个**仍在跑**的 agy
+                        在它自己 token 到期时把凭证写回了钥匙串。要让切换生效：先退出那些旧的
+                        agy 会话，再 <b>切换</b>，然后开新的 agy。
+                      </div>
+                    )}
                     </>)}
                     {provider === "xai" && (<>
                     <div data-cards-grid style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 12, alignContent: "start" }}>

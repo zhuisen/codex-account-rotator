@@ -61,6 +61,14 @@ export interface AgySnapshot {
   reason: AgyReason | null;
   detail: string | null;
   pid: number | null;
+  /** ★★★ **那个 pid 自己认证成了哪个号**（取自 agy 自己的日志 `applyAuthResult:`）。
+   *  `null` = 认不出 ⇒ **这份读数不许挂到任何账号卡上**。
+   *
+   *  本机常有多个长期存活的 agy 进程，身份各不相同；`agy-quota` 打的是「第一个应答的 pid」，
+   *  所以这份周额度属于**那个进程**，不属于"当前登录的号"。实测 2026-09-13：
+   *  卡上 `user-b` 显示的 `周 99%` 实际来自 pid 24433（`user-a`，起于 09-07）。
+   *  归属要有证据 —— 同本仓「按 response_id 精确 join，不按时间猜」。 */
+  pid_email?: string | null;
   /** ★ `available === false` 时恒 `null`。
    *  绝不是空对象、更不是满额 —— 上游 `remainingFraction` 缺省值就是 1.0，
    *  这条链路上「失败」与「满格」只隔一个默认值。 */

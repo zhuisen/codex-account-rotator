@@ -90,5 +90,65 @@ class TestThemeContrast(unittest.TestCase):
                              f"{theme} 的 text/text2/muted 亮度不是单调的：{lums}")
 
 
+
+class EveryPlatformTheUiColorsHasARealFallback(unittest.TestCase):
+    """★★ `colorOf()` 是三级链：用户偏好 > 扫描结果注册表 > `PLATFORM_COLORS`。
+    **总览页没有流量数据**，所以前两级都空 —— 那一页上所有平台色都由第三级供给。
+
+    2026-09-13 实测：`agy` 不在这张表里 ⇒ 总览的 Google 档整块画成死灰 `#5b6472`
+    （环、条、名字、卡框全灰），而这**不报任何错**，看起来就像"设计成灰的"。
+    同一形态本仓记过一次：MiMo/DeepSeek 不在表里 ⇒ 详情页「总量」档整张图变灰。
+
+    ★ 判据两边都**解析**出来，不手列：
+      左边 = UI 里真的调了 `colorOf(x, "<key>")` 的那些 key；
+      右边 = `PLATFORM_COLORS` 的键。手列一份清单，下一个新平台还会再灰一次。
+    ⚠️ 宿主源（openclaw/reasonix/dsh）**故意不在表里** —— 它们从不作为平台出现，
+      所以判据只覆盖"UI 真的给它取过色"的那些。
+    """
+
+    ROOT = pathlib.Path(__file__).resolve().parent.parent
+    SRC = ROOT / "codexbar" / "src"
+
+    def _ui_keys(self):
+        keys = set()
+        for p in sorted(self.SRC.rglob("*")):
+            if p.suffix not in (".ts", ".tsx"):
+                continue
+            src = p.read_text(encoding="utf-8")
+            # ⚠️ 必须剥注释：本仓多处注释里正写着 `colorOf(traffic, "agy")` 解释这条规则
+            #    （空守卫形态⑫）—— 不剥的话，把调用删干净了这条闸照样绿。
+            src = re.sub(r"/\*[\s\S]*?\*/", "", src)
+            src = re.sub(r"(?<![:/])//.*", "", src)
+            keys |= set(re.findall(r'colorOf\(\s*\w+\s*,\s*"([a-z0-9_]+)"\s*\)', src))
+        return keys
+
+    def _table(self):
+        src = (self.SRC / "theme.ts").read_text(encoding="utf-8")
+        i = src.index("PLATFORM_COLORS")
+        seg = src[i:src.index("};", i)]
+        return dict(re.findall(r'^\s*([a-z0-9_]+):\s*"(#[0-9A-Fa-f]{6})"', seg, re.M))
+
+    def test_the_probe_finds_the_call_sites(self):
+        """★ 先证探针有效 —— 匹配 0 个 key 的正则会让整条闸恒绿。"""
+        self.assertGreaterEqual(len(self._ui_keys()), 2,
+                                f"只解析到 {self._ui_keys()} —— 正则或剥注释逻辑坏了")
+
+    def test_no_ui_platform_falls_through_to_the_dead_grey(self):
+        table = self._table()
+        missing = sorted(k for k in self._ui_keys() if k not in table)
+        self.assertEqual(missing, [],
+                         f"★★ {missing} 不在 PLATFORM_COLORS 里 ⇒ 总览上会整块画成死灰")
+
+    def test_the_fallback_agrees_with_the_scanner_registry(self):
+        """★ 兜底色必须和扫描器注册表**同一个值**。两处不同的症状是
+        「进了用量页颜色就变了」—— 而同一个平台换页换色正是配色规则禁止的。"""
+        scan = (self.ROOT / "traffic" / "scan.py").read_text(encoding="utf-8")
+        reg = dict((k, c) for k, c in
+                   re.findall(r'\{"key": "([a-z0-9_]+)",[^}]*?"color": "(#[0-9A-Fa-f]{6})"', scan))
+        table = self._table()
+        bad = [(k, table[k], reg[k]) for k in self._ui_keys()
+               if k in table and k in reg and table[k].lower() != reg[k].lower()]
+        self.assertEqual(bad, [], f"★ 兜底色与注册表不一致: {bad}")
+
 if __name__ == "__main__":
     unittest.main()

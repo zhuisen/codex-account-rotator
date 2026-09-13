@@ -61,6 +61,7 @@ import subprocess
 import sys
 import time
 from http.client import HTTPConnection, HTTPSConnection
+from pathlib import Path
 
 SCHEMA = 1
 RPC = "/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary"
@@ -146,6 +147,79 @@ def agy_pids():
             except ValueError:
                 pass
     return pids
+
+
+AGY_LOG_DIR = Path(os.environ.get(
+    "AGY_LOG_DIR", str(Path.home() / ".gemini" / "antigravity-cli" / "log")))
+#: 进程启动时刻 与 日志文件名里那个时刻 的容差。实测 pid 36756 起于 23:15:13、
+#: 日志名是 `cli-20260912_231514.log` —— 差 1 秒（agy 先起进程再建日志）。
+_LOG_SKEW = 10
+
+
+#: `ps -o lstart=` 的日期顺序**跟着 locale 变**，两种都要认。
+#: ⚠️ 本机实测输出是 `Mon  7 Sep 18:09:06 2026`（**日在月前**），
+#:   而我第一版只写了 `%a %b %d …` ⇒ `strptime` 抛异常 → 被 `except` 吞掉 →
+#:   `pid_email` 恒 `None`，**归属功能静默地从不工作**。
+#:   这与本仓记过的「`agy-quota` 用了没 import 的 `Path`，脚本照跑、账本静默不工作」
+#:   是同一族：**fail-open 会把接线错误一起吞掉**。所以闸打在这个纯函数上。
+_LSTART_FMTS = ("%a %d %b %H:%M:%S %Y", "%a %b %d %H:%M:%S %Y")
+
+
+def _parse_lstart(s):
+    """`ps -o lstart=` 的那串 → epoch 秒。两种 locale 顺序都认，认不出返回 None。"""
+    s = " ".join((s or "").split())          # `Mon  7 Sep` 里是两个空格
+    for f in _LSTART_FMTS:
+        try:
+            return time.mktime(time.strptime(s, f))
+        except ValueError:
+            pass
+    return None
+
+
+def pid_identity(pid):
+    """→ 这个 agy 进程**自己**认证成了哪个账号（email），认不出返回 None。
+
+    ★★★ 为什么必须有这个函数（2026-09-13 三方评审独立指出同一条）：
+      本机常有多个长期存活的 agy 进程，**各自的身份可能不同**（它们在各自启动那一刻
+      读的是当时钥匙串里的号）。而本脚本是对「**第一个应答的 pid**」打 loopback RPC ——
+      拿回来的周额度属于**那个进程**，不属于「当前登录的号」。
+      上层却按当值号把它挂到账号卡上 ⇒ **A 的周额度画在 B 的卡上**，而且完全看不出来。
+      这与本仓「按 response_id 精确 join，不按时间猜」是同一条纪律：
+      **归属要有证据，没证据就不归属。**
+
+    判据取自 **agy 自己的日志**（`applyAuthResult: email=`），不是我们的记录 ——
+    写入侧的记录在这件事上正是不可信的那一方。取**最后一条**：进程中途
+    `/logout` 换号时，早先那条已经过期。
+    """
+    try:
+        out = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)],
+                             capture_output=True, text=True, timeout=15).stdout.strip()
+        if not out:
+            return None
+        started = _parse_lstart(out)
+        if started is None:
+            return None
+        best = None
+        for p in AGY_LOG_DIR.glob("cli-*.log"):
+            m = re.match(r"cli-(\d{8}_\d{6})\.log$", p.name)
+            if not m:
+                continue
+            t = time.mktime(time.strptime(m.group(1), "%Y%m%d_%H%M%S"))
+            if abs(t - started) <= _LOG_SKEW:
+                # ★ 同一秒可能有多份（并发起两个 agy）⇒ **认不出就不猜**。
+                if best is not None:
+                    return None
+                best = p
+        if best is None:
+            return None
+        hit = None
+        for line in best.read_text(encoding="utf-8", errors="replace").splitlines():
+            m = re.search(r"applyAuthResult: email=([^\s,]+)", line)
+            if m:
+                hit = m.group(1)
+        return hit
+    except Exception:                                    # noqa: BLE001
+        return None
 
 
 def listen_ports(pid):
@@ -358,6 +432,8 @@ def main(argv):
         "reason": None,
         "detail": None,
         "pid": None,
+        # 那个 pid **自己**认证成了哪个号（agy 日志自证）。None = 认不出 ⇒ 上层不得归属。
+        "pid_email": None,
         "quota": None,          # ★ 失败态恒 None,绝不写 0 也绝不写满额
         "last_good": None,
     }
@@ -378,6 +454,8 @@ def main(argv):
             quota, reason, detail = probe(pid, deadline)
             if quota:
                 out["pid"] = pid
+                # ★★★ 归属证据。没有它，这份周额度就只能说"某个进程的"，不能挂到任何账号卡上。
+                out["pid_email"] = pid_identity(pid)
                 break
         if quota:
             out["available"] = True

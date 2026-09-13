@@ -191,6 +191,12 @@ export const PLATFORM_COLORS: Record<string, string> = {
   codex:  "#2dd4bf",
   grok:   "#8b7cf6",
   kimi:   "#f472b6",
+  // ★ 2026-09-13 补：总览的 Google 档整块**画成了灰色**（环、条、名字、卡框）。
+  //   `colorOf()` 是三级链：用户偏好 > 扫描结果注册表 > 这张表。总览页**没有流量数据**，
+  //   前两级都空，于是落到这里 —— 而这里没有 `agy`，`?? "#5b6472"` 那个死灰就上场了。
+  //   同一个形态本仓记过一次（MiMo/DeepSeek 不在表里 ⇒ 详情页整张图变灰）。
+  //   ⚠️ 宿主源（openclaw/reasonix/dsh）**故意不进这张表**：它们从不作为平台出现。
+  agy:    "#4d9fff",
 };
 export const platformColor = (k: string): string => PLATFORM_COLORS[k] ?? "#5b6472";
 

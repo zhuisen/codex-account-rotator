@@ -625,6 +625,20 @@ function relayEntry() {
         return Promise.resolve(JSON.stringify({ accounts: accs, live_seen: subs[0] }));
       }
       case 'run_agy_rotate':
+        // ★ `live` 回的是 JSON（「**现在**钥匙串里是谁」），不是人话。回 'ok' 会让
+        //   `JSON.parse` 抛，然后「当前」徽章整个消失 —— 而那正好长得像"池是空的"。
+        //   `?agydrift=1` 专门渲染"被别的 agy 进程抢回去了"那一态。
+        if ((a.args || [])[0] === 'live') {
+          var np = parseInt(p.get('agypool') || '0', 10);
+          var lsubs = []; for (var li = 0; li < np; li++) lsubs.push('sub' + li);
+          var drift = p.get('agydrift') === '1' && np > 1;
+          return Promise.resolve(JSON.stringify({
+            sub: drift ? lsubs[1] : (lsubs[0] || null),
+            email: null,
+            live_seen: lsubs[0] || null,
+            drifted: drift,
+          }));
+        }
         return Promise.resolve('ok');
       case 'read_traffic_snapshot_days':
       case 'read_traffic_snapshot':

@@ -26,7 +26,9 @@ import importlib.util
 import json
 import os
 import re
+import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -379,7 +381,9 @@ class AutoSwitchIsFailOpenAndSticky(unittest.TestCase):
         """
         body = self.WRAP[self.WRAP.index("def main("):]
         i = body.index("select_account(argv)")
-        j = body.index("passthrough()")
+        # ⚠️ `passthrough` 现在带参（必须传剥掉 `--as` 的 argv），所以锚点跟着改成 `passthrough(`。
+        #    取**调用点**不是定义：`def passthrough(` 在前会把"定义在前"判成"调用在前"。
+        j = body.index("passthrough(argv)")
         self.assertLess(i, j, "★★★ 选号排在 execv 之后 ⇒ 永远不会生效")
 
     def test_the_wrapper_is_fail_open_too(self):
@@ -480,10 +484,20 @@ class TheGoogleTabShowsThePoolNotAReadOnlyCard(unittest.TestCase):
         self.assertNotIn('"weekly"', seg, "★★★ 给非当值号造了一个假的周窗口")
         self.assertIn('window: "5h"', seg)
 
-    def test_the_live_account_keeps_the_local_rpc_snapshot(self):
-        """★ 只有本机 RPC 带周窗口，所以当值号优先用它 —— 那是真实存在的额度。"""
+    def test_the_local_rpc_snapshot_needs_proof_of_ownership(self):
+        """★★★ **这条 2026-09-13 被推翻并改写过，旧判据是错的。**
+
+        旧的是「当值号优先用本机 RPC 那份」（`a.sub === liveSub`）—— 它问的是
+        "这张卡是不是当值号"，而该问的是"**这份读数是不是这张卡的**"。
+        `agy-quota` 打的是「第一个应答的 agy 进程」，本机多个常驻进程身份各不相同：
+        实测卡上 `user-b` 的「周 99%」来自 pid 24433（`user-a`）。
+
+        详见 `TheWeeklyReadingMustProveWhoItBelongsTo`。这里留一条，是因为
+        **旧判据留在原地会把错误的前提锁死**（本仓「闸锁的是错误前提」那一类）。
+        """
         hook = (ROOT / "codexbar" / "src" / "hooks" / "useAgyPool.ts").read_text(encoding="utf-8")
-        self.assertIn("a.sub === liveSub && liveSnap?.available ? liveSnap", hook)
+        self.assertNotIn("a.sub === liveSub && liveSnap?.available ? liveSnap", hook,
+                         "★★★ 退回了「当值号就用本机那份」—— 那会把 A 的周额度画在 B 的卡上")
 
     def test_failure_still_never_becomes_full(self):
         """★★★ 取额度失败时 `quota` 必须是 `null`。返回空对象会让卡片画出一条
@@ -496,8 +510,15 @@ class TheGoogleTabShowsThePoolNotAReadOnlyCard(unittest.TestCase):
         和 `remove`（不可逆）。界面能点的只有幂等的读/切。"""
         i = self.RS.index("async fn run_agy_rotate(")
         seg = self.RS[i:i + 700]
-        self.assertIn('ALLOWED: &[&str] = &["quota", "switch"]', seg,
-                      "★★★ 白名单不对 —— GUI 能跑 login/remove")
+        m = re.search(r'ALLOWED: &\[&str\] = &\[([^\]]*)\]', seg)
+        self.assertIsNotNone(m, "★ 白名单不见了 —— 参数直接进 argv，那等于开放任意子命令")
+        allowed = set(re.findall(r'"([a-z-]+)"', m.group(1)))
+        # ★ 判据是**危险的那几个不在里面**，不是"清单逐字等于某个值"。
+        #   写死清单的话，加一条幂等只读命令（`live`）也会变红 —— 会假红的闸等于没有。
+        self.assertEqual(allowed & {"login", "remove", "rename", "pick", "auto"}, set(),
+                         "★★★ 白名单放进了会挂死或不可逆的子命令")
+        self.assertTrue(allowed <= {"quota", "switch", "live", "list"},
+                        f"★★ 白名单里有没审过的子命令: {sorted(allowed)}")
 
     def test_the_scripts_are_bundled(self):
         """★★★ 部署出去的 app 里必须有 `agy-rotate` 和它的模块，
@@ -683,3 +704,257 @@ class TheRealLiveStoreIsTheKeychainNotTheFile(unittest.TestCase):
         self.assertIn('where = P.install_live(', seg, "★ 落点被丢掉了")
         self.assertIn('where != "keyring"', seg, "★★ 没有按落点分支")
         self.assertIn("仍在用原来那个号", seg, "★★ 警告文案没说清后果")
+
+
+class TheCurrentAccountIsProbedNotRemembered(unittest.TestCase):
+    """★★★ 2026-09-13 用户实报：界面说当前号是 B，打开 agy CLI 看到的是 A。
+
+    钥匙串 `svce=gemini`/`acct=antigravity` 是**一个槽**，而本机常有多个**长期存活**
+    的 agy 进程（实测 5 个，最久 6 天）。它们各自在自己的 access token 到期时刷新，
+    并把**自己的身份**整份写回那个槽：
+
+        17:58:xx  我们 switch 到 B（agy models 日志证明新进程认到 B）
+                  当时那份 token 的 expiry = 18:23:16
+        18:23:17  钥匙串 mdat 被改写 ← 某个身份为 A 的常驻 agy 写回了自己
+        18:59     用户开 agy → applyAuthResult: email=A
+
+    `live_seen` 是**我们上次写进去时看到的值** —— 它对这件事毫不知情。
+    拿它当"当前账号"显示，就是本仓那条「写入侧标志会撒谎」踩在自己头上。
+    **真相只能现读**，而读钥匙串很便宜。
+    """
+
+    CLI = (ROOT / "agy-rotate").read_text(encoding="utf-8")
+    HOOK = (ROOT / "codexbar" / "src" / "hooks" / "useAgyPool.ts").read_text(encoding="utf-8")
+    RS = (ROOT / "codexbar" / "src-tauri" / "src" / "lib.rs").read_text(encoding="utf-8")
+
+    def test_the_ui_actually_probes_the_keychain(self):
+        """★★★ 判据打在**调用**上：只把 `live` 加进白名单而前端不调，等于没改。"""
+        body = "\n".join(l for l in self.HOOK.splitlines() if not l.strip().startswith(("*", "/*", "//")))
+        self.assertIn('args: ["live", "--json"]', body,
+                      "★★★ 前端没有现读当前号 —— 又退回 live_seen 那个会撒谎的值")
+
+    def test_the_probe_is_allowed_through_the_bridge(self):
+        i = self.RS.index("async fn run_agy_rotate(")
+        self.assertIn('ALLOWED: &[&str] = &["quota", "switch", "live"]', self.RS[i:i + 500],
+                      "★ `live` 不在白名单里 ⇒ 前端那次 invoke 必被拒")
+
+    def test_a_failed_probe_does_not_erase_the_fallback(self):
+        """★★ 探不到时**不许**把 `liveSub` 写成 null 覆盖掉兜底值 ——
+        「这次没探到」和「确实没人登录」是两件事（§7.0b）。"""
+        body = "\n".join(l for l in self.HOOK.splitlines() if not l.strip().startswith(("*", "/*", "//")))
+        self.assertIn("if (probe.sub) setLiveSub(probe.sub)", body,
+                      "★★ 无条件写回 ⇒ 探测失败会把「当前」徽章整个抹掉")
+
+    def test_the_drift_is_surfaced_not_swallowed(self):
+        """★★★ 分歧本身是唯一可见的证据：有别的 agy 进程把槽抢回去了。
+        抹平它 = 界面继续说一个它无法兑现的事实。"""
+        app = (ROOT / "codexbar" / "src" / "App.tsx").read_text(encoding="utf-8")
+        app = re.sub(r"\{/\*[\s\S]*?\*/\}", "", app)
+        self.assertIn("agyPool.drifted && (", app, "★★★ 漂移没有任何披露")
+        i = app.index("agyPool.drifted && (")
+        seg = app[i:i + 700]
+        self.assertIn("仍在跑", seg, "★ 披露没说清原因（是别的 agy 进程写回去的）")
+        self.assertIn("退出", seg, "★ 披露没给出可执行的下一步，只说了「坏了」")
+
+    def test_live_reports_drift(self):
+        """★ 行为闸：钥匙串里是 A、池里记着 B ⇒ `live --json` 必须报 `drifted`。"""
+        import subprocess as sp
+        d = Path(tempfile.mkdtemp())
+        (d / "auth" / "agy").mkdir(parents=True)
+        pool = {"accounts": {"A": {"label": "a"}, "B": {"label": "b"}}, "live_seen": "B"}
+        (d / ".agy-pool.json").write_text(json.dumps(pool), encoding="utf-8")
+        live = d / "tok.json"
+        live.write_text(json.dumps(_cred("A", "a@x.y")), encoding="utf-8")
+        env = dict(os.environ, AGY_POOL_STORE=str(d), AGY_TOKEN_FILE=str(live), AGY_KEYRING="0")
+        out = sp.run([str(ROOT / "agy-rotate"), "live", "--json"],
+                     capture_output=True, text=True, env=env, timeout=60)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        got = json.loads(out.stdout)
+        self.assertEqual(got["sub"], "A")
+        self.assertTrue(got["drifted"], "★ 钥匙串里是 A、我们记着 B，却没报漂移")
+
+
+class AMissingWindowSaysSoInsteadOfGoingBlank(unittest.TestCase):
+    """★★ 非当值号读不到周窗口，此前渲染成 `visibility: hidden` 的**一整行空白** ——
+    用户直接问「为什么这个号少了一个窗口」。
+
+    本仓 §5d 的规矩是「**读不到显 `—`，不显 `0`**」，而"什么都不显"比显 0 更糟：
+    它把「读不到」伪装成「没有这个窗口」，两者的下一步动作完全相反。
+    高度仍与真行同构（跨卡对齐靠它），只是把话说出来。
+    """
+
+    SRC = (ROOT / "codexbar" / "src" / "components" / "AgyCard.tsx").read_text(encoding="utf-8")
+
+    def _code(self):
+        return re.sub(r"\{?/\*[\s\S]*?\*/\}?", "", self.SRC)
+
+    def test_the_placeholder_row_is_no_longer_invisible(self):
+        self.assertNotIn('visibility: "hidden"', self._code(),
+                         "★★ 缺失窗口又变回了纯空白占位")
+
+    def test_it_renders_a_dash(self):
+        code = self._code()
+        i = code.index("const row = rows.find")
+        seg = code[i:i + 900]
+        self.assertIn(">—<", seg, "★ 缺失窗口没有显示 `—`")
+
+    def test_the_tooltip_says_why_and_what_to_do(self):
+        """★ 文案要说**原因**和**怎么才能看到**，不是只说"没有"（§5d 披露）。"""
+        code = self._code()
+        i = code.index("const missTitle")
+        # ⚠️ **不用定长切片**。第一版写 `code[i:i+500]`，变异把函数改名、把原体留在旁边，
+        #   窗口就滑进了下一段、断言照样命中 ⇒ 闸是空的（本仓 §7.-1 第 3 条）。
+        #   切到**结构边界**：下一个同级 `const`/`return`。
+        ends = [j for j in (code.find("\n  const ", i + 1), code.find("\n  return", i + 1)) if j > 0]
+        seg = code[i:min(ends)] if ends else code[i:]
+        self.assertIn("当前登录", seg, "★ 没说清为什么只有当值号有")
+        self.assertIn("切过去", seg, "★ 没给出可执行的下一步")
+
+
+class TheWeeklyReadingMustProveWhoItBelongsTo(unittest.TestCase):
+    """★★★ 2026-09-13 三方评审独立指出同一条，实测证实。
+
+    `agy-quota` 对「**第一个应答的 agy 进程**」打本机 loopback RPC。而本机常有多个
+    长期存活的 agy 进程，**身份各不相同**（各自在启动那一刻读的是当时钥匙串里的号）。
+    上层却按"当值号"把这份读数挂到账号卡上：
+
+        卡上 user-b 显示「周 99%」
+        实际来自 pid 24433 —— user-a，起于 09-07（本机实测）
+
+    与本仓「按 `response_id` 精确 join，不按时间猜」是同一条纪律：
+    **归属要有证据，没证据就不归属。** 少画一行是真话，画错一行看起来完全正常。
+    """
+
+    HOOK = (ROOT / "codexbar" / "src" / "hooks" / "useAgyPool.ts").read_text(encoding="utf-8")
+    Q = (ROOT / "agy-quota").read_text(encoding="utf-8")
+
+    def test_the_collector_records_who_that_pid_is(self):
+        self.assertIn('out["pid_email"] = pid_identity(pid)', self.Q,
+                      "★★★ 没有记录那个 pid 的身份 ⇒ 上层无从判断归属")
+
+    def test_the_ui_matches_on_identity_not_on_being_current(self):
+        body = "\n".join(l for l in self.HOOK.splitlines()
+                         if not l.strip().startswith(("*", "/*", "//")))
+        self.assertIn("liveSnap.pid_email === a.email", body,
+                      "★★★ 归属判据不是身份 —— A 的周额度会画在 B 的卡上")
+        i = body.index("const snapshotOf")
+        seg = body[i:body.index("\n  return {", i)] if "\n  return {" in body[i:] else body[i:]
+        self.assertNotIn("a.sub === liveSub", seg,
+                         "★★ 又退回「这张卡是不是当值号」—— 那问的不是归属")
+
+    def test_lstart_parses_both_locale_orders(self):
+        """★★ `ps -o lstart=` 的日期顺序**跟着 locale 变**。本机实测是
+        `Mon  7 Sep 18:09:06 2026`（日在月前），而我第一版只写了月在前的格式 ⇒
+        `strptime` 抛异常被 `except` 吞掉 ⇒ `pid_email` 恒 `None`，
+        **归属功能静默地从不工作**（同本仓「用了没 import 的 Path」那一族）。
+
+        所以闸打在这个纯函数上，两种顺序都必须认。"""
+        import importlib.util
+        spec = importlib.util.spec_from_loader("agyq_t", None)
+        m = importlib.util.module_from_spec(spec)
+        m.__dict__["__file__"] = str(ROOT / "agy-quota")
+        exec(compile(self.Q, "agy-quota", "exec"), m.__dict__)   # noqa: S102
+        for s in ("Mon  7 Sep 18:09:06 2026", "Mon Sep  7 18:09:06 2026"):
+            with self.subTest(fmt=s):
+                got = m._parse_lstart(s)
+                self.assertIsNotNone(got, f"★★ 认不出 `{s}` ⇒ 归属恒为空")
+                self.assertEqual(time.strftime("%Y%m%d_%H%M%S", time.localtime(got)),
+                                 "20260907_180906")
+        self.assertIsNone(m._parse_lstart("not a date"), "★ 垃圾输入该返回 None 而不是猜")
+
+    def test_ambiguous_logs_are_not_guessed(self):
+        i = self.Q.index("def pid_identity(")
+        seg = self.Q[i:self.Q.index("\ndef ", i + 10)]
+        self.assertIn("if best is not None:", seg,
+                      "★ 同一秒起了两个 agy 时必须放弃归属，不能挑一个")
+
+
+class AnExplicitChoiceIsNeverSilentlyUndone(unittest.TestCase):
+    """★★★ 2026-09-13 三方评审共同指出，比"显示错了"严重得多。
+
+    钥匙串是**一个槽**，被多个常驻 agy 进程并发写。用户 switch 到 B 之后，
+    一个身份为 A 的旧进程会在自己 access token 到期时把 A 写回去。此时 `auto` 的
+    「当前号额度还够就不动」会看到 A、且 A 健康 ⇒ **静默放弃用户的选择**，
+    下一个新会话仍然是 A。用户看到的是「我明明切过了」。
+
+    工具**撤销**一个明确指令而且不出声，比显示一个错数字糟：
+    后者能被发现，前者只会被归咎于"记错了"。
+
+    ★ 同时：`--as` 是**一次性**指定，不该变成长期偏好（否则之后每次裸跑都被拉回去）。
+    """
+
+    CLI = (ROOT / "agy-rotate").read_text(encoding="utf-8")
+    WRAP = (ROOT / "bin" / "agy").read_text(encoding="utf-8")
+
+    def _fn(self, src, name):
+        i = src.index("def %s(" % name)
+        j = src.find("\ndef ", i + 10)
+        seg = src[i:j if j > 0 else len(src)]
+        return "\n".join(l for l in seg.splitlines() if not l.lstrip().startswith("#"))
+
+    def test_switch_records_what_the_user_asked_for(self):
+        seg = self._fn(self.CLI, "cmd_switch")
+        self.assertIn('pool["live_wanted"] = sub', seg,
+                      "★★★ 没有记下用户要的号 ⇒ auto 无从分辨「被抢了」和「本来就是它」")
+
+    def test_it_is_separate_from_what_we_last_saw(self):
+        """★★ `live_wanted`（用户要谁）与 `live_seen`（钥匙串里现在是谁）**必须分开**。
+        合并就等于把"意图"和"现状"压成一个值 —— 那样永远发现不了劫持。"""
+        self.assertIn('pool["live_wanted"]', self.CLI)
+        self.assertIn('pool["live_seen"]', self.CLI)
+
+    def test_auto_restores_it_before_judging_headroom(self):
+        """★★★ 顺序是判据：恢复必须排在「当前号够用就 return」**之前**，
+        否则那条 early-return 先把路挡死（本仓 §7.-1 ⑦：这条断言的绿是谁给的）。"""
+        seg = self._fn(self.CLI, "cmd_auto")
+        i = seg.index('pool.get("live_wanted")')
+        j = seg.index("if cur is not None and _score(cur) >= P.LOW_WATER:")
+        self.assertLess(i, j, "★★★ 恢复排在 headroom 判断之后 ⇒ 被它兜住，永远不执行")
+
+    def test_the_restore_is_announced(self):
+        seg = self._fn(self.CLI, "cmd_auto")
+        self.assertIn("恢复成你选的", seg, "★ 悄悄改回去也不行 —— 用户要知道发生过什么")
+
+    def test_a_one_off_as_does_not_become_a_standing_preference(self):
+        seg = self._fn(self.WRAP, "select_account")
+        self.assertIn('"--for-this-run"', seg,
+                      "★★ `--as` 会被记成长期偏好 ⇒ 之后每次裸跑都被拉回这个号")
+        cmd = self._fn(self.CLI, "cmd_switch")
+        self.assertIn('if "--for-this-run" not in args:', cmd,
+                      "★ CLI 侧不认这个开关 ⇒ 上面那条传了也没用")
+
+    def test_an_explicit_account_that_cannot_be_honoured_aborts(self):
+        """★★★ `--as` 不在 fail-open 范围里。做不到必须拒绝启动 ——
+        否则用户以为在花 B 的额度，实际花的是 A 的，而屏幕上没有任何异样。
+        「采集失败不影响 CLI」那条策略不能套到账号选择上：前者丢一条统计，后者用错钱。"""
+        import subprocess as sp
+        d = Path(tempfile.mkdtemp())
+        (d / ".agy-pool.json").write_text(json.dumps(
+            {"accounts": {"A": {"label": "a"}, "B": {"label": "b"}}}), encoding="utf-8")
+        stub = d / "fake-agy"
+        # ★ 桩子一旦被 exec 就会留下痕迹 —— 判据不是"退出码对不对"，是**真身有没有被跑起来**。
+        stub.write_text("#!/bin/sh\ntouch '%s'\n" % (d / "REAL_RAN"), encoding="utf-8")
+        stub.chmod(0o755)
+        env = dict(os.environ, AGY_REAL=str(stub), AGY_POOL_STORE=str(d),
+                   AGY_TOKEN_FILE=str(d / "tok.json"), AGY_KEYRING="0")
+        r = sp.run([sys.executable, str(ROOT / "bin" / "agy"), "--as", "nosuch"],
+                   capture_output=True, text=True, env=env, timeout=120)
+        self.assertEqual(r.returncode, 3,
+                         "★★★ 切不到指定号却没有中止（rc=%d）" % r.returncode)
+        self.assertFalse((d / "REAL_RAN").exists(),
+                         "★★★ agy 还是被拉起来了 —— 用的是**另一个号**的额度")
+
+    def test_auto_stays_fail_open(self):
+        """★ 反方向：不带 `--as` 时必须仍然放行。把轮换做成前置条件，
+        就会出现「CodexBar 坏了导致 agy 用不了」，那比没有轮换糟。"""
+        import subprocess as sp
+        d = Path(tempfile.mkdtemp())
+        stub = d / "fake-agy"
+        stub.write_text("#!/bin/sh\ntouch '%s'\n" % (d / "REAL_RAN"), encoding="utf-8")
+        stub.chmod(0o755)
+        env = dict(os.environ, AGY_REAL=str(stub), AGY_POOL_STORE=str(d),
+                   AGY_TOKEN_FILE=str(d / "tok.json"), AGY_KEYRING="0")
+        r = sp.run([sys.executable, str(ROOT / "bin" / "agy")],
+                   capture_output=True, text=True, env=env, timeout=120)
+        self.assertEqual(r.returncode, 0, r.stderr[-400:])
+        self.assertTrue((d / "REAL_RAN").exists(), "★ 池是空的就不让 agy 跑了")
