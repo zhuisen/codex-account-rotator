@@ -3,10 +3,18 @@ import StaleMark from "./StaleMark";
 import type { Theme } from "../theme";
 import type { AgySnapshot } from "../agy";
 import {
-  agyShown, agyTightest, agyWinLabel, agyQuotaVisible, agyReasonNote, agyReasonTone, agyResetText,
+  agyShown, agyTightest, agyQuotaVisible, agyReasonNote, agyReasonTone, agyResetText, agyWinRows,
 } from "../agy";
+import { winNumColor } from "../helpers";
 
 const MONO = "'JetBrains Mono'";
+
+/**
+ * 行上固定画这两格。★★ **写成固定槽位而不是"有什么画什么"** ——
+ * 非当值号读不到周窗口（云端按账号那条只给 5h），"有什么画什么"会让那些行少一格、
+ * 比旁边的行矮一截，而那个矮**没有任何地方解释**。固定槽位下缺的那格显式画 `—`。
+ */
+const MB_WIN_SLOTS = ["5h", "周"] as const;
 
 /**
  * 菜单栏里的 agy 额度行。与 `GrokRow` 同款外形，同一套 `mb-row` class。
@@ -52,6 +60,7 @@ export default function AgyRow({ t, color, snap, busy, disabled, onOpen,
 
   const shown = agyShown(snap);
   const tight = agyTightest(shown?.quota);
+  const rows = agyWinRows(shown?.quota);
   const degraded = !!snap && !snap.available;
   const tone = snap ? agyReasonTone(snap) : "muted";
   const alarmed = degraded && tone !== "muted";
@@ -82,7 +91,8 @@ export default function AgyRow({ t, color, snap, busy, disabled, onOpen,
   const rem = tight.b.remaining_percent;
   const ringColor = alarmed ? "#E0901C" : color;
   // 环与条走平台色（同 grok 的定稿）；数字仍按阈值变色 —— 那是这行唯一还能报警的地方。
-  const numColor = rem <= 10 ? "#E0524D" : rem < 50 ? "#E0901C" : t.text2;
+  // ★ 阈值走 `winNumColor`（helpers 的**唯一真源**），不在这里再抄一份：
+  //   本仓记过「同一判据三处副本，漏改任一份都不报错」那一族。
   const glow = rem <= 20 ? (rem <= 10 ? "#E0524D" : "#E0901C") : undefined;
 
   return (
@@ -97,19 +107,43 @@ export default function AgyRow({ t, color, snap, busy, disabled, onOpen,
                   mark={degraded && snap
                     ? <StaleMark t={t} note={agyReasonNote(snap)} tone={tone} size={10} />
                     : undefined} />
-        <div className="mb-row-meta">
-          <span style={{ fontSize: 9, color: t.muted, fontFamily: MONO }}>{agyWinLabel(tight.b.window)}</span>
-          <div className="mb-row-bar" style={{ background: t.barTrack }}>
-            <div style={{ height: "100%", width: `${rem}%`, background: ringColor, borderRadius: 2,
-                          transition: "width .55s cubic-bezier(.4,0,.2,1)" }} />
-          </div>
-          <span style={{ fontSize: 9.5, fontWeight: 600, color: alarmed ? "#E0901C" : numColor,
-                         fontVariantNumeric: "tabular-nums" }}>{rem.toFixed(0)}%</span>
-          <span title={agyResetText(tight.b).title || undefined}
-                style={{ fontSize: 9, color: t.muted, fontFamily: MONO }}>
-            ↻{agyResetText(tight.b).text}
-          </span>
-        </div>
+        {/* ★★ **每个窗口一行，不是只画最紧的那个**（v4 稿 §6 行 3/4 = `5h` / `周`）。
+            2026-09-13 用户实报「gemini 缺少 5h 额度」—— 此前这里只渲染 `tight`，
+            于是当值号明明有 5h + 周两格，行上只看得到其中一格，而旁边 codex 的行有两格。
+            ★ 缺的那一格**补 `—` 不留空**：非当值号读不到周窗口（云端只给 5h），
+              空着会把「读不到」伪装成「没有这个窗口」，两者的下一步动作完全相反。 */}
+        {MB_WIN_SLOTS.map((label) => {
+          const row = rows.find(r => r.label === label);
+          if (!row) {
+            return (
+              <div key={label} className="mb-row-meta"
+                   title={isCurrent ? `${label} 窗口这次没读到`
+                     : `${label} 窗口只有**当前登录**的号读得到（本机 RPC）—— 云端按账号那条只给 5h`}>
+                <span style={{ fontSize: 9, color: t.muted, fontFamily: MONO }}>{label}</span>
+                <div className="mb-row-bar" style={{ background: t.barTrack }} />
+                <span style={{ fontSize: 9.5, fontWeight: 600, color: t.muted,
+                               fontVariantNumeric: "tabular-nums" }}>—</span>
+                <span style={{ fontSize: 9, color: t.muted, fontFamily: MONO }}>↻—</span>
+              </div>
+            );
+          }
+          const rr = row.remaining;
+          return (
+            <div key={label} className="mb-row-meta">
+              <span style={{ fontSize: 9, color: t.muted, fontFamily: MONO }}>{row.label}</span>
+              <div className="mb-row-bar" style={{ background: t.barTrack }}>
+                <div style={{ height: "100%", width: `${rr}%`, background: ringColor, borderRadius: 2,
+                              transition: "width .55s cubic-bezier(.4,0,.2,1)" }} />
+              </div>
+              <span style={{ fontSize: 9.5, fontWeight: 600, color: alarmed ? "#E0901C" : winNumColor(rr, t),
+                             fontVariantNumeric: "tabular-nums" }}>{rr.toFixed(0)}%</span>
+              <span title={agyResetText(row).title || undefined}
+                    style={{ fontSize: 9, color: t.muted, fontFamily: MONO }}>
+                ↻{agyResetText(row).text}
+              </span>
+            </div>
+          );
+        })}
       </div>
     </Shell>
   );

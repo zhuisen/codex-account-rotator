@@ -136,12 +136,19 @@ export default function GrokCard({ t, color, snap, privacy, busy, err, disabled,
           <div aria-hidden style={{ flex: 1, minHeight: 0 }} />
 
           {shownRem != null && slotRows.map(label => label !== GROK_WIN ? (
-            // 没有这个窗口 ⇒ 同构隐藏行占位，高度由构造保证与真行一致。
-            <div key={label} aria-hidden style={{ display: "flex", alignItems: "center", gap: 6, visibility: "hidden" }}>
-              <span style={{ fontSize: Z.winLabel, fontFamily: MONO }}>{label}</span>
-              <div style={{ flex: 1, height: Z.bar }} />
-              <span style={{ fontSize: Z.pct, fontWeight: 600, fontFamily: MONO }}>00%</span>
-              <span style={{ fontSize: Z.eta, fontFamily: MONO }}>↻0d00h</span>
+            // ★★ 这一行以前是 `visibility: hidden` 的纯占位 —— 用户 2026-09-13 直接问
+            //   「grok 缺少了 5h 额度」。**什么都不显** 比显 `—` 更糟：它把一件事实
+            //   （上游根本没有这个窗口）伪装成了"这里本该有点什么"。
+            //   ★ 文案与 agy 那条**刻意不同**：agy 缺的是"这个号读不到"，
+            //     grok 缺的是"上游没有这个窗口" —— 两者的下一步动作完全不一样，
+            //     合并成一句话就等于把两种状态又折叠回同一个值。
+            <div key={label} title={`grok 只有周窗口 —— 上游没有 ${label} 这个额度窗口（实测 window_minutes = 10080）`}
+                 style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <span style={{ fontSize: Z.winLabel, color: t.muted, fontFamily: MONO }}>{label}</span>
+              <div style={{ flex: 1, height: Z.bar, borderRadius: 2, background: t.barTrack }} />
+              <span style={{ fontSize: Z.pct, fontWeight: 600, color: t.muted,
+                             fontFamily: MONO, fontVariantNumeric: "tabular-nums" }}>—</span>
+              <span style={{ fontSize: Z.eta, color: t.muted, fontFamily: MONO }}>↻—</span>
             </div>
           ) : (
             <div key={label} style={{ display: "flex", alignItems: "center", gap: 6 }}>
