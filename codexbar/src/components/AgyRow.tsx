@@ -25,7 +25,8 @@ const MONO = "'JetBrains Mono'";
  *    最紧的那个才是约束，另一个在主窗卡片上看。
  * ③ **「没在跑」不染警告色**：agy 不常驻，那是常态。染了就是又造一盏长亮的灯。
  */
-export default function AgyRow({ t, color, snap, busy, disabled, onOpen }: {
+export default function AgyRow({ t, color, snap, busy, disabled, onOpen,
+                                 label, isCurrent, onSwitch, switching }: {
   t: Theme;
   /** agy 平台识别色，来自 `colorOf(data, "agy")`（已折进用户偏好）。 */
   color: string;
@@ -35,6 +36,16 @@ export default function AgyRow({ t, color, snap, busy, disabled, onOpen }: {
   disabled?: boolean;
   /** 点行 = 弹出主界面的 Antigravity 详情页。 */
   onOpen?: () => void;
+  // ── 账号池（2026-09-13，菜单栏 v4）──────────────────────────────────
+  /** 池里的显示名。缺省 `agy` —— 池还没建起来时就是这个。 */
+  label?: string;
+  /** 这个号是不是 agy **当前**的登录态（现读钥匙串，不是我们写进去的值）。 */
+  isCurrent?: boolean;
+  /** 切到这个号。★★ **只对下一次启动的 agy 生效** —— agy 只在启动时读凭证。
+   *  ⚠️ v4 稿里这一档写的是「只读·点卡不切号」，用户 2026-09-13 明确**淘汰**了那个方式：
+   *     「可以切号的，按照目前 codex 的方式」。所以这里与账号卡同构，不是只读。 */
+  onSwitch?: () => void;
+  switching?: boolean;
 }) {
   // ★ 与总览卡**共用同一个判据** —— 两边各写一份迟早出现「主窗有、菜单栏没有」。
   if (!agyQuotaVisible(snap, { disabled })) return null;
@@ -49,12 +60,12 @@ export default function AgyRow({ t, color, snap, busy, disabled, onOpen }: {
   // 而这里的真相是"读不到"。同理也绝不画 100%（上游缺省值就是满格）。
   if (!tight) {
     return (
-      <Shell t={t} color={color} onOpen={onOpen}>
+      <Shell t={t} color={color} onOpen={onOpen} onSwitch={onSwitch} switching={switching} isCurrent={isCurrent}>
         <Ring pct={0} r={18} sw={4.5} color={t.ringTrack} track={t.ringTrack} size={46}>
           <span style={{ fontSize: 12, fontWeight: 700, color: t.muted, lineHeight: 1 }}>—</span>
         </Ring>
         <div className="mb-row-info">
-          <NameLine t={t} color={color}
+          <NameLine t={t} color={color} label={label} isCurrent={isCurrent} inPool={!!onSwitch}
                     mark={degraded && snap
                       ? <StaleMark t={t} note={agyReasonNote(snap)} tone={tone} size={10} />
                       : undefined} />
@@ -75,13 +86,14 @@ export default function AgyRow({ t, color, snap, busy, disabled, onOpen }: {
   const glow = rem <= 20 ? (rem <= 10 ? "#E0524D" : "#E0901C") : undefined;
 
   return (
-    <Shell t={t} color={color} onOpen={onOpen}>
+    <Shell t={t} color={color} onOpen={onOpen} onSwitch={onSwitch} switching={switching} isCurrent={isCurrent}>
       <Ring pct={rem} r={18} sw={4.5} color={ringColor} track={t.ringTrack} size={46} glow={glow}>
         <span style={{ fontSize: 12, fontWeight: 700, color: t.text,
                        fontVariantNumeric: "tabular-nums", lineHeight: 1 }}>{Math.round(rem)}</span>
       </Ring>
       <div className="mb-row-info">
         <NameLine t={t} color={color} sub={tight.group ?? undefined}
+                  label={label} isCurrent={isCurrent} inPool={!!onSwitch}
                   mark={degraded && snap
                     ? <StaleMark t={t} note={agyReasonNote(snap)} tone={tone} size={10} />
                     : undefined} />
@@ -105,28 +117,48 @@ export default function AgyRow({ t, color, snap, busy, disabled, onOpen }: {
 
 /** 卡片外壳。左轨用 agy 识别色 —— 账号卡那条轨编码的是「临期 > 当前 > 额度」,
  *  这里编码的是「不是池成员」,所以刻意不参与那套优先级。 */
-function Shell({ t, color, onOpen, children }: { t: Theme; color: string; onOpen?: () => void; children: React.ReactNode }) {
+function Shell({ t, color, onOpen, onSwitch, switching, isCurrent, children }: {
+  t: Theme; color: string; onOpen?: () => void; onSwitch?: () => void;
+  switching?: boolean; isCurrent?: boolean; children: React.ReactNode;
+}) {
   return (
-    <div className="mb-row" onClick={onOpen} style={{
+    // ★ 点行 = 切号（v4 稿 §7「点账号卡 → 设为该平台当前号」）；没有 `onSwitch` 时退回"开主窗"。
+    <div className="mb-row" onClick={switching ? undefined : (onSwitch ?? onOpen)} style={{
       background: t.cardBg,
       border: `1px solid ${t.cardBorder}`,
-      borderLeft: `3px solid ${color}`,
-      cursor: onOpen ? "pointer" : "default",
+      borderLeft: `3px solid ${isCurrent ? t.accent : color}`,
+      cursor: (onSwitch ?? onOpen) && !switching ? "pointer" : "default",
+      opacity: switching ? .55 : 1,
     }}>
       {children}
     </div>
   );
 }
 
-function NameLine({ t, color, sub, mark }: { t: Theme; color: string; sub?: string; mark?: React.ReactNode }) {
+function NameLine({ t, color, sub, mark, label, isCurrent, inPool }: {
+  t: Theme; color: string; sub?: string; mark?: React.ReactNode;
+  label?: string; isCurrent?: boolean; inPool?: boolean;
+}) {
   return (
     <>
       <div className="mb-row-name-line">
-        <span className="mb-row-name" style={{ color }}>agy</span>
-        {/* 「只读」是这张卡与旁边几张唯一需要的区别 —— 那几张 hover 出「切换」,这张永远不会。 */}
-        <span className="mb-row-badge-cur"
-              title="Antigravity 不在轮换池,只显示额度,不参与切号"
-              style={{ color, border: `1px solid ${hexA(color, .45)}` }}>只读</span>
+        <span className="mb-row-name" style={{ color }}>{label ?? "agy"}</span>
+        {/* ★★ 徽章三态，**别合并**（与总览的 AgyCard 同一套语义）：
+            · 在池里且当值 → 「当前」  · 在池里不当值 → 「切换」  · 不在池里 → 「只读」
+            合并成一个灰标签就等于回到用户问过的那句「不是解决了吗」。 */}
+        {isCurrent ? (
+          <span className="mb-row-badge-cur"
+                title="agy 当前就登录着这个号（现读钥匙串）"
+                style={{ color: t.accentText, background: t.accent, border: "1px solid transparent" }}>当前</span>
+        ) : inPool ? (
+          <span className="mb-row-badge-cur"
+                title="切到这个号 —— ★ 只对**下一次启动的** agy 生效，已经开着的会话不受影响"
+                style={{ color, border: `1px solid ${hexA(color, .45)}` }}>切换</span>
+        ) : (
+          <span className="mb-row-badge-cur"
+                title="这个号不在轮换池里，只显示额度（`agy-rotate login --current` 可收编）"
+                style={{ color, border: `1px solid ${hexA(color, .45)}` }}>只读</span>
+        )}
         {mark}
       </div>
       {sub !== undefined && (

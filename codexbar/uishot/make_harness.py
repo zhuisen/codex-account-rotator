@@ -76,6 +76,9 @@ STUB = """
     localStorage.setItem('codexbar_privacy', p.get('privacy') === '1' ? '1' : '0');
     // 菜单栏停留页:`?tab=today` 直接渲染今日 Tab(默认账号页)
     localStorage.setItem('codexbar_mb_tab', p.get('tab') === 'today' ? 'today' : 'acc');
+    // ★ 菜单栏停留在哪个平台档（v4 芯片行）。**必须能打桩** —— 芯片只有 logo 没有文字，
+    //   `click=` 那条路匹配不到它，不给这个开关的话 gemini/grok 两档一个像素都验不到。
+    if (p.get('mbplat')) localStorage.setItem('codexbar_mb_plat', p.get('mbplat'));
     // ★★ `?h=<n>` 预置**记住的弹窗高度**。账号 Tab 用的就是这个数(今日页没渲染,量不到),
     //    所以「两个 Tab 等高」这条闸**必须能预置它** —— 否则每次加载 localStorage 都是空的,
     //    账号页永远落到兜底值,验出来的"相等"只是两个兜底值相等,与真实行为无关。

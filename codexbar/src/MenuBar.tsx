@@ -7,6 +7,9 @@ import Toast from "./components/Toast";
 import AccountRow from "./components/AccountRow";
 import GrokRow from "./components/GrokRow";
 import AgyRow from "./components/AgyRow";
+import PlatformChips from "./components/PlatformChips";
+import { useAgyPool } from "./hooks/useAgyPool";
+import { POOL_PLATFORMS, platformOf, type PoolKey } from "./platforms";
 import ProbeButton from "./components/ProbeButton";
 import MenuBarToday from "./components/MenuBarToday";
 import { useStore } from "./hooks/useStore";
@@ -77,6 +80,16 @@ function loadTheme(): "dark" | "light" {
 
 type Tab = "acc" | "today";
 const TAB_KEY = "codexbar_mb_tab";
+/** 菜单栏停留在哪个平台档。★ 与主窗那份**分开存** —— 两个 webview 是各自的使用场景，
+ *  主窗在管 codex 时菜单栏想看 gemini 额度是完全正常的需求。 */
+const PLAT_KEY = "codexbar_mb_plat";
+function loadPlat(): PoolKey {
+  try {
+    const v = localStorage.getItem(PLAT_KEY);
+    if (v === "gemini" || v === "grok" || v === "codex") return v;
+  } catch { /* 隐私模式下读不了 */ }
+  return "codex";
+}
 
 /** 交接稿 §3:**记忆上次停留页**,重开弹窗直达。 */
 function loadTab(): Tab {
@@ -93,6 +106,11 @@ export default function MenuBar() {
   const { accounts, hero, currentNode, counts, lastRefreshAt, cardAlert, loadingAction, toast, refresh, run, showToast } = useStore();
   const [theme, setTheme] = useState<"dark" | "light">(loadTheme);
   const [tab, setTabState] = useState<Tab>(loadTab);
+  const [plat, setPlatState] = useState<PoolKey>(loadPlat);
+  const setPlat = useCallback((v: PoolKey) => {
+    setPlatState(v);
+    try { localStorage.setItem(PLAT_KEY, v); } catch { /* 隐私模式下写不了 */ }
+  }, []);
   const rootRef = useRef<HTMLDivElement>(null);
   const { privacy, toggle: togglePrivacy } = usePrivacy();
   const t = THEMES[theme];
@@ -242,29 +260,82 @@ export default function MenuBar() {
   // ★ grok **不进** `accounts`/`alive`:那两个数组同时驱动 ⌘1~⌘9 切号、计数徽章、
   //   探针全池的号数、自动切号。混进去 ⌘3 会"切"到一个切不了的东西上,且不报错。
   //   视觉复用账号卡,数据走独立通路 —— 闸在 tests/test_grok_not_in_pool_ui.py。
-  const { snap: grokSnap, busy: grokBusy } = useGrokQuota();
+  const { snap: grokSnap, busy: grokBusy, refresh: refreshGrok } = useGrokQuota();
   // ★ agy 同样不进 `accounts`/`alive`,理由与 grok 完全一致。
   //   与 grok 的差别:这条**不联网**(本机 loopback),所以菜单栏常开也不产生外部请求。
   const { snap: agySnap, busy: agyBusy } = useAgyQuota();
+  // ★ agy 账号池。只在 gemini 档打开时才读盘 —— 菜单栏常开，无谓的 IPC 不该常驻。
+  const agyPool = useAgyPool(tab === "acc" && plat === "gemini");
   const alive = accounts.filter(a => a.status !== "dead");
   const dead = accounts.filter(a => a.status === "dead");
+  /** 芯片行的数据。★ 计数一律是**这一档渲染出来几行** —— 写"池里有几个"就是在说
+   *  界面上看不到的事（与主窗 `ProviderTab.count` 同一条定义）。 */
+  const chips = POOL_PLATFORMS.map(p => ({
+    ...p,
+    color: colorOf(traffic, p.colorKey),
+    count: p.key === "codex" ? alive.length
+      : p.key === "gemini" ? Math.max(1, agyPool.accounts.length)
+      : 1,
+    // 死号红点只有 codex 这一档有数据来源；另两档没有"死号"这个状态，
+    // ★ 恒 false 不是偷懒：给一个永远不亮的灯也比给一个来路不明的灯好。
+    hasDead: p.key === "codex" && dead.length > 0,
+  }));
+  const platCount = chips.find(c => c.key === plat)?.count ?? 0;
+
   const bestPct = alive.reduce((m, a) => Math.max(m, a.windows[0]?.pct ?? -1), -1);
+
+  /**
+   * 底部操作栏。★★ **随平台变**（v4 稿 §5）：
+   *   codex / grok → 刷新全池 ｜ 检查 token ｜ 探针
+   *   gemini       → 刷新全池 ｜ 打开 Antigravity（探针/检查 token 对它**没有意义**）
+   *
+   * ★★★ 「探针」是全 app 唯一会花钱的控件，它扣的是 **codex** 的额度。
+   *   挂在 gemini 档上 = 用户看着 gemini 的卡按下去、扣的是另一家的钱。
+   */
+  const codexActions = platformOf(plat).codexActions;
+  /**
+   * ★★★ **「刷新全池」必须刷当前这一档，不能永远刷 codex。**
+   *   原来它写死成 `codex-rotate refresh-all` —— 站在 Gemini 档上按下去，
+   *   刷的是另一家，而 toast 还说「已刷新全池」。按钮说的和做的不是一件事，
+   *   这是本仓那条「写入侧标志会撒谎」在 UI 上的形态。
+   *   三家的刷新成本都是零消耗：codex 走官方 usage GET、gemini 走云端 `fetchAvailableModels`、
+   *   grok 走它的 billing 端点 —— 所以「免费」那个徽章三档都成立。
+   */
+  const refreshPool = () => {
+    if (plat === "gemini") { agyPool.refresh(); showToast("已刷新 Gemini · 免费"); return; }
+    if (plat === "grok") { refreshGrok(); showToast("已刷新 Grok · 免费"); return; }
+    run("refresh-all", ["refresh-all", "--notify"], "已刷新全池");
+  };
 
   const actions = [
     { id: "refresh-all", label: "刷新全池", loadingLabel: "刷新中…", accent: true, badge: "免费",
       icon: true,
-      hint: "读取 Codex 官方额度接口(GET),不消耗额度",
-      action: () => run("refresh-all", ["refresh-all", "--notify"], "已刷新全池") },
-    // 中键随 Tab 变(交接稿 §3):账号页查 token,今日页跳主窗流量总览要明细。
+      hint: plat === "codex" ? "读取 Codex 官方额度接口(GET),不消耗额度"
+        : plat === "gemini" ? "按账号读云端额度(fetchAvailableModels),零消耗"
+        : "读 grok 的账单接口,零消耗",
+      action: refreshPool },
+    // 中键随 Tab / 平台变(稿 §3/§5)。
     tab === "today"
       ? { id: "open-traffic", label: "打开流量总览 ↗", loadingLabel: "", accent: false,
           badge: undefined as string | undefined, icon: false,
           hint: "在主窗口看分平台/分模型明细、切时间段、看费率卡",
           action: () => void openMain("navigate-traffic") }
-      : { id: "health", label: "检查 token", loadingLabel: "检查中…", accent: false,
-          badge: undefined as string | undefined, icon: true,
-          hint: "逐号问服务端 token 是否被作废(零消耗,不刷新 token);发现失效会记录。约 10s",
-          action: () => run("health", ["health"], "已检查 token") },
+      : codexActions
+        ? { id: "health", label: "检查 token", loadingLabel: "检查中…", accent: false,
+            badge: undefined as string | undefined, icon: true,
+            hint: "逐号问服务端 token 是否被作废(零消耗,不刷新 token);发现失效会记录。约 10s",
+            action: () => run("health", ["health"], "已检查 token") }
+        : plat === "gemini"
+          ? { id: "open-agy", label: "↗ 打开 Antigravity 重启生效", loadingLabel: "", accent: false,
+              badge: undefined as string | undefined, icon: false,
+              // ★ 文案说"做什么"不只说"坏了"：换号只对**下一次启动**的 agy 生效，
+              //   已经开着的会话不受影响 —— 不说清楚，用户会以为点一下就把当前会话切走了。
+              hint: "agy 只在启动时读凭证 —— 换号要开一个新的 agy 才生效",
+              action: () => { void openMain("navigate-overview"); showToast("切号只对下一次启动的 agy 生效"); } }
+          : { id: "open-grok", label: "↗ 打开 Grok 详情", loadingLabel: "", accent: false,
+              badge: undefined as string | undefined, icon: false,
+              hint: "grok 是单号只读：没有池可切、也没有可探的号,只有用量与周额度可看",
+              action: () => void openMain("navigate-platform", "grok") },
   ];
 
   return (
@@ -302,7 +373,9 @@ export default function MenuBar() {
       {/* Tab 行(v3 新增):全宽分段控件,带活值小字 */}
       <div className="mb-tabs" style={{ border: `1px solid ${t.ghostBorder}` }}>
         {([
-          ["acc", "账号", String(alive.length)],
+          // ★ 稿 §1：这个数是**当前平台**的账号数，不是 codex 的。
+          //   写死成 codex 的话，切到 Gemini 档后 Tab 上仍印着 6，而列表里只有 2 行。
+          ["acc", "账号", String(platCount)],
           ["today", "今日", today ? fmtTok(today.totalTok) : "—"],
         ] as [Tab, string, string][]).map(([id, label, val]) => (
           <span key={id} className="mb-tab" onClick={() => setTab(id)}
@@ -323,17 +396,21 @@ export default function MenuBar() {
         </div>
       ) : (
       <div className="mb-pane">
-      {/* Sub-header */}
-      <div className="mb-list-header">
-        <span className="mb-list-title" style={{ color: t.muted }}>可用账号</span>
-        {lastRefreshAt && (
-          <span className="mb-refreshed" style={{ color: t.muted }}><IconRefresh size={10} />上次刷新 {fmtAgo(lastRefreshAt)}</span>
-        )}
-        <span className="mb-list-count" style={{ color: t.muted, marginLeft: lastRefreshAt ? undefined : "auto" }}>{alive.length} 个</span>
-      </div>
+      {/* 平台 logo 芯片行（v4 稿 §2）—— 取代 v3 那条只重复 Tab 数字的「可用账号」标题行 */}
+      <PlatformChips t={t} cur={plat} on={setPlat} items={chips}
+                     right={lastRefreshAt
+                       // ★ 稿 §2 给的是 `↻ {时间}` 一个时刻。`fmtAgo` 还会缀「N 分钟前」，
+                       //   352px 的一行里那截尾巴会在平台名变长或多一个芯片时先被挤掉 ——
+                       //   所以只画时刻，**新旧程度放进 title**，一个字都没丢。
+                       ? <span title={`上次刷新 ${fmtAgo(lastRefreshAt)}`}>
+                           {platformOf(plat).label} · ↻ {new Date(lastRefreshAt * 1000)
+                             .toTimeString().slice(0, 5)}
+                         </span>
+                       : <>{platformOf(plat).label}</>} />
 
       {/* Expiring reset-card banner */}
-      {cardAlert && (
+      {/* ★ 重置卡是 **codex** 专属的东西。挂在别家档上说的是另一家的事（同主窗那条纪律）。 */}
+      {plat === "codex" && cardAlert && (
         <div className="mb-banner" style={{ background: "rgba(224,144,28,.1)", border: "1px solid rgba(224,144,28,.45)" }}>
           <span className="mb-banner-icon" style={{ color: "#f2b45c" }}><IconWarn /></span>
           <div className="mb-banner-body">
@@ -356,7 +433,9 @@ export default function MenuBar() {
 
       {/* 点行 = 弹出主界面(既有行为);hover 行尾的「切换」= 直接换号,不开主窗口(用户 2026-08-11) */}
       <div className="mb-list">
-        {alive.map(a => (
+        {/* ★★ 一档一份列表。三家的账号语义根本不同（逐请求换号 / 启动前换凭证 / 单号只读），
+            堆在一起时读者会拿同一套直觉去理解它们 —— 这正是分档的理由（同主窗 ProviderTabs）。 */}
+        {plat === "codex" && alive.map(a => (
           <AccountRow key={a.aid} a={a} isCurrent={a.aid === currentNode} isBest={hero?.aid === a.aid}
             bestPct={bestPct} privacy={privacy} t={t} onSelect={() => void openMain("navigate-overview")}
             // 当前号不给按钮:切到自己是空操作,画出来只会让人以为点了没反应。
@@ -366,16 +445,34 @@ export default function MenuBar() {
             switching={loadingAction === `switch-${a.aid}`} />
         ))}
 
-        {/* grok:同款卡片、紫色左轨、无「切换」按钮。点行 = 弹主界面的 Grok 详情页。 */}
-        <GrokRow t={t} color={colorOf(traffic, "grok")} disabled={!!prefs.by?.grok?.off}
-                 snap={grokSnap} privacy={privacy} busy={grokBusy}
-                 onOpen={() => void openMain("navigate-platform", "grok")} />
-        {/* agy:同款卡片、无「切换」按钮。★ 没有 privacy —— agy 的额度响应里没有身份信息。 */}
-        <AgyRow t={t} color={colorOf(traffic, "agy")} disabled={!!prefs.by?.agy?.off}
-                snap={agySnap} busy={agyBusy}
-                onOpen={() => void openMain("navigate-platform", "agy")} />
+        {/* Gemini：一号一行、可点切换。
+            ⚠️ v4 稿这一档写的是「只读·点卡不切号」，用户 2026-09-13 明确**淘汰**了那个方式
+               （「可以切号的，按照目前 codex 的方式」），所以这里与 codex 档同构。 */}
+        {plat === "gemini" && (agyPool.accounts.length > 0
+          ? agyPool.accounts.map(a => (
+              <AgyRow key={a.sub} t={t} color={colorOf(traffic, "agy")}
+                      snap={agyPool.snapshotOf(a, agySnap)} label={a.label}
+                      isCurrent={a.sub === agyPool.liveSub}
+                      onSwitch={a.sub === agyPool.liveSub ? undefined
+                        : () => { agyPool.switchTo(a.label);
+                                  showToast(`已切到 ${a.label} · 下次启动 agy 生效`); }}
+                      switching={agyPool.switching === a.label}
+                      disabled={!!prefs.by?.agy?.off} busy={agyBusy}
+                      onOpen={() => void openMain("navigate-platform", "agy")} />
+            ))
+          // 池还没建起来 —— 退回原来那张只读行（`agy-rotate login --current` 之前就是这个状态）
+          : <AgyRow t={t} color={colorOf(traffic, "agy")} disabled={!!prefs.by?.agy?.off}
+                    snap={agySnap} busy={agyBusy}
+                    onOpen={() => void openMain("navigate-platform", "agy")} />)}
 
-        {dead.length > 0 && (
+        {/* grok:同款卡片、紫色左轨、无「切换」按钮。点行 = 弹主界面的 Grok 详情页。 */}
+        {plat === "grok" && (
+          <GrokRow t={t} color={colorOf(traffic, "grok")} disabled={!!prefs.by?.grok?.off}
+                   snap={grokSnap} privacy={privacy} busy={grokBusy}
+                   onOpen={() => void openMain("navigate-platform", "grok")} />
+        )}
+
+        {plat === "codex" && dead.length > 0 && (
           <details className="mb-dead-fold">
             <summary className="mb-dead-summary" style={{ color: t.muted, borderTop: `1px solid ${t.chromeBorder}` }}>
               <span className="mb-dead-dot" style={{ background: STATUS_COLORS.dead }} />
@@ -413,11 +510,13 @@ export default function MenuBar() {
             </Fragment>
           );
         })}
-        <span className="mb-action-divider" style={{ background: t.chromeBorder }} />
-        <ProbeButton t={t} variant="menubar" label="探针"
+        {/* ★★★ 探针扣的是 **codex** 的额度。挂在 gemini 档上 = 用户看着 gemini 的卡
+            按下去、花的是另一家的钱（v4 稿 §5 明确要求只读平台隐藏它）。 */}
+        {codexActions && <span className="mb-action-divider" style={{ background: t.chromeBorder }} />}
+        {codexActions && <ProbeButton t={t} variant="menubar" label="探针"
           hint={`对 ${alive.length} 个号各发一次真实补全(问 hi 要求答 ok),证明"真的还能干活"——token 有效但订阅到期/模型权限被撤/被限流,只有这个测得出来。⚠️ 消耗周额度(实测单次 <1%)`}
           loading={loadingAction === "probe-all"} loadingText="探测中…"
-          onConfirm={() => run("probe-all", ["probe", "--all"], "探针 全池")} />
+          onConfirm={() => run("probe-all", ["probe", "--all"], "探针 全池")} />}
       </div>
 
       {toast && <Toast msg={toast} t={t} />}

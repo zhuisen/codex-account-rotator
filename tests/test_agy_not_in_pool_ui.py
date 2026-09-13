@@ -58,13 +58,24 @@ class AgyNeverEntersPoolArrays(unittest.TestCase):
             self.assertEqual(re.findall(pat, self.mb, re.I), [],
                              "agy 是从 accounts 里挑出来的 —— 它根本不该在那里面")
 
-    def test_agyrow_has_no_switch_affordance(self):
-        """卡片这个形状本身在说"这是能切的号"。agy 切不了,所以绝不能长出切换入口。"""
+    def test_agyrow_switches_through_the_pool_not_the_codex_arrays(self):
+        """★★ **这条 2026-09-13 被推翻并改写过，旧判据「agy 绝不能长出切换入口」已作废。**
+
+        旧的前提是「agy 切不了号」。当天把钥匙串那条路打通之后它切得了了
+        （已由 agy 自己的日志两向证实），用户也明确要求「可以切号的，按照目前 codex 的方式」。
+        **留着旧判据会把一个已经不成立的前提锁死。**
+
+        但这个文件真正要守的东西一个字没变：**agy 绝不能混进 `accounts`/`alive`**
+        —— 那两个数组同时驱动 ⌘1~⌘9、计数徽章、探针全池的号数、自动切号。
+        所以判据改成：切号必须走**池自己的通道**（`agy-rotate switch`，由 `useAgyPool` 发），
+        而不是 codex 池那条 `run_rotate`。
+        """
         code = strip_comments(AGYROW.read_text(encoding="utf-8"))
-        for bad in ("onSwitch", "mb-row-switch", '"switch"', "switching"):
-            with self.subTest(token=bad):
-                self.assertNotIn(bad, code,
-                                 "AgyRow 出现了切换相关的 {} —— 它不在池里".format(bad))
+        self.assertNotIn("run_rotate", code,
+                         "★★★ AgyRow 走了 codex 池的通道 —— 那条路会动 accounts/alive")
+        self.assertNotIn("invoke(", code, "★★ AgyRow 直接发 IPC 了 —— 它只该把点击回调出去")
+        # 正面：切号能力确实在（否则上面两条在"根本不能切"的实现下也会绿）
+        self.assertIn("onSwitch", code, "★ 连回调都没有 —— 这条闸退化成恒真")
 
     def test_agy_components_never_invoke_commands(self):
         for f in (AGYROW, AGYCARD):

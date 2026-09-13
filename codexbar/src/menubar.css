@@ -56,25 +56,74 @@
 }
 .mb-settings-btn:hover { filter: brightness(1.5); }
 
-/* Sub-header: "可用账号 … 上次刷新 … N 个" */
-.mb-list-header {
+/* 平台 logo 芯片行（v4 稿 §2）—— 取代了 v3 那条只重复 Tab 数字的「可用账号」标题行。
+   ★ 芯片宽度靠 logo+数字的固定组合稳定在 ~56px；超过 6 个平台时横滑不换行（稿 §9.3）。 */
+.mb-chips {
   display: flex;
   align-items: center;
-  gap: 13px;
-  padding: 9px 16px 4px;
+  gap: 7px;
+  padding: 10px 16px 4px;
   flex-shrink: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
 }
-.mb-list-title { font-size: 12.5px; }
-.mb-refreshed {
-  margin-left: auto;
+.mb-chips::-webkit-scrollbar { display: none; }
+.mb-chip {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
+  gap: 7px;
+  padding: 3px 9px 3px 4px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  cursor: pointer;
+  user-select: none;
+  flex-shrink: 0;
+  transition: all .15s;
+}
+.mb-chip:hover { filter: brightness(1.25); }
+.mb-chip-logo {
+  width: 20px;
+  height: 20px;
+  border-radius: 6px;
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  transition: background .15s;
+}
+/* ★ 蒙版着色：一张白 glyph + 透明底的 PNG 覆盖选中/未选中两态（稿 §2）。 */
+.mb-chip-mask {
+  width: 14px;
+  height: 14px;
+  display: block;
+  -webkit-mask-size: contain;
+  mask-size: contain;
+  -webkit-mask-position: center;
+  mask-position: center;
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+}
+.mb-chip-n {
+  font-size: 11px;
+  font-weight: 700;
+  font-family: 'JetBrains Mono', monospace;
+  font-variant-numeric: tabular-nums;
+}
+.mb-chip-dead {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #E0524D;
+  flex-shrink: 0;
+  margin-left: -2px;
+}
+/* 右侧小字「{当前平台名} · ↻ {时间}」—— 只有 logo 时用来防认错（稿 §2）。 */
+.mb-chips-right {
+  margin-left: auto;
   font-size: 10px;
   font-family: 'JetBrains Mono', monospace;
   white-space: nowrap;
+  flex-shrink: 0;
 }
-.mb-list-count { font-size: 11px; flex-shrink: 0; }
 
 /* Expiring reset-card banner */
 .mb-banner {

@@ -29,7 +29,8 @@ import { useGrokQuota } from "./hooks/useGrokQuota";
 import GrokCard from "./components/GrokCard";
 import { useAgyQuota } from "./hooks/useAgyQuota";
 import AgyCard from "./components/AgyCard";
-import ProviderTabs, { type ProviderKey } from "./components/ProviderTabs";
+import ProviderTabs from "./components/ProviderTabs";
+import { POOL_PLATFORMS, loadPoolKey, savePoolKey, type PoolKey } from "./platforms";
 import { useAgyPool } from "./hooks/useAgyPool";
 import { IconTicket } from "./components/CardBadge";
 import ProbeButton from "./components/ProbeButton";
@@ -80,15 +81,12 @@ export default function App() {
   const [trafficSt, setTrafficSt] = useState<RangeState>(DEFAULT_RANGE);
   /** 总览当前看哪一家。★ 记进 localStorage：切到别的页再回来不该跳回第一档 ——
    *  这一档是"我在管哪一家账号"，不是一次性的筛选。 */
-  const [provider, setProvider] = useState<ProviderKey>(() => {
-    try {
-      const v = localStorage.getItem("codexbar_provider");
-      return v === "google" || v === "xai" ? v : "codex";
-    } catch { return "codex"; }
-  });
-  useEffect(() => {
-    try { localStorage.setItem("codexbar_provider", provider); } catch { /* 隐私模式下写不了，忽略 */ }
-  }, [provider]);
+  /** 总览当前看哪一家。★ 记进 localStorage：切到别的页再回来不该跳回第一档 ——
+   *  这一档是"我在管哪一家账号"，不是一次性的筛选。
+   *  ★ 平台清单与菜单栏芯片行**同一份** `POOL_PLATFORMS`（v4 稿 §9.1）。 */
+  const [provider, setProvider] = useState<PoolKey>(loadPoolKey);
+  useEffect(() => { savePoolKey(provider); }, [provider]);
+
   const [drill, setDrill] = useState<string | null>(null);   // 平台详情:null = 停在总览
   const [detailModal, setDetailModal] = useState<AccountDetail | null>(null);
   const [selectedCard, setSelectedCard] = useState<string | null>(null);
@@ -184,7 +182,7 @@ export default function App() {
   //     **显示**一律用 `todayOf(data)`（桶按本地日切，挂钟在午夜前后会差一天）。
   // agy 账号池。★ 只在总览的 Google 档才读 —— 与 grok 额度同一条纪律：
   //   不是每个页面都需要它，而"顺手读一下"会变成"每次开 app 都读"。
-  const agyPool = useAgyPool(page === "overview" && provider === "google");
+  const agyPool = useAgyPool(page === "overview" && provider === "gemini");
   const trafficDays = daysNeeded(trafficSt, todayOf(null));
   const { data: traffic, raw: trafficRaw, cacheMode, prefs: platPrefs, busy: trafficBusy,
           err: trafficErr, refresh: refreshTraffic } = useTraffic({
@@ -199,10 +197,11 @@ export default function App() {
    *   不要放在 AI 用量信息里,放在总览里就好」)。用量页、日志页、设置页一律不触发 ——
    *   那一页整页都是"本机盘扫出来的 token 消耗",而 grok 额度是云端账单,本来就不同源。
    *
-   *   频次仍有四道闸:sidecar 新鲜度 10min · `visibilityState` 门(窗口隐藏时零请求) ·
-   *   Rust 侧 `GROK_COALESCE_SECS=300` 双检 · 设置页「后台自动刷新」总开关。
-   *   ⚠️ 已知取舍:总览是默认页,所以**每次启动 app 会打一次**(token 已过期时连请求都不发,
-   *   本地短路)。这个端点不计费、不消耗额度,换来的是打开窗口时数字已经在那儿。
+   *   grok CLI 活着时抓取交给 `grok-quota-sampler`（约 15s 一轮、推送到 sidecar），
+   *   这里的 10min 轮询只是它退出之后的兜底。`enabled` 仍白名单：只挡主动 `run_grok_quota`，
+   *   推送通道不受它约束。
+   *   ⚠️ 总览是默认页,启动仍可能打一次(token 已过期时本地短路、不发请求)。
+   *   这个端点不计费、不消耗额度。
    */
   const { snap: grokSnap, busy: grokBusy, err: grokErr, refresh: refreshGrok } =
     useGrokQuota({ enabled: page === "overview" });
@@ -353,24 +352,19 @@ export default function App() {
                   <span style={{ fontSize: 20, fontWeight: 700, letterSpacing: "-.01em",
                                  whiteSpace: "nowrap", flexShrink: 0 }}>总览</span>
                   <ProviderTabs t={t} cur={provider} on={setProvider}
-                    items={[
-                      { key: "codex", label: "Codex", color: colorOf(traffic, "codex"),
-                        // ★ 数的是**网格里渲染出来的**那些（死号在下面的折叠区里，不算）——
-                        //   与 `ProviderTab.count` 的定义一致：写"池里有几个"就是在说
-                        //   一件界面上看不到的事。
-                        count: accounts.filter((a) => a.status !== "dead").length,
-                        note: "账号池 · 经本地代理逐请求换号 · 5h/周双窗口" },
-                      { key: "google", label: "Google", color: colorOf(traffic, "agy"),
-                        // ★ 同 Codex：数的是**画出来几张**。池空时退回那张只读卡，也是 1 张。
-                        count: Math.max(1, agyPool.accounts.length), note: "Antigravity · 启动前换凭证（agy 只在启动时读）" },
-                      { key: "xai", label: "xAI", color: colorOf(traffic, "grok"),
-                        count: 1, note: "Grok · 单号只读 · 周窗口" },
-                    ]}
-                    onAdd={(k) => showToast(k === "codex"
-                      ? "加号：终端里跑 `codex-rotate login`"
-                      : k === "google"
-                        ? "加号：终端里跑 `agy-rotate login`"
-                        : "grok 是单号只读 —— 登录由 grok CLI 自己管")} />
+                    items={POOL_PLATFORMS.map((p) => ({
+                      ...p,
+                      color: colorOf(traffic, p.colorKey),
+                      // ★ 计数一律是**渲染出来几张**，不是"池里有几个"：死号在下面的折叠区里，
+                      //   算进来就会出现「Codex 7」配着 6 张卡，而那个差额没有任何地方解释。
+                      count: p.key === "codex"
+                        ? accounts.filter((a) => a.status !== "dead").length
+                        : p.key === "gemini"
+                          // 池空时退回那张只读卡，也是 1 张。
+                          ? Math.max(1, agyPool.accounts.length)
+                          : 1,
+                    }))}
+                    onAdd={(k) => showToast(POOL_PLATFORMS.find((p) => p.key === k)!.addHint)} />
                 </div>
                 <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 5 }}>
                 {/* ★★★ 这一排全是 **codex 池**的动作（刷新全池 / 检查 token / 探针全池 /
@@ -554,7 +548,7 @@ export default function App() {
                       );})}
                     </div>
                     </>)}
-                    {provider === "google" && (<>
+                    {provider === "gemini" && (<>
                     <div data-cards-grid style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 12, alignContent: "start" }}>
                       {/* ★★ 池里**有号就一号一卡**；一个都没有时退回原来那张只读卡
                           （`agy-rotate login --current` 之前就是这个状态，它仍然成立）。
@@ -596,7 +590,7 @@ export default function App() {
                       </div>
                     )}
                     </>)}
-                    {provider === "xai" && (<>
+                    {provider === "grok" && (<>
                     <div data-cards-grid style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 12, alignContent: "start" }}>
                       {/* ★ grok 卡。**渲染在格子里,但绝不进 `alive` 数组** —— 那个数组同时驱动
                           ⌘1~⌘9 切号(`aliveByLabel[idx]` 直接 switch)、计数徽章、探针全池的号数、

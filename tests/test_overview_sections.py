@@ -23,15 +23,18 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 APP = (ROOT / "codexbar" / "src" / "App.tsx").read_text(encoding="utf-8")
 TABS = (ROOT / "codexbar" / "src" / "components" / "ProviderTabs.tsx").read_text(encoding="utf-8")
+# ★ 2026-09-13：平台清单搬到了 `platforms.ts`，主窗分档 Tab 与**菜单栏 logo 芯片行**
+#   共用这一份（菜单栏 v4 稿 §9.1）。判据跟着真源走，不留在 App.tsx 上。
+PLAT = (ROOT / "codexbar" / "src" / "platforms.ts").read_text(encoding="utf-8")
 
 
 class TheOverviewIsTabbedByProvider(unittest.TestCase):
 
-    KEYS = re.findall(r'key: "(codex|google|xai)"', APP)
-    NOTES = re.findall(r'note: "([^"]+)"', APP)
+    KEYS = re.findall(r'\{ key: "([a-z]+)"', PLAT)
+    NOTES = re.findall(r'note: "([^"]+)"', PLAT)
 
     def test_three_tabs_in_pool_size_order(self):
-        self.assertEqual(self.KEYS, ["codex", "google", "xai"],
+        self.assertEqual(self.KEYS, ["codex", "gemini", "grok"],
                          "★ 档位或顺序不对（顺序 = 账号数量降序，主力池排最前）")
 
     def test_each_tab_explains_its_own_rotation(self):
@@ -51,12 +54,17 @@ class TheOverviewIsTabbedByProvider(unittest.TestCase):
     def test_the_count_is_what_gets_rendered(self):
         """★★ 计数是「网格里画出来几张」，不是「池里有几个」。死号在下面的折叠区里，
         算进来就会出现「Codex 7」配着 6 张卡 —— 而那个差额没有任何地方解释。"""
-        self.assertIn('count: accounts.filter((a) => a.status !== "dead").length', APP,
+        self.assertIn('accounts.filter((a) => a.status !== "dead").length', APP,
                       "★★ Codex 的计数把死号也算进去了")
 
     def test_the_choice_is_remembered(self):
         """★ 这一档是"我在管哪一家账号"，不是一次性筛选 —— 切到别的页再回来不该跳回第一档。"""
-        self.assertIn('localStorage.setItem("codexbar_provider"', APP)
+        self.assertIn('localStorage.setItem(STORE_KEY, k)', PLAT,
+                      "★ 分档没有被记住")
+        # ★★ 旧值必须还认得：2026-09-13 之前存的是 `google`/`xai`，
+        #   不迁移的话停在 Gemini 档的用户下次打开会**静默跳回 Codex**。
+        self.assertIn('v === "google"', PLAT, "★★ 没有迁移旧的 provider 值")
+        self.assertIn('v === "xai"', PLAT, "★★ 没有迁移旧的 provider 值")
 
     def test_the_identity_dot_survives_selection(self):
         """★ 选中态是青底，识别色圆点是「这一档是谁」—— 两件事。
@@ -119,7 +127,7 @@ class TheExtraCardsStillStayOutOfThePool(unittest.TestCase):
 
     def test_neither_card_is_rendered_from_alive(self):
         i = APP.index("{alive.map((a) => {")
-        j = APP.index('{provider === "google"', i)
+        j = APP.index('{provider === "gemini"', i)
         seg = APP[i:j]
         for tag in ("<GrokCard", "<AgyCard"):
             with self.subTest(card=tag):

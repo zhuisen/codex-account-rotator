@@ -360,7 +360,7 @@ class ThePushActuallyMovesTheNumberOnScreen(unittest.TestCase):
     BASE = "http://127.0.0.1:3304"
     CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
     #: ★ 2026-09-13 起总览按供应商**分档**，agy 卡在 Google 档下 ——
-    #:   所以这两个视图都要先 `click=Google`。不点的话 DOM 里根本没有那张卡，
+    #:   所以这两个视图都要先 `click=Gemini`。不点的话 DOM 里根本没有那张卡，
     #:   `assertNotIn` 那条基线**依然绿**（因为确实没有），而正向那条恒红：
     #:   一条"看起来在验推送"的测试，实际在验一张不存在的卡。
     NEEDLE = "42.5"
@@ -380,7 +380,7 @@ class ThePushActuallyMovesTheNumberOnScreen(unittest.TestCase):
         if not Path(cls.CHROME).exists():
             raise unittest.SkipTest("没有 Chrome")
         try:
-            raw, cls.baseline = cls.dom("nav=home&rail=open&agy=ok&click=Google")
+            raw, cls.baseline = cls.dom("nav=home&rail=open&agy=ok&click=Gemini")
         except Exception as e:                      # noqa: BLE001
             raise unittest.SkipTest("harness 不可达: %s" % e)
         if 'class="neterror"' in raw or "<title>__PROBE__" not in raw:
@@ -394,7 +394,7 @@ class ThePushActuallyMovesTheNumberOnScreen(unittest.TestCase):
                          "基线里就有推送值 —— 这条测试没有判别力")
 
     def test_the_number_changes_after_the_push_arrives(self):
-        _raw, d = self.dom(f"nav=home&rail=open&agy=ok&click=Google&agypush={self.NEEDLE}")
+        _raw, d = self.dom(f"nav=home&rail=open&agy=ok&click=Gemini&agypush={self.NEEDLE}")
         self.assertIn(self.NEEDLE, d,
                       "推送到达了，但 UI 上的数没动 —— 监听没接上，或没重读 sidecar")
 

@@ -2,18 +2,18 @@ import type { Theme } from "../theme";
 
 const MONO = "'JetBrains Mono'";
 
-export type ProviderKey = "codex" | "google" | "xai";
+import type { PoolKey, PoolPlatform } from "../platforms";
 
-export interface ProviderTab {
-  key: ProviderKey;
-  label: string;
+/** @deprecated 名字留给旧引用；真源是 `platforms.ts` 的 `PoolKey`。 */
+export type ProviderKey = PoolKey;
+
+/** `PoolPlatform` + 两个**只有渲染时才知道**的字段。 */
+export interface ProviderTab extends PoolPlatform {
   /** 平台识别色。★ 走 `colorOf(data, …)` 取，别用 `theme.ts` 的静态表 —— 那是链末兜底。 */
   color: string;
   /** 这一档有几张账号卡。**是"渲染出来几张"而不是"池里有几个"** —— 两者不同的时候，
    *  把后者显示出来等于在说一件界面上看不到的事。 */
   count: number;
-  /** 这一档的账号是怎么轮换的。三家机制不同，不写就会被当成一样的。 */
-  note: string;
 }
 
 /**
