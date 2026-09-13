@@ -768,7 +768,9 @@ async fn run_agy_quota() -> Result<String, String> {
     }
 }
 
-/// 取一次 grok 周额度。**这是本 app 唯一一条主动联网的数据路径**(`check_update` 是点按钮才跑的 git)。
+/// 取一次 grok 周额度。前端点 ↻ / 闲置兜底走这里；grok CLI 活着时由
+/// `grok-quota-sampler` 写同一份 sidecar，这边因 `GROK_COALESCE_SECS` 复用、不再发请求。
+/// (`check_update` 是点按钮才跑的 git，不算这条。)
 ///
 /// ★★ `grok-quota` 的退出码**恒 0**,任何失败都以 `available:false` 的 JSON 回来 ——
 /// 所以这里几乎不会走 `Err` 分支。这是刻意的:`Err(String)` 在前端会被读成"没数据",
@@ -1835,6 +1837,8 @@ pub fn run() {
                 //    才前进** —— 切走再回来最坏等 2.5 分钟。两个 webview 也因此各看各的。
                 let agy_path = sidecar_path(AGY_SNAPSHOT);
                 let mut agy_seen: Option<(std::time::SystemTime, u64)> = None;
+                let grok_path = sidecar_path(GROK_SNAPSHOT);
+                let mut grok_seen: Option<(std::time::SystemTime, u64)> = None;
                 let mut seen: Option<(std::time::SystemTime, u64)> = None;
                 let mut since_tick = 0u32;
                 // *** 独立计数器。`since_tick` 会被下面的 `changed` 分支清零,
@@ -1869,6 +1873,17 @@ pub fn run() {
                         agy_seen = agy_stamp;
                     }
 
+                    let grok_stamp = fs::metadata(&grok_path)
+                        .ok()
+                        .and_then(|m| m.modified().ok().map(|t| (t, m.len())));
+                    let grok_changed = grok_stamp.is_some() && grok_seen.is_some() && grok_stamp != grok_seen;
+                    if grok_changed {
+                        let _ = handle_timer.emit("grok-quota-updated", ());
+                    }
+                    if grok_stamp.is_some() {
+                        grok_seen = grok_stamp;
+                    }
+
                     // ★★ **补拉采样器**（Phase 5）。采样器目前只由 `bin/agy` wrapper 拉起 ——
                     //    从 IDE / VS Code / 绝对路径起的 agy 没有 wrapper,于是**没有采样器**,
                     //    额度就永远停在上一次的读数上,而 UI 看不出这一点(它只知道"数据旧了")。
@@ -1890,9 +1905,20 @@ pub fn run() {
                                     .spawn();
                             }
                         }
+                        let lock = format!("{}/traffic/grok-quota-ledger/.sampler.lock", data_dir());
+                        if !std::path::Path::new(&lock).exists() {
+                            let script = format!("{}/grok-quota-sampler", script_dir());
+                            if std::path::Path::new(&script).exists() {
+                                let _ = py_cmd()
+                                    .arg(&script)
+                                    .stdout(std::process::Stdio::null())
+                                    .stderr(std::process::Stdio::null())
+                                    .spawn();
+                            }
+                        }
                     }
 
-                    if changed || since_tick >= 30 {
+                    if changed || grok_changed || since_tick >= 30 {
                         since_tick = 0;
                         if changed {
                             let _ = handle_timer.emit("state-changed", ());

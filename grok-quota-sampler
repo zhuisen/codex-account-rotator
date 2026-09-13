@@ -1,0 +1,241 @@
+#!/usr/bin/env python3
+"""grok 周额度水位采样器 —— grok CLI 活着时才采，写 sidecar 推给 CodexBar。
+
+对照 `traffic/agy_quota_sampler.py`（Phase 5）。agy 打本机 loopback，这条打
+`cli-chat-proxy.grok.com`，所以节拍更慢，其它结构对齐：
+
+  ① **单一抓取者**：只 subprocess `grok-quota`，不自己打开 `~/.grok/auth.json`，
+     更不碰 `refresh_token`（那是 grok-quota 文件头第 1 条，闸在
+     `tests/test_grok_readonly.py` + `tests/test_grok_realtime.py`）。
+  ② **同一份响应同时喂账本和 sidecar**。Rust 看 sidecar mtime 变化就
+     `emit("grok-quota-updated")`，前端只读、不发请求。
+  ③ 自己会死：单实例锁 + grok 不在就退出 + 空闲超时 + 24h 硬上限。
+  ④ 内容没变就不写 sidecar（mtime 不变 ⇒ 不广播），否则 15s 一轮会把两个
+     webview 变成空转。比较时剔掉 `fetched_at`。
+
+★ 放仓库根、不放 `traffic/`：它会联网且（经由 grok-quota）读凭证，
+  与 `traffic/`「不碰凭证不联网」的安全线相反。同 `grok-quota`。
+
+★ 账单接口只回**整数**百分比。15s 一轮换来的是「整数跳变后约 15s 内进菜单栏」，
+  不是亚百分点的实时曲线。编一个更细的数 = 编造额度。
+"""
+import json
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent
+FETCHER = ROOT / "grok-quota"
+# ★ 数据目录必须认 `CODEX_ROTATE_STORE`：脚本打进 app 后 `ROOT` 变成
+#   `Contents/Resources/scripts/`，往那里写 sidecar 等于写进只读包内，
+#   而 CodexBar 去数据目录读 —— 两边各自正常、数字永远不更新。
+_STORE = Path(os.environ.get("CODEX_ROTATE_STORE", str(ROOT)))
+LEDGER_DIR = Path(os.environ.get(
+    "GROK_QUOTA_LEDGER_DIR", str(_STORE / "traffic" / "grok-quota-ledger")))
+LEDGER = "samples.jsonl"
+SIDECAR = _STORE / ".grok-quota.json"
+LOCK = ".sampler.lock"
+
+POLL_SECS = int(os.environ.get("GROK_SAMPLER_POLL", "15"))
+# 第一次读数前略快。不要降到 agy 那种 2s：那是 loopback，这条是外网账单。
+POLL_FAST_SECS = int(os.environ.get("GROK_SAMPLER_POLL_FAST", "5"))
+FAST_PHASE_SECS = int(os.environ.get("GROK_SAMPLER_FAST_PHASE", "45"))
+HEARTBEAT_SECS = int(os.environ.get("GROK_SAMPLER_HEARTBEAT", "1800"))
+IDLE_SECS = int(os.environ.get("GROK_SAMPLER_IDLE_SECS", "180"))
+MAX_LIFETIME_SECS = int(os.environ.get("GROK_SAMPLER_MAX_LIFETIME", str(24 * 3600)))
+FETCH_TIMEOUT = int(os.environ.get("GROK_SAMPLER_FETCH_TIMEOUT", "30"))
+
+
+def fetch():
+    """跑一次 `grok-quota`。→ 解析后的 dict，失败返回 None。
+
+    ★ 复用抓取器，不在这里重写一遍 HTTPS —— 过期短路、HPACK 解出的路径、
+    降级契约（失败 `quota` 恒 None，绝不写 0）都在它里面。
+
+    ★ 传 `--prev` 让 `last_good` 与锚点链跨进程连续。
+    """
+    try:
+        cmd = [sys.executable, str(FETCHER)]
+        if SIDECAR.exists():
+            cmd += ["--prev", str(SIDECAR)]
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=FETCH_TIMEOUT)
+        snap = json.loads(p.stdout)
+    except Exception:                       # noqa: BLE001 — 采样失败绝不能弄死采样器
+        return None
+    _write_sidecar(snap)
+    return snap
+
+
+_last_sidecar = None
+
+
+def _write_sidecar(snap):
+    """原子写 sidecar。**只在内容真的变了时写。**
+
+    ★ 原子写(tmp + rename)：直接覆写会让正在读的 webview 拿到半截 JSON，
+      半截 JSON 解析失败在 UI 上表现为「额度读不到」—— 与真的读不到同形。
+
+    ★★ **必须比内容，不能每次都写。** Rust 侧靠 mtime 变化广播。
+    """
+    global _last_sidecar
+    try:
+        key = json.dumps({k: v for k, v in (snap or {}).items()
+                          if k not in ("fetched_at", "pid")},
+                         ensure_ascii=False, sort_keys=True)
+    except Exception:
+        key = None
+    if key is not None and key == _last_sidecar:
+        return
+    try:
+        tmp = SIDECAR.with_name(SIDECAR.name + ".tmp%d" % os.getpid())
+        tmp.write_text(json.dumps(snap, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, SIDECAR)
+        _last_sidecar = key
+    except OSError:
+        pass                                # 写不了 sidecar 不影响账本
+
+
+def flatten(snap):
+    """快照 → `{used, reset, window, products}`，不可用时 None。
+
+    ★ 口径是**已用**百分比，与 grok-quota / 锚点账本同向。不要在这里换成剩余。
+    """
+    if not snap:
+        return None
+    accs = snap.get("accounts") or []
+    if not accs or not isinstance(accs[0], dict):
+        return None
+    a = accs[0]
+    q = a.get("quota")
+    if not a.get("available") or not isinstance(q, dict):
+        return None
+    used = q.get("used_percent")
+    if not isinstance(used, (int, float)):
+        return None
+    products = tuple(sorted(
+        (p.get("product"), p.get("used_percent"))
+        for p in (q.get("products") or [])
+        if isinstance(p, dict) and isinstance(p.get("used_percent"), (int, float))
+    ))
+    return {
+        "used": float(used),
+        "reset": q.get("period_end"),
+        "window": q.get("window_minutes"),
+        "products": products,
+    }
+
+
+def row(ts, flat):
+    return {
+        "ts": int(ts),
+        "used": flat["used"],
+        "reset": flat["reset"],
+        "window": flat["window"],
+        "products": [{"product": n, "used": u} for n, u in flat["products"]],
+    }
+
+
+def same(a, b):
+    """两次读数在水位与重置时刻上是否完全一致（时间戳不算）。"""
+    if a is None or b is None:
+        return False
+    return (a["used"] == b["used"]
+            and a["reset"] == b["reset"]
+            and a["products"] == b["products"])
+
+
+def append(path, obj):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(obj, ensure_ascii=False) + "\n")
+
+
+def take_lock(lock_path):
+    """单实例。→ True 表示拿到了。陈旧锁必须能被接管。"""
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        old = int(lock_path.read_text().strip())
+    except (OSError, ValueError):
+        old = None
+    if old and old != os.getpid():
+        try:
+            os.kill(old, 0)
+            return False
+        except OSError:
+            pass
+    try:
+        lock_path.write_text(str(os.getpid()))
+        return True
+    except OSError:
+        return False
+
+
+def grok_alive():
+    """★ 用 `ps` + 精确匹配可执行名，不用 `pgrep -f`（自匹配恒真，本仓已记过）。
+
+    本机实测 comm 就是 `grok`。不认 `grok-quota` / `grok-quota-sampler`：
+    那两个 comm 是 `python3`。
+    """
+    try:
+        out = subprocess.run(["ps", "-ax", "-o", "comm="],
+                             capture_output=True, text=True, timeout=15).stdout
+    except Exception:                       # noqa: BLE001
+        return False
+    return any(l.strip() == "grok" or l.strip().endswith("/grok")
+               or l.strip() == "grok.exe"
+               for l in out.splitlines())
+
+
+def main():
+    ledger = LEDGER_DIR / LEDGER
+    # ★★ 先探 grok 再取锁。反了的话：没在跑时 take_lock 成功 → return 0 不释放
+    #    ⇒ `.sampler.lock` 残留，而 Rust 只看「文件在不在」、不接管死 PID
+    #    ⇒ 之后再开 grok，补拉永远被挡。agy 有 `bin/agy` wrapper 总能再拉；
+    #    grok 没有 wrapper，App 是唯一补拉路径，这条更致命。
+    if not grok_alive():
+        return 0
+    if not take_lock(LEDGER_DIR / LOCK):
+        return 0
+
+    started = time.time()
+    last_flat, last_write = None, 0.0
+    got_one = False
+    idle_since = None
+    try:
+        while time.time() - started < MAX_LIFETIME_SECS:
+            flat = flatten(fetch())
+            now = time.time()
+            if flat:
+                got_one, idle_since = True, None
+                changed = not same(flat, last_flat)
+                stale = now - last_write >= HEARTBEAT_SECS
+                if changed or stale:
+                    append(ledger, row(now, flat))
+                    last_flat, last_write = flat, now
+            else:
+                if grok_alive():
+                    idle_since = None
+                else:
+                    if idle_since is None:
+                        idle_since = now
+                    elif now - idle_since >= IDLE_SECS:
+                        break
+            nxt = last_flat["reset"] if last_flat else None
+            crossed = (isinstance(nxt, (int, float)) and nxt > 0
+                       and now >= nxt and last_write < nxt)
+            fast = (not got_one) and (now - started < FAST_PHASE_SECS)
+            time.sleep(POLL_FAST_SECS if (fast or crossed) else POLL_SECS)
+    finally:
+        lk = LEDGER_DIR / LOCK
+        try:
+            if lk.read_text().strip() == str(os.getpid()):
+                lk.unlink()
+        except OSError:
+            pass
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

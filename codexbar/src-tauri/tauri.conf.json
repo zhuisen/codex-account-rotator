@@ -48,6 +48,7 @@
       "../../portalock.py": "scripts/portalock.py",
       "../../resume_provenance.py": "scripts/resume_provenance.py",
       "../../grok-quota": "scripts/grok-quota",
+      "../../grok-quota-sampler": "scripts/grok-quota-sampler",
       "../../agy-quota": "scripts/agy-quota",
       "../../traffic/scan.py": "scripts/traffic/scan.py",
       "../../traffic/discover.py": "scripts/traffic/discover.py",

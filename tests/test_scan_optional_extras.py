@@ -218,7 +218,11 @@ class BundledResourcesCoverRuntimeImports(unittest.TestCase):
 
     def test_sampler_is_bundled_too(self):
         """采样器由 `bin/agy` 起,同样必须进包,否则装了 app 的机器采不到样本。"""
-        self.assertIn("agy_quota_sampler.py", {Path(k).name for k in self.res})
+        names = {Path(v).name for v in self.res.values()} if isinstance(self.res, dict) \
+            else {Path(k).name for k in self.res}
+        self.assertIn("agy_quota_sampler.py", names)
+        self.assertIn("grok-quota-sampler", names,
+                      "grok 采样器没进包 —— 装机版菜单栏额度不会跟着 CLI 动")
 
 
 if __name__ == "__main__":

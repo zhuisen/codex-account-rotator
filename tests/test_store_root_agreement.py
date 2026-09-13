@@ -41,6 +41,7 @@ ENTRIES = [
     "traffic/rotation.py",
     "traffic/quota_anchors.py",
     "traffic/agy_quota_sampler.py",
+    "grok-quota-sampler",
     "relay/store.py",
     "codex-rotate",
 ]
