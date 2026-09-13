@@ -186,7 +186,7 @@ function NameLine({ t, color, sub, mark, label, isCurrent, inPool }: {
                 style={{ color: t.accentText, background: t.accent, border: "1px solid transparent" }}>当前</span>
         ) : inPool ? (
           <span className="mb-row-badge-cur"
-                title="切到这个号 —— ★ 只对**下一次启动的** agy 生效，已经开着的会话不受影响"
+                title="切到这个号 —— ★ 只对下一次启动的 agy 生效，已经开着的会话不受影响"
                 style={{ color, border: `1px solid ${hexA(color, .45)}` }}>切换</span>
         ) : (
           <span className="mb-row-badge-cur"

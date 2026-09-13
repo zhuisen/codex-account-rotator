@@ -12,6 +12,8 @@ export interface AgyPoolAccount {
   quota?: Record<string, { remaining: number; reset: string; models?: string[] }> | null;
   quota_err?: string | null;
   quota_at?: number | null;
+  /** 反向：`true` = 这个号被摘出自动轮换。**缺省（没有这个键）= 参与轮换**。 */
+  rotate_off?: boolean;
 }
 
 interface PoolFile {
@@ -84,6 +86,18 @@ export function useAgyPool(enabled: boolean): {
   renameTo: (label: string, next: string) => void;
   /** 从池里移除。★ **不可逆** —— 卡片上有两段确认，CLI 侧另有一道拒绝删当值号的守卫。 */
   removeIt: (label: string) => void;
+  /** 逐号验凭证还有效吗。**零消耗**（刷 token + 打 `fetchAvailableModels`）。 */
+  health: () => void;
+  /** ★★★ **计费探针 —— 花的是 agy 自己的额度**（起一次 `agy -p`，实测约 15k token）。
+   *  回答 `health` 回答不了的那个问题：这个号**真的还能干活吗**。 */
+  probe: (label?: string) => void;
+  /** 按号开关自动轮换。 */
+  setRotate: (label: string, on: boolean) => void;
+  /** 全局自动切号开关。`null` = 还没读到。 */
+  autoOn: boolean | null;
+  setAuto: (on: boolean) => void;
+  /** 正在跑的那条写操作的 id（`probe:<label>` / `health` / …），给按钮转圈用。 */
+  running: string | null;
   switching: string | null;
 } {
   const [accounts, setAccounts] = useState<AgyPoolAccount[]>([]);
@@ -92,6 +106,10 @@ export function useAgyPool(enabled: boolean): {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [switching, setSwitching] = useState<string | null>(null);
+  const [autoOn, setAutoOn] = useState<boolean | null>(null);
+  /** 正在跑的那条写操作的 id。★ 与下面那个 `running` ref 是两回事：
+   *  那个管「refresh 在途、别起第二个子进程」，这个管**按钮转圈**。 */
+  const [runningId, setRunningId] = useState<string | null>(null);
   const running = useRef(false);
 
   const read = useCallback(async () => {
@@ -110,6 +128,11 @@ export function useAgyPool(enabled: boolean): {
     } catch (e: unknown) {
       setErr(String(e).slice(0, 200));
     }
+    try {
+      // 全局自动切号开关的真源在池里（wrapper 在 app 没开时也要读它）。
+      const j = await invoke<string>("run_agy_rotate", { args: ["auto-switch", "--json"] });
+      setAutoOn(!!(JSON.parse(j) as { enabled: boolean }).enabled);
+    } catch { /* 读不到就保持 null —— 「没探到」不写成「关着」 */ }
     try {
       const out = await invoke<string>("run_agy_rotate", { args: ["live", "--json"] });
       const probe = JSON.parse(out) as LiveProbe;
@@ -151,6 +174,24 @@ export function useAgyPool(enabled: boolean): {
   }, [read]);
   const renameTo = useCallback((label: string, next: string) =>
     runThen(["rename", label, next]), [runThen]);
+  /** 带"正在跑"标记的写操作 —— 探针要 30s+，按钮必须能转圈。 */
+  const runTagged = useCallback((id: string, args: string[]) => {
+    setRunningId(id);
+    void invoke<string>("run_agy_rotate", { args })
+      .then(() => read())
+      .catch((e: unknown) => setErr(String(e).slice(0, 200)))
+      .finally(() => setRunningId(null));
+  }, [read]);
+  const health = useCallback(() => runTagged("health", ["health"]), [runTagged]);
+  const probe = useCallback((label?: string) =>
+    runTagged(`probe:${label ?? ""}`, label ? ["probe", label] : ["probe", "--all"]),
+    [runTagged]);
+  const setRotate = useCallback((label: string, on: boolean) =>
+    runThen(["rotate", label, on ? "--on" : "--off"]), [runThen]);
+  const setAuto = useCallback((on: boolean) => {
+    setAutoOn(on);                       // 乐观更新：开关点下去要立刻有反馈
+    runThen(["auto-switch", on ? "--on" : "--off"]);
+  }, [runThen]);
   const removeIt = useCallback((label: string) => runThen(["remove", label]), [runThen]);
 
   const snapshotOf = useCallback((a: AgyPoolAccount, liveSnap: AgySnapshot | null) => {
@@ -167,5 +208,6 @@ export function useAgyPool(enabled: boolean): {
   }, []);
 
   return { accounts, liveSub, drifted, snapshotOf, busy, err, refresh, switchTo,
-           renameTo, removeIt, switching };
+           renameTo, removeIt, switching, health, probe, setRotate,
+           autoOn, setAuto, running: runningId };
 }

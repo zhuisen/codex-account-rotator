@@ -443,10 +443,34 @@ export default function App() {
                                loading={agyPool.busy} loadingText="刷新中…">
                     <IconRefresh spin={agyPool.busy} />刷新全池
                   </GhostButton>
-                  <GhostButton t={t} accent
-                               onClick={() => showToast("切号只对下一次启动的 agy 生效 —— 开一个新的 agy 会话即可")}>
-                    重启生效说明
+                  <GhostButton t={t} accent onClick={() => agyPool.health()}
+                               loading={agyPool.running === "health"} loadingText="检查中…">
+                    检查 token
                   </GhostButton>
+                  {/* ★★★ **agy 的探针与 codex 的是两套机制，扣的也是两家不同的额度。**
+                      codex 直接打 `/responses`；agy 没有"指定号发一次请求"这种东西
+                      （只在进程启动时读凭证），所以这条起的是 agy 真身 `agy -p`，
+                      花的是 **agy 自己**的额度（实测一次约 15k token、约 30s）。
+                      ⚠️ 2026-09-13 我曾把「Gemini 档不该有探针」写成闸 —— 那条闸锁死的是
+                         「探针只能是 codex 那一套」这个**错误前提**，已按事实改写。 */}
+                  <ProbeButton t={t} label="探针 全池"
+                    hint={`对 ${agyPool.accounts.length} 个号各起一次 agy 真跑一句（问 hi 要求答 ok），证明"真的还能干活"——凭证有效但订阅到期/模型权限被撤/被限流，只有这个测得出来。⚠️ 花的是 **agy 自己**的额度（实测单次约 15k token），每号约 30s`}
+                    loading={(agyPool.running ?? "").startsWith("probe:")} loadingText="探测中…"
+                    onConfirm={() => agyPool.probe()} />
+                  <span onClick={() => agyPool.setAuto(!(agyPool.autoOn ?? true))}
+                        title={agyPool.autoOn
+                          ? "自动切号开着：下次启动 agy 时，额度低于阈值会自动换一个号（由 `bin/agy` wrapper 在拉起真身前决定）"
+                          : "自动切号已关：wrapper 不再替你换号，`agy` 一律用当前登录的那个"}
+                        style={{ fontSize: 11.5, fontWeight: 700, padding: "5px 11px", borderRadius: 8,
+                                 cursor: "pointer", whiteSpace: "nowrap", userSelect: "none",
+                                 display: "inline-flex", alignItems: "center", gap: 6,
+                                 color: agyPool.autoOn ? t.accent : t.muted,
+                                 border: `1px solid ${agyPool.autoOn ? t.accent + "55" : t.ghostBorder}`,
+                                 background: agyPool.autoOn ? "rgba(45,212,191,.07)" : "transparent" }}>
+                    <span style={{ width: 7, height: 7, borderRadius: "50%",
+                                   background: agyPool.autoOn ? t.accent : t.muted }} />
+                    自动切号 {agyPool.autoOn === null ? "—" : agyPool.autoOn ? "开" : "关"}
+                  </span>
                 </div>)}
                 {provider === "codex" && (
                 <span style={{ fontSize: 10, color: t.muted, fontFamily: "'JetBrains Mono'" }}>
@@ -651,7 +675,7 @@ export default function App() {
                           </div>
                           {agyBest && agyBest.sub !== cur.sub && (
                             <div onClick={() => agyPool.switchTo(agyBest.label)}
-                                 title="切过去 —— ★ 只对**下一次启动的** agy 生效，已经开着的会话不受影响"
+                                 title="切过去 —— ★ 只对下一次启动的 agy 生效，已经开着的会话不受影响"
                                  style={{ background: t.accent, color: t.accentText, borderRadius: 10,
                                           padding: "10px 16px", cursor: "pointer", textAlign: "center",
                                           flexShrink: 0 }}>
@@ -690,6 +714,12 @@ export default function App() {
                                         另有一道拒绝删当值号的守卫（删掉它 = 既不在池里、
                                         也没有别的登录态可回）。 */
                                      onRemove={() => agyPool.removeIt(a.label)}
+                                     onProbe={() => agyPool.probe(a.label)}
+                                     probing={agyPool.running === `probe:${a.label}`}
+                                     /* ★ 池里存的是反向的 `rotate_off`：缺省必须等于"参与轮换"，
+                                        否则存量号要写迁移，漏迁移的会**静默退出轮换池**。 */
+                                     rotates={!a.rotate_off}
+                                     onToggleRotate={(on) => agyPool.setRotate(a.label, on)}
                                      onOpen={() => { setDrill("agy"); setPage("traffic"); }} />
                           ))
                         : (
@@ -708,7 +738,7 @@ export default function App() {
                     {agyPool.drifted && (
                       <div style={{ marginTop: 10, fontSize: 11.5, fontFamily: "'JetBrains Mono'",
                                     color: "#E0901C", lineHeight: 1.5 }}>
-                        ⚠️ 当前登录的号与你上次切换的不一致 —— 某个**仍在跑**的 agy
+                        ⚠️ 当前登录的号与你上次切换的不一致 —— 某个<b>仍在跑</b>的 agy
                         在它自己 token 到期时把凭证写回了钥匙串。要让切换生效：先退出那些旧的
                         agy 会话，再 <b>切换</b>，然后开新的 agy。
                       </div>

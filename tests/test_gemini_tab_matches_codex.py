@@ -31,10 +31,20 @@ def code(p):
 
 
 def gemini_block():
-    """总览里 Gemini 档那一段（含 Hero、动作条、卡片网格）。"""
+    """总览里**所有** `provider === "gemini"` 的段落拼起来。
+
+    ⚠️ 不能只取 `(<>` 那一段：**动作条与卡片网格不在同一处** ——
+    动作条在顶栏右侧、网格在下面。只切一段会让「有没有探针/检查 token」
+    这类断言对着半页源码判，而那种假红/假绿两个方向都出现过。
+    """
     c = code(APP)
-    i = c.index('{provider === "gemini" && (<>')
-    return c[i:c.index('{provider === "grok" && (<>', i)]
+    marks = [i for i in range(len(c)) if c.startswith('{provider === "gemini" &&', i)]
+    assert marks, "★ 解析不到 Gemini 档 —— 判据看不懂了，先修闸"
+    out = []
+    for i in marks:
+        j = c.find('{provider === "', i + 10)
+        out.append(c[i:j if j > 0 else len(c)])
+    return "\n".join(out)
 
 
 class TheGeminiTabHasAHeroLikeCodex(unittest.TestCase):
@@ -122,16 +132,29 @@ class TheGeminiCardHasTheSameActionBar(unittest.TestCase):
 class TheThingsDeliberatelyLeftOut(unittest.TestCase):
     """★★★ 两头都要守：缺按钮是缺陷，**多一个扣错家钱的按钮更糟**。"""
 
-    def test_no_probe_button_on_the_gemini_tab(self):
-        b = gemini_block()
-        self.assertNotIn("ProbeButton", b,
-                         "★★★ 探针出现在 Gemini 档 —— 它扣的是 codex 的额度")
-        self.assertNotIn("ProbeButton", code(CARD),
-                         "★★★ agy 卡上有探针 —— 同上")
+    def test_the_probe_is_agys_own_not_codexs(self):
+        """★★★ **这条 2026-09-13 被用户推翻并改写过。**
 
-    def test_no_health_check_on_the_gemini_tab(self):
-        self.assertNotIn('"health"', gemini_block(),
-                         "★★ 「检查 token」对 agy 没有对等物 —— 点了不会有任何结果")
+        旧的是「Gemini 档不许有 ProbeButton」，理由是探针扣 codex 的额度。
+        用户原话：「探针做，做另外的机制，扣的是 agy 的额度啊…不是照搬 codex 的方法啊」。
+        现在 agy 有了自己的探针（起 `agy -p`，花 agy 自己的额度），
+        旧闸锁死的是一个**已经不成立的前提**。
+
+        改写后守的是真正的那条：**Gemini 档绝不能去跑 codex 的那条命令。**
+        """
+        b = gemini_block()
+        self.assertIn("agyPool.probe(", b, "★★ Gemini 档没有自己的探针")
+        for bad in ('"probe-all"', '["probe", "--all"]', 'run("probe'):
+            with self.subTest(token=bad):
+                self.assertNotIn(bad, b,
+                                 f"★★★ Gemini 档跑了 codex 的 {bad} —— 扣的是另一家的额度")
+
+    def test_the_health_check_is_agys_own_too(self):
+        """★ 同理：`health` 走 `agyPool.health()`（刷 token + 打 API，零消耗），
+        不是 codex 那条 `run("health", ["health"])`。"""
+        b = gemini_block()
+        self.assertIn("agyPool.health()", b, "★★ Gemini 档没有检查 token")
+        self.assertNotIn('run("health"', b, "★★★ Gemini 档跑了 codex 的 health")
 
     def test_the_bridge_still_refuses_login(self):
         """★★★ `login` 会起一个交互式 agy，GUI 里跑必然挂死。
@@ -142,7 +165,8 @@ class TheThingsDeliberatelyLeftOut(unittest.TestCase):
         self.assertIsNotNone(m, "★ 白名单不见了 —— 参数直接进 argv")
         allowed = set(re.findall(r'"([a-z-]+)"', m.group(1)))
         self.assertNotIn("login", allowed, "★★★ GUI 能跑 login —— 必然挂死")
-        self.assertTrue(allowed <= {"quota", "switch", "live", "rename", "remove"},
+        self.assertTrue(allowed <= {"quota", "switch", "live", "rename", "remove",
+                                    "health", "probe", "rotate", "auto-switch"},
                         f"★★ 白名单里有没审过的子命令: {sorted(allowed)}")
 
 

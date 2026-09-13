@@ -623,15 +623,26 @@ function relayEntry() {
                                reset: new Date(__NOW__ * 1000 + 4300000).toISOString() },
                      claude: { remaining: 1, reset: new Date(__NOW__ * 1000 + 18000000).toISOString() } },
             quota_at: __NOW__,
+            // ★ 第三个号刻意摘出轮换池 —— 按号开关那一档只有有高有低时才看得出来。
+            rotate_off: (i === 2 && p.get('agyrotoff') !== '0') || undefined,
           };
         }
         return Promise.resolve(JSON.stringify({ accounts: accs, live_seen: subs[0] }));
       }
       case 'run_agy_rotate':
+        // ⚠️ 打桩里读载荷一律用 **`args`** —— 这个 stub 的签名就是 `invoke(cmd, args)`。
+        //    我曾在这两条分支里写成 `a.args`：`a` 不在作用域 ⇒ ReferenceError，
+        //    而它发生在 `await invoke(...)` 里、被调用方的 `catch` 吞掉 ⇒
+        //    **`errors` 探针里一个字都没有**，页面只是安静地少了「当前」徽章与开关状态。
+        //    这正是本仓那条「打桩缺口 ⇒ 零渲染看着像通过」的又一次。
         // ★ `live` 回的是 JSON（「**现在**钥匙串里是谁」），不是人话。回 'ok' 会让
         //   `JSON.parse` 抛，然后「当前」徽章整个消失 —— 而那正好长得像"池是空的"。
         //   `?agydrift=1` 专门渲染"被别的 agy 进程抢回去了"那一态。
-        if ((a.args || [])[0] === 'live') {
+        // ★ 新增的几条也要打桩，否则 `JSON.parse` 抛 ⇒ 整块静默降级。
+        if ((args.args || [])[0] === 'auto-switch') {
+          return Promise.resolve(JSON.stringify({ enabled: p.get('agyauto') !== '0' }));
+        }
+        if ((args.args || [])[0] === 'live') {
           var np = parseInt(p.get('agypool') || '0', 10);
           var lsubs = []; for (var li = 0; li < np; li++) lsubs.push('sub' + li);
           var drift = p.get('agydrift') === '1' && np > 1;

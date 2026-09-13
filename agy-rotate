@@ -30,6 +30,10 @@ import os
 import subprocess
 import sys
 import time
+
+#: 探针的硬上限。实测一次约 30s（agy 起进程 ~10s + 生成 ~8s），留三倍余量。
+#: ★ 必须有上界：没有的话一个卡住的 agy 会把 GUI 的按钮永远钉在「探测中…」。
+PROBE_TIMEOUT = int(os.environ.get("AGY_PROBE_TIMEOUT", "120"))
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -318,7 +322,12 @@ def cmd_auto(args):
     """
     try:
         pool = P.load()
-        accs = _accounts(pool)
+        # ★★★ **开关必须在这里真的被读到。** 只把状态存进池、而 `auto` 照切，
+        #   就是本仓那条「写入侧标志会撒谎」——界面说关着、wrapper 照样换号，
+        #   而用户完全看不出来。闸 `tests/test_agy_actions.py` 打在这两行上。
+        if pool.get("auto_off"):
+            return
+        accs = {s: a for s, a in _accounts(pool).items() if not a.get("rotate_off")}
         if len(accs) < 2:
             return
         live_sub = (P.claims(P.read_live()) or {}).get("sub")
@@ -329,6 +338,7 @@ def cmd_auto(args):
         #   新会话仍是 A。用户看到的是"我明明切过了"。这比显示错更严重：
         #   它让工具**撤销**了一个明确的指令，而且不出声。
         want = pool.get("live_wanted")
+        # ★ 被摘出轮换池的号不该被"恢复"回去 —— 用户显式关掉了它。
         if want and want in accs and live_sub != want:
             cred, err = _refresh_one(want, accs[want], pool)
             if not err:
@@ -406,6 +416,228 @@ def cmd_remove(args):
     print("已移除 [%s]" % lbl)
 
 
+def cmd_health(args):
+    """**零消耗**地问 Google：池里每个号的凭证还有效吗。
+
+    ★★★ 这是 codex `health` 的 agy 版，但**机制完全不同**，别照搬：
+      codex 是问 OpenAI「这个 token 被作废了吗」；agy 这边是
+      **拿 refresh_token 换一次 access_token，再打一次 `fetchAvailableModels`**。
+      两步都成功才算这个号真的还能用 —— 只刷不打，换来的 token 可能对 API 没权限。
+
+    ★★ **刷新是安全的，这一条必须实测过才敢写。** Google 默认**不轮换** refresh_token
+      （响应里没有那个字段，2026-09-13 实测），所以我们刷不会作废 agy 自己手里那份。
+      ⚠️ 与本仓对 grok 的铁律**正好相反**（grok 单次有效、绝不刷）——
+      两家行为是反的，照搬任何一边都会杀号。
+
+    零消耗：`fetchAvailableModels` 不产生 token 用量，只回额度与模型清单。
+    """
+    want_json = "--json" in args
+    pool = P.load()
+    accs = _accounts(pool)
+    if not accs:
+        sys.exit("池是空的 —— 先 `agy-rotate login --current`")
+    live = _mark_live(pool)
+    rows = []
+    for sub, a in accs.items():
+        cred = P.read_cred(sub)
+        if not cred:
+            rows.append((sub, a, "no_cred", "池里没有这个号的凭证文件"))
+            continue
+        cred, err = P.refresh(cred, pool)
+        if err:
+            # ★ `invalid_grant` = 凭证被作废（掉登录），与「网络不通」必须分开：
+            #   前者要重新走浏览器 OAuth，后者等一会儿再来。合并成一句话，
+            #   用户就会对着一个网络抖动去重新登录。
+            kind = "revoked" if "invalid_grant" in err else "error"
+            rows.append((sub, a, kind, err))
+            continue
+        P.write_cred(sub, cred)
+        q, qerr = P.fetch_quota(cred["token"]["access_token"])
+        rows.append((sub, a, "ok" if not qerr else "api_error", qerr or ""))
+        if not qerr:
+            a["quota"] = {k: {"remaining": v["remaining"], "reset": v["reset"]} for k, v in q.items()}
+            a["quota_at"] = int(time.time())
+    a_now = int(time.time())
+    for sub, a, kind, _d in rows:
+        # ★ 独立兄弟键，与 `quota` 分开：`quota` 会被别的路径整体替换，
+        #   健康结论跟着它走就会在下一次刷新后凭空消失（同 codex 的 `last_probe`）。
+        a["last_health"] = {"at": a_now, "ok": kind == "ok", "kind": kind}
+    with P._lock(P.POOL):
+        P.save(pool)
+    if want_json:
+        print(json.dumps([{"sub": s, "label": a.get("label"), "kind": k, "detail": d}
+                          for s, a, k, d in rows], ensure_ascii=False))
+        return
+    TXT = {"ok": "✓ 还能用", "revoked": "✗ 掉登录（要重新走浏览器 OAuth）",
+           "no_cred": "✗ 池里没有凭证文件", "api_error": "⚠️ 刷新成功但 API 打不通",
+           "error": "⚠️ 刷新失败"}
+    for sub, a, kind, detail in rows:
+        print("  [%s]%s %s%s" % (a.get("label"), " ←当前" if sub == live else "",
+                                 TXT.get(kind, kind), (" — " + detail[:80]) if detail else ""))
+    bad = [a.get("label") for _s, a, k, _d in rows if k != "ok"]
+    print("  %d/%d 个还能用%s" % (len(rows) - len(bad), len(rows),
+                                  ("；有问题的：" + "、".join(bad)) if bad else ""))
+
+
+#: 探针问的话与判据。★ 与 codex 探针同一条纪律：**判据是「模型真吐出字」**，
+#: 不是退出码 0 —— 200/exit 0 只说明请求被受理，流中途断掉照样 0。
+PROBE_ASK = "Reply with exactly: ok"
+
+
+def _probe_one(label):
+    """对**当前登录**的号跑一次真实生成 -> (ok, 说明, usage dict|None)。
+
+    ★★★ 为什么是"起一次 agy"而不是自己拼 HTTP：
+      2026-09-13 实测，直接打 `v1internal:streamGenerateContent` 恒 **429
+      RESOURCE_EXHAUSTED**，即使该号额度满格、模型 id 取自它自己的
+      `fetchAvailableModels`、也带上了 `loadCodeAssist` 回的 `aicode-consumers`。
+      ⚠️ **那个 429 极具误导性**：它长得和「额度用光了」一模一样，而真因是我们
+      没有复刻 agy 的完整客户端身份。用它做探针会把"我们拼错了"报成"你的号没额度了"。
+      所以探针走 **agy 自己**（`agy -p … --output-format json`）——
+      它顺带给出**精确到 token 的用量**，比 codex 那边只能拿到整数百分比还清楚。
+
+    ★ 代价：一次约 30s、约 15k token（实测）。这是**花 agy 自己额度**的动作。
+    """
+    real = Path(os.environ.get("AGY_REAL", str(Path.home() / ".local" / "bin" / "agy")))
+    if not real.exists():
+        return False, "找不到 agy（%s）" % real, None
+    try:
+        r = subprocess.run([str(real), "-p", PROBE_ASK, "--output-format", "json"],
+                           capture_output=True, text=True, timeout=PROBE_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return False, "超时（%ds）" % PROBE_TIMEOUT, None
+    if r.returncode != 0:
+        return False, "agy 退出码 %d：%s" % (r.returncode, (r.stderr or "")[-160:]), None
+    try:
+        d = json.loads((r.stdout or "").strip())
+    except ValueError:
+        return False, "输出不是 JSON（前 120 字：%s）" % (r.stdout or "")[:120], None
+    ans = (d.get("response") or "").strip()
+    if d.get("status") != "SUCCESS" or not ans:
+        # ★ 空回答判失败 —— 「受理了」不等于「干成了」。
+        return False, "没吐出字（status=%s）" % d.get("status"), d.get("usage")
+    # 答非所问只标 ⚠️ 不算失败：模型换个措辞不代表账号有问题（同 codex 探针）。
+    note = "答「%s」" % ans[:24] + ("" if ans.lower().startswith("ok") else " ⚠️ 答非所问")
+    return True, note, d.get("usage")
+
+
+def cmd_probe(args):
+    """计费探针。★★★ **这是 Gemini 档唯一会花钱的动作，花的是 agy 自己的额度。**
+
+    回答 `health` 回答不了的那个问题：**这个号真的还能干活吗** ——
+    凭证有效但订阅到期 / 模型权限被撤 / 被限流，只有真发一次请求才测得出来。
+
+    ★★ **非当值号要先切过去**：agy 只在进程启动时读凭证，没有"指定号发一次请求"
+      这种东西（这正是 agy 与 codex 的结构性差异）。所以这里是
+      **切过去 → 探 → 切回来**，而且切回来放在 `finally` 里 ——
+      中途异常也不能把用户留在别的号上。
+    """
+    want_json = "--json" in args
+    pool = P.load()
+    accs = _accounts(pool)
+    live = _mark_live(pool)
+    names = [a for a in args if not a.startswith("-")]
+    if "--all" in args:
+        subs = list(accs)
+    elif names:
+        subs = [s for s in (_by_label(pool, n) for n in names) if s]
+    else:
+        subs = [live] if live in accs else []
+    if not subs:
+        sys.exit("没指定要探哪个号 —— `agy-rotate probe <label>` 或 `--all`")
+
+    out = []
+    try:
+        for sub in subs:
+            a = accs[sub]
+            if sub != (P.claims(P.read_live()) or {}).get("sub"):
+                cred, err = _refresh_one(sub, a, pool)
+                if err:
+                    out.append((a, False, "切不过去：%s" % err, None))
+                    continue
+                if P.install_live(cred) != "keyring":
+                    out.append((a, False, "只写了兜底文件，agy 多半还在用别的号", None))
+                    continue
+            ok, note, usage = _probe_one(a.get("label"))
+            out.append((a, ok, note, usage))
+            a["last_probe"] = {"at": int(time.time()), "ok": ok, "note": note,
+                               "usage": usage}
+    finally:
+        # ★★ 把用户放回他原来的号。放在 finally 里：中途炸了也不能把他留在别处。
+        if live and live in accs and (P.claims(P.read_live()) or {}).get("sub") != live:
+            cred, err = _refresh_one(live, accs[live], pool)
+            if not err:
+                P.install_live(cred)
+        _mark_live(pool)
+        with P._lock(P.POOL):
+            P.save(pool)
+
+    if want_json:
+        print(json.dumps([{"label": a.get("label"), "ok": ok, "note": n, "usage": u}
+                          for a, ok, n, u in out], ensure_ascii=False))
+        return
+    for a, ok, note, usage in out:
+        tok = ("（%s token）" % format(usage.get("total_tokens", 0), ",")) if usage else ""
+        print("  [%s] %s %s%s" % (a.get("label"), "✓" if ok else "✗", note, tok))
+
+
+def cmd_rotate(args):
+    """按号开关自动轮换。`agy-rotate rotate <label> --on|--off`
+
+    ★★ 真源是池里的 `rotate_off`，**存反向命名**：缺省必须等于「参与轮换」——
+      存量号与 `login` 收编的新号都没有这个键，正向命名要写迁移，
+      漏迁移的号会**静默退出轮换池**（症状：自动切号只在那两三个号里转，零报错）。
+      恢复时**删键**不是写 `False`，否则"缺省"有两种表示。
+      与 codex 的 `rotate_off` 一字不差的同一条设计。
+    """
+    if len(args) < 2 or args[1] not in ("--on", "--off"):
+        sys.exit("usage: agy-rotate rotate <label> --on|--off")
+    pool = P.load()
+    sub = _by_label(pool, args[0])
+    if not sub:
+        sys.exit("池里没有 '%s'" % args[0])
+    accs = _accounts(pool)
+    on = args[1] == "--on"
+    if not on:
+        # ★ 拒绝关掉最后一个：全关 = 自动切号无号可挑。
+        live_n = sum(1 for s, a in accs.items() if not a.get("rotate_off") and s != sub)
+        if live_n == 0:
+            sys.exit("✗ 这是最后一个还参与轮换的号 —— 全关掉的话自动切号就没号可挑了")
+    if on:
+        accs[sub].pop("rotate_off", None)
+    else:
+        accs[sub]["rotate_off"] = True
+    with P._lock(P.POOL):
+        P.save(pool)
+    print("[%s] 自动轮换已%s" % (accs[sub].get("label"), "开启" if on else "关闭"))
+
+
+def cmd_autoswitch(args):
+    """全局自动切号开关。`agy-rotate auto-switch [--on|--off]`
+
+    ★★★ **这条能做，我此前说"做不了"是错的。** 当时的理由是「自动选号发生在
+      `bin/agy` 拉起进程之前」—— 那句话本身没错，但结论错了：wrapper 调的是
+      `agy-rotate auto`，而它**读池**。所以一个持久化到池里的开关完全控制得住它。
+      真源放池里（不放 localStorage）的理由与 codex 的 `dawn_probe` 一致：
+      wrapper 在 app 没开时也要读它，两个真源迟早分叉成
+      「界面说关着、wrapper 照切」。
+    """
+    pool = P.load()
+    if "--on" in args or "--off" in args:
+        off = "--off" in args
+        if off:
+            pool["auto_off"] = True
+        else:
+            pool.pop("auto_off", None)      # 删键，不写 False —— 缺省只能有一种表示
+        with P._lock(P.POOL):
+            P.save(pool)
+    on = not pool.get("auto_off")
+    if "--json" in args:
+        print(json.dumps({"enabled": on}))
+    else:
+        print("自动切号：%s" % ("开" if on else "关"))
+
+
 def cmd_live(args):
     """**现在**到底是谁登录着 —— 只读钥匙串，不联网、不改任何状态。
 
@@ -438,7 +670,8 @@ def cmd_live(args):
 
 CMDS = {"login": cmd_login, "list": cmd_list, "quota": cmd_quota, "switch": cmd_switch,
         "pick": cmd_pick, "auto": cmd_auto, "rename": cmd_rename, "remove": cmd_remove,
-        "live": cmd_live}
+        "live": cmd_live, "health": cmd_health, "probe": cmd_probe,
+        "rotate": cmd_rotate, "auto-switch": cmd_autoswitch}
 
 
 def main(argv):

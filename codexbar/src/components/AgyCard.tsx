@@ -7,7 +7,8 @@ import {
   agyShown, agyTightest, agyWinRows, agyQuotaVisible, agyReasonNote, agyReasonTone, agyResetText,
 } from "../agy";
 import { fmtAgo, winNumColor } from "../helpers";
-import { IconBtn, IcPen, IcTrash } from "./CardIcons";
+import { IconBtn, IcPen, IcTrash, IcRotate } from "./CardIcons";
+import ProbeButton from "./ProbeButton";
 import { useState } from "react";
 
 const MONO = "'JetBrains Mono'";
@@ -35,7 +36,8 @@ const MONO = "'JetBrains Mono'";
  */
 export default function AgyCard({ t, color, snap, busy, err, disabled, winSlots, onOpen, onRefresh,
                                  isSelected, reserveActions, shortcut, isBest, bestPct,
-                                 onSelect, onRename, onRemove,
+                                 onSelect, onRename, onRemove, onProbe, probing,
+                                 rotates, onToggleRotate,
                                   label, email, isCurrent, onSwitch, switching }: {
   t: Theme;
   /** 与账号卡**同一份**窗口槽位表。agy 没有的窗口画一行隐藏等高行 —— 不占槽的话
@@ -77,6 +79,13 @@ export default function AgyCard({ t, color, snap, busy, err, disabled, winSlots,
   onRename?: (next: string) => void;
   /** 从池里移除。★ **不可逆** —— 这里有两段确认，CLI 侧另有一道拒绝删当值号的守卫。 */
   onRemove?: () => void;
+  /** ★★★ 计费探针 —— **花的是 agy 自己的额度**（起一次 `agy -p`，实测约 15k token）。
+   *  与 codex 的探针是两套机制：那边直接打 `/responses`，agy 只在启动时读凭证。 */
+  onProbe?: () => void;
+  probing?: boolean;
+  /** 这个号参不参与自动轮换。缺省 = 参与（池里存的是反向的 `rotate_off`）。 */
+  rotates?: boolean;
+  onToggleRotate?: (on: boolean) => void;
 }) {
   // 本机没有 agy / 已停用 ⇒ **零像素**。见 `agyQuotaVisible` 的注释。
   if (!agyQuotaVisible(snap, { disabled })) return null;
@@ -179,7 +188,7 @@ export default function AgyCard({ t, color, snap, busy, err, disabled, winSlots,
                              borderRadius: 5, color: t.accentText, background: t.accent }}>当前</span>
             ) : onSwitch ? (
               <span onClick={(e) => { e.stopPropagation(); if (!switching) onSwitch(); }}
-                    title="切到这个号 —— ★ 只对**下一次启动的** agy 生效，已经开着的会话不受影响"
+                    title="切到这个号 —— ★ 只对下一次启动的 agy 生效，已经开着的会话不受影响"
                     style={{ fontSize: Z.curBadge, fontWeight: 700, padding: "1px 5px",
                              borderRadius: 5, cursor: switching ? "default" : "pointer",
                              color, border: `1px solid ${hexA(color, .45)}`,
@@ -304,6 +313,24 @@ export default function AgyCard({ t, color, snap, busy, err, disabled, winSlots,
                            cursor: switching ? "default" : "pointer", opacity: switching ? .5 : 1 }}>
               {switching ? "切换中…" : "切换"}</span>
           ) : null}
+          {onProbe && (
+            /* ★ 探针**不压成图标**：它是这一档唯一花钱的控件，必须与旁边免费的按钮
+               一眼可分（琥珀 + ⚡ + 两段确认）。压成一个 34px 的灰图标正好抹掉那条区分。 */
+            <ProbeButton t={t} variant="inline" label="探针"
+              hint={`起一次 agy 让 ${label ?? "这个号"} 真跑一句，验它是否真能干活。⚠️ 花的是 **agy 自己**的额度（实测单次约 15k token、约 30s）`}
+              loading={!!probing} onConfirm={onProbe} loadingText="探测…" />
+          )}
+          {onToggleRotate && (
+            <IconBtn title={rotates
+                       ? `${label ?? "这个号"} 正参与自动轮换。点一下移出 —— wrapper 不再挑它`
+                       : `${label ?? "这个号"} 已停用自动轮换。点一下放回轮换池`}
+                     onClick={() => onToggleRotate(!rotates)}
+                     color={rotates ? t.muted : "#E0901C"}
+                     border={rotates ? t.ghostBorder : "#E0901C55"}
+                     bg={rotates ? undefined : "rgba(224,144,28,.10)"}>
+              <IcRotate off={!rotates} />
+            </IconBtn>
+          )}
           {onRefresh && (
             <IconBtn title="重新取一次这一池的额度（云端按账号读，零消耗）"
                      onClick={() => { if (!busy) onRefresh(); }}

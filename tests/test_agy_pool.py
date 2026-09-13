@@ -518,9 +518,14 @@ class TheGoogleTabShowsThePoolNotAReadOnlyCard(unittest.TestCase):
         # ⚠️ `rename`/`remove` 2026-09-13 起**是允许的**（用户要求 Gemini 档与 Codex 档
         #    功能对齐，而账号卡上本来就有这两个）。`remove` 不可逆，靠卡片上的两段确认
         #    与 CLI 侧「拒绝删当值号」那道守卫兜着。真正不能放的是会**挂死 GUI** 的那个。
+        # ⚠️ `probe` 2026-09-14 起**是允许的** —— 用户要求 agy 有自己的探针
+        #    （起 `agy -p`，花 **agy 自己**的额度，不是 codex 的）。它花钱，
+        #    所以靠 `ProbeButton` 的琥珀 + 两段确认与旁边免费的按钮区分。
+        #    真正不能放的仍是会**挂死 GUI** 的那个：`login` 会起交互式 agy。
         self.assertEqual(allowed & {"login", "pick", "auto"}, set(),
                          "★★★ 白名单放进了会挂死 GUI 的子命令")
-        self.assertTrue(allowed <= {"quota", "switch", "live", "rename", "remove", "list"},
+        self.assertTrue(allowed <= {"quota", "switch", "live", "rename", "remove",
+                                    "health", "probe", "rotate", "auto-switch", "list"},
                         f"★★ 白名单里有没审过的子命令: {sorted(allowed)}")
 
     def test_the_scripts_are_bundled(self):

@@ -695,6 +695,15 @@ fn read_agy_pool() -> Result<Option<String>, String> {
 ///   · `live`   —— 只读钥匙串，回答"**现在**到底是谁登录着"。★ 必须现读而不是用池里的
 ///     `live_seen`：那个槽被多个常驻 agy 进程并发写，实测 17:58 装进 B、18:23 被一个
 ///     身份为 A 的旧进程在自己 token 到期时写回，而 `live_seen` 毫不知情。
+///   · `health` —— **零消耗**：逐号刷一次 token 再打一次 `fetchAvailableModels`。
+///     ★ 刷新对 agy 是安全的（Google 默认不轮换 refresh_token，实测），
+///       ⚠️ 与 grok 的铁律正好相反，别照搬任何一边。
+///   · `probe` —— ★★★ **会花钱，花的是 agy 自己的额度**（起一次 `agy -p`，实测约 15k token）。
+///     它与 codex 的探针是**两套机制**：codex 直接打 `/responses`；agy 没有"指定号发一次
+///     请求"这种东西（只在进程启动时读凭证），所以只能起真身。GUI 上靠 `ProbeButton`
+///     的琥珀 + 两段确认与旁边免费的按钮区分。
+///   · `rotate` / `auto-switch` —— 自动轮换的按号/全局开关。真源在池里，
+///     因为 `bin/agy` 在 app 没开时也要读它（两个真源迟早分叉成「界面说关着、wrapper 照切」）。
 ///   · `rename` / `remove` —— 2026-09-13 用户要求 Gemini 档与 Codex 档**功能对齐**，
 ///     而账号卡上本来就有这两个。`remove` **不可逆**，所以它与 codex 卡同款：
 ///     卡片上是两段确认（先亮「确认删除」），CLI 侧另有一道守卫拒绝删掉当值号。
@@ -702,7 +711,8 @@ fn read_agy_pool() -> Result<Option<String>, String> {
 /// 与账号池那条 `ALLOWED_CMDS` 同一条理由：两套语义混一个白名单迟早加错。
 #[tauri::command]
 async fn run_agy_rotate(args: Vec<String>) -> Result<String, String> {
-    const ALLOWED: &[&str] = &["quota", "switch", "live", "rename", "remove"];
+    const ALLOWED: &[&str] = &["quota", "switch", "live", "rename", "remove",
+                               "health", "probe", "rotate", "auto-switch"];
     let sub = args.first().cloned().unwrap_or_default();
     if !ALLOWED.contains(&sub.as_str()) {
         return Err(format!("disallowed agy-rotate subcommand: {:?}", sub));
