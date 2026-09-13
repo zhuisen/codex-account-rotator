@@ -248,6 +248,67 @@ class SwitchingProtectsTheOnlyLoginTheUserHas(unittest.TestCase):
         self.assertIn("正是当前登录的号", cli[i:i + 900])
 
 
+class LoginSavesTheCurrentAccountBeforeLoggingOut(unittest.TestCase):
+    """★★★ agy 的登录态**只有一份**，`/logout` 会就地清掉它。
+
+    所以 `agy-rotate login` 必须在把用户送去 `/logout` **之前**就把当前号存进池 ——
+    不存就丢了，他要重新走一遍浏览器 OAuth 才能拿回来。
+    这不是"顺手做的"，它是这条命令存在的理由之一。
+    """
+
+    CLI = (ROOT / "agy-rotate").read_text(encoding="utf-8")
+
+    def test_the_current_account_is_adopted_before_agy_starts(self):
+        """★★★ 行为闸：给一个**什么都不做**的假 agy，跑完 `login` 之后，
+        池里必须已经有登录前那个号 —— 那正是"先存再让你 logout"这件事的唯一证据。
+
+        ⚠️ 第一版比的是源码里 `_adopt(` 与 `subprocess.run(` 的**文本次序**，
+        而把 `_adopt` 挪进提前 return 的分支之后次序依然满足，闸照样绿
+        （变异工具当场拦下）。次序对了不等于**那条路径上**做了。
+        """
+        import subprocess
+        import sys as _s
+        d = Path(tempfile.mkdtemp(prefix="agy-login-"))
+        live = d / "tok.json"
+        live.write_text(json.dumps(_cred("keepme", "keep@x.y")), encoding="utf-8")
+        fake = d / "fake-agy"
+        fake.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        fake.chmod(0o755)
+        r = subprocess.run([_s.executable, str(ROOT / "agy-rotate"), "login"],
+                           input="\n", capture_output=True, text=True, timeout=120,
+                           env={**os.environ, "AGY_POOL_STORE": str(d),
+                                "AGY_TOKEN_FILE": str(live), "AGY_REAL": str(fake)})
+        self.assertEqual(r.returncode, 0, r.stderr[-600:])
+        pool = json.loads((d / ".agy-pool.json").read_text(encoding="utf-8"))
+        self.assertIn("keepme", pool["accounts"],
+                      "★★★ 起 agy 之前没把当前号收进池 —— 用户 `/logout` 之后它就没了")
+        self.assertTrue((d / "auth" / "agy" / "keepme.json").exists(),
+                        "★★★ 池里记了名字却没存凭证 —— 那份登录态还是丢的")
+
+    def test_it_waits_for_agy_instead_of_execing(self):
+        """★★ 用 `subprocess.run` 不是 `os.execv`：execv 之后本进程就没了，**回不来收编**，
+        新登录的号会静默地不进池 —— 而界面上一切正常。"""
+        i = self.CLI.index("def cmd_login(")
+        seg = self.CLI[i:self.CLI.index("\ndef ", i + 10)]
+        # ⚠️ 判据要认**调用形态** `os.execv(`，不能只搜 `execv` —— 上面那行注释正解释着
+        #    "为什么不用 execv"，搜词会被自己的说明判红（这一轮里第三次踩到同一个形状）。
+        self.assertNotIn("os.execv(", seg)
+        self.assertIn("subprocess.run(", seg)
+
+    def test_no_change_is_reported_as_no_change(self):
+        """★ 三态里最容易讲错的那个：**没换号** ≠ 失败，也 ≠ 成功加号。
+        把它讲成成功，用户会以为池里有两个号了。"""
+        i = self.CLI.index("def cmd_login(")
+        seg = self.CLI[i:self.CLI.index("\ndef ", i + 10)]
+        self.assertIn("if after == before:", seg, "★ 没有区分「登了同一个号」")
+
+    def test_a_failed_login_says_where_the_old_one_went(self):
+        i = self.CLI.index("def cmd_login(")
+        seg = self.CLI[i:self.CLI.index("\ndef ", i + 10)]
+        self.assertIn("池里那份没丢", seg,
+                      "★ 登录没完成时没告诉用户旧号还在 —— 他会以为两个都没了")
+
+
 class AutoSwitchIsFailOpenAndSticky(unittest.TestCase):
     """★★ 轮换是**增益不是前置条件**。做成前置条件就会出现
     「CodexBar 坏了导致 agy 用不了」，而那比没有轮换糟得多。"""

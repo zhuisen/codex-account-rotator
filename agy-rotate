@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Antigravity(agy) 账号池 CLI —— 收编 / 看额度 / 换号 / 选号。
 
-    agy-rotate adopt [label]   把**当前登录**的号收进池（加号的唯一入口）
+    agy-rotate login [label]   加一个号：保住当前的 → 起 agy 让你登录新号 → 回来自动收编
+    agy-rotate login --current 只收编**当前登录**的号，不起 agy（第一次建池用它）
     agy-rotate list            列出池 + 上次读到的额度
     agy-rotate quota [--json]  刷新全池额度（零消耗，不需要 agy 在跑）
     agy-rotate switch <label>  把某个号装回 agy 的登录态
@@ -10,11 +11,12 @@
     agy-rotate rename <旧> <新>
     agy-rotate remove <label>
 
-## 加号为什么不做 OAuth
+## 加号为什么不自己实现 OAuth
 
-★ 走 agy 自己的登录流程：`agy` 里 `/logout` → 浏览器登录第二个号 → `agy-rotate adopt`。
-  我们**不实现 OAuth**，因为那需要把 client_secret 常驻在代码里，而这个仓库是公开的；
-  收编现成的登录态既零风险也零维护（agy 换 OAuth 流程都不影响我们）。
+★ agy **没有** login/logout 子命令（`agy --help` 实测），登录只能在 TUI 里走。
+  我们不"代替"用户登录，只把他前后那两步接上：**先把当前号存进池**（`/logout` 会就地
+  清掉唯一那份登录态，不先存就丢了），再在他登完之后自动收编。
+★ 也因此不需要把 client_secret 常驻在代码里 —— 而这个仓库是公开的。
 
 ## ★★ 换号只对**下一次启动**生效
 
@@ -25,6 +27,7 @@
 """
 import json
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -69,7 +72,8 @@ def _by_label(pool, key):
     return pre[0] if len(pre) == 1 else None
 
 
-def cmd_adopt(args):
+def _adopt(label=None, quiet=False):
+    """把**当前登录**的号收进池 -> (sub, 是否新号)。收不了就退出并说清楚为什么。"""
     live = P.read_live()
     if not live:
         sys.exit("读不到当前登录态（%s）—— 先在 agy 里登录一个号" % P.LIVE)
@@ -79,19 +83,80 @@ def cmd_adopt(args):
         sys.exit("当前凭证里没有 id_token.sub —— 认不出这是哪个号，拒绝收编")
     pool = P.load()
     accs = _accounts(pool)
-    known = sub in accs
-    label = (args[0] if args else None) or (accs.get(sub, {}).get("label")) \
-        or (email or sub).split("@")[0]
+    fresh = sub not in accs
+    label = label or accs.get(sub, {}).get("label") or (email or sub).split("@")[0]
     P.write_cred(sub, live)
     accs[sub] = {**accs.get(sub, {}), "label": label, "email": email,
                  "adopted_at": accs.get(sub, {}).get("adopted_at") or int(time.time()),
                  "updated_at": int(time.time())}
     with P._lock(P.POOL):
         P.save(pool)
-    print("%s [%s] %s" % ("已更新" if known else "已收编", label, email or sub[:12]))
-    if len(accs) == 1:
-        print("  ★ 池里只有一个号，轮换还没有意义。再加号：在 agy 里 `/logout` 登录另一个账号，"
-              "然后再跑一次 `agy-rotate adopt`。")
+    if not quiet:
+        print("%s [%s] %s" % ("已收编" if fresh else "已更新", label, email or sub[:12]))
+    return sub, fresh
+
+
+def cmd_login(args):
+    """加一个号：先保住当前的，再起 agy 让你登录新号，回来自动收编。
+
+    ★★★ **必须先把当前号收进池再让用户去 `/logout`。** agy 的登录态只有一份，
+      `/logout` 会就地把它清掉 —— 没有先备份的话，那个号就此丢了，用户要重新走一遍
+      浏览器 OAuth 才能拿回来。这一步不是"顺手做的"，它是这条命令存在的理由之一。
+
+    ★ agy **没有** login/logout 子命令（`agy --help` 实测），登录只能在 TUI 里走。
+      所以我们不"代替"用户登录，只是把他前后那两步（保住旧的、收编新的）接上。
+
+    `--current` 只收编当前登录的号，不起 agy —— 第一次建池用它。
+    """
+    only = "--current" in args
+    label = next((a for a in args if not a.startswith("-")), None)
+    before, _ = _adopt(label if only else None)
+    if only:
+        _hint_next(P.load())
+        return
+
+    pool = P.load()
+    print("\n接下来会启动 agy。在里面：")
+    print("  1. 输入 `/logout`")
+    print("  2. 按提示在浏览器里登录**另一个** Google 账号")
+    print("  3. 退出 agy（Ctrl-D / `/quit`）——回来我会自动把新号收进池")
+    print("\n★ 刚才那个号（%s）已经存进池里了，随时可以 `agy-rotate switch` 切回去。"
+          % _accounts(pool).get(before, {}).get("label"))
+    try:
+        input("准备好就按回车（Ctrl-C 放弃）… ")
+    except (EOFError, KeyboardInterrupt):
+        print("\n已放弃 —— 池里那份没动。")
+        return
+
+    real = Path(os.environ.get("AGY_REAL", str(Path.home() / ".local" / "bin" / "agy")))
+    if not real.exists():
+        sys.exit("找不到 agy（%s）" % real)
+    # ★ 用 subprocess 而不是 execv：execv 之后本进程就没了，**回不来收编**。
+    #   交互态要保住 TTY，所以不接管任何一条流。
+    subprocess.run([str(real)], check=False)
+
+    after_cred = P.read_live()
+    after = (P.claims(after_cred) or {}).get("sub")
+    if not after:
+        print("\n✗ 回来之后读不到登录态 —— 可能登录没完成。"
+              "\n  池里那份没丢：`agy-rotate switch %s` 装回去。"
+              % _accounts(pool).get(before, {}).get("label"))
+        return
+    if after == before:
+        # ★ 三态里最容易被讲错的那个：**没换号** ≠ 失败，也 ≠ 成功加号。
+        print("\n还是原来那个号（没有 `/logout`，或者又登了同一个账号）—— 池没有变化。")
+        return
+    sub, fresh = _adopt(label)
+    print("  ★ 新号已成为当前登录态。" if fresh else "  ★ 这个号本来就在池里，已更新凭证。")
+    _hint_next(P.load())
+
+
+def _hint_next(pool):
+    n = len(_accounts(pool))
+    if n < 2:
+        print("  ★ 池里只有一个号，轮换还没有意义 —— `agy-rotate login` 再加一个。")
+    else:
+        print("  池里现在 %d 个号。`agy-rotate quota` 看额度，`agy --as <label>` 指定号跑。" % n)
 
 
 def _refresh_one(sub, acc, pool):
@@ -284,7 +349,7 @@ def cmd_remove(args):
     print("已移除 [%s]" % lbl)
 
 
-CMDS = {"adopt": cmd_adopt, "list": cmd_list, "quota": cmd_quota, "switch": cmd_switch,
+CMDS = {"login": cmd_login, "list": cmd_list, "quota": cmd_quota, "switch": cmd_switch,
         "pick": cmd_pick, "auto": cmd_auto, "rename": cmd_rename, "remove": cmd_remove}
 
 

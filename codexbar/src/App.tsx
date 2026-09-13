@@ -29,6 +29,7 @@ import { useGrokQuota } from "./hooks/useGrokQuota";
 import GrokCard from "./components/GrokCard";
 import { useAgyQuota } from "./hooks/useAgyQuota";
 import AgyCard from "./components/AgyCard";
+import ProviderSection from "./components/ProviderSection";
 import { IconTicket } from "./components/CardBadge";
 import ProbeButton from "./components/ProbeButton";
 import PlanBadge from "./components/PlanBadge";
@@ -485,6 +486,11 @@ export default function App() {
                         改成 minmax(0,1fr) 之后,列能缩、省略号接手,布局不再受内容宽度摆布。 */}
                     {/* `data-cards-grid` 供 uishot 探针定位这一排卡片（对齐闸只看格子里的，
                         hero 卡也有同名窗口行，混进来会变成假红）。不参与样式。 */}
+                    {/* ★★ 分区按**供应商**，不是按卡片类型 —— 三家的账号语义不同
+                        （codex 热切 / agy 启动前切 / grok 只读），摆在一起会让读者
+                        拿同一套直觉去理解它们。见 `ProviderSection` 的说明。 */}
+                    <ProviderSection t={t} title="OpenAI" count={alive.length}
+                                     note="账号池 · 经本地代理逐请求换号 · 5h/周双窗口">
                     <div data-cards-grid style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 12, alignContent: "start" }}>
                       {alive.map((a) => {
                         const shortcutIdx = aliveByLabel.findIndex(x => x.aid === a.aid);
@@ -508,6 +514,27 @@ export default function App() {
                             run(`rotate-${a.aid}`, ["rotate", a.aid, on ? "--on" : "--off"],
                                 on ? `${a.node} 已恢复轮换` : `${a.node} 已停用轮换`)} />
                       );})}
+                    </div>
+                    </ProviderSection>
+
+                    {/* ★ agy 卡**不进 `alive` 数组**,理由与 grok 完全一致
+                        （⌘1~⌘9 会"切"到一个切不了的东西上,且不报错）。
+                        闸在 tests/test_agy_not_in_pool_ui.py。
+                        ★ 没有 `privacy` prop:agy 的额度响应里**没有任何身份信息**
+                        （接口无鉴权、不返回账号），没有可遮的东西。 */}
+                    <ProviderSection t={t} title="Google"
+                                     note="Antigravity · 启动前换凭证（agy 只在启动时读）">
+                    <div data-cards-grid style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 12, alignContent: "start" }}>
+                      <AgyCard t={t} color={colorOf(traffic, "agy")} snap={agySnap}
+                               disabled={!!platPrefs.by?.agy?.off} winSlots={winSlots}
+                               busy={agyBusy} err={agyErr}
+                               onRefresh={refreshAgy}
+                               onOpen={() => { setDrill("agy"); setPage("traffic"); }} />
+                    </div>
+                    </ProviderSection>
+
+                    <ProviderSection t={t} title="xAI" note="Grok · 单号只读 · 周窗口">
+                    <div data-cards-grid style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 12, alignContent: "start" }}>
                       {/* ★ grok 卡。**渲染在格子里,但绝不进 `alive` 数组** —— 那个数组同时驱动
                           ⌘1~⌘9 切号(`aliveByLabel[idx]` 直接 switch)、计数徽章、探针全池的号数、
                           自动切号。混进去 ⌘4 会"切"到一个切不了的东西上,而且不报错。
@@ -517,17 +544,8 @@ export default function App() {
                                 privacy={privacy} busy={grokBusy} err={grokErr}
                                 onRefresh={refreshGrok}
                                 onOpen={() => { setDrill("grok"); setPage("traffic"); }} />
-                      {/* ★ agy 卡。同样**不进 `alive` 数组**,理由与 grok 完全一致
-                          (⌘1~⌘9 会"切"到一个切不了的东西上,且不报错)。
-                          闸在 tests/test_agy_not_in_pool_ui.py。
-                          ★ 没有 `privacy` prop:agy 的额度响应里**没有任何身份信息**
-                          (接口无鉴权、不返回账号),没有可遮的东西。 */}
-                      <AgyCard t={t} color={colorOf(traffic, "agy")} snap={agySnap}
-                               disabled={!!platPrefs.by?.agy?.off} winSlots={winSlots}
-                               busy={agyBusy} err={agyErr}
-                               onRefresh={refreshAgy}
-                               onOpen={() => { setDrill("agy"); setPage("traffic"); }} />
                     </div>
+                    </ProviderSection>
                     {dead.length > 0 && (
                       <details style={{ marginTop: 12 }}>
                         <summary style={{ fontSize: 12, color: t.muted, cursor: "pointer", padding: "8px 14px", background: t.cardBg, borderRadius: 10, border: `1px solid ${t.cardBorder}`, userSelect: "none", display: "flex", alignItems: "center", gap: 6 }}>
