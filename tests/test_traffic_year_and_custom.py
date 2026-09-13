@@ -69,6 +69,9 @@ out.r_year = resolveRange(R({ preset: "year" }), TODAY);
 // 粒度
 out.gran = [1, 90, 91, 365, 366].map(autoGran);
 out.gran_manual = effGran(R({ gran: "month" }), 10);
+out.gran_year = effGran(R({ preset: "year" }), 256);
+out.gran_custom_same_len = effGran(R({ preset: "custom", custom: { s: "2026-01-01", e: "2026-09-13" } }), 256);
+out.gran_year_manual = effGran(R({ preset: "year", gran: "day" }), 256);
 
 // 今日 = 每 2 小时
 const td = bucketsFor(data, "codex", R({ preset: "today" }), TODAY);
@@ -182,9 +185,23 @@ class GranularityFollowsTheSpan(unittest.TestCase):
         self.assertEqual(self.o["gran_manual"], "month",
                          "★ 手动选了「月」却仍按 auto 算 —— 那个分段控件就是摆设")
 
-    def test_a_year_becomes_weekly_not_daily(self):
-        self.assertLessEqual(self.o["year_n"], 53)
-        self.assertGreaterEqual(self.o["year_n"], 36)
+    def test_the_year_preset_is_monthly_by_definition(self):
+        """★★★ 用户 2026-09-12 提这个档时的原话：「新增一个年度的纬度，**然后横轴时间变成月份**」。
+
+        交接稿 §6 那张 auto 表（≤365 按周）管的是**自定义区间** —— 今年到现在 256 天落在
+        「≤365 → 按周」里，于是年度档一度画成 37 根周柱（用户 2026-09-13 报「怎么按周了」）。
+        两条规则都对，只是适用对象不同，混在一个函数里就会互相覆盖。
+        """
+        self.assertEqual(self.o["gran_year"], "month")
+
+    def test_a_custom_span_of_the_same_length_still_follows_the_table(self):
+        """★★ 反向闸。把「年度按月」写成 `autoGran` 的特例，会连带改掉**所有** 256 天的
+        自定义区间 —— 而那是用户自己框的一段，没有"这是一年"的语义，按周才看得出周内节奏。"""
+        self.assertEqual(self.o["gran_custom_same_len"], "week")
+
+    def test_manual_choice_still_beats_the_year_default(self):
+        """★ 优先级：手动 > 年度恒月 > auto 表。少了这一条，弹层里选的分格在年度档失效。"""
+        self.assertEqual(self.o["gran_year_manual"], "day")
 
     def test_merging_into_weeks_loses_nothing(self):
         """★★ 合并是**求和**不是抽样。少加几天在一张周线图上完全看不出来。"""

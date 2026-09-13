@@ -251,9 +251,23 @@ export function presetList(today: string): ({ sep: true } | { sep: false; label:
 export function autoGran(days: number): Exclude<Granularity, "auto"> {
   return days <= 90 ? "day" : days <= 365 ? "week" : "month";
 }
-/** 实际生效的粒度（手动选择覆盖 auto）。**判据只有这一处**，页面别各写一份。 */
+/**
+ * 实际生效的粒度。**判据只有这一处**，页面别各写一份。
+ *
+ * 优先级：手动选择 > **年度档恒按月** > 按跨度自动。
+ *
+ * ★★ 「年度按月」不是 `autoGran` 的特例，是**这个档位本身的语义**：
+ *   用户 2026-09-12 提这个档时原话就是「新增一个年度的纬度，**然后横轴时间变成月份**」。
+ *   交接稿 §6 那张 auto 表（≤90 天 / ≤365 周 / 更长月）管的是**自定义区间** ——
+ *   今年到现在 256 天落在「≤365 → 按周」里，于是年度档画成了 37 根周柱，
+ *   而用户要的是 12 个月。两条规则都对，只是适用对象不同，混在一个函数里就会互相覆盖。
+ * ★ 自定义区间即使长度与年度相同，仍按 auto 表走 —— 那是用户自己框的一段，
+ *   没有"这是一年"的语义，按周能看出周内节奏。
+ */
 export function effGran(st: RangeState, days: number): Exclude<Granularity, "auto"> {
-  return st.gran === "auto" ? autoGran(days) : st.gran;
+  if (st.gran !== "auto") return st.gran;
+  if (st.preset === "year") return "month";
+  return autoGran(days);
 }
 export const granLabel = (g: Exclude<Granularity, "auto">): string =>
   ({ day: "按天", week: "按周", month: "按月" } as const)[g];
