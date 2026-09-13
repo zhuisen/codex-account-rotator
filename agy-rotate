@@ -1,0 +1,303 @@
+#!/usr/bin/env python3
+"""Antigravity(agy) 账号池 CLI —— 收编 / 看额度 / 换号 / 选号。
+
+    agy-rotate adopt [label]   把**当前登录**的号收进池（加号的唯一入口）
+    agy-rotate list            列出池 + 上次读到的额度
+    agy-rotate quota [--json]  刷新全池额度（零消耗，不需要 agy 在跑）
+    agy-rotate switch <label>  把某个号装回 agy 的登录态
+    agy-rotate pick [--why]    按额度挑一个号（自动切用；只打印 label，不动凭证）
+    agy-rotate auto            = pick + 必要时 switch（`bin/agy` 启动前调它）
+    agy-rotate rename <旧> <新>
+    agy-rotate remove <label>
+
+## 加号为什么不做 OAuth
+
+★ 走 agy 自己的登录流程：`agy` 里 `/logout` → 浏览器登录第二个号 → `agy-rotate adopt`。
+  我们**不实现 OAuth**，因为那需要把 client_secret 常驻在代码里，而这个仓库是公开的；
+  收编现成的登录态既零风险也零维护（agy 换 OAuth 流程都不影响我们）。
+
+## ★★ 换号只对**下一次启动**生效
+
+  agy 在启动时读 `antigravity-oauth-token`，之后不再读。所以：
+  - 自动切发生在 `bin/agy` **exec 真身之前**，那是唯一能保证本次会话用对号的时刻；
+  - 对**已经开着**的 agy 会话，换文件不影响它 —— 这是设计事实，文案必须这么写，
+    不能让用户以为点一下就切走了正在跑的那个。
+"""
+import json
+import os
+import sys
+import time
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from agy import pool as P                                    # noqa: E402
+
+
+def _fmt_pct(v):
+    return "—" if v is None else "%.1f%%" % (float(v) * 100)
+
+
+def _fmt_reset(s):
+    """`2026-09-13T10:31:36Z` → 本地 `09-13 18:31`。★ 显示一律转本地：
+    用户看的是自己的钟，而服务端给的是 UTC —— 混着看会差 8 小时。"""
+    if not s:
+        return "—"
+    try:
+        import datetime
+        d = datetime.datetime.fromisoformat(s.replace("Z", "+00:00")).astimezone()
+        return d.strftime("%m-%d %H:%M")
+    except Exception:                                        # noqa: BLE001
+        return s
+
+
+def _accounts(pool):
+    return pool.setdefault("accounts", {})
+
+
+def _by_label(pool, key):
+    """label 或 sub 前缀都认。★ 与 codex 池同一条教训：**label 是可改的显示名**，
+    所以内部一律存 `sub`，只在查找时接受 label。"""
+    accs = _accounts(pool)
+    if key in accs:
+        return key
+    hit = [s for s, a in accs.items() if a.get("label") == key]
+    if len(hit) == 1:
+        return hit[0]
+    if len(hit) > 1:
+        sys.exit("★ 有 %d 个号都叫 '%s' —— 先 rename 一个再来" % (len(hit), key))
+    pre = [s for s in accs if s.startswith(key)]
+    return pre[0] if len(pre) == 1 else None
+
+
+def cmd_adopt(args):
+    live = P.read_live()
+    if not live:
+        sys.exit("读不到当前登录态（%s）—— 先在 agy 里登录一个号" % P.LIVE)
+    cl = P.claims(live)
+    sub, email = cl.get("sub"), cl.get("email")
+    if not sub:
+        sys.exit("当前凭证里没有 id_token.sub —— 认不出这是哪个号，拒绝收编")
+    pool = P.load()
+    accs = _accounts(pool)
+    known = sub in accs
+    label = (args[0] if args else None) or (accs.get(sub, {}).get("label")) \
+        or (email or sub).split("@")[0]
+    P.write_cred(sub, live)
+    accs[sub] = {**accs.get(sub, {}), "label": label, "email": email,
+                 "adopted_at": accs.get(sub, {}).get("adopted_at") or int(time.time()),
+                 "updated_at": int(time.time())}
+    with P._lock(P.POOL):
+        P.save(pool)
+    print("%s [%s] %s" % ("已更新" if known else "已收编", label, email or sub[:12]))
+    if len(accs) == 1:
+        print("  ★ 池里只有一个号，轮换还没有意义。再加号：在 agy 里 `/logout` 登录另一个账号，"
+              "然后再跑一次 `agy-rotate adopt`。")
+
+
+def _refresh_one(sub, acc, pool):
+    """→ (cred, err)。必要时刷新并**写回池里的凭证**（不碰 agy 的登录态）。"""
+    cred = P.read_cred(sub)
+    if not cred:
+        return None, "凭证文件不在（auth/agy/%s.json）" % sub
+    if not P.expired(cred):
+        return cred, ""
+    fresh, err = P.refresh(cred, pool)
+    if err:
+        return None, err
+    P.write_cred(sub, fresh)
+    return fresh, ""
+
+
+def cmd_quota(args):
+    want_json = "--json" in args
+    pool = P.load()
+    accs = _accounts(pool)
+    if not accs:
+        sys.exit("池是空的 —— 先 `agy-rotate adopt`")
+    live_sub = (P.claims(P.read_live()) or {}).get("sub")
+    out = []
+    for sub, a in accs.items():
+        cred, err = _refresh_one(sub, a, pool)
+        if err:
+            a["quota_err"] = err
+            out.append({"sub": sub, "label": a.get("label"), "err": err})
+            continue
+        q, err = P.fetch_quota(cred["token"]["access_token"])
+        # ★★ 失败态一律**不写数字**：`0` 是"用光了"的合法值，一旦某条失败路径悄悄写出 0，
+        #    UI 会画一条正常的红条，而用户没有第二个办法分辨。同 grok/agy 额度那条降级契约。
+        a["quota"] = q if not err else None
+        a["quota_err"] = err or None
+        a["quota_at"] = int(time.time())
+        out.append({"sub": sub, "label": a.get("label"), "live": sub == live_sub,
+                    "quota": q, "err": err or None})
+    with P._lock(P.POOL):
+        P.save(pool)
+    if want_json:
+        print(json.dumps({"accounts": out, "at": int(time.time())}, ensure_ascii=False))
+        return
+    for r in out:
+        tag = " ←当前" if r.get("live") else ""
+        if r.get("err"):
+            print("  [%-10s] ✗ %s%s" % (r["label"], r["err"], tag))
+            continue
+        parts = ["%s %s(重置 %s)" % (g, _fmt_pct(v["remaining"]), _fmt_reset(v["reset"]))
+                 for g, v in (r["quota"] or {}).items()]
+        print("  [%-10s] %s%s" % (r["label"], " · ".join(parts) or "无额度信息", tag))
+
+
+def cmd_list(args):
+    pool = P.load()
+    accs = _accounts(pool)
+    if not accs:
+        print("池是空的 —— `agy-rotate adopt` 收编当前登录的号")
+        return
+    live_sub = (P.claims(P.read_live()) or {}).get("sub")
+    for sub, a in accs.items():
+        q = a.get("quota") or {}
+        g = (q.get("gemini") or {})
+        print("  %-10s %-28s gemini %s  重置 %s%s%s" % (
+            a.get("label"), (a.get("email") or sub)[:28],
+            _fmt_pct(g.get("remaining")), _fmt_reset(g.get("reset")),
+            "  ←当前" if sub == live_sub else "",
+            "  ✗" + a["quota_err"] if a.get("quota_err") else ""))
+
+
+def _score(a):
+    """选号用的剩余比例。★ 只看 `gemini` 组 —— 它是 agy 的主力池（实测 20/27 个模型），
+    而 claude 组那 3 个模型用不到时永远是 1.0，掺进来会让排序失去分辨力。
+    取不到额度的号排在**最后**：不是「它满额」，是「我们不知道」。"""
+    q = (a.get("quota") or {}).get("gemini") or {}
+    r = q.get("remaining")
+    return float(r) if isinstance(r, (int, float)) else -1.0
+
+
+def cmd_pick(args):
+    pool = P.load()
+    accs = _accounts(pool)
+    if not accs:
+        sys.exit("池是空的")
+    live_sub = (P.claims(P.read_live()) or {}).get("sub")
+    ranked = sorted(accs.items(), key=lambda kv: -_score(kv[1]))
+    best_sub, best = ranked[0]
+    cur = accs.get(live_sub)
+    # ★ 当前号还够用就**不换** —— 无谓换号会打断 agy 的 prompt 缓存（上游那些项目
+    #   把这叫 sticky 策略，默认就是它）。
+    if cur is not None and _score(cur) >= P.LOW_WATER:
+        best_sub, best = live_sub, cur
+    if "--why" in args:
+        print("阈值 %.0f%% · 当前 [%s] %s → 选 [%s] %s" % (
+            P.LOW_WATER * 100, (cur or {}).get("label", "—"), _fmt_pct(_score(cur) if cur else None),
+            best.get("label"), _fmt_pct(_score(best))))
+    print(best.get("label") or best_sub)
+
+
+def cmd_switch(args):
+    if not args:
+        sys.exit("usage: agy-rotate switch <label>")
+    pool = P.load()
+    sub = _by_label(pool, args[0])
+    if not sub:
+        sys.exit("池里没有 '%s'" % args[0])
+    cred, err = _refresh_one(sub, _accounts(pool)[sub], pool)
+    if err:
+        sys.exit("✗ %s" % err)
+    live_sub = (P.claims(P.read_live()) or {}).get("sub")
+    if live_sub == sub:
+        print("[%s] 已经是当前号，没动" % _accounts(pool)[sub].get("label"))
+        return
+    P.install_live(cred)
+    with P._lock(P.POOL):
+        P.save(pool)
+    print("已切到 [%s] —— ★ 只对**下一次启动的** agy 生效，已经开着的会话不受影响"
+          % _accounts(pool)[sub].get("label"))
+
+
+def cmd_auto(args):
+    """选号 + 必要时换凭证。`bin/agy` 在 exec 真身之前调它。
+
+    ★ 整体 fail-open：选不出来/刷不动，就让 agy 用**当前**登录态照常跑。
+      轮换是增益，不是前置条件 —— 把它做成前置条件就会出现「CodexBar 坏了导致 agy 用不了」。
+    """
+    try:
+        pool = P.load()
+        accs = _accounts(pool)
+        if len(accs) < 2:
+            return
+        live_sub = (P.claims(P.read_live()) or {}).get("sub")
+        cur = accs.get(live_sub)
+        if cur is not None and _score(cur) >= P.LOW_WATER:
+            return
+        ranked = sorted(accs.items(), key=lambda kv: -_score(kv[1]))
+        sub, a = ranked[0]
+        if sub == live_sub or _score(a) < P.LOW_WATER:
+            return                                    # 全池都低 —— 换了也没用，别白折腾
+        cred, err = _refresh_one(sub, a, pool)
+        if err:
+            return
+        P.install_live(cred)
+        with P._lock(P.POOL):
+            P.save(pool)
+        print("[codexbar] agy 自动切到 [%s]（剩余 %s）" % (a.get("label"), _fmt_pct(_score(a))),
+              file=sys.stderr)
+    except Exception:                                 # noqa: BLE001
+        return
+
+
+def cmd_rename(args):
+    if len(args) < 2:
+        sys.exit("usage: agy-rotate rename <old> <new>")
+    pool = P.load()
+    sub = _by_label(pool, args[0])
+    if not sub:
+        sys.exit("池里没有 '%s'" % args[0])
+    new = args[1].strip()
+    if not new or any(c.isspace() for c in new):
+        sys.exit("新名字不能为空、不能含空格（它要当命令行参数用）")
+    accs = _accounts(pool)
+    if any(s != sub and a.get("label") == new for s, a in accs.items()):
+        sys.exit("'%s' 已经被别的号占了" % new)
+    accs[sub]["label"] = new
+    with P._lock(P.POOL):
+        P.save(pool)
+    print("renamed → %s" % new)
+
+
+def cmd_remove(args):
+    if not args:
+        sys.exit("usage: agy-rotate remove <label>")
+    pool = P.load()
+    sub = _by_label(pool, args[0])
+    if not sub:
+        sys.exit("池里没有 '%s'" % args[0])
+    lbl = _accounts(pool)[sub].get("label")
+    live_sub = (P.claims(P.read_live()) or {}).get("sub")
+    if sub == live_sub:
+        sys.exit("[%s] 正是当前登录的号 —— 先 switch 到别的号再移除，"
+                 "否则你会既不在池里、也没有别的登录态可回。" % lbl)
+    del _accounts(pool)[sub]
+    with P._lock(P.POOL):
+        P.save(pool)
+    try:
+        P.cred_path(sub).unlink()
+    except OSError:
+        pass
+    print("已移除 [%s]" % lbl)
+
+
+CMDS = {"adopt": cmd_adopt, "list": cmd_list, "quota": cmd_quota, "switch": cmd_switch,
+        "pick": cmd_pick, "auto": cmd_auto, "rename": cmd_rename, "remove": cmd_remove}
+
+
+def main(argv):
+    if not argv or argv[0] in ("-h", "--help"):
+        print(__doc__)
+        return 0
+    fn = CMDS.get(argv[0])
+    if not fn:
+        sys.exit("未知命令 '%s' —— 可用: %s" % (argv[0], " ".join(sorted(CMDS))))
+    fn(argv[1:])
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

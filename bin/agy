@@ -170,6 +170,46 @@ def record(payload: dict, model, started: float) -> None:
         os.close(fd)
 
 
+def select_account(argv):
+    """启动前挑号并换凭证 -> 去掉 `--as` 之后的 argv。
+
+    ★★★ **这是唯一能保证"本次会话用对号"的时刻。** agy 只在启动时读
+      `antigravity-oauth-token`，之后不再读 —— 所以换号必须发生在 `execv` **之前**，
+      而且对**已经开着**的 agy 会话无效。文案与行为都按这条来，别让用户以为点一下
+      就把正在跑的那个切走了。
+
+    两条路：
+      · `agy --as <label>` / `AGY_ACCOUNT=<label>`  → 指定号（显式优先）
+      · 其余                                        → `agy-rotate auto`：
+        当前号剩余低于阈值才换，够用就不动（换号会打断 prompt 缓存）
+
+    ★ 整体 **fail-open**：轮换器不在、池是空的、网断了，一律让 agy 用当前登录态照常跑。
+      轮换是增益不是前置条件 —— 做成前置条件就会出现「CodexBar 坏了导致 agy 用不了」，
+      而那比没有轮换糟得多。
+    """
+    rot = Path(__file__).resolve().parent.parent / "agy-rotate"
+    if not rot.exists():
+        return argv
+    want, out, i = os.environ.get("AGY_ACCOUNT"), [], 0
+    while i < len(argv):
+        a = argv[i]
+        if a == "--as" and i + 1 < len(argv):
+            want, i = argv[i + 1], i + 2
+            continue
+        if a.startswith("--as="):
+            want, i = a[5:], i + 1
+            continue
+        out.append(a)
+        i += 1
+    try:
+        subprocess.run([sys.executable, str(rot), "switch", want] if want
+                       else [sys.executable, str(rot), "auto"],
+                       timeout=60, check=False)
+    except Exception:                                   # noqa: BLE001
+        pass
+    return out
+
+
 def main() -> None:
     argv = sys.argv[1:]
     if not REAL.exists():
@@ -178,6 +218,7 @@ def main() -> None:
 
     # ★ 必须在分支**之前** —— 交互态那条走 execv,过了那行就没有本进程了。
     start_quota_sampler()
+    argv = select_account(argv)
 
     is_print = any(a in PRINT_FLAGS or a.startswith("--print=") or a.startswith("--prompt=")
                    for a in argv)
