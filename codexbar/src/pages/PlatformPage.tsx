@@ -12,6 +12,7 @@ import { rangeLabel, bucketsFor, sumBuckets, costOfBucket, savingOfBucket, fmtTo
 import KpiStrip, { type Kpi, UP, DOWN } from "../components/KpiStrip";
 import { useIntro, introEnabled } from "../hooks/useIntro";
 import CacheChip from "../components/CacheChip";
+import PageSub from "../components/PageSub";
 
 const AMBER = "#E0A21C";
 const SRC: Record<string, string> = {
@@ -395,6 +396,8 @@ export default function PlatformPage({ t, data, raw, cacheMode, pk, st, setSt, o
         <span style={{ fontSize: 22, fontWeight: 700, whiteSpace: "nowrap" }}>
           {data?.platforms[pk]?.name ?? pk} 消耗
         </span>
+        {/* ★ 交接稿 §5 的数据源副标 —— 与总览那行同一个组件，避免两页各写一份再漂。 */}
+        <PageSub text="读本地 transcript · 不消耗额度" t={t} />
         <CacheChip mode={cacheMode} />
         <span style={{ fontSize: 11, color: t.muted, fontFamily: "'JetBrains Mono'", overflow: "hidden",
                        textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{SRC[pk] ?? ""}</span>

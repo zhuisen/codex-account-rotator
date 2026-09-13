@@ -70,13 +70,18 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 FETCHER = ROOT / "agy-quota"
+# ★★★ **账本的基准目录必须与 `scan.py` 同一个**（2026-09-13 修）。
+#   这里原来写的是 `ROOT / "traffic" / …`，而 `scan.py` 读的是 `_STORE / "traffic" / …`
+#   —— 在仓库里两者恰好相等，所以一直看不出来；**脚本被打进 app 之后 `ROOT` 变成
+#   `Contents/Resources/scripts/`**，采样器往 app 内部写、scan 去数据目录读，
+#   两边各自正常、数据永远对不上。本仓那条「一份事实一个家」的老形态。
+_STORE = Path(os.environ.get("CODEX_ROTATE_STORE") or str(ROOT))
 LEDGER_DIR = Path(os.environ.get(
-    "AGY_QUOTA_LEDGER_DIR", str(ROOT / "traffic" / "agy-quota-ledger")))
+    "AGY_QUOTA_LEDGER_DIR", str(_STORE / "traffic" / "agy-quota-ledger")))
 LEDGER = "samples.jsonl"
 # ★★ app 读的那份 sidecar。**采样器现在同时写它** —— 见 `fetch()` 的注释:
 #   两个轮询者打同一个 RPC 是没必要的浪费,而且它们各自写、互相看不见对方的新鲜度。
-SIDECAR = Path(os.environ.get("CODEX_ROTATE_STORE") or
-               str(Path(__file__).resolve().parent.parent)) / ".agy-quota.json"
+SIDECAR = _STORE / ".agy-quota.json"
 LOCK = ".sampler.lock"
 
 POLL_SECS = int(os.environ.get("AGY_SAMPLER_POLL", "60"))

@@ -55,6 +55,15 @@ fn data_dir() -> String {
 fn spawn_cmd(program: &str) -> Command {
     let mut c = Command::new(program);
     c.env("CODEX_ROTATE_STORE", data_dir());
+    // ★★★ **agy 池有它自己的变量,不吃 `CODEX_ROTATE_STORE`。**（2026-09-13 用户实报
+    //    「codex 能切、agy 不能切」）`agy/pool.py` 按 `__file__` 往上两级推数据目录 ——
+    //    打进安装包之后那就是 `Contents/Resources/scripts/`，里面**一个账号都没有**。
+    //    于是 GUI 点「切换」跑的是一个空池：命令成功、退出码 0、什么也没发生。
+    //    ⚠️ 本仓记过同一条：「**改了"谁来读"，就必须同时验"谁来写"**」——
+    //    当时是 `proxy.py` 认了变量而安装脚本一个都没喂。这次是我加了变量却没接上喂它的人。
+    //    ★ **只设 store，绝不设 `AGY_TOKEN_FILE`**：那是 agy 自己的登录态路径，
+    //      它必须留在用户真实的家目录里。
+    c.env("AGY_POOL_STORE", data_dir());
     // ★★ **Windows 上 Python 的 stdout 默认是本地代码页(简体中文机器 = cp936)**,
     //    而这边一律 `String::from_utf8_lossy` 解 —— 所有中文输出(discover 的口径判定、
     //    `codex-rotate list/health` 的文案)都会变成一堆替换字符。用户 2026-08-31 实测报「字体乱码」。

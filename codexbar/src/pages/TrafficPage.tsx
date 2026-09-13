@@ -4,6 +4,7 @@ import { fmtUSD } from "../rates";
 import StackedArea, { type Layer } from "../components/StackedArea";
 import KpiStrip, { type Kpi, UP, DOWN } from "../components/KpiStrip";
 import CacheChip from "../components/CacheChip";
+import PageSub from "../components/PageSub";
 import { useIntro, introEnabled } from "../hooks/useIntro";
 import type { TrafficData, Bucket, RangeState, CacheMode, PlatformPrefs } from "../traffic";
 import RangeBar from "../components/RangeBar";
@@ -176,6 +177,9 @@ export default function TrafficPage({ t, data, raw, cacheMode, prefs, st, setSt,
   const loading = !view;
   const kpis: Kpi[] = loading ? [
     { k: "总 token", v: "—", sub: "读取中", subC: t.muted },
+    // ★ 占位骨架的**列数与列序必须和加载完一致**，否则数据一到 KPI 条会当场重排
+    //   （space-evenly 会把 5 格重新均分成 7 格），用户看到的是整条抖一下。
+    { k: "请求数", v: "—" },
     { k: isToday ? "较昨日" : "日均", v: "—" },
     { k: "总费用", v: "—", c: AMBER },
     { k: isToday ? "费用较昨日" : "日均费用", v: "—", c: AMBER },
@@ -185,6 +189,12 @@ export default function TrafficPage({ t, data, raw, cacheMode, prefs, st, setSt,
       // 今日档环比行隐藏（§5：改注在「较昨日」那一格下面）
       sub: isToday ? undefined : (dTok ? `环比 ${dTok.txt}` : "环比 —"),
       subC: dTok ? (dTok.up ? UP : DOWN) : t.muted },
+    // ★★ 交接稿 §1 的**第 2 列**。2026-09-13 补：这一格此前只在**平台详情页**上有
+    //   （那边叫「请求轮数」），总览没有 —— 而两页是同一族（§5c 页面统一性），
+    //   用户实报「内容和位置不是 1:1」指的就是这类缺口。
+    //   ⚠️ `grandRounds` 一直算着却没人消费，是个孤儿字段：**后端有值 ≠ 已披露**。
+    { k: "请求数", v: (view?.grandRounds ?? 0).toLocaleString(),
+      n: view?.grandRounds ?? 0, fmt: (x: number) => Math.round(x).toLocaleString() },
     isToday
       ? { k: "较昨日", v: dTok?.txt ?? "—", c: dTok ? (dTok.up ? UP : DOWN) : undefined,
           sub: "vs 昨日", subC: t.muted }
@@ -234,6 +244,9 @@ export default function TrafficPage({ t, data, raw, cacheMode, prefs, st, setSt,
       {/* 顶栏 */}
       <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 9 }}>
         <span style={{ fontSize: 22, fontWeight: 700, whiteSpace: "nowrap" }}>AI用量信息</span>
+        {/* ★ 交接稿 §1 的数据源副标。2026-09-13 补：此前两页都没有它，而它承担的是
+            「这个页面会不会花我的钱」这条**披露**（数据全来自本机 CLI 自己落的盘）。 */}
+        <PageSub text="汇总各 CLI 本地 transcript · 不消耗额度" t={t} />
         {/* 开关在设置页,被它改变的数字在这里 —— 不挂个牌子,页面就会静默地把 34.2B 显示成 0.46B */}
         <CacheChip mode={cacheMode} />
         <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 10 }}>
