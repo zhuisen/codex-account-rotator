@@ -247,6 +247,30 @@ export function presetList(today: string): ({ sep: true } | { sep: false; label:
   ];
 }
 
+/** 某月最后一天（UTC）。 */
+export const monthEnd = (y: number, m: number): number => new Date(Date.UTC(y, m, 0)).getUTCDate();
+
+/**
+ * 把一段区间**吸附到月边界**：起点 → 月初，终点 → 月末（当月则为今天）。
+ *
+ * ★★ 交接稿 10 §3.5：分格切到「月」时日历换成月份选择器，已有草稿要自动吸附，
+ *   左列预设在月模式下也按月吸附。不吸附的后果是**看到的区间和生效的区间不是同一个** ——
+ *   格子高亮着整个 8 月和 9 月，而底部 ISO 框写着 `08-14 → 09-12`，两者都"看着正常"。
+ * ★ 当月的月末是**今天**，不是 30/31 号 —— 否则区间会伸进没有数据的未来。
+ */
+export function snapToMonths(r: DateRange, today: string): DateRange {
+  const s = `${r.s.slice(0, 7)}-01`;
+  const [y, m] = r.e.split("-").map(Number);
+  const last = `${r.e.slice(0, 7)}-${String(monthEnd(y, m)).padStart(2, "0")}`;
+  return { s, e: last > today ? today : last };
+}
+
+/** 跨了几个自然月（含两端）。月模式底部显示 `N 个月`。 */
+export function monthSpan(s: string, e: string): number {
+  return (Number(e.slice(0, 4)) - Number(s.slice(0, 4))) * 12
+       + (Number(e.slice(5, 7)) - Number(s.slice(5, 7))) + 1;
+}
+
 /** 交接稿 §6：≤90 天按天，≤365 按周，更长按月。 */
 export function autoGran(days: number): Exclude<Granularity, "auto"> {
   return days <= 90 ? "day" : days <= 365 ? "week" : "month";

@@ -34,6 +34,7 @@ USE_TRAFFIC = WEB / "src" / "hooks" / "useTraffic.ts"
 
 PROBE = r"""
 import { bucketsFor, daysNeeded, autoGran, effGran, resolveRange, presetList,
+         snapToMonths, monthSpan, monthEnd,
          prevRange, prevTotals, diffDays, addDays, axisTick, tickTitle,
          DEFAULT_RANGE, PILLS, WINDOW_TIERS, MAX_RANGE_DAYS, MIN_COMPARE_DAYS }
   from "%s";
@@ -117,6 +118,14 @@ out.week_start = presetList(TODAY).find((p) => !p.sep && p.label === "本周").r
 out.last_month = presetList(TODAY).find((p) => !p.sep && p.label === "上月").r;
 
 // 刻度
+// 交接稿 10 §3.5：月模式
+out.snap_mid = snapToMonths({ s: "2026-03-14", e: "2026-06-20" }, TODAY);
+out.snap_cur = snapToMonths({ s: "2026-08-14", e: "2026-09-12" }, TODAY);
+out.snap_idem = snapToMonths(snapToMonths({ s: "2026-03-14", e: "2026-06-20" }, TODAY), TODAY);
+out.mspan_same = monthSpan("2026-03-01", "2026-03-31");
+out.mspan_cross = monthSpan("2025-11-01", "2026-06-30");
+out.mend = [monthEnd(2026, 2), monthEnd(2024, 2), monthEnd(2026, 4), monthEnd(2026, 12)];
+
 out.tick_hour = axisTick("2026-09-12T09");
 out.tick_day = axisTick("2026-09-12");
 out.tick_m1 = axisTick("2026-01");
@@ -395,6 +404,105 @@ class TheLimitsMatchTheHandoff(unittest.TestCase):
     def test_max_365_and_min_compare_7(self):
         self.assertEqual(self.o["max_days"], 365)
         self.assertEqual(self.o["min_cmp"], 7)
+
+
+class MonthPickerSnapsToMonthBoundaries(unittest.TestCase):
+    """★★ 交接稿 10 §3.5：分格切到「月」时，日历换成月份选择器，草稿自动吸附到月边界。
+
+    不吸附的后果是**看到的区间和生效的区间不是同一个** —— 格子高亮着整个 8 月和 9 月，
+    底部 ISO 框却写着 `08-14 → 09-12`，两者都"看着正常"，只有把它们并排读才发现对不上。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.o = _probe()
+
+    def test_start_goes_to_the_first_and_end_to_the_last(self):
+        self.assertEqual(self.o["snap_mid"], {"s": "2026-03-01", "e": "2026-06-30"})
+
+    def test_the_current_month_ends_today_not_at_month_end(self):
+        """★★★ 当月的"月末"是**今天**。取 09-30 会让区间伸进没有数据的未来，
+        而那几天会被当成 0 算进日均 —— 数字变小，图形完全正常。"""
+        self.assertEqual(self.o["snap_cur"], {"s": "2026-08-01", "e": "2026-09-12"})
+
+    def test_snapping_twice_changes_nothing(self):
+        """★ 幂等。每次切分格都会吸附一次，不幂等的话来回切几次区间就漂了。"""
+        self.assertEqual(self.o["snap_idem"], self.o["snap_mid"])
+
+    def test_the_month_count_is_inclusive_and_crosses_years(self):
+        self.assertEqual(self.o["mspan_same"], 1)
+        self.assertEqual(self.o["mspan_cross"], 8, "2025-11 → 2026-06 是 8 个月（交接稿截图）")
+
+    def test_month_end_handles_leap_years(self):
+        """★ 2 月是这个函数唯一会出错的地方，而错了只差一天 —— 在月度图上看不出来。"""
+        self.assertEqual(self.o["mend"], [28, 29, 30, 31])
+
+
+class ThePopoverMatchesHandoffTen(unittest.TestCase):
+    """★ 交接稿 10 对弹层的四处更新（§2 / §3.5 / §6）。"""
+
+    TS = (ROOT / "codexbar" / "src" / "components" / "RangePopover.tsx").read_text(encoding="utf-8")
+
+    def test_the_popover_is_600_wide(self):
+        """★ 580 → 600：月模式那两块 `3×54px` 的年面板要放得下。"""
+        self.assertIn("width: 600", self.TS)
+        self.assertNotIn("width: 580", self.TS)
+
+    def test_four_arrows_not_two(self):
+        """★ `«` `‹` | `›` `»` —— 单箭头翻 1 个月，双箭头翻 1 年。"""
+        # ★ 判据收在 `panel()` 的**表头 JSX** 里：光看"源码里出现过这个字符"太弱 ——
+        #   一个被 `null &&` 短路掉的调用也留着那个字符（变异验证时我自己先踩了这个）。
+        i = self.TS.index("const panel = (")
+        head = self.TS[i:self.TS.index("{monthMode ? (", i)]
+        for g in ("«", "‹", "›", "»"):
+            with self.subTest(glyph=g):
+                self.assertIn(f'{{arrow("{g}"', head, f"★ 表头里少了 `{g}` 这枚箭头")
+
+    def test_month_mode_pages_by_year_on_both_arrow_kinds(self):
+        """★★ 交接稿 §6「翻页」：**月视图下 `‹ ›` 与 `« »` 都翻年**。
+        单箭头仍按月翻的话，两块年面板会各显示不相邻的年份 —— 而标题只写年份，看不出错。"""
+        # ⚠️ 窗口必须**收到函数体内**。第一版取固定 260 字符，越过了 `};` 读到下一个函数的
+        #    `if (monthMode)` —— 把 `stepBack` 那一行删掉闸照样绿（变异工具当场拦下）。
+        for fn in ("stepBack", "stepFwd"):
+            i = self.TS.index(f"const {fn} = ")
+            seg = self.TS[i:self.TS.index("\n  };", i)]
+            self.assertIn("if (monthMode)", seg, f"★ {fn} 在月模式下没有改成翻年")
+            self.assertRegex(seg, r"setVy\(ly [-+] 1\)", f"★ {fn} 月模式下不是按年步进")
+
+    def test_the_month_grid_matches_the_spec(self):
+        i = self.TS.index('gridTemplateColumns: "repeat(3,54px)"')
+        seg = self.TS[i:i + 700]
+        self.assertIn('"repeat(3,54px)"', seg, "★ 月格不是 3 列 × 54px")
+        self.assertIn("height: 30", seg, "★ 月格高度不是 30")
+        self.assertIn("fontSize: 11", seg, "★ 月格字号不是 11")
+
+    def test_the_header_spacer_is_41_not_20(self):
+        """★ 占位宽度必须是 41（两枚 20 + 1 间隙）。写 20 的话标题不在面板正中，
+        两块面板并排时那 21px 偏移一眼就能看出来。"""
+        # ⚠️ 左右面板**各有一个**占位。第一版只断言"出现过 41"，改掉其中一个闸照样绿
+        #    （变异工具当场拦下）—— 而只歪一边恰恰是最难看的那种：两块面板的标题不齐。
+        i = self.TS.index("const panel = (")
+        head = self.TS[i:self.TS.index("{monthMode ? (", i)]
+        self.assertEqual(head.count("width: 41"), 2,
+                         "★ 两个表头占位必须都是 41（两枚箭头 20+20+1 间隙）")
+
+    def test_switching_to_month_snaps_the_draft(self):
+        i = self.TS.index("GRANS.map(")
+        seg = self.TS[i:i + 700]
+        self.assertIn('k === "month"', seg, "★ 切到月模式时没有吸附草稿")
+        self.assertIn("snapMonth(ds, de)", seg)
+
+    def test_presets_snap_in_month_mode(self):
+        """★ 交接稿 §3.5 最后一句：左列预设在月模式下也按月吸附。"""
+        i = self.TS.index("presets.map(")
+        seg = self.TS[i:i + 900]
+        self.assertIn("monthMode ? snapMonth(p.r.s, p.r.e)", seg,
+                      "★ 月模式下点预设没有按月吸附 —— 格子与 ISO 框会对不上")
+
+    def test_the_count_switches_to_months(self):
+        i = self.TS.index("个月")
+        self.assertIn("monthMode ?", self.TS[max(0, i - 200):i],
+                      "★ 计数没有随模式切换")
 
 
 class TheMonthAxisReadsAsMonths(unittest.TestCase):
