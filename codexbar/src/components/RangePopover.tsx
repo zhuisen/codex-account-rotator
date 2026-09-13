@@ -255,9 +255,18 @@ export default function RangePopover({ st, today, onApply, onClose, t }: {
               return (
                 <span key={p.label}
                       onClick={() => {
+                        // ★★ **点预设 = 直接应用**（用户 2026-09-13 定）。
+                        //   交接稿 §2 写的是"立即回填草稿"，还要再点一次「应用」——
+                        //   但左列这 11 项本来就是**成品区间**，没有什么可以再调的：
+                        //   多那一步只是让人确认一件已经确定的事。
+                        //   ⚠️ 需要微调的那条路没堵死：日历上再点一下就回到草稿态。
                         const [a, b] = monthMode ? snapMonth(p.r.s, p.r.e) : [p.r.s, p.r.e];
                         setDs(a); setDe(b); setHov(null);
                         setVy(Number(p.r.s.slice(0, 4))); setVm(Number(p.r.s.slice(5, 7)));
+                        // 365 天上限仍然要守 —— 目前 11 项全在限内，但这条是给以后加预设的人的。
+                        if (a && b && diffDays(a, b) <= MAX_RANGE_DAYS) {
+                          onApply({ range: { s: a, e: b }, gran, compare: cmp });
+                        }
                       }}
                       style={{ padding: "6px 10px", borderRadius: 6, cursor: "pointer",
                                color: on ? t.accent : t.text2,

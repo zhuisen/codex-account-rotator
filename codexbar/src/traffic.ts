@@ -224,6 +224,22 @@ export function resolveRange(st: RangeState, today: string): DateRange {
   }
 }
 
+/**
+ * 这个区间是不是恰好等于某个**固定档**。→ 档位名，或 `null`（那就是真正的自定义）。
+ *
+ * ★ 用途：左列点「今日 / 近 30 天 / 年度」时，它们与 pill 的区间**逐字相同** ——
+ *   造一个内容一模一样的自定义芯片，等于同一件事有两种长相，而其中一种还更长。
+ *   直接点亮对应 pill 更短也更诚实。
+ * ★ 判据是**区间相等**，不是"用户点的是哪一项" —— 手动选出同样一段也该走同一条路。
+ */
+export function matchPreset(r: DateRange, today: string): RangePreset | null {
+  for (const p of PILLS) {
+    const x = resolveRange({ ...DEFAULT_RANGE, preset: p }, today);
+    if (x.s === r.s && x.e === r.e) return p;
+  }
+  return null;
+}
+
 /** 弹层左列的 11 个预设（交接稿 §2，`—` 是分隔线）。 */
 export function presetList(today: string): ({ sep: true } | { sep: false; label: string; r: DateRange })[] {
   const m = (label: string, s: string, e: string) => ({ sep: false as const, label, r: { s, e } });

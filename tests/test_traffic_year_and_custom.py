@@ -34,7 +34,7 @@ USE_TRAFFIC = WEB / "src" / "hooks" / "useTraffic.ts"
 
 PROBE = r"""
 import { bucketsFor, daysNeeded, autoGran, effGran, resolveRange, presetList,
-         snapToMonths, monthSpan, monthEnd,
+         snapToMonths, monthSpan, monthEnd, matchPreset,
          prevRange, prevTotals, diffDays, addDays, axisTick, tickTitle,
          DEFAULT_RANGE, PILLS, WINDOW_TIERS, MAX_RANGE_DAYS, MIN_COMPARE_DAYS }
   from "%s";
@@ -125,6 +125,13 @@ out.snap_idem = snapToMonths(snapToMonths({ s: "2026-03-14", e: "2026-06-20" }, 
 out.mspan_same = monthSpan("2026-03-01", "2026-03-31");
 out.mspan_cross = monthSpan("2025-11-01", "2026-06-30");
 out.mend = [monthEnd(2026, 2), monthEnd(2024, 2), monthEnd(2026, 4), monthEnd(2026, 12)];
+
+// 点预设即应用：与固定档重合就点亮 pill
+out.match_30d = matchPreset({ s: addDays(TODAY, -29), e: TODAY }, TODAY);
+out.match_today = matchPreset({ s: TODAY, e: TODAY }, TODAY);
+out.match_year = matchPreset({ s: "2026-01-01", e: TODAY }, TODAY);
+out.match_none = matchPreset({ s: "2026-08-01", e: "2026-08-31" }, TODAY);
+out.match_offbyone = matchPreset({ s: addDays(TODAY, -30), e: TODAY }, TODAY);
 
 out.tick_hour = axisTick("2026-09-12T09");
 out.tick_day = axisTick("2026-09-12");
@@ -345,8 +352,12 @@ class AFixedPresetResetsGranularity(unittest.TestCase):
         判据必须打在**那次调用**上。"""
         self.assertRegex(
             self.TS,
-            r'onChange\(\{ \.\.\.st, preset: "custom", custom: range, lastCustom: range, gran, compare \}\)',
+            r'preset: "custom", custom: range, lastCustom: range, gran, compare',
             "★ 应用自定义区间时没有把用户选的分格写回状态 —— 那个分段控件是摆设")
+        # ★ 命中固定档那一支必须**复位**成 auto：固定档的分格按定义就是自动的，
+        #   带着弹层里选的「月」跳过去，30d 会缩成 1 格。
+        self.assertRegex(self.TS, r'preset: hit[\s\S]{0,80}gran: "auto"',
+                         "★ 命中固定档时没把分格复位 —— 30d 会按月画成 1 格")
 
 
 class ThePresetColumnMatchesTheHandoff(unittest.TestCase):
@@ -503,6 +514,52 @@ class ThePopoverMatchesHandoffTen(unittest.TestCase):
         i = self.TS.index("个月")
         self.assertIn("monthMode ?", self.TS[max(0, i - 200):i],
                       "★ 计数没有随模式切换")
+
+
+class ClickingAPresetAppliesImmediately(unittest.TestCase):
+    """★ 用户 2026-09-13：「左侧今日、昨日、近 7 天等等，点击了就是直接跳转应用」。
+
+    交接稿 §2 写的是"立即回填草稿"，还要再点一次「应用」。左列这 11 项本来就是**成品区间**，
+    没有什么可以再调的 —— 多那一步只是让人确认一件已经确定的事。
+    ⚠️ 需要微调的路没堵死：日历上再点一下就回到草稿态。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.o = _probe()
+
+    RP = (ROOT / "codexbar" / "src" / "components" / "RangePopover.tsx").read_text(encoding="utf-8")
+    RB = (ROOT / "codexbar" / "src" / "components" / "RangeBar.tsx").read_text(encoding="utf-8")
+
+    def test_the_preset_click_calls_apply(self):
+        i = self.RP.index("presets.map(")
+        seg = self.RP[i:i + 1400]
+        self.assertIn("onApply(", seg, "★★ 点预设只回填草稿，没有直接应用")
+
+    def test_it_still_honours_the_365_limit(self):
+        """★ 目前 11 项全在限内，这条是给以后加预设的人的 —— 绕过上限的路不该从这里开。"""
+        i = self.RP.index("presets.map(")
+        self.assertIn("MAX_RANGE_DAYS", self.RP[i:i + 1400],
+                      "★ 点预设那条路绕过了 365 天上限")
+
+    def test_a_range_equal_to_a_pill_lights_that_pill(self):
+        """★★ 「今日 / 近 30 天 / 年度」与 pill 的区间**逐字相同**。造一个内容一模一样的
+        自定义芯片，等于同一件事有两种长相，而其中一种还更长。"""
+        self.assertEqual(self.o["match_30d"], "30d")
+        self.assertEqual(self.o["match_today"], "today")
+        self.assertEqual(self.o["match_year"], "year")
+
+    def test_a_genuinely_custom_range_stays_custom(self):
+        """★ 反向闸。判得太宽就会把真正的自定义区间也吞成 pill，芯片再也出不来。"""
+        self.assertIsNone(self.o["match_none"])
+        self.assertIsNone(self.o["match_offbyone"], "★ 差一天也必须算自定义")
+
+    def test_the_bar_routes_through_the_match(self):
+        i = self.RB.index("onApply={(")
+        seg = self.RB[i:i + 700]
+        self.assertIn("matchPreset(range, today)", seg,
+                      "★ 应用时没有做固定档匹配 —— 会造出与 pill 内容相同的芯片")
+        self.assertIn('preset: "custom"', seg, "★ 没命中固定档时仍要走自定义")
 
 
 class TheMonthAxisReadsAsMonths(unittest.TestCase):

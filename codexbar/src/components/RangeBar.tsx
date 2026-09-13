@@ -1,7 +1,7 @@
 import { useState } from "react";
 import type { Theme } from "../theme";
 import type { RangeState } from "../traffic";
-import { DEFAULT_RANGE, PILLS, diffDays, md, rangeLabel, resolveRange } from "../traffic";
+import { DEFAULT_RANGE, PILLS, diffDays, matchPreset, md, rangeLabel, resolveRange } from "../traffic";
 import RangePopover from "./RangePopover";
 
 const MONO = "'JetBrains Mono'";
@@ -104,7 +104,12 @@ export default function RangeBar({ st, today, onChange, onToast, t }: {
           onClose={() => setOpen(false)}
           onApply={({ range, gran, compare }) => {
             setOpen(false);
-            onChange({ ...st, preset: "custom", custom: range, lastCustom: range, gran, compare });
+            // ★ 区间恰好等于某个固定档时**点亮那个 pill**，不造一个内容一样的自定义芯片。
+            //   判据是区间相等（`matchPreset`），所以手动选出同一段也走同一条路。
+            const hit = matchPreset(range, today);
+            onChange(hit
+              ? { ...st, preset: hit, custom: null, lastCustom: range, gran: "auto", compare }
+              : { ...st, preset: "custom", custom: range, lastCustom: range, gran, compare });
             onToast(`范围已应用 · ${md(range.s)} → ${md(range.e)}`);
           }} />
       )}
