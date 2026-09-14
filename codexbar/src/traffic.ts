@@ -28,7 +28,14 @@ export interface Platform {
   /** 由 scan.py 的注册表下发。加平台只改 scan.py,前端自动跟上 */
   color?: string;
   days: Record<string, Bucket>;   // 已按自然日窗口补零
-  hours: Record<string, Bucket>;  // 今日 00 点到当前小时,已补零
+  /**
+   * 逐小时桶，键 `YYYY-MM-DDTHH`。
+   * ★ 今天补到**当前小时**为止（未来的小时不是 0，是"还没发生"）；
+   *   往前 `HOURLY_DAYS`(30) 天的整天补满 24 格（那些小时确实过完了，空就是真的没用）。
+   * ⚠️ **再早的日子这里没有** —— 不是那天没用过，是没存。要 `scan.py --hours-day <日期>` 现补。
+   *   实测：全部 1095 天都留会把快照从 1.1 MB 撑到约 37 MB，而它每次扫描都重写。
+   */
+  hours: Record<string, Bucket>;
   available: boolean;
   coverage?: Coverage;
   /** ★ 路由分账（目前只有 codex 有）：这批 token 走的是账号池还是某个中转站。
@@ -563,12 +570,50 @@ function byTwoHours(hours: Record<string, Bucket>): { labels: string[]; buckets:
   return { labels, buckets };
 }
 
+/**
+ * 单天的逐小时序列。→ `null` = **这一天没有小时桶**（不是"这一天没用过"）。
+ *
+ * ★★★ 两者必须分开（用户 2026-09-15 要「单天例如昨天、具体的某一天，横轴按小时」）。
+ *   `scan.py` 只对最近 `HOURLY_DAYS`(30) 天留逐小时桶 —— 实测全部 1095 天都留会把
+ *   快照从 1.1 MB 撑到约 37 MB，而它每次扫描都要重写。窗口外的那一天要
+ *   `scan.py --hours-day <日期>` 现补。返回 `null` 让调用方去补，**而不是画一根空柱**：
+ *   一根空柱和"那天真的没用"长得一模一样。
+ *
+ * ★ 单天**不做两小时合并**（`byTwoHours` 是今日档的做法）——
+ *   今日档合并是因为它常只有小半天、格子太窄；整天是 24 格，正好一格一小时，
+ *   而用户要的就是"横轴按小时"。
+ */
+export function hoursOfDay(p: Platform, day: string): { labels: string[]; buckets: Bucket[] } | null {
+  const ks = Object.keys(p.hours).filter((k) => k.startsWith(day + "T")).sort();
+  if (!ks.length) return null;
+  return { labels: ks, buckets: ks.map((k) => p.hours[k] ?? EMPTY) };
+}
+
+/**
+ * 这个区间是不是**恰好一天**。→ 那一天的 `YYYY-MM-DD`，否则 `null`。
+ *
+ * ★ 「今日」档单独走 `byTwoHours`，所以这里只管自定义区间与其它 preset。
+ */
+export function singleDayOf(st: RangeState, today: string): string | null {
+  if (st.preset === "today") return null;
+  const r = resolveRange(st, today);
+  return r.s === r.e ? r.s : null;
+}
+
 /** 取某平台在某区间的 (labels, buckets)。scan.py 已补零,这里只做切片与合并。 */
 export function bucketsFor(data: TrafficData, key: string, st: RangeState, today: string):
   { labels: string[]; buckets: Bucket[] } {
   const p = data.platforms[key];
   if (!p) return { labels: [], buckets: [] };
   if (st.preset === "today") return byTwoHours(p.hours);
+  // ★★ 区间恰好一天 ⇒ 横轴按小时（用户 2026-09-15 指定）。
+  //   取不到小时桶就**照旧走日聚合**（画出那一根日柱）—— 调用方另有一条
+  //   「按需补扫」的路，而在补到之前画一根真实的日柱，比画空诚实。
+  const one = singleDayOf(st, today);
+  if (one) {
+    const h = hoursOfDay(p, one);
+    if (h) return h;
+  }
   const r = resolveRange(st, today);
   // ★ 字符串比较就够:`YYYY-MM-DD` 定宽且字典序 == 时间序。转 Date 反而把时区带进来，
   //   而 `p.days` 的键**已经是本地日**（scan.py 按本地日分桶）——再转一次就是转两遍。

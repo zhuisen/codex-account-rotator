@@ -2,7 +2,7 @@
 """多 AI 流量总览的统一扫描器 —— Claude / Codex / Grok / Kimi 四家 + OpenClaw **宿主源**
 (宿主自己不是平台:按模型名把每条记录回流到真正的平台,可再分出 DeepSeek / MiMo),读本机 CLI 落盘记录。
 
-    scan.py [--days N] [--json] [--no-cache] [--only k1,k2] [--exclude k1]
+    scan.py [--days N] [--hours-day YYYY-MM-DD] [--json] [--no-cache] [--only k1,k2] [--exclude k1]
 
 **全部本地只读、不联网、不消耗任何额度。**各家的 transcript 都是它们自己写在硬盘上的。
 
@@ -1342,7 +1342,18 @@ def _add(b, model, i, cr, cw, out):
     m["output"] += out; m["total"] += t; m["rounds"] += 1
 
 
-def scan(days=90, use_cache=True, only=None, exclude=None):
+#: 往回**几天**保留逐小时桶。
+#:
+#: ★ 用户 2026-09-15 要「单天（例如昨天、具体的某一天）横轴按小时」。此前只有**今天**有
+#:   小时桶（`if di == last_di`），所以选中昨天只能画出一根日柱。
+#: ★ 30 这个数是**量出来的**，不是拍的（当天实测，7 个平台、单个小时桶 JSON 约 201 B）：
+#:     全部 1095 天都存 → 快照 1.1 MB 涨到约 **37 MB**，而它每次扫描都要重写；
+#:     最近 30 天      → 约 +1.0 MB；最近 7 天 → 约 +0.24 MB。
+#:   用户选了「30 天内瞬开、更早按需重扫」，所以这里是 30，窗口外走 `hours_day`。
+HOURLY_DAYS = 30
+
+
+def scan(days=90, use_cache=True, only=None, exclude=None, hours_day=None):
     cached = _load_cache() if use_cache else {}
     cut = time.time() - max(days, 90) * 86400
     fresh = {}
@@ -1496,7 +1507,12 @@ def scan(days=90, use_cache=True, only=None, exclude=None):
                 if pv is None:
                     pv = by_provider[pk][prov][d] = _blank()
                 _add(pv, model, i, cr, cw, o)
-            if di == last_di:                               # 今日视图按小时,只需当天
+            # ★ 逐小时桶：最近 `HOURLY_DAYS` 天都留，外加调用方点名的那一天（`hours_day`）。
+            #   以前只算今天（`di == last_di`），于是选中昨天只能画出一根日柱。
+            #   ⚠️ 判据用**日期标签**而不是 `di` 的算术：`day_labels` 是用真日历逐日
+            #     `mktime` 算的，DST 与半小时偏移天然正确；拿 `di` 去减天数会把那份正确性丢掉。
+            if di >= last_di - (HOURLY_DAYS - 1) or (
+                    hours_day and 0 <= di < n_days and day_labels[di] == hours_day):
                 h = strftime("%Y-%m-%dT%H", localtime(ep))
                 hb = hours_b.get(h)
                 if hb is None:
@@ -1565,13 +1581,28 @@ def scan(days=90, use_cache=True, only=None, exclude=None):
         relay_billed = {}
 
     cur_h = int(strftime("%H", localtime(now_ts)))
+    # 哪些日期带逐小时桶。★ 跟着 `day_labels` 走，不自己算日期 —— 那份标签是用真日历
+    #   逐日 `mktime` 出来的，DST/半小时偏移已经正确。
+    _hourly_days = set(day_labels[max(0, n_days - HOURLY_DAYS):])
     for pk, (days_b, hours_b) in acc.items():
         picked = {}
         for off in range(days - 1, -1, -1):
             d = (end_date - _timedelta(days=off)).isoformat()
             picked[d] = days_b.get(d) or _blank()
+        # ★ 今天只补到**当前小时**（未来的小时不是 0，是"还没发生"）；
+        #   往前的整天补满 24 格 —— 那些小时确实过完了，空就是真的没用。
         hours = {f"{today}T{h:02d}": (hours_b.get(f"{today}T{h:02d}") or _blank())
                  for h in range(cur_h + 1)}
+        # ★★ 历史日的小时桶（`HOURLY_DAYS` 天内 + 调用方点名那天）。
+        #   与 `picked` 用同一批日期标签，所以不会出现"有小时没有日"的错位。
+        for _d in list(picked):
+            if _d == today:
+                continue
+            if not (_d in _hourly_days or _d == hours_day):
+                continue
+            for _h in range(24):
+                _k = f"{_d}T{_h:02d}"
+                hours[_k] = hours_b.get(_k) or _blank()
         meta = SRC_META.get(pk) or ROUTED.get(pk) or {"name": pk, "color": None}
         entry = {"name": meta["name"], "color": meta.get("color"),
                  "days": picked, "hours": hours,
@@ -1639,6 +1670,7 @@ def _fmt(n):
 
 def main(argv):
     days, use_cache, as_json = 14, True, False
+    hours_day = None
     only = exclude = None
     i = 0
     while i < len(argv):
@@ -1647,6 +1679,16 @@ def main(argv):
             if i + 1 >= len(argv):
                 sys.exit("--days 后面要跟天数")
             days = max(1, int(argv[i + 1])); i += 1
+        elif a == "--hours-day":
+            # ★ 给**窗口外的某一天**补逐小时桶（用户选的「更早按需重扫」那条路）。
+            #   只认 `YYYY-MM-DD`：形状不对就退出，而不是悄悄当成 None ——
+            #   那会让调用方以为要到了小时数据，画出来却还是一根日柱。
+            if i + 1 >= len(argv):
+                sys.exit("--hours-day 后面要跟 YYYY-MM-DD")
+            hours_day = argv[i + 1]
+            if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", hours_day):
+                sys.exit("--hours-day 要 YYYY-MM-DD，收到: %r" % hours_day)
+            i += 1
         elif a == "--json":
             as_json = True
         elif a == "--no-cache":
@@ -1668,7 +1710,8 @@ def main(argv):
         i += 1
 
     t0 = time.time()
-    platforms, stat = scan(days=days, use_cache=use_cache, only=only, exclude=exclude)
+    platforms, stat = scan(days=days, use_cache=use_cache, only=only, exclude=exclude,
+                           hours_day=hours_day)
     stat["elapsed_ms"] = int((time.time() - t0) * 1000)
 
     if as_json:

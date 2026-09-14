@@ -282,7 +282,14 @@ export default function TrafficPage({ t, data, raw, cacheMode, prefs, st, setSt,
                      key={`${st.preset}:${range.s}:${range.e}:${st.gran}:${view.labels[0]}`}
                      labels={view.labels} layers={layers} height={156} fmt={fmtTok} t={t}
                      dimmed={hoverKey} onPick={onDrill}
-                     tipTitle={(i) => (isToday ? `今日 ${view.labels[i].slice(11)}:00` : view.labels[i])} />
+                     /* ★ 标签带 `T` = 小时桶（今日档，或选中的某一天）。
+                        原来只给「今日」特判，于是选中昨天时 tooltip 会印原始的
+                        `2026-09-14T09` —— 判据改成看标签形状，不看是不是今天。 */
+                     tipTitle={(i) => {
+                       const l = view.labels[i];
+                       if (l.length <= 10) return l;
+                       return `${isToday ? "今日" : l.slice(0, 10)} ${l.slice(11)}:00`;
+                     }} />
         </div>
       )}
 

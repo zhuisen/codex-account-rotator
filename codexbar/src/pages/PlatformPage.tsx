@@ -435,8 +435,13 @@ export default function PlatformPage({ t, data, raw, cacheMode, pk, st, setSt, o
         <StackedArea caption={capt}
                      key={`${st.preset}:${range.s}:${range.e}:${st.gran}:${mode}:${v.labels[0]}`}
                      labels={v.labels} layers={layers} height={190} fmt={fmtTok} t={t}
-                     tipTitle={(i) => (isToday ? `今日 ${v.labels[i].slice(11)}:00 · ${modeWord}`
-                                               : `${v.labels[i]} · ${modeWord}`)} />
+                     /* ★ 同 TrafficPage：判据看标签形状（带 `T` 就是小时桶），
+                        不看是不是今天 —— 否则选中昨天会印出原始的 `2026-09-14T09`。 */
+                     tipTitle={(i) => {
+                       const l = v.labels[i];
+                       if (l.length <= 10) return `${l} · ${modeWord}`;
+                       return `${isToday ? "今日" : l.slice(0, 10)} ${l.slice(11)}:00 · ${modeWord}`;
+                     }} />
         </div>
         </>
       )}

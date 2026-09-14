@@ -15,7 +15,7 @@ import RelayPage from "./pages/RelayPage";
 import TrafficPage from "./pages/TrafficPage";
 import PlatformPage from "./pages/PlatformPage";
 import type { RangeState } from "./traffic";
-import { colorOf, daysNeeded, DEFAULT_RANGE, todayOf } from "./traffic";
+import { colorOf, daysNeeded, DEFAULT_RANGE, todayOf, singleDayOf, hoursOfDay } from "./traffic";
 import SettingsPage, { getSettings, patchSettings, TRAY_STYLES } from "./pages/SettingsPage";
 import { useStore } from "./hooks/useStore";
 import { useExpiryWatch } from "./hooks/useExpiryWatch";
@@ -212,11 +212,29 @@ export default function App() {
   const agyPool = useAgyPool(page === "overview" && provider === "gemini");
   const trafficDays = daysNeeded(trafficSt, todayOf(null));
   const { data: traffic, raw: trafficRaw, cacheMode, prefs: platPrefs, busy: trafficBusy,
-          err: trafficErr, refresh: refreshTraffic } = useTraffic({
+          err: trafficErr, refresh: refreshTraffic, requestHoursFor } = useTraffic({
             enabled: page === "traffic",
             // ★ 窗口由当前档位决定,且**量化到档**(90/365/1095) —— 见 `daysNeeded`。
             //   默认档原样返回 90,所以常用路径的行为一个字都没变。
             days: trafficDays });
+  /**
+   * ★★ 选中**单独一天**而快照里没有那天的逐小时桶 ⇒ 现补一次（用户 2026-09-15 选的方案）。
+   *
+   * `scan.py` 只对最近 30 天留小时桶（全部 1095 天都留会把快照从 1.1 MB 撑到约 37 MB，
+   * 而它每次扫描都重写）。更早的某一天点进来时，这里发一次 `--hours-day`。
+   * ★ 判据是「**一个平台都没有**那天的小时桶」——只要有一个有，就说明那天在窗口内，
+   *   某些平台那天没数据是真话，不该为此重扫。
+   * ★ 去重在 `requestHoursFor` 里（`askedHours`），所以这个 effect 每次渲染跑也无害。
+   */
+  useEffect(() => {
+    if (page !== "traffic" || !traffic) return;
+    const day = singleDayOf(trafficSt, todayOf(traffic));
+    if (!day) return;
+    const anyHours = Object.values(traffic.platforms)
+      .some((p) => hoursOfDay(p, day) !== null);
+    if (!anyHours) requestHoursFor(day);
+  }, [page, traffic, trafficSt, requestHoursFor]);
+
   /**
    * ★ 这是全 app 唯一一条会**主动联网**的数据路径(`useTraffic` 扫的是本机盘,零消耗不联网),
    *   所以 `enabled` 是白名单不是黑名单:**只有这两个页面**要看 grok 额度。

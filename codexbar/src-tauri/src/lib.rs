@@ -376,15 +376,25 @@ async fn run_discover() -> Result<String, String> {
 
 #[tauri::command]
 async fn run_traffic(app: AppHandle, args: Vec<String>) -> Result<String, String> {
-    const ALLOWED_FLAGS: &[&str] = &["--days", "--json", "--no-cache"];
-    if let Some(bad) = args
-        .iter()
-        .find(|a| !ALLOWED_FLAGS.contains(&a.as_str()) && a.parse::<u32>().is_err())
-    {
+    const ALLOWED_FLAGS: &[&str] = &["--days", "--json", "--no-cache", "--hours-day"];
+    // `--hours-day` 的值是 `YYYY-MM-DD`，既不是白名单里的 flag 也不是数字，
+    // 所以单独放行**这一种形状**（长度与逐位都核，不用宽松的 contains）。
+    let is_date = |a: &str| {
+        a.len() == 10
+            && a.as_bytes().iter().enumerate().all(|(i, c)| {
+                if i == 4 || i == 7 { *c == b'-' } else { c.is_ascii_digit() }
+            })
+    };
+    if let Some(bad) = args.iter().find(|a| {
+        !ALLOWED_FLAGS.contains(&a.as_str()) && a.parse::<u32>().is_err() && !is_date(a)
+    }) {
         return Err(format!("disallowed arg: {:?}", bad));
     }
     let script = format!("{}/traffic/scan.py", script_dir());
-    let forced = args.iter().any(|a| a == "--no-cache");
+    // ★★ `--hours-day` 必须**绕过新鲜度合并**：它要的正是现有快照里**没有**的东西
+    //   （窗口外那一天的逐小时桶）。命中合并窗口直接回旧快照的话，调用方会拿到一份
+    //   仍然没有小时桶的快照，而"刚点过"和"没点中"在界面上一模一样 —— 本仓的老形状。
+    let forced = args.iter().any(|a| a == "--no-cache" || a == "--hours-day");
     let days = traffic_days(&args);      // ★ 决定读写哪一份快照,见 `snapshot_name`
     let out = tauri::async_runtime::spawn_blocking(move || {
         // 串行化:第二个调用者在这里等第一个扫完

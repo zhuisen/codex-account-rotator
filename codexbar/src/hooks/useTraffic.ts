@@ -87,6 +87,15 @@ export function useTraffic(opts: {
   err: string | null;
   /** 手动重扫(两处 `↻ 上次刷新 HH:MM` 按钮) */
   refresh: () => void;
+  /**
+   * ★★★ 给**窗口外**的某一天现补逐小时桶（用户 2026-09-15 选的「更早按需重扫」）。
+   *
+   * `scan.py` 只对最近 `HOURLY_DAYS`(30) 天留小时桶 —— 全部 1095 天都留会把快照从
+   * 1.1 MB 撑到约 37 MB，而它每次扫描都要重写。更早的某一天要现扫一次。
+   * ★ 重复调同一天是**空操作**（记在 `askedHours` 里）：图表每次渲染都会发现"没有小时桶"，
+   *   不记的话就是每帧起一次 python。
+   */
+  requestHoursFor: (day: string) => void;
   /** 只在数据比 `maxAgeMs` 还旧时才重扫。给"界面刚被看到"这类时刻用。 */
   refreshIfStale: (maxAgeMs?: number) => void;
 } {
@@ -234,6 +243,25 @@ export function useTraffic(opts: {
   const dataRef = useRef<TrafficData | null>(null);
   dataRef.current = data;
 
+  /** 已经为哪些日期补过小时桶。★ 见 `requestHoursFor` 的注释：不记就是每帧起一次 python。 */
+  const askedHours = useRef<Set<string>>(new Set());
+  const requestHoursFor = useCallback((day: string) => {
+    if (!day || askedHours.current.has(day)) return;
+    askedHours.current.add(day);
+    announce("traffic-scan");
+    setBusy(true);
+    void invoke<string>("run_traffic",
+                        { args: ["--days", String(days), "--hours-day", day, "--json"] })
+      .then((raw) => { adopt(parse(raw)); if (isDefault) void emit("traffic-updated"); })
+      .catch((e: unknown) => {
+        // ★ 失败就把这一天从"问过了"里拿掉 —— 否则用户再点也不会重试，
+        //   而界面上"补过但没有数据"和"补失败了"长得一模一样。
+        askedHours.current.delete(day);
+        setErr(String(e).slice(0, 200));
+      })
+      .finally(() => { setBusy(false); announce(null); });
+  }, [days, adopt, isDefault, announce]);
+
   const refreshIfStale = useCallback((maxAgeMs: number = FRESH_MS) => {
     const g = dataRef.current?.generated_at;
     if (g == null || Date.now() - g * 1000 > maxAgeMs) void scan();
@@ -296,5 +324,5 @@ export function useTraffic(opts: {
     // ★ 对方在扫也算 busy —— 见 `busy` 字段上的说明。
   return { data: shaped, raw: shapedRaw, cacheMode, prefs,
            busy: busy || remoteBusy === "traffic-scan", err,
-           refresh: () => void scan(true), refreshIfStale };
+           refresh: () => void scan(true), refreshIfStale, requestHoursFor };
 }
