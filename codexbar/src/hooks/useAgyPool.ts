@@ -1,6 +1,31 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { emit, listen } from "@tauri-apps/api/event";
 import type { AgyQuota, AgySnapshot } from "../agy";
+
+/**
+ * 「现在钥匙串里是谁」的**跨 webview 广播**。
+ *
+ * ★★★ 主窗与菜单栏是**两个独立的 webview**，各自 `useAgyPool()` 一份，
+ *   而且 `enabled` 的条件还不一样（主窗要 `总览 + Gemini 档`，菜单栏要 `账号 Tab + Gemini 芯片`）。
+ *   于是两边在**不同时刻**各自跑 `agy-rotate live --json` —— 而这台机器上钥匙串正被
+ *   4 个常驻 agy 进程反复抢（实测最久的跑了 6 天 23 小时，`drifted: true`）。
+ *   两次探测落在不同时刻，就会得到不同的号。
+ *
+ * ⚠️ **这个缺口是 2026-09-14 用户实报的**：同一屏上菜单栏说当前是 `sam`、
+ *   主窗总览说当前是 `dbk`（实际 `live --json` = sam，主窗停在陈旧的 `live_seen`）。
+ *
+ * ★★ 而 B45 引入的 `verified` 位让这件事**从瞬态变成永久** —— 在那之前两边至少每次
+ *   进档都会重读一次、有机会收敛；之后各自锁死在自己那次探测的结果上。
+ *   所以这条广播不是锦上添花，是 `verified` 的**必要配套**。
+ *
+ * 范式照抄 `usePrivacy`（两个 webview 的 localStorage 不互通，只能走 Tauri 事件）；
+ * 采纳规则照抄 `useQuotaSidecar.adopt`：**按时间戳单调采纳**，只认更新的。
+ * 这样自己 `emit` 出去又被自己收到（Tauri 会广播给所有 webview，包括发送方）是无害的空操作。
+ */
+const LIVE_EVT = "agy-live-changed";
+
+interface LivePayload { sub: string; drifted: boolean; at: number }
 
 /** 池里一个号（`.agy-pool.json` 的一条）。 */
 export interface AgyPoolAccount {
@@ -143,7 +168,8 @@ export function useAgyPool(enabled: boolean): {
   /** ★★ `liveSub` 现在这个值**是现读探回来的**吗？`false` = 它还只是 `live_seen` 那个种子。
    *  这一位就是 ② 的全部实现：只有它为假时，`live_seen` 才有资格写 `liveSub`。 */
   const verified = useRef(false);
-  /** 上次**成功**跑完现读探测的时刻。0 = 还没成功过（于是永远算过期，必探）。 */
+  /** 上次**成功**跑完现读探测的时刻。0 = 还没成功过（于是永远算过期，必探）。
+   *  ★ 也用作跨 webview 广播的单调时间戳（见 `LIVE_EVT`）。 */
   const probedAt = useRef(0);
   /** `read()` 在途 —— 来回点分档不该把子进程叠起来。 */
   const readingRef = useRef(false);
@@ -202,6 +228,13 @@ export function useAgyPool(enabled: boolean): {
       if (probe.sub) { verified.current = true; setLiveSub(probe.sub); }
       setDrifted(!!probe.drifted);
       probedAt.current = Date.now();
+      // ★★ 告诉**另一个 webview**。不广播的话，主窗与菜单栏会各自锁死在自己那次
+      //   探测的结果上（`verified` 让它变成永久分歧）—— 就是用户 2026-09-14 报的
+      //   「菜单栏说 sam、总览说 dbk」。见 `LIVE_EVT` 的说明。
+      if (probe.sub) {
+        void emit(LIVE_EVT, { sub: probe.sub, drifted: !!probe.drifted,
+                              at: probedAt.current } satisfies LivePayload);
+      }
     } catch {
       // ★★ 探不到当前号不该让整块卡片失败 —— 上面的池数据已经可用了。
       //   ★ 尤其**不许写 `setDrifted(false)`**：那是把「这次没探到」说成「确实没漂移」，
@@ -235,6 +268,27 @@ export function useAgyPool(enabled: boolean): {
 
   // ① 挂载即读池文件 —— 不等用户进 Gemini 档。见文件头 ①。
   useEffect(() => { void readPool(); }, [readPool]);
+
+  /**
+   * ★★★ 收另一个 webview 的现读结果。**不受 `enabled` 约束** ——
+   *   同 `useQuotaSidecar` 的推送通道那条理由：这是别人**已经取好**的数据，
+   *   收下它零成本，而受约束就会退回「只有正在看这一档时才收敛」，
+   *   那正是「菜单栏说 sam、总览说 dbk」的成因。
+   * ★ 按 `at` **严格更新**才采纳：自己 emit 又被自己收到时 `at` 相等 ⇒ 空操作。
+   */
+  useEffect(() => {
+    let un: (() => void) | undefined;
+    let dead = false;
+    void listen<LivePayload>(LIVE_EVT, (e) => {
+      const p = e.payload;
+      if (!p || !p.sub || !(p.at > probedAt.current)) return;
+      probedAt.current = p.at;
+      verified.current = true;
+      setLiveSub(p.sub);
+      setDrifted(!!p.drifted);
+    }).then((f) => { if (dead) f(); else un = f; });
+    return () => { dead = true; un?.(); };
+  }, []);
   useEffect(() => { if (enabled) void read(); }, [enabled, read]);
 
   const refresh = useCallback(() => {

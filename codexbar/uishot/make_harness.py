@@ -977,6 +977,21 @@ function relayEntry() {
       }, 16);
     })();
 
+    // ★★★ `?agylive=<subN>` —— 模拟**另一个 webview** 广播了它现读到的当值号。
+    //    主窗与菜单栏是两个独立 webview，各自跑 `agy-rotate live --json`，而钥匙串正被
+    //    多个常驻 agy 进程反复抢 ⇒ 两次探测落在不同时刻就会得到不同的号。
+    //    2026-09-14 用户实报：菜单栏说 `sam`、总览说 `dbk`，同一屏两个答案。
+    //    ⚠️ harness 里只渲染**一个** webview，所以那个分歧**结构上模拟不出来** ——
+    //      能验的是「收到兄弟的广播之后会不会收敛」，这正是修法本身。
+    //    `at` 给一个远大于 `Date.now()` 的值，确保通过单调采纳那一关。
+    if (p.get('agylive')) {
+      setTimeout(function () {
+        fire('agy-live-changed', { sub: p.get('agylive'), drifted: true,
+                                   at: Date.now() + 3600000 });
+        clicks.push('agylive → 广播 ' + p.get('agylive'));
+      }, parseInt(p.get('agylive_at') || '1500', 10));
+    }
+
     // `?click=a,b` —— 按**文本**依次点击(全站 45 处是 div/span+onClick,没有 button 可选)。
     // 用于验证需要交互才出现的形态(选中卡片 → 改名输入框)。取最内层匹配节点,
     // 否则会点到包住它的容器上 —— 那个容器往往挂着**另一个** onClick。

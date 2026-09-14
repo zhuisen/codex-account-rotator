@@ -92,21 +92,24 @@ def _runs(trail):
     return out
 
 
-class TheGeminiTabKeepsItsVerifiedCurrentAccount(unittest.TestCase):
-    """行为闸：跑真实构建产物，量身份格随时间的变化。"""
+_built = []
 
-    @classmethod
-    def setUpClass(cls):
-        sys.path.insert(0, str(UISHOT))
-        import sweep
 
-        # ★★ **先把被测源码编进 harness 要加载的那份 bundle。**
-        #    不编就是测旧代码 —— 本仓已经因此假绿过两次（CLAUDE.md §4），
-        #    而 `sweep.probe` 只是去打静态服务，`make_harness.py` 的
-        #    `_assert_fresh_bundle()` 在这条路径上**根本不会被调用**。
-        #    所以这道防线必须由本测试自己建，不能指望别处。
-        #    ⚠️ `vite build --outDir uishot/app` 会清空目录、连 harness.html 一起删掉，
-        #       所以两步顺序固定：先 build，再 make_harness。
+def _probe(url):
+    """构建一次 harness（多个类共用），再取探针。
+
+    ★★ **先把被测源码编进 harness 要加载的那份 bundle。**
+       不编就是测旧代码 —— 本仓已经因此假绿过两次（CLAUDE.md §4），
+       而 `sweep.probe` 只是去打静态服务，`make_harness.py` 的
+       `_assert_fresh_bundle()` 在这条路径上**根本不会被调用**。
+       所以这道防线必须由本测试自己建，不能指望别处。
+    ⚠️ `vite build --outDir uishot/app` 会清空目录、连 harness.html 一起删掉，
+       所以两步顺序固定：先 build，再 make_harness。
+    """
+    sys.path.insert(0, str(UISHOT))
+    import sweep
+
+    if not _built:
         for cmd in (["./node_modules/.bin/vite", "build", "--outDir", "uishot/app"],
                     [sys.executable, "uishot/make_harness.py"]):
             r = subprocess.run(cmd, cwd=str(CODEXBAR), capture_output=True,
@@ -114,7 +117,6 @@ class TheGeminiTabKeepsItsVerifiedCurrentAccount(unittest.TestCase):
             if r.returncode != 0:
                 raise unittest.SkipTest(
                     "构建 harness 失败（{}）：{}".format(cmd[0], (r.stderr or r.stdout)[-400:]))
-
         ok, how = sweep.server_alive(BASE)
         if not ok:
             # ★ skip 不是绿。memory.md §3 记着：服务没起来时这类测试是 skip，
@@ -122,8 +124,16 @@ class TheGeminiTabKeepsItsVerifiedCurrentAccount(unittest.TestCase):
             raise unittest.SkipTest(
                 "harness 静态服务没起来（{}）—— 这条闸这一轮**没有跑**，别当成通过。"
                 "起法见 CLAUDE.md §4。".format(how))
+        _built.append(True)
+    return sweep.probe(url, 1200)
 
-        cls.d = sweep.probe(URL, 1200)
+
+class TheGeminiTabKeepsItsVerifiedCurrentAccount(unittest.TestCase):
+    """行为闸：跑真实构建产物，量身份格随时间的变化。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.d = _probe(URL)
 
     # ── ① 先证明探针真的打在东西上（否则下面的「没跳」是空话）──────────────
 
@@ -210,3 +220,104 @@ class AFailedLiveProbeMustNotClaimThereIsNoDrift(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ★ 兄弟 webview 广播的那个号（夹具里 `sub2` = Huo）。与 SEED/LIVE 都不同，
+#   所以"收敛到它"不可能被前两者蒙对。
+SIBLING = "Huo"
+SIBLING_URL = (BASE + "/harness.html"
+               "?nav=home&agypool=3&agydrift=1&agy_delay=100&click=Gemini"
+               "&agylive=sub2&agylive_at=1500")
+
+
+class TheTwoWebviewsAgreeOnWhoIsCurrent(unittest.TestCase):
+    """★★★ 主窗与菜单栏不许对「当前号」给出两个答案（2026-09-14 用户实报）。
+
+    ## 现场
+
+    同一张截图里：菜单栏说当前是 `sam`、主窗总览说当前是 `dbk`。
+    实测 `agy-rotate live --json` 回的是 `sam` ⇒ **菜单栏对、总览错**，
+    总览停在池文件里陈旧的 `live_seen`。
+
+    ## 根因：两个 webview，各探各的，而钥匙串正被人抢
+
+    `useAgyPool` 在 `App.tsx` 和 `MenuBar.tsx` **各挂一份**，`enabled` 条件还不一样
+    （主窗要"总览 + Gemini 档"，菜单栏要"账号 Tab + Gemini 芯片"）。于是两边在
+    **不同时刻**各跑一次 `agy-rotate live --json` —— 而本机有 4 个常驻 agy 进程
+    在抢同一个钥匙串槽（实测最久的 6 天 23 小时，`drifted: true`）。
+    两次探测落在不同时刻，本来就会得到不同的号。
+
+    ★★ **而 B45 加的 `verified` 位让这件事从瞬态变成永久**：在那之前两边每次进档
+      都会重读、有机会收敛；之后各自锁死在自己那次探测上。
+      所以跨 webview 广播不是锦上添花，是 `verified` 的**必要配套** ——
+      这条闸守的正是那个配套。
+
+    ## ⚠️ harness 只渲染一个 webview，所以能验的是"收到兄弟广播会不会收敛"
+
+    真正的双 webview 分歧结构上模拟不出来。`?agylive=<sub>` 直接投递一条
+    另一个 webview 会发的事件，验的是修法本身。**这个局限必须写出来**，
+    否则下一个人会以为"两个 webview 一致"已经被自动化覆盖了。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.d = _probe(SIBLING_URL)
+
+    def test_the_broadcast_actually_fired(self):
+        """★ 先证明事件真的投递了。没投递的话，「收敛了」就是空话。"""
+        self.assertIsNone(self.d.get("_fatal"), self.d.get("_fatal"))
+        self.assertEqual(self.d.get("errors"), [])
+        self.assertTrue(any("agylive" in c for c in (self.d.get("clicks") or [])),
+                        "★ 广播没发出去 —— 下面那条断言测的是空气")
+
+    def test_it_converges_onto_the_sibling_reading(self):
+        """★★★ 收到兄弟 webview 的现读结果后，必须改过来。"""
+        runs = _runs(self.d["trails"]["hero"])
+        self.assertTrue(runs, "Hero 一次都没渲染")
+        self.assertEqual(
+            runs[-1], SIBLING,
+            "★ 没有收敛到兄弟 webview 报的当值号 {!r} —— 两个 webview 会各说各的。\n"
+            "  完整序列：{}".format(SIBLING, runs))
+
+    def test_it_had_its_own_answer_first(self):
+        """★★ 防"作弊通过"：如果本 webview 压根没探出过自己的答案，
+        那"收敛"只是"从来没有过第二个答案"，这条闸就没在验合流。"""
+        runs = _runs(self.d["trails"]["hero"])
+        self.assertIn(LIVE, runs,
+                      "★ 本 webview 自己的现读结果 {!r} 从没出现过 —— 没有分歧可收敛".format(LIVE))
+        self.assertLess(runs.index(LIVE), runs.index(SIBLING),
+                        "★ 顺序不对：应当先有自己的答案，再被兄弟的更新覆盖")
+
+
+class TheHookBroadcastsAndListens(unittest.TestCase):
+    """静态闸：`useAgyPool` 必须**同时**发和收，且收的那一侧不受 `enabled` 约束。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.src = _strip_comments(HOOK.read_text(encoding="utf-8"))
+
+    def test_it_emits_and_listens_on_the_same_event(self):
+        self.assertIn("emit(LIVE_EVT", self.src, "★ 探到结果不广播 —— 兄弟 webview 永远不知道")
+        self.assertIn("listen<LivePayload>(LIVE_EVT", self.src, "★ 只发不收，照样各说各的")
+
+    def test_adoption_is_monotonic(self):
+        """★ 按时间戳单调采纳（同 `useQuotaSidecar.adopt`）。
+
+        没有这条：① 自己 emit 又被自己收到会反复写 state；
+        ② 一条**更旧**的在途结果会覆盖更新的答案 —— 而那看起来就像"又跳回去了"。
+        """
+        self.assertIn("p.at > probedAt.current", self.src,
+                      "★ 采纳没有比时间戳 —— 旧结果会覆盖新结果")
+
+    def test_the_listener_is_not_gated_by_enabled(self):
+        """★★ 收听**不受 `enabled` 约束**：那是别人已经取好的数据，收下零成本。
+
+        受约束的话就退回「只有正在看这一档时才收敛」—— 而用户报的正是
+        "菜单栏在看、总览没在看，于是两边不一样"。
+        """
+        i = self.src.index("listen<LivePayload>(LIVE_EVT")
+        # 往回找到这个 effect 的起点，确认它的依赖数组是空的、且没有 enabled 守卫
+        head = self.src.rindex("useEffect(", 0, i)
+        body = self.src[head:self.src.index("}, [", i)]
+        self.assertNotIn("if (!enabled)", body, "★ 收听被 enabled 挡住了")
+        self.assertNotIn("enabled &&", body, "★ 收听被 enabled 挡住了")
