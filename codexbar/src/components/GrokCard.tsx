@@ -142,13 +142,23 @@ export default function GrokCard({ t, color, snap, privacy, busy, err, disabled,
             //   ★ 文案与 agy 那条**刻意不同**：agy 缺的是"这个号读不到"，
             //     grok 缺的是"上游没有这个窗口" —— 两者的下一步动作完全不一样，
             //     合并成一句话就等于把两种状态又折叠回同一个值。
+            // ★★★ **原因写在行上，不只写在 `title` 里**（2026-09-14 用户实报
+            //   「我的 grok 五小时额度没刷新？还丢失了？」）。
+            //   在那之前这一行是 `—  ↻—`，而**同一个 `—` 同时表示三件事**：
+            //     ① 这个平台结构上没有这个窗口（grok 的 5h，上游只回 WEEKLY）
+            //     ② 这个读数属于别的号（agy 的周，`pid_email` 对不上）
+            //     ③ 真的读失败了
+            //   三者的下一步动作完全不同，而界面给了同一个字。解释确实写了 ——
+            //   写在 `title` 里，**而本仓自己的规矩是「告警放在眼睛已经在的地方」，
+            //   只写进悬浮的真话等于没写**。`title` 保留做详情，行上给结论。
             <div key={label} title={`grok 只有周窗口 —— 上游没有 ${label} 这个额度窗口（实测 window_minutes = 10080）`}
                  style={{ display: "flex", alignItems: "center", gap: 6 }}>
               <span style={{ fontSize: Z.winLabel, color: t.muted, fontFamily: MONO }}>{label}</span>
+              {/* ★ 条槽保留：跨卡对齐靠这一行的高度撑着，去掉它旁边的卡就会高一截，
+                  而 harness 的折行探针对"少了一行"是沉默的（见 test_missing_window_says_so）。 */}
               <div style={{ flex: 1, height: Z.bar, borderRadius: 2, background: t.barTrack }} />
-              <span style={{ fontSize: Z.pct, fontWeight: 600, color: t.muted,
-                             fontFamily: MONO, fontVariantNumeric: "tabular-nums" }}>—</span>
-              <span style={{ fontSize: Z.eta, color: t.muted, fontFamily: MONO }}>↻—</span>
+              <span style={{ fontSize: Z.eta, color: t.muted, fontFamily: MONO,
+                             whiteSpace: "nowrap" }}>无此窗口</span>
             </div>
           ) : (
             <div key={label} style={{ display: "flex", alignItems: "center", gap: 6 }}>

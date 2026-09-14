@@ -134,6 +134,31 @@ STUB = """
     sh.textContent = '.mb-row-switch-wrap{opacity:1 !important;pointer-events:auto !important}';
     document.head.appendChild(sh);
   }
+  // ★★★ `read_logs` 的夹具。**在 2026-09-14 之前 `LOGS_TXT` 是个从未定义过的名字** ——
+  //   那条 case 一旦被调用就 `ReferenceError`。此前没人发现，因为**前端根本没有调用方**
+  //   （那条命令是孤儿）。接线的同一轮把它补上，否则症状会是：stub 抛异常 → 调用方
+  //   `.catch` 吞掉 → 服务日志恒空 → 页面照常渲染、零报错 → sweep 报"干净"。
+  //   这正是本仓反复记的「打桩缺口 ⇒ 零渲染看着像通过」。
+  // ★ 三种时间形态必须都在，否则 `parseServiceLogs` 的三条分支只验到一条：
+  //   ① `[quotad HH:MM:SS]` 只有时分秒 —— **且刻意造一次跨日**（倒序往下走时间变大）
+  //   ② `[agy MM-DD HH:MM:SS]` 带日期
+  //   ③ dawnprobe **一个时间戳都没有**
+  //   另含一行 `✗`：日志页给失败行染红的规则以前是死代码（agy 的行到不了这一页）。
+  var LOGS_TXT = [
+    // ★ 契约：每行 `<job>` + TAB + 原文（Rust 侧 read_logs 就是这么给的）。
+    //   来源**不由前端猜** —— dawnprobe 的行没有任何自我标识。
+    'quotad\t[quotad 20:10:05] activity → Asen:HTTP 200',
+    'quotad\t[quotad 08:44:17] window reset crossed → sweep now',
+    'quotad\t[quotad 23:58:02] activity → wing:HTTP 200',   // ← 时间变大 ⇒ 属于**前一天**
+    'agy\t[agy 09-14 13:41:34] auto 恢复成你选的 [dbk]（钥匙串被别的 agy 进程写回过）',
+    'agy\t[agy 09-14 01:06:57] health [sam] ✗ 取不到额度',
+    'dawnprobe\t每日清晨探针 · 5 个 Plus 号:qq55 Asen Egan Huo wing',
+    'dawnprobe\tprobe 0/5 可用',
+  // ⚠️ **不能写 `join('\\n')`** —— 这整段 JS 住在 make_harness.py 的一个**非 raw** 三引号
+  //   字符串里，Python 会先把 `\\n` 变成真正的换行，于是 JS 那个字符串字面量当场断行、
+  //   整个打桩块语法错误 ⇒ **所有视图**一起「探针缺失」。转义在这里被解释两次。
+  ].join(String.fromCharCode(10));
+
   var cbid = 0, cbs = {}, listeners = {}, unknown = [], errors = [], clicks = [];
 
   // ★ 没有这个,渲染失败会表现为"一张空白页 + 零溢出",而零溢出看起来像通过 ——

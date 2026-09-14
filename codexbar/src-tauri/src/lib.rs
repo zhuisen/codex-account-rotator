@@ -1023,22 +1023,19 @@ const LOG_BUDGET: usize = 300;
 /// ★ 保底 = `LOG_BUDGET / 源数`，谁不够用谁把余量让出来，剩下的按序补。
 ///   这样「某个源一条都看不到」只可能是它真的没写，不可能是被别人挤掉的。
 ///
-/// ⚠️⚠️ **@unwired(read_logs) —— 前端目前没有任何地方调用这条命令。**
-///   （2026-09-14 查实，`grep -rn read_logs codexbar/src/` 为空）
-///   日志页（`LogsPage.tsx`）的日志列表来自 `read_proxy_rotation → rotation.py`，
-///   而那个解析器 **只认 `[proxy` 开头的行**（`scan_proxy_log`），所以 quotad / agy / dawnprobe
-///   的任何一行都到不了界面。连 `LogsPage` 里那条「`✗` 染红」的规则都是为 agy 写的、却永远用不上。
-///   ⇒ CLAUDE.md 与 `install-launchd.sh` 里「日志页读这些字面量」的说法**当前不成立**。
-///   ★ 接不接线是**用户要拍板的界面改动**（本仓铁律：UI 交互不要自己发明），未定。
-///   ★ 这行标记有闸（`tests/test_agy_actions.py` 的异或闸）：「有前端调用方」与
-///     「挂着上面那个标记」**恰好成立一个**。接线之后必须删掉它，否则变红。
-///     ⚠️ 闸按**出现次数 == 1** 判，所以别在别处重复那个记号 —— 第一版就是因为这段说明里
-///     也写了一遍同样的字，把标记删掉后闸照样绿（本仓「闸被自己的说明文字判绿」的又一例）。
+/// ★ 2026-09-14 已接线：`LogsPage.tsx` 的「运行日志」区消费它（用户点名要接）。
+///   在那之前它是孤儿 —— 后端按 5 个文件收集、一直在跑，而日志页读的是
+///   `read_proxy_rotation`，那个解析器只认 `[proxy` 开头的行，于是 quotad / agy /
+///   dawnprobe 一行都到不了界面。★ 其中 dawnprobe 是全仓唯一会自动花钱的任务。
 #[tauri::command]
 fn read_logs() -> Result<String, String> {
+    // ★★★ 每行带上**来源前缀** `<job>\t`。
+    //   来源只有这一层知道 —— `dawnprobe.log` 的行**一个自我标识都没有**
+    //   （既没有 `[dawnprobe …]` 也没有时间戳），前端拿到扁平文本只能靠猜，
+    //   而猜出来的是「其它」。把它扔给前端去猜，就是又一次让下游去还原上游本来就有的事实。
     let per: Vec<Vec<String>> = LOG_SOURCES
         .iter()
-        .map(|(_, name)| {
+        .map(|(job, name)| {
             let path = format!("{}/{}", data_dir(), name);
             match fs::read_to_string(&path) {
                 Ok(data) => data
@@ -1046,7 +1043,7 @@ fn read_logs() -> Result<String, String> {
                     .rev()
                     .filter(|l| !l.trim().is_empty())
                     .take(LOG_BUDGET)
-                    .map(|l| l.to_string())
+                    .map(|l| format!("{}\t{}", job, l))
                     .collect(),
                 // 读不到 = 这个任务还没跑过/没装。**不是错误**，静默给空。
                 Err(_) => Vec::new(),

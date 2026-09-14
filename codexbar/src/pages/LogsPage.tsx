@@ -105,6 +105,75 @@ const clock = (ts: number): string => {
   const d = new Date(ts * 1000);
   return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 };
+/**
+ * 服务日志的一行。`t` 为 `null` = **这一行没有可用的时间**，不是"时间是 0"。
+ * `inferred` = 时间是**推出来的**，不是日志里写着的（见 `parseServiceLogs`）。
+ */
+interface SvcLine { src: string; t: number | null; inferred: boolean; text: string }
+
+/** `[<源> …]` 行首的三种形态。`dawnprobe` 那份**一个时间戳都没有**。 */
+const RE_DATED = /^\[(\w[\w-]*) (\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})\]/;   // [proxy 09-14 13:48:20]
+const RE_CLOCK = /^\[(\w[\w-]*) (\d{2}):(\d{2}):(\d{2})\]/;                   // [quotad 19:26:47]
+
+/**
+ * 把 `read_logs` 的扁平文本解析成带来源与时间的行。
+ *
+ * ★★★ **`quotad.log` 只有 `HH:MM:SS`，没有日期。** 直接按时钟排序会把昨天 23:00 的行
+ *   排到今天 01:00 前面；直接当"今天"更糟 —— 那是**编造**。
+ *   这里用的是本会话验过的那个办法：`read_logs` 每个源给的是**倒序**（最新在前），
+ *   所以沿着它往下走，**时间一旦变大就说明跨了一天**，把日期往前推一天。
+ *   这样得到的时间是**推断**，所以逐行标 `inferred`，界面上给 `~` 前缀 ——
+ *   本仓的老规矩：推断不许伪装成实测。
+ *
+ * ★ `proxy` 的行**跳过**：上面那张泳道图用的 `rot.log` 已经是它，而且那份带完整日期、
+ *   还按窗口过滤过。合进来就是同一条日志画两遍。
+ */
+function parseServiceLogs(raw: string, now: Date): SvcLine[] {
+  const out: SvcLine[] = [];
+  // 按源分组，因为"时间倒退=跨日"只在**同一个文件内部**成立。
+  // ★ 来源由 Rust 侧以 `<job>\t` 前缀给出，**不在这里猜**：`dawnprobe.log` 的行
+  //   既没有 `[dawnprobe …]` 也没有时间戳，靠猜只会得到「其它」。
+  const bySrc = new Map<string, string[]>();
+  for (const raw1 of raw.split("\n")) {
+    if (!raw1.trim()) continue;
+    const tab = raw1.indexOf("\t");
+    if (tab < 0) continue;                       // 没有来源前缀 = 契约没对上，宁可不画
+    const src = raw1.slice(0, tab);
+    if (src === "proxy") continue;
+    const arr = bySrc.get(src) ?? [];
+    arr.push(raw1.slice(tab + 1));
+    bySrc.set(src, arr);
+  }
+  for (const [src, lines] of bySrc) {
+    // 推断日期用的游标：从"今天"开始，遇到时间变大就往前退一天。
+    let cursor = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    let prevSecs = Infinity;
+    for (const text of lines) {
+      const d = RE_DATED.exec(text);
+      if (d) {
+        // 带日期的：直接用。★ 跨年时 `09-14` 可能属于去年 —— 比今天晚超过 1 天就退一年。
+        let dt = new Date(now.getFullYear(), +d[2] - 1, +d[3], +d[4], +d[5], +d[6]);
+        if (dt.getTime() - now.getTime() > 86400_000) dt = new Date(dt.setFullYear(dt.getFullYear() - 1));
+        out.push({ src, t: Math.floor(dt.getTime() / 1000), inferred: false, text: text.slice(d[0].length).trim() });
+        continue;
+      }
+      const c = RE_CLOCK.exec(text);
+      if (!c) {
+        // ★ 真的没有时间（dawnprobe.log）。写 `null`，**不编一个**。
+        out.push({ src, t: null, inferred: false, text });
+        continue;
+      }
+      const secs = +c[2] * 3600 + +c[3] * 60 + +c[4];
+      if (secs > prevSecs) cursor = new Date(cursor.getTime() - 86400_000);   // 时间倒退 ⇒ 跨日
+      prevSecs = secs;
+      const dt = new Date(cursor.getFullYear(), cursor.getMonth(), cursor.getDate(),
+                          +c[2], +c[3], +c[4]);
+      out.push({ src, t: Math.floor(dt.getTime() / 1000), inferred: true, text: text.slice(c[0].length).trim() });
+    }
+  }
+  return out;
+}
+
 const dur = (secs: number): string => {
   const m = Math.round(secs / 60), h = Math.floor(m / 60), mm = m % 60;
   return (h ? `${h}h` : "") + (mm || !h ? `${mm}m` : "");
@@ -258,11 +327,34 @@ export default function LogsPage({ t }: { t: Theme }): React.ReactElement {
     () => (rot?.events ?? []).filter(e => !focus || e.accs.includes(focus)),
     [rot, focus]);
 
+  /**
+   * ★★★ 服务日志（quotad / agy / dawnprobe / autosync）—— 2026-09-14 接线。
+   *
+   * 在那之前 `read_logs` 这条 Tauri 命令**一个前端调用方都没有**：它按 5 个文件收集、
+   * 后端一直在跑，而日志页读的是 `read_proxy_rotation`，那个解析器**只认 `[proxy` 开头的行**。
+   * 于是 quotad / agy / dawnprobe 的日志一行都到不了界面 —— 连这一页给 `✗` 染红的规则
+   * 都是为 agy 写的、却永远用不上。本仓管这叫「后端有字段 ≠ 已披露」。
+   * ⚠️ 其中 **dawnprobe 是全仓唯一会自动花钱的任务**，它的成败此前完全不可见。
+   */
+  const [svc, setSvc] = useState<SvcLine[]>([]);
+  useEffect(() => {
+    invoke<string>("read_logs")
+      .then((raw) => { setSvc(parseServiceLogs(raw || "", new Date())); })
+      // 读不到就保持空 —— 泳道那半已经可用，不该被这半拖垮。
+      .catch(() => { /* 服务日志读不到不影响本页其余部分 */ });
+  }, [win]);
+
   const logs = useMemo(() => {
-    const all = rot?.log ?? [];
+    const proxy = (rot?.log ?? []).map(
+      (l): SvcLine => ({ src: "proxy", t: l.t, inferred: false, text: l.text }));
+    // ★ 有时间的按时间倒序；**没有时间的排在最后**，不许给它们编一个时间去参与排序。
+    const merged = [...proxy, ...svc];
+    const dated = merged.filter(l => l.t !== null).sort((a, b) => (b.t as number) - (a.t as number));
+    const undated = merged.filter(l => l.t === null);
+    const all = [...dated, ...undated];
     if (filter === "all") return all;
     return all.filter(l => l.text.toLowerCase().includes(filter));
-  }, [rot, filter]);
+  }, [rot, svc, filter]);
 
   const cov = rot?.coverage;
   // 覆盖率说明。★ 去掉的是那**一行字**,不是那个**事实** —— 它改挂到 KPI 标签与 title 上。
@@ -593,10 +685,22 @@ export default function LogsPage({ t }: { t: Theme }): React.ReactElement {
           {logs.length === 0 && <div style={{ fontSize: 12, color: t.text2, padding: "12px 0" }}>无匹配日志</div>}
           {logs.map((l, i) => (
             <div key={i} style={{
-              display: "grid", gridTemplateColumns: "44px 1fr", gap: 10, padding: "6px 0",
+              display: "grid", gridTemplateColumns: "50px 62px 1fr", gap: 10, padding: "6px 0",
               borderTop: `1px solid ${t.divider}`, fontFamily: MONO, fontSize: 11.5,
             }}>
-              <span style={{ color: t.muted, fontVariantNumeric: "tabular-nums" }}>{clock(l.t)}</span>
+              {/* ★ `~` = 时间是**推出来的**（该源的日志只有 HH:MM:SS，没有日期，
+                    见 `parseServiceLogs`）；`—` = 这一行**真的没有时间**（dawnprobe.log）。
+                    推断不许伪装成实测，"没有"也不许伪装成 0 点。 */}
+              <span title={l.t === null ? "这一行日志没有时间戳"
+                            : l.inferred ? "该源的日志只有时分秒、没有日期，这个日期是按「时间倒退＝跨日」推出来的"
+                              : undefined}
+                    style={{ color: t.muted, fontVariantNumeric: "tabular-nums" }}>
+                {l.t === null ? "—" : (l.inferred ? "~" : "") + clock(l.t)}</span>
+              {/* ★ 来源。多源合流之后，不标来源就分不出「代理没换号」和「quotad 没扫到」——
+                  而这两件事的下一步动作完全不同。`[src …]` 前缀已在解析时剥掉，改由这一列承担。 */}
+              <span title={`来源：${l.src}`}
+                    style={{ color: t.muted, fontSize: 10.5, whiteSpace: "nowrap",
+                             overflow: "hidden", textOverflow: "ellipsis" }}>{l.src}</span>
               <span title={l.text} style={{
                 // ★ `✗` 是 agy 那侧统一的失败标记（探针/健康/切号都用它）。
                 //   失败行和成功行同色，等于把"成功与否"藏起来 —— 用户点名要看的就是这个。

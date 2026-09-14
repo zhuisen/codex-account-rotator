@@ -61,27 +61,35 @@ class NoWindowRowIsSilentlyBlank(unittest.TestCase):
                 self.assertNotIn('visibility: "hidden"', self._rows_region(name),
                                  f"★★ {name} 又用隐藏行占位了 —— 用户看到的是一整行空白")
 
+    #: 缺失行上**写给人看的那句话**。两张卡 2026-09-14 从 `—  ↻—` 改成了直接写原因
+    #: （用户实报「我的 grok 五小时额度没刷新？还丢失了？」）；两行受菜单栏宽度限制仍用 `↻—`。
+    #: ★ 判据因此改成「**这一行上有没有一个能读的结论**」，而不是某个字符。
+    #:   上一版钉的是字面 `↻—`，于是把 `—` 换成更清楚的中文时**闸自己红了**，
+    #:   而语义是变好的 —— 逐字匹配守的是"代码长什么样"，不是"用户看不看得懂"。
+    SAYS = {"AgyCard": ("非当值号", "这次没读到"), "GrokCard": ("无此窗口",),
+            "AgyRow": ("↻—",), "GrokRow": ("↻—",)}
+
     def test_every_component_can_render_a_dash(self):
         """★ 正面：四处都必须有那个缺失行。只验"没有隐藏行"的话，
-        把整行删掉（对齐一起塌）也能变绿。
-
-        ⚠️ 锚点用 `↻—` 而**不是** `>—<`：后者在"环里那个读不到的 —"上也有一份，
-        整文件断言会命中错的那处（实测 GrokRow 就是这么假红的）。"""
+        把整行删掉（对齐一起塌）也能变绿。"""
         for name, p in TARGETS.items():
             with self.subTest(component=name):
-                self.assertIn("↻—", code(p), f"★ {name} 没有缺失窗口那一行")
+                c = code(p)
+                self.assertTrue(any(w in c for w in self.SAYS[name]),
+                                f"★ {name} 没有缺失窗口那一行（找不到 {self.SAYS[name]}）")
 
     def test_the_missing_row_still_keeps_its_height(self):
         """★★ 跨卡/跨行对齐靠这一行撑着。把它整个删掉，旁边的卡就会比它高一截，
         而 harness 的折行探针对"少了一行"是**沉默**的。
-        判据：缺失分支里仍然画着标签、条槽、`—` 和 `↻—` 四段。"""
+        判据：缺失分支里仍然画着**标签 + 条槽**。★ 条槽是高度的来源，所以它是这条闸的核心；
+        2026-09-14 我一度把它删掉（想给中文腾地方），这条闸当场红 —— 红得对。"""
         for name, p in TARGETS.items():
             with self.subTest(component=name):
                 c = code(p)
-                i = c.index("↻—")
+                anchor = next(w for w in self.SAYS[name] if w in c)
+                i = c.index(anchor)
                 seg = c[max(0, i - 900):i + 60]
                 self.assertIn("barTrack", seg, f"★★ {name} 缺失行没有条槽 —— 高度对不齐")
-                self.assertIn(">—<", seg, f"★★ {name} 缺失行没有显示 `—`")
 
 
 class TheTwoKindsOfMissingAreNotTheSameSentence(unittest.TestCase):

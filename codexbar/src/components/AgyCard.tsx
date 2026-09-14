@@ -236,13 +236,21 @@ export default function AgyCard({ t, color, snap, busy, err, disabled, winSlots,
               //   本仓 §5d 的规矩是「**读不到显 `—`，不显 `0`**」，而"什么都不显"比显 0 还糟：
               //   它把「读不到」伪装成了「没有这个窗口」，两者的下一步动作完全相反。
               //   高度仍与真行同构（跨卡对齐靠它），只是把话说出来。
+              // ★★★ **原因写在行上，不只写在 `title` 里**（2026-09-14 用户实报
+              //   「我的 gemini 周额度没刷新？还丢失了？」）。实测当时**并没有丢**：
+              //   `.agy-quota.json` 里 `gemini-weekly = 98.78%`、`fetched_at` 就在几秒前，
+              //   只是它的 `pid_email` 指向**另一个号**，所以这张卡结构上拿不到它。
+              //   在那之前这一行是 `—  ↻—`，而同一个 `—` 同时表示「非当值号」和「读失败」，
+              //   两者的下一步动作完全相反。解释一直写着 —— 写在 `title` 里，
+              //   **而本仓的规矩是「告警放在眼睛已经在的地方」，只写进悬浮的真话等于没写**。
               <div key={label} title={missTitle(label, isCurrent)}
                    style={{ display: "flex", alignItems: "center", gap: 6 }}>
                 <span style={{ fontSize: Z.winLabel, color: t.muted, fontFamily: MONO }}>{label}</span>
+                {/* ★ 条槽保留：跨卡对齐靠这一行的高度撑着（见 test_missing_window_says_so）。 */}
                 <div style={{ flex: 1, height: Z.bar, borderRadius: 2, background: t.barTrack }} />
-                <span style={{ fontSize: Z.pct, fontWeight: 600, color: t.muted,
-                               fontFamily: MONO, fontVariantNumeric: "tabular-nums" }}>—</span>
-                <span style={{ fontSize: Z.eta, color: t.muted, fontFamily: MONO }}>↻—</span>
+                <span style={{ fontSize: Z.eta, color: t.muted, fontFamily: MONO,
+                               whiteSpace: "nowrap" }}>
+                  {isCurrent ? "这次没读到" : "非当值号"}</span>
               </div>
             ) : (
               <div key={label} title={`${row.group ?? "?"} · 剩 ${row.remaining.toFixed(1)}%`}
