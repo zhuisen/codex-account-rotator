@@ -678,7 +678,11 @@ export default function App() {
                             <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: ".14em",
                                           color: t.accent, fontFamily: "'JetBrains Mono'" }}>当前使用中</div>
                             <div style={{ display: "flex", alignItems: "baseline", gap: 9, marginTop: 3 }}>
-                              <span style={{ fontSize: 24, fontWeight: 700, letterSpacing: "-.01em" }}>{cur.label}</span>
+                              {/* ★ `data-hero-acct`：供 uishot 的 `trails` 探针**按时间**采「当前使用中」
+                                  到底是谁。这一格的错法是**瞬态**的 —— 终态永远对，错的是中间那几帧
+                                  （`liveSub` 被 `live_seen` 打回去的那一段），而单次终态快照对它沉默。 */}
+                              <span data-hero-acct
+                                    style={{ fontSize: 24, fontWeight: 700, letterSpacing: "-.01em" }}>{cur.label}</span>
                               <span style={{ fontSize: 12, color: t.text2, fontFamily: "'JetBrains Mono'" }}>
                                 {maskId(cur.email ?? "", privacy)}</span>
                             </div>

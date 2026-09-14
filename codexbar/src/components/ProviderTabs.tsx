@@ -42,6 +42,10 @@ export default function ProviderTabs({ items, cur, on, onAdd, t }: {
         const on_ = p.key === cur;
         return (
           <span key={p.key} onClick={() => on(p.key)} title={p.note}
+                // ★ 身份标记，供 uishot 的 `trails` 探针**按时间**采这一枚 pill 的文字。
+                //   它守的是「进过这一档之前，计数是不是已经是真数」—— 那种缺陷是**瞬态**的，
+                //   终态快照对它完全沉默（见 `make_harness.py` 的 `trails`）。
+                data-provtab={p.key}
                 style={{ display: "inline-flex", alignItems: "center", gap: 7,
                          padding: "5px 12px", borderRadius: 8, cursor: "pointer",
                          whiteSpace: "nowrap", userSelect: "none",

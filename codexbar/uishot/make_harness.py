@@ -639,21 +639,31 @@ function relayEntry() {
         //   `JSON.parse` 抛，然后「当前」徽章整个消失 —— 而那正好长得像"池是空的"。
         //   `?agydrift=1` 专门渲染"被别的 agy 进程抢回去了"那一态。
         // ★ 新增的几条也要打桩，否则 `JSON.parse` 抛 ⇒ 整块静默降级。
+        // ★★ `?agy_delay=<ms>` 让这两条**异步**送达（默认 0，保持既有行为）。
+        //    真机上它们各起一个 python 子进程，实测各约 80ms；harness 原本同步回，
+        //    于是「现读回来之前 `liveSub` 是什么」这个中间态窄到采不着 ——
+        //    而 2026-09-14 用户报的「切档跳来跳去」**整个就发生在那个窗口里**。
+        //    同 `?snap_delay=`：打桩同步给 = 按设计绕开竞态 = 看不见任何竞态缺陷。
+        var _agyD = parseInt(p.get('agy_delay') || '0', 10);
+        var _later = function (v) {
+          if (!_agyD) return Promise.resolve(v);
+          return new Promise(function (res) { setTimeout(function () { res(v); }, _agyD); });
+        };
         if ((args.args || [])[0] === 'auto-switch') {
-          return Promise.resolve(JSON.stringify({ enabled: p.get('agyauto') !== '0' }));
+          return _later(JSON.stringify({ enabled: p.get('agyauto') !== '0' }));
         }
         if ((args.args || [])[0] === 'live') {
           var np = parseInt(p.get('agypool') || '0', 10);
           var lsubs = []; for (var li = 0; li < np; li++) lsubs.push('sub' + li);
           var drift = p.get('agydrift') === '1' && np > 1;
-          return Promise.resolve(JSON.stringify({
+          return _later(JSON.stringify({
             sub: drift ? lsubs[1] : (lsubs[0] || null),
             email: null,
             live_seen: lsubs[0] || null,
             drifted: drift,
           }));
         }
-        return Promise.resolve('ok');
+        return _later('ok');
       case 'read_traffic_snapshot_days':
       case 'read_traffic_snapshot':
       case 'run_traffic': {
@@ -936,6 +946,37 @@ function relayEntry() {
       }
     }, 500);
 
+    // ★★★ `trails` —— 几个**身份格**的取值随时间怎么变，不是它最后是什么。
+    //
+    //   本仓大部分探针问的是终态（有没有溢出/折行/渲染出来）。但有一整类缺陷**终态永远是对的**，
+    //   错的只是中间那几帧 —— 2026-09-14 用户报的「gemini 没有缓存，切档跳来跳去」就是：
+    //   每进一次 Gemini 档，`liveSub` 先被池文件里陈旧的 `live_seen` 打回去，约 160ms 后才被
+    //   现读改正，于是 Hero 的号名/邮箱/环形百分比整块闪一次、「当前」徽章在两张卡之间跳一趟。
+    //   **单次终态快照对它完全沉默，而沉默在报告里长得和通过一模一样**（本仓的老病根）。
+    //
+    //   采样而不是 MutationObserver：要的是"这一格先后显示过哪些值"，
+    //   React 一次 commit 里改哪几个节点不重要。相邻重复值折叠，所以序列长度 = 真实变化次数。
+    var trails = {};
+    (function watchIdentityCells() {
+      var WATCH = {
+        // 「当前使用中」到底是谁（Gemini 档的 Hero）。
+        hero: '[data-hero-acct]',
+        // 分档条上 Gemini 那一枚 pill 的整段文字（含计数）。
+        gemtab: '[data-provtab="gemini"]',
+      };
+      Object.keys(WATCH).forEach(function (k) { trails[k] = []; });
+      setInterval(function () {
+        Object.keys(WATCH).forEach(function (k) {
+          var e = document.querySelector(WATCH[k]);
+          var v = e ? (e.textContent || '').trim() : null;
+          var t = trails[k];
+          if (!t.length || t[t.length - 1].v !== v) {
+            t.push({ t: Math.round(performance.now()), v: v });
+          }
+        });
+      }, 16);
+    })();
+
     // `?click=a,b` —— 按**文本**依次点击(全站 45 处是 div/span+onClick,没有 button 可选)。
     // 用于验证需要交互才出现的形态(选中卡片 → 改名输入框)。取最内层匹配节点,
     // 否则会点到包住它的容器上 —— 那个容器往往挂着**另一个** onClick。
@@ -1047,6 +1088,8 @@ function relayEntry() {
         // ★ 先看 mounted:它为 0 说明整页没渲染,此时 overflow 的"无"是**假阴性**,不是通过。
         mounted: r ? r.querySelectorAll('*').length : 0,
         rootW: r ? r.scrollWidth + '/' + r.clientWidth : null,
+        // ★ 身份格的**变化序列**（见上面 `watchIdentityCells`）。瞬态缺陷只能在这里看见。
+        trails: trails,
         // 菜单栏弹窗的高度由 JS 量 `.mb-root` 的 scrollHeight 再 setSize 出来。
         // 量它随时间怎么变,才能区分「内容超过 PANEL_H_MAX 被钳」和「量早了、之后没再量」。
         mbH: (function () {

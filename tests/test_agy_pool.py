@@ -45,6 +45,44 @@ def _load_pool(store, token_file):
     return m
 
 
+def _strip_ts_comments(src):
+    """剥掉 TS 的块注释与**行尾**注释。
+
+    ★ 行尾那半不能省：本仓有 3 条闸被自己的说明文字判绿/判红过（CLAUDE.md §7.-1）。
+      只滤「整行以 // 开头」会漏掉 `foo();  // 这里解释着 if (probe.sub)` 这种。
+    """
+    src = re.sub(r"/\*[\s\S]*?\*/", "", src)
+    return re.sub(r"//[^\n]*", "", src)
+
+
+def _guarded_by_probe_sub(src):
+    """每个 `if (probe.sub)` 守卫**真正管辖**的字符区间。
+
+    带花括号就做括号配对，不带就管到下一个分号 —— 两种写法语义相同，
+    判据不该只认其中一种（上一版就是只认单行写法，被变异验证当场判成假红）。
+    """
+    out = []
+    for m in re.finditer(r"if\s*\(\s*probe\.sub\s*\)", src):
+        i = m.end()
+        while i < len(src) and src[i].isspace():
+            i += 1
+        if i < len(src) and src[i] == "{":
+            depth, j = 0, i
+            while j < len(src):
+                if src[j] == "{":
+                    depth += 1
+                elif src[j] == "}":
+                    depth -= 1
+                    if depth == 0:
+                        break
+                j += 1
+            out.append((i, j))
+        else:
+            j = src.find(";", i)
+            out.append((i, len(src) if j < 0 else j))
+    return out
+
+
 def _sub_of(token_file):
     """当前登录态是哪个号。"""
     import base64
@@ -753,10 +791,29 @@ class TheCurrentAccountIsProbedNotRemembered(unittest.TestCase):
 
     def test_a_failed_probe_does_not_erase_the_fallback(self):
         """★★ 探不到时**不许**把 `liveSub` 写成 null 覆盖掉兜底值 ——
-        「这次没探到」和「确实没人登录」是两件事（§7.0b）。"""
-        body = "\n".join(l for l in self.HOOK.splitlines() if not l.strip().startswith(("*", "/*", "//")))
-        self.assertIn("if (probe.sub) setLiveSub(probe.sub)", body,
-                      "★★ 无条件写回 ⇒ 探测失败会把「当前」徽章整个抹掉")
+        「这次没探到」和「确实没人登录」是两件事（§7.0b）。
+
+        ⚠️ **判据从逐字匹配改成了结构判定**（2026-09-14）。原来钉的是字面串
+        `if (probe.sub) setLiveSub(probe.sub)`；给那个 `if` 的花括号里多加一句
+        （记「这个值已经验证过了」）就把它打红了，而**语义一个字没变**。
+
+        ★ 中间还错了一版：改成「这一行必须出现 `if (probe.sub)`」——**变异验证当场判它假红**，
+        因为把同一个守卫拆成多行它就不认了。逐字匹配和按行匹配守的都是"代码长什么样"；
+        这里要守的是"**写回有没有被条件管住**"，所以判据改成：每一处
+        `setLiveSub(probe.sub)` 都必须落在某个 `if (probe.sub)` 的**管辖区间**内
+        （带花括号就配对，不带就到分号）。会因为无关重构假红的闸，人学会的是把它关掉。
+        """
+        body = _strip_ts_comments(self.HOOK)
+        regions = _guarded_by_probe_sub(body)
+        writes = list(re.finditer(r"setLiveSub\(probe\.sub\)", body))
+        # ★ 先证明被测目标还在：一处都没有时，下面的循环**零次迭代照样通过**，
+        #   那正是本仓记过的空守卫形态。
+        self.assertTrue(writes, "★★ 前端不再写回现读结果了 —— 这条闸在守一个不存在的东西")
+        for w in writes:
+            self.assertTrue(
+                any(a <= w.start() <= b for a, b in regions),
+                "★★ 无条件写回 ⇒ 探测失败会把「当前」徽章整个抹掉。\n"
+                "  上下文：{!r}".format(body[max(0, w.start() - 90):w.end() + 10]))
 
     def test_the_drift_is_surfaced_not_swallowed(self):
         """★★★ 分歧本身是唯一可见的证据：有别的 agy 进程把槽抢回去了。
