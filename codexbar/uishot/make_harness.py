@@ -650,6 +650,15 @@ function relayEntry() {
             quota_at: __NOW__,
             // ★ 第三个号刻意摘出轮换池 —— 按号开关那一档只有有高有低时才看得出来。
             rotate_off: (i === 2 && p.get('agyrotoff') !== '0') || undefined,
+            // ★★ `weekly_seen` = **上次当值时读到的周额度**（`agy-quota` 归属明确时写）。
+            //   非当值号的周窗口不可能现取（云端那条结构上没有周，2026-09-15 实测），
+            //   但它当值时读到过。只给**第一个**号，这样同屏就能对照出
+            //   「有记忆的号画降级行」与「从没当值过的号仍画非当值号」两种形态。
+            weekly_seen: i === 0 ? {
+              at: __NOW__ - 7200,
+              buckets: { 'gemini-weekly': { remaining_percent: 93.4,
+                                            reset_at: __NOW__ + 380000, group: 'Gemini Models' } },
+            } : undefined,
           };
         }
         return Promise.resolve(JSON.stringify({ accounts: accs, live_seen: subs[0] }));

@@ -253,8 +253,17 @@ export default function AgyCard({ t, color, snap, busy, err, disabled, winSlots,
                   {isCurrent ? "这次没读到" : "非当值号"}</span>
               </div>
             ) : (
-              <div key={label} title={`${row.group ?? "?"} · 剩 ${row.remaining.toFixed(1)}%`}
-                   style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              // ★★★ `seen_at` = 这一格是**上次当值时看到的**，不是现在读到的
+              //   （2026-09-15 用户实报「两个号一个有周额度一个没有」）。
+              //   周窗口只有本机 RPC 有、只看得到当值号；云端那条**结构上没有周**（当天实测）。
+              //   所以这里画的是一个**真实发生过**的数字 —— 但必须标龄、走中性色，
+              //   否则它会冒充现值，而那比画空更糟（§7.0b 的反面：不许把旧值伪装成新值）。
+              <div key={label}
+                   title={row.seen_at
+                     ? `${row.group ?? "?"} · 剩 ${row.remaining.toFixed(1)}% —— 这是这个号**上次当值时**读到的（${fmtAgo(row.seen_at)}）。周窗口只有当前登录的号读得到，云端按账号那条没有周。`
+                     : `${row.group ?? "?"} · 剩 ${row.remaining.toFixed(1)}%`}
+                   style={{ display: "flex", alignItems: "center", gap: 6,
+                            opacity: row.seen_at ? .62 : 1 }}>
                 <span style={{ fontSize: Z.winLabel, color: t.muted, fontFamily: MONO }}>{row.label}</span>
                 <div style={{ flex: 1, height: Z.bar, borderRadius: 2, background: t.barTrack, overflow: "hidden" }}>
                   <div style={{ height: "100%", width: `${row.remaining}%`,

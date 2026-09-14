@@ -117,9 +117,15 @@ class AgyJsonMatchesTypeScript(unittest.TestCase):
         g = self.out["quota"]["groups"][0]
         self.assertEqual(set(g.keys()), ts_fields("AgyGroup"))
 
+    #: 只存在于**前端**的字段：由 `toSnapshot` 合成，python 侧不产出，
+    #: 所以它们不参与这条契约比对。
+    #: ★ `seen_at`（2026-09-15）= 这一格是「上次当值时看到的」周额度，
+    #:   来自池里的 `weekly_seen`，不是 `agy-quota` 的输出。
+    FRONTEND_ONLY = {"seen_at"}
+
     def test_bucket_fields_match(self):
         b = self.out["quota"]["groups"][0]["buckets"][0]
-        py, ts = set(b.keys()), ts_fields("AgyBucket")
+        py, ts = set(b.keys()), ts_fields("AgyBucket") - self.FRONTEND_ONLY
         self.assertEqual(py, ts,
                          "桶字段不一致(写差一个字母 = UI 永远画 — 且零报错)"
                          "\n  只在 python: {}\n  只在 ts: {}".format(

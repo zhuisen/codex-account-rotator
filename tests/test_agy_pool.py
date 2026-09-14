@@ -510,17 +510,37 @@ class TheGoogleTabShowsThePoolNotAReadOnlyCard(unittest.TestCase):
                       "★ 页脚写死了「不在轮换池」")
 
     def test_the_weekly_row_is_never_faked(self):
-        """★★★ 云端按账号只给 **5h**（实测 0.9566 == 本机 RPC 的 `gemini-5h` 95.66）。
+        """★★★ 周窗口**只能回放观测过的，绝不能凭空造**。
 
-        给别的号补一格「周 100%」会让每张卡都显示满格周额度 ——
-        而上游 `remainingFraction` 的缺省值恰好也是 1.0，这条链路上
-        「没有」和「满格」只隔一个默认值。少一行是真话，补一行不是。
+        云端按账号那条只给 **5h** —— 2026-09-15 实测（两个号各 27 个模型、
+        各只有 2 个桶：一个 5h、一个 `resetTime=None` 的不限量，**没有任何周桶**）。
+        补一格「周 100%」会让每张卡都显示满格周额度，而上游 `remainingFraction`
+        的缺省值恰好也是 1.0 —— 这条链路上「没有」和「满格」只隔一个默认值。
+
+        ⚠️ **判据 2026-09-15 收窄过，不是放宽。** 用户实报「两个号一个有周额度一个没有，
+        这就是问题」之后，`toSnapshot` 会回放 `weekly_seen` —— 那是这个号**当值时
+        真实读到过**的数字，由 `agy-quota` 在归属明确（`pid_email` 唯一命中）时写下。
+        「读到过但现在取不到」与「从来没有」是两件事（§7.0b），把前者画成空是在丢信息。
+
+        所以判据从「不许出现 weekly」改成三条**更强**的：
+          ① 周桶只在 `weekly_seen` 存在时才产出（没有记忆就没有这一行）；
+          ② 它必须带 `seen_at` —— UI 据此降级显示，绝不冒充新鲜读数；
+          ③ 产出路径上**不许有任何默认值**（`?? 100` / `|| 1` 之类），
+             那正是「没有」变成「满格」的唯一入口。
         """
         hook = (ROOT / "codexbar" / "src" / "hooks" / "useAgyPool.ts").read_text(encoding="utf-8")
         i = hook.index("function toSnapshot(")
         seg = hook[i:hook.index("\n}", i)]
-        self.assertNotIn('"weekly"', seg, "★★★ 给非当值号造了一个假的周窗口")
+        seg = re.sub(r"//[^\n]*", "", seg)          # ★ 剥注释：说明里正解释着这条规则
         self.assertIn('window: "5h"', seg)
+        if '"weekly"' in seg:
+            self.assertIn("weekly_seen", seg,
+                          "★★★ 造了周窗口却不是来自 `weekly_seen` —— 那就是凭空造")
+            self.assertIn("seen_at", seg,
+                          "★★★ 周窗口没带 `seen_at` —— 它会冒充成新鲜读数")
+            self.assertNotRegex(
+                seg, r"remaining_percent:\s*(b\.remaining_percent\s*(\?\?|\|\|)|100|1\b)",
+                "★★★ 周窗口的数值有默认值 —— 「没有」会从这里变成「满格」")
 
     def test_the_local_rpc_snapshot_needs_proof_of_ownership(self):
         """★★★ **这条 2026-09-13 被推翻并改写过，旧判据是错的。**

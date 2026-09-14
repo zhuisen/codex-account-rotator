@@ -42,6 +42,17 @@ export interface AgyBucket {
    *  ★ agy 是「闲置桶的 `resetTime` 跟着 now 滑」最典型的那个：没有它，这里渲染的
    *  是一个**永远停在 4h5xm** 的倒计时，而且没有任何标记说它是假的。 */
   anchor?: AnchorVerdict;
+  /**
+   * ★★★ 这一格是**上次看到的**，不是现在读到的 —— 值是那一刻的 unix 秒。
+   *
+   * 周窗口只有本机 loopback RPC 有，而那条只看得到**当前登录**的那个号；
+   * 云端按账号那条（`fetchAvailableModels`）**结构上就没有周**
+   * （2026-09-15 实测：两个号各 27 个模型、各只有 2 个桶 —— 一个 5h、一个不限量）。
+   * 所以非当值号的周额度**不可能现取**，但它当值时读到过 —— `agy-quota` 把它
+   * 记进了池里的 `weekly_seen`（§7.0b：「这次读不到」不许覆盖「上次读到过」）。
+   * ⚠️ **带着它的桶一律降级显示**（标龄、不同色），绝不冒充新鲜读数。
+   */
+  seen_at?: number;
 }
 
 export interface AgyGroup {
@@ -123,6 +134,8 @@ export function agyTightest(q: AgyQuota | null | undefined): { group: string | n
 export interface AgyWinRow {
   label: string; remaining: number; group: string | null; reset_at: number | null;
   anchor?: AnchorVerdict;
+  /** 见 `AgyBucket.seen_at` —— 有值 = 这是**上次看到的**读数，必须降级显示。 */
+  seen_at?: number;
 }
 
 export function agyWinRows(q: AgyQuota | null | undefined): AgyWinRow[] {
@@ -134,7 +147,7 @@ export function agyWinRows(q: AgyQuota | null | undefined): AgyWinRow[] {
       // ★ `anchor` 必须跟着桶一起带下来。丢了它，行上渲染的就还是那个
       //   永远停在 4h5xm 的倒计时 —— 后端算了、前端没接，正是本仓点名的孤儿字段。
       byWin.set(label, { label, remaining: b.remaining_percent, group, reset_at: b.reset_at,
-                         anchor: b.anchor });
+                         anchor: b.anchor, seen_at: b.seen_at });
     }
   }
   // 短窗在前（5h 比周更常变），与账号卡的行序一致。

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { emit, listen } from "@tauri-apps/api/event";
-import type { AgyQuota, AgySnapshot } from "../agy";
+import type { AgyBucket, AgyQuota, AgySnapshot } from "../agy";
 
 /**
  * 「现在钥匙串里是谁」的**跨 webview 广播**。
@@ -39,6 +39,18 @@ export interface AgyPoolAccount {
   quota_at?: number | null;
   /** 反向：`true` = 这个号被摘出自动轮换。**缺省（没有这个键）= 参与轮换**。 */
   rotate_off?: boolean;
+  /**
+   * ★★★ **上次看到这个号的周窗口时，它是多少**（由 `agy-quota` 在归属明确时写）。
+   *
+   * 周窗口只有本机 loopback RPC 有，而那条只看得到当前登录的号；云端按账号那条
+   * **结构上就没有周**（2026-09-15 实测：两个号各 27 模型、各只有 2 个桶，没有周桶）。
+   * 所以非当值号的周额度不可能现取 —— 但它当值时读到过，那个数字是真的。
+   * §7.0b：「这次读不到」不许覆盖「上次读到过」。
+   */
+  weekly_seen?: {
+    at: number;
+    buckets: Record<string, { remaining_percent: number; reset_at: number | null; group?: string | null }>;
+  } | null;
 }
 
 interface PoolFile {
@@ -68,8 +80,24 @@ interface LiveProbe {
  *   周窗口它根本不返回。补一格「周 100%」会让每张卡都显示满格周额度 ——
  *   而上游那个字段的缺省值恰好也是 1.0，这条链路上「没有」和「满格」只隔一个默认值。
  *   不造那一格，卡片按槽位补一行等高空行，用户看到的是"这里没有数"，那是真话。
+ *
+ * ★★★ **但"从来没有过"和"现在取不到"是两件事**（2026-09-15 用户实报：
+ *   「两个号一个有周额度，一个没有，这就是问题」）。这个号当值时我们**读到过**它的周额度，
+ *   `agy-quota` 把它记进了 `weekly_seen`。把那一格画出来并标龄，比画空诚实得多 ——
+ *   画空等于把「我们知道，只是现在取不到」降级成「从来不知道」，而两者差着一个真实的数字。
+ *   ⚠️ 它带 `seen_at`，卡片据此**降级显示**，绝不冒充新鲜读数。
  */
 function toSnapshot(a: AgyPoolAccount): AgySnapshot {
+  const seen = a.weekly_seen;
+  const weeklyFor = (k: string): AgyBucket[] => {
+    // 云端那条的组名是 `gemini` / `claude`；`weekly_seen` 的键是快照的 bucket_id
+    // （`gemini-weekly` / `3p-weekly`）。按前缀对上，对不上就不画 —— 宁可少一格。
+    const want = k === "claude" ? "3p-weekly" : "gemini-weekly";
+    const b = seen?.buckets?.[want];
+    if (!b || !seen) return [];
+    return [{ bucket_id: want, window: "weekly", remaining_percent: b.remaining_percent,
+              reset_at: b.reset_at, seen_at: seen.at }];
+  };
   const groups = Object.entries(a.quota ?? {}).map(([k, v]) => ({
     name: k === "claude" ? "Claude / GPT" : "Gemini Models",
     buckets: [{
@@ -77,7 +105,7 @@ function toSnapshot(a: AgyPoolAccount): AgySnapshot {
       window: "5h",
       remaining_percent: Math.round(v.remaining * 1000) / 10,
       reset_at: Math.round(Date.parse(v.reset) / 1000),
-    }],
+    }, ...weeklyFor(k)],
   }));
   const ok = groups.length > 0 && !a.quota_err;
   return {

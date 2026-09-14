@@ -33,14 +33,8 @@ const GROK_WIN = "周";
  * ★ 颜色**由调用方传入**（`colorOf(traffic, "grok")`），不在这里写死 `#8b7cf6`：
  * 用户在设置页能给平台改色，写死就跟不上（`.claude/rules/ui.md` 的既有铁律）。
  */
-export default function GrokCard({ t, color, snap, privacy, busy, err, disabled, winSlots, onOpen, onRefresh }: {
+export default function GrokCard({ t, color, snap, privacy, busy, err, disabled, onOpen, onRefresh }: {
   t: Theme;
-  /**
-   * 与账号卡**同一份**窗口槽位表（见 `AccountCard` 的同名 prop）。grok 没有 5h 窗口，
-   * 那个槽位画一行隐藏的等高行 —— 它和账号卡并排在同一行网格里，
-   * 不占槽的话它的「周」会和别人的「5h」画在同一条线上。
-   */
-  winSlots: string[];
   /** grok 的平台识别色，来自 `colorOf(data, "grok")`（已折进用户偏好）。 */
   color: string;
   snap: GrokSnapshot | null;
@@ -71,9 +65,6 @@ export default function GrokCard({ t, color, snap, privacy, busy, err, disabled,
   const numColor = (p: number | null) => p == null ? t.muted : winNumColor(p, t);
 
   const shownRem = degraded ? lgRem : rem;
-  // 槽位表里必须有 grok 自己那格：池里一个账号都没有（或都探测失败）时 winSlots 是空的，
-  // 不兜的话 grok 的条会**一整条消失**——「读不到 ≠ 确实没有」的另一种形态。
-  const slotRows = winSlots.includes(GROK_WIN) ? winSlots : [...winSlots, GROK_WIN];
   const glow = shownRem != null && shownRem <= 20 ? (shownRem <= 10 ? "#E0524D" : "#E0901C") : undefined;
 
   return (
@@ -135,32 +126,16 @@ export default function GrokCard({ t, color, snap, privacy, busy, err, disabled,
           {/* 弹性留白：把条形区压到卡片底边，与账号卡同款（理由见 AccountCard 同处注释）。 */}
           <div aria-hidden style={{ flex: 1, minHeight: 0 }} />
 
-          {shownRem != null && slotRows.map(label => label !== GROK_WIN ? (
-            // ★★ 这一行以前是 `visibility: hidden` 的纯占位 —— 用户 2026-09-13 直接问
-            //   「grok 缺少了 5h 额度」。**什么都不显** 比显 `—` 更糟：它把一件事实
-            //   （上游根本没有这个窗口）伪装成了"这里本该有点什么"。
-            //   ★ 文案与 agy 那条**刻意不同**：agy 缺的是"这个号读不到"，
-            //     grok 缺的是"上游没有这个窗口" —— 两者的下一步动作完全不一样，
-            //     合并成一句话就等于把两种状态又折叠回同一个值。
-            // ★★★ **原因写在行上，不只写在 `title` 里**（2026-09-14 用户实报
-            //   「我的 grok 五小时额度没刷新？还丢失了？」）。
-            //   在那之前这一行是 `—  ↻—`，而**同一个 `—` 同时表示三件事**：
-            //     ① 这个平台结构上没有这个窗口（grok 的 5h，上游只回 WEEKLY）
-            //     ② 这个读数属于别的号（agy 的周，`pid_email` 对不上）
-            //     ③ 真的读失败了
-            //   三者的下一步动作完全不同，而界面给了同一个字。解释确实写了 ——
-            //   写在 `title` 里，**而本仓自己的规矩是「告警放在眼睛已经在的地方」，
-            //   只写进悬浮的真话等于没写**。`title` 保留做详情，行上给结论。
-            <div key={label} title={`grok 只有周窗口 —— 上游没有 ${label} 这个额度窗口（实测 window_minutes = 10080）`}
-                 style={{ display: "flex", alignItems: "center", gap: 6 }}>
-              <span style={{ fontSize: Z.winLabel, color: t.muted, fontFamily: MONO }}>{label}</span>
-              {/* ★ 条槽保留：跨卡对齐靠这一行的高度撑着，去掉它旁边的卡就会高一截，
-                  而 harness 的折行探针对"少了一行"是沉默的（见 test_missing_window_says_so）。 */}
-              <div style={{ flex: 1, height: Z.bar, borderRadius: 2, background: t.barTrack }} />
-              <span style={{ fontSize: Z.eta, color: t.muted, fontFamily: MONO,
-                             whiteSpace: "nowrap" }}>无此窗口</span>
-            </div>
-          ) : (
+                    {/* ★★ **grok 只画它自己那一格**（用户 2026-09-15：「grok 修改，取消 5h 窗口」）。
+              在那之前这里为 `winSlots` 里每个 grok 没有的窗口补一行 —— 最初是
+              `visibility: hidden` 的空行，后来改成 `—`，再后来改成「无此窗口」。
+              三版都是在给**一件根本不存在的东西**找一种体面的画法：xAI 只回 WEEKLY
+              （实测 `window_minutes = 10080`，27 个模型 2 个桶，没有 5h），
+              那一格**永远不会有数**，画它只会让人反复问「我的 5h 额度呢」。
+              ★ 对齐不受影响：条形区由上面那个 `flex:1` 的留白压在卡片底边，
+                所以 grok 的「周」与账号卡的「周」仍落在同一条线上（末行对齐）。
+                这条**必须看像素**，不能推理 —— 见 tests/test_missing_window_says_so.py。 */}
+          {shownRem != null && [GROK_WIN].map(label => (
             <div key={label} style={{ display: "flex", alignItems: "center", gap: 6 }}>
               <span style={{ fontSize: Z.winLabel, color: t.muted, fontFamily: MONO }}>{GROK_WIN}</span>
               <div style={{ flex: 1, height: Z.bar, borderRadius: 2, background: t.barTrack, overflow: "hidden" }}>

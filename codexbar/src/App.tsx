@@ -692,11 +692,20 @@ export default function App() {
                               {agyHeroSlots.map((lab) => {
                                 const r = rows.find(x => x.label === lab);
                                 return (
-                                  <span key={lab} style={{ whiteSpace: "nowrap" }}
-                                        title={r ? undefined : `${lab} 窗口只有**当前登录**的号读得到（本机 RPC）`}>
+                                  // ★★★ `seen_at` = 这一格是**上次当值时看到的**，不是现值。
+                                  //   Hero 是整页最显眼的地方，在这里不标龄就等于把一个
+                                  //   记忆里的数字当成现读推给用户 —— 比留空更糟。
+                                  //   降级方式与卡片同构：降不透明度 + 数字前加 `~` + title 说明。
+                                  <span key={lab} style={{ whiteSpace: "nowrap",
+                                                           opacity: r?.seen_at ? .62 : 1 }}
+                                        title={r
+                                          ? (r.seen_at
+                                              ? `这是这个号**上次当值时**读到的（${fmtAgo(r.seen_at)}）—— 周窗口只有当前登录的号读得到`
+                                              : undefined)
+                                          : `${lab} 窗口只有**当前登录**的号读得到（本机 RPC）`}>
                                     {lab}{" "}
                                     <b style={{ color: r ? winNumColor(r.remaining, t) : t.muted }}>
-                                      {r ? `${Math.round(r.remaining)}%` : "—"}</b>{" "}
+                                      {r ? `${r.seen_at ? "~" : ""}${Math.round(r.remaining)}%` : "—"}</b>{" "}
                                     <span style={{ color: t.muted }}>↻{r ? agyResetText(r).text : "—"}</span>
                                   </span>
                                 );
@@ -784,7 +793,7 @@ export default function App() {
                           自动切号。混进去 ⌘4 会"切"到一个切不了的东西上,而且不报错。
                           闸在 tests/test_grok_not_in_pool_ui.py。 */}
                       <GrokCard t={t} color={colorOf(traffic, "grok")} snap={grokSnap}
-                                disabled={!!platPrefs.by?.grok?.off} winSlots={winSlots}
+                                disabled={!!platPrefs.by?.grok?.off}
                                 privacy={privacy} busy={grokBusy} err={grokErr}
                                 onRefresh={refreshGrok}
                                 onOpen={() => { setDrill("grok"); setPage("traffic"); }} />

@@ -26,12 +26,15 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 C = ROOT / "codexbar" / "src" / "components"
+#: 「缺一格要说清为什么」只对 **agy** 成立了。
+#: ★ grok 的那一格 2026-09-15 被用户直接取消（「grok 修改，取消 5h 窗口」）——
+#:   xAI 只回 WEEKLY，那一格**永远不会有数**，补三版（隐藏行 → `—` → 「无此窗口」）
+#:   都是在给一件不存在的东西找体面画法。现在的判据在 `GrokShowsOnlyItsOwnWindow`。
 TARGETS = {
     "AgyCard": C / "AgyCard.tsx",
     "AgyRow": C / "AgyRow.tsx",
-    "GrokCard": C / "GrokCard.tsx",
-    "GrokRow": C / "GrokRow.tsx",
 }
+GROK = {"GrokCard": C / "GrokCard.tsx", "GrokRow": C / "GrokRow.tsx"}
 
 
 def code(p):
@@ -66,8 +69,7 @@ class NoWindowRowIsSilentlyBlank(unittest.TestCase):
     #: ★ 判据因此改成「**这一行上有没有一个能读的结论**」，而不是某个字符。
     #:   上一版钉的是字面 `↻—`，于是把 `—` 换成更清楚的中文时**闸自己红了**，
     #:   而语义是变好的 —— 逐字匹配守的是"代码长什么样"，不是"用户看不看得懂"。
-    SAYS = {"AgyCard": ("非当值号", "这次没读到"), "GrokCard": ("无此窗口",),
-            "AgyRow": ("↻—",), "GrokRow": ("↻—",)}
+    SAYS = {"AgyCard": ("非当值号", "这次没读到"), "AgyRow": ("↻—",)}
 
     def test_every_component_can_render_a_dash(self):
         """★ 正面：四处都必须有那个缺失行。只验"没有隐藏行"的话，
@@ -101,12 +103,6 @@ class TheTwoKindsOfMissingAreNotTheSameSentence(unittest.TestCase):
                 c = code(TARGETS[name])
                 self.assertIn("当前登录", c, f"★★ {name} 没说清是「只有当值号读得到」")
 
-    def test_grok_says_upstream_has_no_such_window(self):
-        for name in ("GrokCard", "GrokRow"):
-            with self.subTest(component=name):
-                c = code(TARGETS[name])
-                self.assertIn("只有周窗口", c, f"★★ {name} 没说清是「上游没有这个窗口」")
-
     def test_neither_borrows_the_others_wording(self):
         """★★★ 把 grok 的「上游没有」套到 agy 上 = 告诉用户"等也没用"，
         而事实是切过去就能看到；反过来则是让人一直等一个永远不会来的数。"""
@@ -114,10 +110,48 @@ class TheTwoKindsOfMissingAreNotTheSameSentence(unittest.TestCase):
             with self.subTest(component=name):
                 self.assertNotIn("只有周窗口", code(TARGETS[name]),
                                  f"★★★ {name} 用了 grok 的说法 —— 那会让人以为等也没用")
-        for name in ("GrokCard", "GrokRow"):
+        for name, path in GROK.items():
             with self.subTest(component=name):
-                self.assertNotIn("切过去再刷新", code(TARGETS[name]),
+                self.assertNotIn("切过去再刷新", code(path),
                                  f"★★★ {name} 用了 agy 的说法 —— 那个数永远不会来")
+
+
+class GrokShowsOnlyItsOwnWindow(unittest.TestCase):
+    """★★ grok **只画周**，不为它没有的窗口补格（用户 2026-09-15 直接指定）。
+
+    xAI 只回 WEEKLY —— 2026-09-15 实测（`scratch/agy_raw_buckets_*` 同款做法）：
+    `window_minutes = 10080`，27 个模型 2 个桶，**没有 5h**。那一格永远不会有数。
+
+    此前补过三版：`visibility:hidden` 的空行 → `—` → 「无此窗口」。
+    三版都是在给**一件根本不存在的东西**找一种体面的画法，而它每一版都让用户
+    再问一次「我的 5h 额度呢」。**最后的答案是不画。**
+
+    ⚠️ 对齐**不靠这条闸保证** —— 条形区由 `flex:1` 的留白压在卡片底边，末行对齐。
+      那是像素问题，判据在 `sweep.py` 的跨卡对齐检查（`data-cards-grid` 按排比较），
+      不是这里。**别在这个文件里用静态断言去"证明"对齐。**
+    """
+
+    def test_grok_does_not_pad_foreign_window_slots(self):
+        for name, path in GROK.items():
+            with self.subTest(component=name):
+                c = code(path)
+                self.assertNotIn("winSlots", c,
+                                 f"★ {name} 又开始按 winSlots 补格了 —— 那一格永远不会有数")
+
+    def test_grok_card_takes_no_winslots_prop(self):
+        """★ 连 prop 一起删，不留骨架（本仓规矩：删版块就连组件本体一起删）。"""
+        app = code(ROOT / "codexbar" / "src" / "App.tsx")
+        i = app.index("<GrokCard")
+        self.assertNotIn("winSlots", app[i:i + 400],
+                         "★ 调用点还在传 winSlots —— 死 prop 会让下一个人以为它还有用")
+
+    def test_the_weekly_row_is_still_there(self):
+        """★★ 正面：删的是 5h，**不是把 grok 的条整条删掉**。
+        只验"没有 winSlots"的话，把整块条形区删掉也能变绿。"""
+        for name, path in GROK.items():
+            with self.subTest(component=name):
+                self.assertIn("GROK_WIN" if name == "GrokCard" else "周", code(path),
+                              f"★★ {name} 连周窗口都不画了")
 
 
 class TheMenubarRowsShowEveryWindowNotJustTheTightest(unittest.TestCase):

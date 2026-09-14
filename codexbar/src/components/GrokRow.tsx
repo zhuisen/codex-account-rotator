@@ -107,19 +107,11 @@ export default function GrokRow({ t, color, snap, privacy, busy, disabled, onOpe
       </Ring>
       <div className="mb-row-info">
         <NameLine t={t} color={color} email={a.email} privacy={privacy} />
-        {/* ★★ `5h` 那一格**画出来并写明它为什么是空的**（2026-09-13 用户报「grok 缺少 5h」）。
-            grok 上游**只有周窗口**（实测 `window_minutes = 10080`），不是我们读不到 ——
-            所以文案说的是"上游没有"，与 agy 那条「只有当值号读得到」刻意不同：
-            两者的下一步动作完全不一样，合并成一句话就把两种状态又折叠回同一个值。
-            ★ 也因此**不画环、不画第二个数字**（本仓对 grok 的老规矩：别照账号池那套画两个环）。 */}
-        <div className="mb-row-meta"
-             title="grok 只有周窗口 —— 上游没有 5h 这个额度窗口（实测 window_minutes = 10080）">
-          <span style={{ fontSize: 9, color: t.muted, fontFamily: MONO }}>5h</span>
-          <div className="mb-row-bar" style={{ background: t.barTrack }} />
-          <span style={{ fontSize: 9.5, fontWeight: 600, color: t.muted,
-                         fontVariantNumeric: "tabular-nums" }}>—</span>
-          <span style={{ fontSize: 9, color: t.muted, fontFamily: MONO }}>↻—</span>
-        </div>
+        {/* ★★ **grok 不画 5h 那一格**（用户 2026-09-15：「grok 修改，取消 5h 窗口」）。
+            xAI 只回 WEEKLY（实测 `window_minutes = 10080`，27 个模型 2 个桶，没有 5h）——
+            那一格**永远不会有数**。此前补过三版（隐藏行 → `—` → 「无此窗口」），
+            三版都是在给一件根本不存在的东西找一种体面的画法，而它只会让人反复问
+            「我的 5h 额度呢」。★ 与主窗的 `GrokCard` 同步删除（§5c 页面统一性）。 */}
         <div className="mb-row-meta">
           <span style={{ fontSize: 9, color: t.muted, fontFamily: MONO }}>周</span>
           <div className="mb-row-bar" style={{ background: t.barTrack }}>
