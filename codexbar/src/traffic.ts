@@ -560,14 +560,25 @@ function aggregate(days: Record<string, Bucket>, keys: string[],
  * ★ `p.hours` 是逐小时的，这里两两合并。合并而不是隔一取一 —— 后者会丢掉一半的量，
  *   而图形看上去只是"矮了一点"。
  */
-function byTwoHours(hours: Record<string, Bucket>): { labels: string[]; buckets: Bucket[] } {
-  const ks = Object.keys(hours).sort();
+function byTwoHours(ks: string[], p: Platform): { labels: string[]; buckets: Bucket[] } {
   const labels: string[] = [], buckets: Bucket[] = [];
   for (let i = 0; i < ks.length; i += 2) {
     labels.push(ks[i]);
-    buckets.push(sumBuckets(ks.slice(i, i + 2).map((k) => hours[k] ?? EMPTY)));
+    buckets.push(sumBuckets(ks.slice(i, i + 2).map((k) => p.hours[k] ?? EMPTY)));
   }
   return { labels, buckets };
+}
+
+/**
+ * 某平台在**某一天**的小时键（已排序）。
+ *
+ * ★★★ **`p.hours` 跨多天（30 天），所以任何消费点都必须点名是哪一天。**
+ *   2026-09-15 实测代价：`byTwoHours(p.hours)` 与 `todayView` 都曾整包取用，
+ *   于是「今日」档画出 30 天、菜单栏今日页高度也跟着炸。
+ *   这个函数存在的意义就是**让"哪一天"变成一个必填参数**，而不是一个可以忘掉的约定。
+ */
+export function hourKeysOf(p: Platform, day: string): string[] {
+  return Object.keys(p.hours).filter((k) => k.startsWith(day + "T")).sort();
 }
 
 /**
@@ -584,7 +595,7 @@ function byTwoHours(hours: Record<string, Bucket>): { labels: string[]; buckets:
  *   而用户要的就是"横轴按小时"。
  */
 export function hoursOfDay(p: Platform, day: string): { labels: string[]; buckets: Bucket[] } | null {
-  const ks = Object.keys(p.hours).filter((k) => k.startsWith(day + "T")).sort();
+  const ks = hourKeysOf(p, day);
   if (!ks.length) return null;
   return { labels: ks, buckets: ks.map((k) => p.hours[k] ?? EMPTY) };
 }
@@ -605,7 +616,12 @@ export function bucketsFor(data: TrafficData, key: string, st: RangeState, today
   { labels: string[]; buckets: Bucket[] } {
   const p = data.platforms[key];
   if (!p) return { labels: [], buckets: [] };
-  if (st.preset === "today") return byTwoHours(p.hours);
+  // ★★★ **必须点名是今天。** `p.hours` 2026-09-15 起跨 30 天（为了「单天按小时」），
+  //   而这一行原来是 `byTwoHours(p.hours)` —— 整包 698 个小时桶被两两合并成 **349 格**，
+  //   「今日」档于是画出了整整 30 天，总 token 21.64B、较昨日 ↑4130%。
+  //   用户当场截图报「今日的 token 用量有 bug」。**改了 `hours` 的契约，
+  //   就必须回头看每一个消费点** —— 那个字段以前的含义是"今天"，现在不是了。
+  if (st.preset === "today") return byTwoHours(hourKeysOf(p, today), p);
   // ★★ 区间恰好一天 ⇒ 横轴按小时（用户 2026-09-15 指定）。
   //   取不到小时桶就**照旧走日聚合**（画出那一根日柱）—— 调用方另有一条
   //   「按需补扫」的路，而在补到之前画一根真实的日柱，比画空诚实。
@@ -724,7 +740,10 @@ export function todayView(data: TrafficData | null): TodayView | null {
   if (!data) return null;
   const keys = Object.keys(data.platforms);
   if (!keys.length) return null;
-  const hours = Object.keys(data.platforms[keys[0]].hours).sort();
+  // ★★★ 同 `bucketsFor`：`p.hours` 跨 30 天，这里**必须点名今天**。
+  //   原来是整包 `Object.keys(...hours)`，于是菜单栏「今日」页把 30 天当成今天画，
+  //   连带把弹窗高度撑炸（`test_menubar_panel_height` 当场变红 —— 那条闸是对的）。
+  const hours = hourKeysOf(data.platforms[keys[0]], todayOf(data));
   if (!hours.length) return null;
 
   const rows = keys.map((k) => {

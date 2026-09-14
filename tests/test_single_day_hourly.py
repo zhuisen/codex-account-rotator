@@ -165,5 +165,65 @@ class TheHourlyBucketsSumToTheDayBucket(unittest.TestCase):
         self.assertGreater(checked, 0, "★ 一组都没核到 —— 这条闸这一轮什么也没验")
 
 
+class ChangingTheHoursContractDidNotBreakTheTodayView(unittest.TestCase):
+    """★★★ **这一组是回归闸，来历是我自己造的 bug**（2026-09-15，用户截图实报）。
+
+    为了「单天按小时」，`p.hours` 从"只有今天"变成"跨 30 天"。
+    而它的**既有消费点都假设它就是今天**：
+
+        bucketsFor 的今日档 → `byTwoHours(p.hours)`  ⇒ 698 个小时桶两两合并成 **349 格**
+        todayView（菜单栏今日页）→ `Object.keys(...hours)` ⇒ 把 30 天当成今天
+
+    界面上的样子：「今日」档画出整整 30 天，总 token **21.64B**、较昨日 **↑4130.7%**，
+    图例下面写着「今日 · 349 格 · 每 2 小时」。`test_menubar_panel_height` 同时变红 ——
+    那条闸是对的，是我改了契约没回头看消费点。
+
+    ★ 教训写成判据：**`p.hours` 跨多天，所以任何消费点都必须点名是哪一天。**
+      `hourKeysOf(p, day)` 存在的意义就是让"哪一天"变成必填参数，而不是可以忘掉的约定。
+    """
+
+    TS_SRC = TS
+
+    def test_nobody_consumes_hours_wholesale(self):
+        """★★★ 主闸：不许再出现整包取用 `p.hours` 的键。
+
+        ⚠️ **`hourKeysOf` 自己的实现要排除掉** —— 它就是那个"唯一允许整包取键、
+        但当场按 day 过滤"的地方。第一版没排除，闸把**正确的实现**判红了
+        （本仓的老形状：断言打在了被测对象以外的东西上）。
+        """
+        code = re.sub(r"//[^\n]*", "", re.sub(r"/\*[\s\S]*?\*/", "", self.TS_SRC))
+        i = code.index("export function hourKeysOf")
+        allowed = code[i:code.index("\n}", i)]
+        self.assertIn("startsWith(day", allowed,
+                      "★ `hourKeysOf` 不再按 day 过滤了 —— 那它就不该被豁免")
+        rest = code[:i] + code[code.index("\n}", i):]
+        for bad in ("Object.keys(p.hours)", "Object.entries(p.hours).map",
+                    "byTwoHours(p.hours)"):
+            with self.subTest(pattern=bad):
+                self.assertNotIn(bad, rest,
+                                 "★★★ 又整包取用 p.hours 了 —— 「今日」会画成 30 天")
+
+    def test_the_day_is_a_required_parameter(self):
+        """★★ `hourKeysOf` 必须**收一个 day**。没有它，"点名哪一天"就只是一句口头约定。"""
+        self.assertIn("export function hourKeysOf(p: Platform, day: string)", self.TS_SRC,
+                      "★★ `hourKeysOf` 的签名变了 —— 「哪一天」不再是必填参数")
+
+    def test_the_today_preset_passes_today(self):
+        """⚠️ 必须在 **`bucketsFor` 的函数体内**找 —— `st.preset === "today"` 在
+        `singleDayOf` 里也有一份，第一版 `.index()` 命中的正是那处（命中了，但命中错了）。"""
+        f = self.TS_SRC.index("export function bucketsFor")
+        body = self.TS_SRC[f:self.TS_SRC.index("\n}", f)]
+        i = body.index('if (st.preset === "today")')
+        seg = body[i:i + 220]
+        self.assertIn("hourKeysOf(p, today)", seg,
+                      "★★★ 今日档没有点名今天 —— 这正是 21.64B 那个 bug")
+
+    def test_the_menubar_today_view_passes_today(self):
+        i = self.TS_SRC.index("export function todayView")
+        seg = self.TS_SRC[i:i + 900]
+        self.assertIn("hourKeysOf(", seg, "★★ 菜单栏今日页没有点名今天")
+        self.assertIn("todayOf(data)", seg, "★★ 没用数据自带的「今天」")
+
+
 if __name__ == "__main__":
     unittest.main()

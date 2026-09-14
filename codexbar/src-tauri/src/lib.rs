@@ -689,6 +689,22 @@ async fn relay_ctl(sub: String, arg: Option<String>, payload: Option<String>) ->
     Ok(body)
 }
 
+/// 构建号 `B`（`vX.Y.Z+B` 里的那一位）。
+///
+/// ★★ **`B` 只在 `git push` 那一刻 +1**（用户 2026-09-15 定）。本地反复 `deploy.sh`
+///   **不动它** —— 那个数要回答的是「我装的这份，对应远端的哪一次推送」，
+///   而不是「我今天重编了几次」。后者没人关心，还会让版本号每天跳十几下。
+/// ★ `X.Y.Z` 仍留在 `tauri.conf.json` / `Cargo.toml` 两处（发版才动，走 `$release-cut`）；
+///   `B` **不进 manifest**，只活在这里和界面上 —— 全局规则那条「B 不写进 manifest」仍然成立。
+/// ★ `include_str!` 让 `BUILD` 成为编译依赖：改了它下次构建必然重编，
+///   不会出现「文件改了、二进制里还是旧数字」那种静默不一致。
+const BUILD_NO: &str = include_str!("../../../BUILD");
+
+#[tauri::command]
+fn build_number() -> String {
+    BUILD_NO.trim().to_string()
+}
+
 #[tauri::command]
 fn read_agy_quota() -> Result<Option<String>, String> {
     read_sidecar(AGY_SNAPSHOT)
@@ -2070,6 +2086,7 @@ pub fn run() {
             read_traffic_snapshot_days,
             read_grok_quota,
             run_grok_quota,
+            build_number,
             read_agy_quota,
             read_agy_pool,
             run_agy_rotate,

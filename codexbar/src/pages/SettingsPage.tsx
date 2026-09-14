@@ -1,6 +1,6 @@
+import { fullVersion } from "../helpers";
 import { useState, useEffect, useMemo, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { getVersion } from "@tauri-apps/api/app";
 import { open as openExternal } from "@tauri-apps/plugin-shell";
 // ★ 版本号只从 tauri 运行期取,前端不再写死。此前"版本号同步 5 处"里有 3 处在前端,
 //   发一次版要手改三个字符串,漏一个就显示错版本。现在只剩 tauri.conf.json + Cargo.toml 两处。
@@ -642,7 +642,8 @@ type UpdateState =
 function About({ t }: { t: Theme }) {
   const [ver, setVer] = useState("");
   const [up, setUp] = useState<UpdateState>({ k: "idle" });
-  useEffect(() => { getVersion().then(setVer).catch(() => setVer("?")); }, []);
+  // ★ 同 App.tsx：走同一个 `fullVersion()`，别在这里再拼一次 `+B`。
+  useEffect(() => { void fullVersion().then(setVer).catch(() => setVer("?")); }, []);
 
   const check = async () => {
     if (up.k === "busy") return;

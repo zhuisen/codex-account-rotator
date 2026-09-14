@@ -1,5 +1,4 @@
 import { useState, useMemo, useEffect } from "react";
-import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -22,7 +21,7 @@ import { useExpiryWatch } from "./hooks/useExpiryWatch";
 import { useDeadWatch } from "./hooks/useDeadWatch";
 import { useAutoSwitch } from "./hooks/useAutoSwitch";
 import { useKeyboard } from "./hooks/useKeyboard";
-import { fmtAgo, CARD_WARN_DAYS, maskId, winNumColor } from "./helpers";
+import { fmtAgo, CARD_WARN_DAYS, maskId, winNumColor, fullVersion } from "./helpers";
 import { usePrivacy } from "./hooks/usePrivacy";
 import { useTraffic } from "./hooks/useTraffic";
 import { useGrokQuota } from "./hooks/useGrokQuota";
@@ -75,7 +74,8 @@ export default function App() {
   const [theme, setTheme] = useState<"dark" | "light">("dark");
   // 版本号运行期从 tauri 取,别再写死(发版时漏改前端字符串是老毛病)
   const [ver, setVer] = useState("");
-  useEffect(() => { getVersion().then(setVer).catch(() => {}); }, []);
+  // ★ 版本一律走 `fullVersion()`（`X.Y.Z+B`），两个显示位同一个真源。
+  useEffect(() => { void fullVersion().then(setVer).catch(() => {}); }, []);
   const [page, setPage] = useState<Page>("overview");
   /** 时间范围（交接稿 §7 的 `RangeState`）。★ **默认 30d**（v1.5 是 14d）。
    *  总览与平台详情**共用这一份** —— 钻进详情再返回不该把档位重置。 */

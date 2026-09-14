@@ -588,3 +588,25 @@ export function isWindowsUI(): boolean {
     return false;   // 判定不了就按 macOS ——本机就是 macOS，保持既有行为
   }
 }
+
+
+/**
+ * 运行期取完整版本号 `X.Y.Z+B`。
+ *
+ * ★★ **两个显示位（标题栏/侧栏、设置页「关于」）必须走同一个函数。**
+ *   本仓的老毛病是同一个事实两处各写一遍，然后在某次改动后悄悄分叉
+ *   （版本号此前就是「同步 5 处」，漏一个就显示错版本）。
+ * ★ `B` 取不到就**只显示 `X.Y.Z`**，不显示 `+?` —— 那是关于版本的一句假话。
+ */
+export async function fullVersion(): Promise<string> {
+  const [{ getVersion }, { invoke }] = await Promise.all([
+    import("@tauri-apps/api/app"), import("@tauri-apps/api/core"),
+  ]);
+  const v = await getVersion();
+  try {
+    const b = (await invoke<string>("build_number")).trim();
+    return b && b !== "0" ? `${v}+${b}` : v;
+  } catch {
+    return v;
+  }
+}
