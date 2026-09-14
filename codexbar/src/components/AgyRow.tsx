@@ -69,7 +69,7 @@ export default function AgyRow({ t, color, snap, busy, disabled, onOpen,
   // 而这里的真相是"读不到"。同理也绝不画 100%（上游缺省值就是满格）。
   if (!tight) {
     return (
-      <Shell t={t} color={color} onOpen={onOpen} onSwitch={onSwitch} switching={switching} isCurrent={isCurrent}>
+      <Shell t={t} color={color} onOpen={onOpen} switching={switching} isCurrent={isCurrent}>
         <Ring pct={0} r={18} sw={4.5} color={t.ringTrack} track={t.ringTrack} size={46}>
           <span style={{ fontSize: 12, fontWeight: 700, color: t.muted, lineHeight: 1 }}>—</span>
         </Ring>
@@ -96,7 +96,7 @@ export default function AgyRow({ t, color, snap, busy, disabled, onOpen,
   const glow = rem <= 20 ? (rem <= 10 ? "#E0524D" : "#E0901C") : undefined;
 
   return (
-    <Shell t={t} color={color} onOpen={onOpen} onSwitch={onSwitch} switching={switching} isCurrent={isCurrent}>
+    <Shell t={t} color={color} onOpen={onOpen} switching={switching} isCurrent={isCurrent}>
       <Ring pct={rem} r={18} sw={4.5} color={ringColor} track={t.ringTrack} size={46} glow={glow}>
         <span style={{ fontSize: 12, fontWeight: 700, color: t.text,
                        fontVariantNumeric: "tabular-nums", lineHeight: 1 }}>{Math.round(rem)}</span>
@@ -151,17 +151,21 @@ export default function AgyRow({ t, color, snap, busy, disabled, onOpen,
 
 /** 卡片外壳。左轨用 agy 识别色 —— 账号卡那条轨编码的是「临期 > 当前 > 额度」,
  *  这里编码的是「不是池成员」,所以刻意不参与那套优先级。 */
-function Shell({ t, color, onOpen, onSwitch, switching, isCurrent, children }: {
-  t: Theme; color: string; onOpen?: () => void; onSwitch?: () => void;
+function Shell({ t, color, onOpen, switching, isCurrent, children }: {
+  t: Theme; color: string; onOpen?: () => void;
   switching?: boolean; isCurrent?: boolean; children: React.ReactNode;
 }) {
   return (
-    // ★ 点行 = 切号（v4 稿 §7「点账号卡 → 设为该平台当前号」）；没有 `onSwitch` 时退回"开主窗"。
-    <div className="mb-row" onClick={switching ? undefined : (onSwitch ?? onOpen)} style={{
+    // ★★ 点行 = **开主界面**（换号走名字旁边那个「切换」徽章）。
+    //   这与账号行是同一条语义 —— 用户 2026-08-11 从三个 demo 里选的方案 A。
+    //   ⚠️ 这里曾写成"点行即切号"（照 v4 稿 §7），结果三档的点击行为各不相同，
+    //      而当值号没有 `onSwitch` 就退回 `onOpen` ⇒ 跳到 AI 用量的平台详情页，
+    //      用户 2026-09-14 直接问「怎么跳到 ai 用量那里了」。
+    <div className="mb-row" onClick={switching ? undefined : onOpen} style={{
       background: t.cardBg,
       border: `1px solid ${t.cardBorder}`,
       borderLeft: `3px solid ${isCurrent ? t.accent : color}`,
-      cursor: (onSwitch ?? onOpen) && !switching ? "pointer" : "default",
+      cursor: onOpen && !switching ? "pointer" : "default",
       opacity: switching ? .55 : 1,
     }}>
       {children}

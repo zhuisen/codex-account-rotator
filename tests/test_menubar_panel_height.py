@@ -153,7 +153,9 @@ class SingleSourceOfHeight(unittest.TestCase):
 
 
 class BothTabsRenderAtTheSameHeight(unittest.TestCase):
-    """①②③ 行为闸。需要本机 harness 在跑(端口 3304);跑不到就跳过而不是假绿。"""
+    """①②③ 行为闸。需要本机 harness 在跑(端口 3304);跑不到就跳过而不是假绿。
+
+    """
 
     @classmethod
     def setUpClass(cls):

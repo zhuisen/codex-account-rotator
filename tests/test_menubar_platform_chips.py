@@ -121,10 +121,9 @@ class EachPlatformShowsItsOwnAccounts(unittest.TestCase):
             with self.subTest(branch=k):
                 self.assertIn(k, c, f"★★ 列表没有按档分: 缺 {k}")
 
-    def test_the_tab_count_follows_the_platform(self):
-        """★ 稿 §1：`账号 N` 的 N 是**当前平台**的账号数。写死成 codex 的话，
-        切到 Gemini 后 Tab 上仍印着 6，而列表里只有 2 行。"""
-        self.assertIn("String(platCount)", code(MB), "★ 主 Tab 的计数没跟着平台走")
+    # ⚠️ 「Tab 上的数字 = 当前平台账号数」那条（稿 §1）**已被用户 2026-09-14 否掉**，
+    #    判据搬到 `TheTabCountsEveryPlatform`：每一档的数字芯片行上已经有了，
+    #    Tab 上再重复一遍只是把同一个数说两遍。留一条锁死旧前提的闸比没有闸更糟。
 
     def test_gemini_can_switch_like_codex(self):
         """★★ 用户 2026-09-13 明确**淘汰**了稿里「只读·点卡不切号」那个方式：
@@ -150,3 +149,25 @@ class TheHarnessCanReachEveryTab(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TheTabCountsEveryPlatform(unittest.TestCase):
+    """★★ 用户 2026-09-14：「账号 6 应该要改为账号 9」。
+
+    ⚠️ **这条与 v4 稿 §1 相反**，是用户当面否掉的：稿里写「`账号` 后的数字 =
+    当前平台账号数」，而**每一档各自的数字芯片行上已经有了**（`6 / 2 / 1`）——
+    Tab 上再重复一遍只是把同一个数说两遍；而"我一共有几个号"在别处一个地方都看不到。
+    """
+
+    def test_the_tab_sums_the_chips(self):
+        c = code(MB)
+        self.assertIn("chips.reduce((n, c) => n + c.count, 0)", c,
+                      "★★ Tab 上又只数当前这一档了")
+
+    def test_it_is_not_the_per_tab_count(self):
+        """★ 反方向：别退回 `platCount`。"""
+        self.assertNotIn("String(platCount)", code(MB))
+
+
+# ⚠️ 「菜单栏至少装得下 4 个账号」那一组 2026-09-14 由用户**撤回**（「这个需求不要了」）。
+#    连同 `MIN_ROWS` / 行高测量 / 地板持久化一并回退，面板高度仍然只由今日页决定。

@@ -218,3 +218,56 @@ class TheHarnessCanExerciseThem(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class EveryOperationLeavesATrace(unittest.TestCase):
+    """★★ 用户 2026-09-14：「运行日志也需要更新，例如我不同账号的探针、刷新等详细的操作，
+    成功与否都要显示出来」。
+
+    此前 agy 这一侧**一个字都不落盘** —— 界面上点了什么、结果如何，事后完全无从复盘
+    （codex 那侧有 `proxy.log` / `quotad.log`）。而探针是**花钱**的动作，
+    「到底探成没有、花了多少」只能从这里查；codex 那边为同一件事栽过一次
+    （`last_probe` 那条：写回的 quota 会被整体替换，事后找不到 `source == "probe"`）。
+    """
+
+    def test_every_write_command_logs(self):
+        for name in ("cmd_switch", "cmd_auto", "cmd_health", "cmd_probe", "cmd_quota"):
+            with self.subTest(cmd=name):
+                self.assertIn("_log(", fn(name), f"★★ {name} 不留痕 —— 事后无从复盘")
+
+    def test_the_probe_logs_success_and_cost(self):
+        """★★★ 成败与用量**都要**写进去。只写"跑过了"等于把最贵的那条信息丢掉。"""
+        b = fn("cmd_probe")
+        # ⚠️ 窗口必须**只圈住那一次 `_log(` 调用**：紧挨着的 `print(` 行里有一模一样的
+        #    `"✓" if ok else "✗"`，定长切片会连它一起圈进来 ⇒ 把 `_log` 改坏了闸照样绿
+        #    （实测，本仓「定长切片滑进下一段」那一族）。
+        i = b.index('_log("probe')
+        seg = b[i:b.index("\n", i)]
+        self.assertIn('"✓" if ok else "✗"', seg, "★★★ 日志里看不出成败")
+        self.assertIn("tok", seg, "★★ 日志里没有用量 —— 花了多少无从查证")
+
+    def test_logging_never_breaks_the_operation(self):
+        """★ 写不了日志绝不能让操作本身失败 —— 日志是附加品。"""
+        b = fn("_log")
+        self.assertIn("except Exception:", b, "★ `_log` 不是 fail-open")
+
+    def test_the_file_has_an_upper_bound(self):
+        """★ 这个文件由 GUI 按钮驱动，没人会去轮转它 —— 放任下去就是只增不减。"""
+        b = fn("_log")
+        self.assertIn("_LOG_KEEP", b, "★ 日志没有上界")
+
+    def test_it_lands_in_the_store_not_next_to_the_script(self):
+        """★★ 落点跟 store 走，不跟脚本走 —— 脚本会被打进 app（只读、更新即抹掉）。
+        与 `AGY_POOL_STORE` 那次是同一条。"""
+        self.assertIn("AGY_LOG = P.STORE /", CLI, "★★ 日志落在脚本旁边了")
+
+    def test_the_ui_reads_it(self):
+        """★★★ 只写不读等于没写。判据打在**读取那一侧**。"""
+        rs = code(RS)
+        i = rs.index("fn read_logs()")
+        self.assertIn('"agy.log"', rs[i:i + 500], "★★★ 日志页不读 agy.log")
+
+    def test_failures_are_not_the_same_colour_as_successes(self):
+        """★★ `✗` 行和成功行同色，等于把"成功与否"藏起来 —— 用户点名要看的就是这个。"""
+        lp = code(ROOT / "codexbar" / "src" / "pages" / "LogsPage.tsx")
+        self.assertIn('l.text.includes("✗")', lp, "★★ 失败行没有单独染色")

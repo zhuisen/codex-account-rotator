@@ -61,6 +61,33 @@ def _accounts(pool):
     return pool.setdefault("accounts", {})
 
 
+
+#: 运行日志。★★ 用户 2026-09-14：「运行日志也需要更新，例如我不同账号的探针、刷新等
+#: 详细的操作，成功与否都要显示出来」。此前 agy 这一侧**一个字都不落盘** ——
+#: 界面上点了什么、结果如何，事后完全无从复盘（codex 那侧有 proxy.log/quotad.log）。
+#:
+#: ★ 格式与 `quotad.log` 对齐（`[名字 时:分:秒] 正文`），日志页按同一套渲染，
+#:   `✗` 开头的行会被染红。落点跟 store 走，不跟脚本走（脚本会被打进 app）。
+AGY_LOG = P.STORE / "agy.log"
+#: 只留最近这么多行。★ 有上界是必须的：这个文件由 GUI 按钮驱动，
+#:   没人会去轮转它，放任下去就是一个只增不减的文件。
+_LOG_KEEP = 800
+
+
+def _log(msg):
+    """往运行日志追一行。★ **fail-open** —— 写不了日志绝不能让操作本身失败。"""
+    try:
+        line = "[agy %s] %s\n" % (time.strftime("%m-%d %H:%M:%S"), msg)
+        with open(AGY_LOG, "a", encoding="utf-8") as fh:
+            fh.write(line)
+        # 超了就裁一次。按行裁、整份重写：这个文件很小（几十 KB），不值得上轮转器。
+        if AGY_LOG.stat().st_size > 200_000:
+            keep = AGY_LOG.read_text(encoding="utf-8", errors="replace").splitlines()[-_LOG_KEEP:]
+            AGY_LOG.write_text("\n".join(keep) + "\n", encoding="utf-8")
+    except Exception:                                    # noqa: BLE001
+        pass
+
+
 def _mark_live(pool):
     """把「当值号」记进池 -> sub。
 
@@ -198,6 +225,7 @@ def _refresh_one(sub, acc, pool):
 def cmd_quota(args):
     want_json = "--json" in args
     pool = P.load()
+    _t0 = time.time()
     accs = _accounts(pool)
     if not accs:
         sys.exit("池是空的 —— 先 `agy-rotate adopt`")
@@ -219,6 +247,11 @@ def cmd_quota(args):
                     "quota": q, "err": err or None})
     with P._lock(P.POOL):
         P.save(pool)
+    for _s, _a in _accounts(pool).items():
+        _log("quota [%s] %s" % (_a.get("label"),
+             ("✓ " + "、".join("%s %.1f%%" % (k, v["remaining"] * 100)
+                               for k, v in (_a.get("quota") or {}).items()))
+             if not _a.get("quota_err") else "✗ " + str(_a.get("quota_err"))[:70]))
     if want_json:
         print(json.dumps({"accounts": out, "at": int(time.time())}, ensure_ascii=False))
         return
@@ -303,12 +336,14 @@ def cmd_switch(args):
         pool["live_wanted"] = sub
     with P._lock(P.POOL):
         P.save(pool)
-    print("已切到 [%s] —— ★ 只对**下一次启动的** agy 生效，已经开着的会话不受影响"
-          % _accounts(pool)[sub].get("label"))
+    lab = _accounts(pool)[sub].get("label")
+    _log("switch → [%s]（落点 %s）" % (lab, where))
+    print("已切到 [%s] —— ★ 只对**下一次启动的** agy 生效，已经开着的会话不受影响" % lab)
     if where != "keyring":
         # ★★ 不许静默。2026-09-13 之前这条路**一直**只写文件，而 agy 只读钥匙串 ——
         #   换号是空操作，命令却照常打印「已切到」。宁可多说一句，也不能再让
         #   「我们写成功了」冒充「agy 真的换了号」。
+        _log("✗ switch [%s] 只写到兜底文件 —— agy 很可能仍在用原来那个号" % lab)
         print("  ⚠️ 没能写进钥匙串（agy 的主存储），只写了兜底文件 —— "
               "agy 很可能仍在用原来那个号。\n"
               "     钥匙串被锁住时会这样：解锁登录钥匙串后重试一次。")
@@ -346,6 +381,8 @@ def cmd_auto(args):
                 _mark_live(pool)
                 with P._lock(P.POOL):
                     P.save(pool)
+                _log("auto 恢复成你选的 [%s]（钥匙串被别的 agy 进程写回过，落点 %s）"
+                     % (accs[want].get("label"), where))
                 print("[codexbar] agy 恢复成你选的 [%s]（钥匙串被别的 agy 进程写回过）%s"
                       % (accs[want].get("label"),
                          "" if where == "keyring" else " ⚠️ 只写了兜底文件，可能未生效"),
@@ -367,6 +404,7 @@ def cmd_auto(args):
             P.save(pool)
         # ★ 落点写进这一行：只写了文件的话这次自动切**没有生效**，
         #   而 agy 照跑、用户看到的一切都正常 —— 那正是要避免的那种"成功"。
+        _log("auto 切到 [%s]（剩余 %s，落点 %s）" % (a.get("label"), _fmt_pct(_score(a)), where))
         print("[codexbar] agy 自动切到 [%s]（剩余 %s）%s"
               % (a.get("label"), _fmt_pct(_score(a)),
                  "" if where == "keyring" else " ⚠️ 只写了兜底文件，可能未生效"),
@@ -468,6 +506,9 @@ def cmd_health(args):
         print(json.dumps([{"sub": s, "label": a.get("label"), "kind": k, "detail": d}
                           for s, a, k, d in rows], ensure_ascii=False))
         return
+    for _s, a, kind, detail in rows:
+        _log("health [%s] %s%s" % (a.get("label"), "✓ 还能用" if kind == "ok" else "✗ " + kind,
+                                   ("：" + detail[:70]) if detail and kind != "ok" else ""))
     TXT = {"ok": "✓ 还能用", "revoked": "✗ 掉登录（要重新走浏览器 OAuth）",
            "no_cred": "✗ 池里没有凭证文件", "api_error": "⚠️ 刷新成功但 API 打不通",
            "error": "⚠️ 刷新失败"}
@@ -578,6 +619,9 @@ def cmd_probe(args):
         return
     for a, ok, note, usage in out:
         tok = ("（%s token）" % format(usage.get("total_tokens", 0), ",")) if usage else ""
+        # ★ 探针是花钱的动作，**成败与用量都要留痕** —— 事后"到底探成没有、花了多少"
+        #   只能从这里查（codex 那侧为同一件事栽过一次，见 CLAUDE.md §8 的 `last_probe`）。
+        _log("probe [%s] %s %s%s" % (a.get("label"), "✓" if ok else "✗", note, tok))
         print("  [%s] %s %s%s" % (a.get("label"), "✓" if ok else "✗", note, tok))
 
 

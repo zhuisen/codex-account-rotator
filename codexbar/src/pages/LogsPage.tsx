@@ -598,9 +598,12 @@ export default function LogsPage({ t }: { t: Theme }): React.ReactElement {
             }}>
               <span style={{ color: t.muted, fontVariantNumeric: "tabular-nums" }}>{clock(l.t)}</span>
               <span title={l.text} style={{
-                color: l.text.includes("cooled") ? COOL
-                  : l.text.includes("stream err") ? WARN
-                    : l.text.includes("switch") ? t.accent : t.text2,
+                // ★ `✗` 是 agy 那侧统一的失败标记（探针/健康/切号都用它）。
+                //   失败行和成功行同色，等于把"成功与否"藏起来 —— 用户点名要看的就是这个。
+                color: l.text.includes("✗") ? "#E0524D"
+                  : l.text.includes("cooled") ? COOL
+                    : l.text.includes("stream err") ? WARN
+                      : l.text.includes("switch") ? t.accent : t.text2,
                 whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
               }}>{l.text}</span>
             </div>

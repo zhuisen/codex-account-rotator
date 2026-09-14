@@ -151,7 +151,18 @@ export default function App() {
       // ★ 账号行 → 总览。此前账号行调的是**不带事件**的 `openMain()`,主窗口就停在上次那一页 ——
       //   上次停在用量页,点账号就落在用量页(用户 2026-08-25 报)。
       //   「打开主窗口」和「去哪个版块」是两件事,前者不该顺带决定后者。
-      listen("navigate-overview", () => { setDrill(null); setPage("overview"); void invoke("set_main_visible", { show: true }); }),
+      // ★★ 带上**是哪一档**。2026-09-14 用户实报「菜单栏点别的账号，怎么跳到 AI 用量去了」——
+      //   当时 agy/grok 那两档的行点击走的是 `navigate-platform`，而它 `setPage("traffic")`，
+      //   也就是 AI 用量的平台详情页。三档的「点行」语义必须一致：
+      //   **点行 = 弹主界面的总览、并停在这一行所属的那一档**（换号走行上的「切换」）。
+      //   ★ `payload` 缺省时不动 `provider` —— 老的调用点（不带档）行为一个字不变。
+      listen<string | undefined>("navigate-overview", (e) => {
+        setDrill(null); setPage("overview");
+        if (e.payload === "codex" || e.payload === "gemini" || e.payload === "grok") {
+          setProvider(e.payload);
+        }
+        void invoke("set_main_visible", { show: true });
+      }),
       listen("navigate-settings", () => { setPage("settings"); void invoke("set_main_visible", { show: true }); }),
       listen("navigate-traffic", () => { setDrill(null); setPage("traffic"); void invoke("set_main_visible", { show: true }); }),
       listen<string>("navigate-platform", (e) => {
@@ -167,7 +178,22 @@ export default function App() {
   // running the watcher in both would double-notify.
   useDeadWatch(accounts, currentNode);
   useAutoSwitch(accounts, currentNode, run);
+  // ★★ ⌘1~⌘9 **跟着当前这一档走**（用户 2026-09-14：「gemini 的账号左上角还是 CLI？」）。
+  //   那个角标本来就是「按 ⌘N 能切到它」的承诺；只给 codex 接线、却在别的档也画角标，
+  //   就是画一个点了没反应的东西 —— 本仓判过死刑的形态。所以两件事一起做：
+  //   接线按档分流，角标也只在真的接了线的那一档出现。
+  //   ⚠️ agy **仍然不进 `alive`/`accounts`** —— 那两个数组还驱动着计数徽章、探针全池的号数、
+  //     自动切号；这里只是把**键盘事件**按档分流，不是把 agy 塞进那条数组。
   useKeyboard(win, refresh, setPage as (p: string) => void, (idx) => {
+    if (page === "overview" && provider === "gemini") {
+      const a = agyPool.accounts[idx];
+      if (a && a.sub !== agyPool.liveSub) {
+        agyPool.switchTo(a.label);
+        showToast(`⌘${idx + 1} → ${a.label} · 下次启动 agy 生效`);
+      }
+      return;
+    }
+    if (page === "overview" && provider === "grok") return;   // 单号只读，没有可切的
     const target = aliveByLabel[idx];
     if (target && target.aid !== currentNode) run(`switch-${target.aid}`, ["switch", target.node], `⌘${idx + 1} → ${target.node}`);
   });
@@ -693,7 +719,7 @@ export default function App() {
                           ★ 当值号的卡用**本机 RPC** 那份快照 —— 只有它带周窗口；
                             其余号只有云端的 5h。少一行是真话，补一行假的「周 100%」不是。 */}
                       {agyPool.accounts.length > 0
-                        ? agyPool.accounts.map((a) => (
+                        ? agyPool.accounts.map((a, i) => (
                             <AgyCard key={a.sub} t={t} color={colorOf(traffic, "agy")}
                                      snap={agyPool.snapshotOf(a, agySnap)}
                                      label={a.label} email={a.email ?? undefined}
@@ -705,6 +731,9 @@ export default function App() {
                                      busy={agyPool.busy} err={agyPool.err}
                                      onRefresh={agyPool.refresh}
                                      /* ── 与 codex 账号卡对齐（用户 2026-09-13）── */
+                                     // ★ 角标只在**真的接了线**的那一档画：⌘1~⌘9 在 Gemini 档
+                                     //   切的就是这一列（见上面 useKeyboard 的分流）。超过 9 个不画。
+                                     shortcut={i < 9 ? i + 1 : undefined}
                                      isSelected={selectedCard === a.sub}
                                      reserveActions={selectedCard !== null}
                                      isBest={agyBest?.sub === a.sub} bestPct={agyBestPct ?? undefined}

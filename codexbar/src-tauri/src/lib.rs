@@ -975,7 +975,9 @@ fn b64_decode(input: &str) -> Result<Vec<u8>, String> {
 #[tauri::command]
 fn read_logs() -> Result<String, String> {
     let mut lines = Vec::new();
-    for name in ["keepalive.log", "refreshquota.log", "proxy/proxy.log", "quotad.log"] {
+    // ★ `agy.log` 2026-09-14 加入：此前 agy 那一侧**一个字都不落盘** ——
+    //   界面上点了探针/刷新/切号、结果如何，事后完全无从复盘（用户实报要它）。
+    for name in ["keepalive.log", "refreshquota.log", "proxy/proxy.log", "quotad.log", "agy.log"] {
         let path = format!("{}/{}", data_dir(), name);
         if let Ok(data) = fs::read_to_string(&path) {
             for line in data.lines().rev().take(100) {

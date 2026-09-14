@@ -183,3 +183,82 @@ class TheHarnessCanReachTheExpandedCard(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ClickingARowGoesToTheOverviewNotTheUsagePage(unittest.TestCase):
+    """★★ 用户 2026-09-14：「菜单栏我不同的账号点击进去，为什么是跳转到 ai 用量那里了？」
+
+    根因：三档的「点行」语义被做得不一致 ——
+      · 账号行（codex）走 `navigate-overview`（用户 2026-08-11 从三个 demo 里选的**方案 A**：
+        点行开主界面、换号走行上的「切换」）
+      · agy / grok 那两档走的是 `navigate-platform` ⇒ `setPage("traffic")` ⇒ **AI 用量**的平台详情页
+      · 而 agy 的**当值号**没有 `onSwitch`，点行时还会退回 `onOpen` —— 同一档内两种行为
+
+    现在三档一致：**点行 = 弹主界面的总览，并停在这一行所属的那一档**。
+    """
+
+    MB = (ROOT / "codexbar" / "src" / "MenuBar.tsx")
+    ROW = (ROOT / "codexbar" / "src" / "components" / "AgyRow.tsx")
+
+    def test_no_row_jumps_to_the_usage_page(self):
+        c = code(self.MB)
+        i = c.index('<div className="mb-list">')
+        seg = c[i:c.index("</div>\n      </div>", i)]
+        self.assertNotIn("navigate-platform", seg,
+                         "★★ 又有行点击跳到 AI 用量的平台详情页了")
+
+    def test_every_row_carries_its_own_tab(self):
+        """★ 不带档的话主窗会停在**上次那一档** —— 点 Gemini 的行落在 Codex 档上。
+        「打开主窗口」和「去哪一档」是两件事，前者不该顺带决定后者。"""
+        c = code(self.MB)
+        for k in ('"navigate-overview", "codex"', '"navigate-overview", "gemini"',
+                  '"navigate-overview", "grok"'):
+            with self.subTest(tab=k):
+                self.assertIn(k, c, f"★ 缺 {k}")
+
+    def test_the_main_window_honours_the_tab(self):
+        """★★ 只发不收等于没发。判据打在**监听那一侧**。"""
+        c = code(APP)
+        i = c.index('listen<string | undefined>("navigate-overview"')
+        seg = c[i:i + 420]
+        self.assertIn("setProvider(e.payload)", seg, "★★ 主窗收到了档位却不切")
+        # ★ 缺省必须不动 provider —— 老的调用点（不带档）行为一个字不变
+        self.assertIn('e.payload === "codex"', seg, "★ 没有校验载荷 ⇒ 脏值能改档")
+
+    def test_clicking_an_agy_row_does_not_switch(self):
+        """★★ 换号走名字旁边那个「切换」徽章，点行只开主界面 ——
+        与账号行同一条语义。混着来的症状就是用户报的那个跳转。"""
+        c = code(self.ROW)
+        i = c.index('<div className="mb-row" onClick=')
+        self.assertIn("onClick={switching ? undefined : onOpen}", c[i:i + 120],
+                      "★★ 点行又变回切号了")
+
+
+class TheShortcutBadgeOnlyAppearsWhereItWorks(unittest.TestCase):
+    """★★ 用户 2026-09-14：「为什么 gemini 的账号排序左上角还是 CLI？」
+
+    那个角标是「按 ⌘N 能切到它」的**承诺**。只给 codex 接线、却在别的档也画角标，
+    就是画一个点了没反应的东西 —— 本仓判过死刑的形态。所以两件事必须一起做：
+    **接线按档分流，角标也只在真的接了线的那一档出现。**
+    """
+
+    def test_the_keyboard_is_routed_per_tab(self):
+        c = code(APP)
+        i = c.index("useKeyboard(win, refresh")
+        seg = c[i:c.index("\n  });", i)]
+        self.assertIn('provider === "gemini"', seg, "★★ ⌘N 没有为 Gemini 档接线")
+        self.assertIn("agyPool.switchTo(a.label)", seg, "★★ 接了线却没真的切号")
+        self.assertIn('provider === "grok"', seg, "★ Grok 档（单号只读）没有短路")
+
+    def test_the_badge_is_passed_only_when_wired(self):
+        self.assertIn("shortcut={i < 9 ? i + 1 : undefined}", code(APP),
+                      "★★ 角标没传 ⇒ 卡上还是 `CLI`")
+
+    def test_agy_still_stays_out_of_the_pool_arrays(self):
+        """★★★ 按档分流**不等于**把 agy 塞进 `alive`/`accounts` ——
+        那两个数组还驱动着计数徽章、探针全池的号数、自动切号。"""
+        c = code(APP)
+        i = c.index("useKeyboard(win, refresh")
+        seg = c[i:c.index("\n  });", i)]
+        self.assertNotIn("aliveByLabel[idx].sub", seg)
+        self.assertIn("agyPool.accounts[idx]", seg, "★ Gemini 档取的不是它自己那列")

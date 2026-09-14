@@ -280,7 +280,6 @@ export default function MenuBar() {
     // ★ 恒 false 不是偷懒：给一个永远不亮的灯也比给一个来路不明的灯好。
     hasDead: p.key === "codex" && dead.length > 0,
   }));
-  const platCount = chips.find(c => c.key === plat)?.count ?? 0;
 
   const bestPct = alive.reduce((m, a) => Math.max(m, a.windows[0]?.pct ?? -1), -1);
 
@@ -326,12 +325,13 @@ export default function MenuBar() {
             hint: "逐号问服务端 token 是否被作废(零消耗,不刷新 token);发现失效会记录。约 10s",
             action: () => run("health", ["health"], "已检查 token") }
         : plat === "gemini"
-          ? { id: "open-agy", label: "↗ 打开 Antigravity 重启生效", loadingLabel: "", accent: false,
-              badge: undefined as string | undefined, icon: false,
-              // ★ 文案说"做什么"不只说"坏了"：换号只对**下一次启动**的 agy 生效，
-              //   已经开着的会话不受影响 —— 不说清楚，用户会以为点一下就把当前会话切走了。
-              hint: "agy 只在启动时读凭证 —— 换号要开一个新的 agy 才生效",
-              action: () => { void openMain("navigate-overview"); showToast("切号只对下一次启动的 agy 生效"); } }
+          // ★ Gemini 现在有**自己的**检查 token（刷一次 token + 打一次 `fetchAvailableModels`，
+          //   零消耗）。与主窗那一档保持一致 —— 两个界面对同一档给不同的按钮，
+          //   正是用户这几轮反复在报的那类不一致。
+          ? { id: "agy-health", label: "检查 token", loadingLabel: "检查中…", accent: false,
+              badge: undefined as string | undefined, icon: true,
+              hint: "逐号刷一次 token 再打一次云端额度接口，两步都过才算这个号还能用。零消耗",
+              action: () => { agyPool.health(); showToast("正在检查 Gemini 各号…"); } }
           : { id: "open-grok", label: "↗ 打开 Grok 详情", loadingLabel: "", accent: false,
               badge: undefined as string | undefined, icon: false,
               hint: "grok 是单号只读：没有池可切、也没有可探的号,只有用量与周额度可看",
@@ -373,9 +373,11 @@ export default function MenuBar() {
       {/* Tab 行(v3 新增):全宽分段控件,带活值小字 */}
       <div className="mb-tabs" style={{ border: `1px solid ${t.ghostBorder}` }}>
         {([
-          // ★ 稿 §1：这个数是**当前平台**的账号数，不是 codex 的。
-          //   写死成 codex 的话，切到 Gemini 档后 Tab 上仍印着 6，而列表里只有 2 行。
-          ["acc", "账号", String(platCount)],
+          // ★★ 这个数是**全部平台的总数**（用户 2026-09-14：「账号 6 应该要改为账号 9」）。
+          //   ⚠️ v4 稿 §1 写的是"当前平台的账号数"，用户当面否了：
+          //     **每一档各自的数字芯片行上已经有了**（`6 / 2 / 1`），Tab 上再重复一遍
+          //     只是把同一个数说两遍；而"我一共有几个号"在别处一个地方都看不到。
+          ["acc", "账号", String(chips.reduce((n, c) => n + c.count, 0))],
           ["today", "今日", today ? fmtTok(today.totalTok) : "—"],
         ] as [Tab, string, string][]).map(([id, label, val]) => (
           <span key={id} className="mb-tab" onClick={() => setTab(id)}
@@ -437,7 +439,7 @@ export default function MenuBar() {
             堆在一起时读者会拿同一套直觉去理解它们 —— 这正是分档的理由（同主窗 ProviderTabs）。 */}
         {plat === "codex" && alive.map(a => (
           <AccountRow key={a.aid} a={a} isCurrent={a.aid === currentNode} isBest={hero?.aid === a.aid}
-            bestPct={bestPct} privacy={privacy} t={t} onSelect={() => void openMain("navigate-overview")}
+            bestPct={bestPct} privacy={privacy} t={t} onSelect={() => void openMain("navigate-overview", "codex")}
             // 当前号不给按钮:切到自己是空操作,画出来只会让人以为点了没反应。
             // 失效号在下面那个折叠区,本来就不传。
             onSwitch={a.aid === currentNode ? undefined
@@ -458,18 +460,25 @@ export default function MenuBar() {
                                   showToast(`已切到 ${a.label} · 下次启动 agy 生效`); }}
                       switching={agyPool.switching === a.label}
                       disabled={!!prefs.by?.agy?.off} busy={agyBusy}
-                      onOpen={() => void openMain("navigate-platform", "agy")} />
+                      // ★ 点行 = 弹主界面的**总览**并停在 Gemini 档，与 codex 行同一条语义
+                      //   （用户 2026-08-11 定的方案 A：点行开主界面、换号走行上的「切换」）。
+                      //   ⚠️ 这里曾是 `navigate-platform` ⇒ 跳到 **AI 用量**的平台详情页，
+                      //      用户 2026-09-14 直接问「怎么跳到 ai 用量那里了」。
+                      onOpen={() => void openMain("navigate-overview", "gemini")} />
             ))
           // 池还没建起来 —— 退回原来那张只读行（`agy-rotate login --current` 之前就是这个状态）
           : <AgyRow t={t} color={colorOf(traffic, "agy")} disabled={!!prefs.by?.agy?.off}
                     snap={agySnap} busy={agyBusy}
-                    onOpen={() => void openMain("navigate-platform", "agy")} />)}
+                    // ★ 池空那一路也走总览的 Gemini 档 —— 同一档里两种点击行为
+                    //   正是用户 2026-09-14 报的那个跳转的来源。
+                    onOpen={() => void openMain("navigate-overview", "gemini")} />)}
 
         {/* grok:同款卡片、紫色左轨、无「切换」按钮。点行 = 弹主界面的 Grok 详情页。 */}
         {plat === "grok" && (
           <GrokRow t={t} color={colorOf(traffic, "grok")} disabled={!!prefs.by?.grok?.off}
                    snap={grokSnap} privacy={privacy} busy={grokBusy}
-                   onOpen={() => void openMain("navigate-platform", "grok")} />
+                   // ★ 同上：点行去总览的 Grok 档，不是 AI 用量的平台详情页。
+                   onOpen={() => void openMain("navigate-overview", "grok")} />
         )}
 
         {plat === "codex" && dead.length > 0 && (
@@ -481,7 +490,7 @@ export default function MenuBar() {
             </summary>
             <div className="mb-dead-list">
               {dead.map(a => (
-                <AccountRow key={a.aid} a={a} isCurrent={a.aid === currentNode} isBest={false} bestPct={bestPct} privacy={privacy} t={t} onSelect={() => void openMain("navigate-overview")} />
+                <AccountRow key={a.aid} a={a} isCurrent={a.aid === currentNode} isBest={false} bestPct={bestPct} privacy={privacy} t={t} onSelect={() => void openMain("navigate-overview", "codex")} />
               ))}
             </div>
           </details>

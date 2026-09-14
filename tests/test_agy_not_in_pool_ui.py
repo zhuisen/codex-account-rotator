@@ -99,8 +99,11 @@ class AgyNeverEntersPoolArrays(unittest.TestCase):
         """
         m = re.search(r"<AgyRow[^>]*onOpen=\{([^}]*(?:\}[^}]*)*?)\}\s*/>", self.mb, re.S)
         self.assertIsNotNone(m, "AgyRow 没有 onOpen —— 点了不会有反应")
-        self.assertIn("navigate-platform", m.group(1),
-                      "AgyRow 的 onOpen 没指定目的地")
+        # ⚠️ 2026-09-14 起目的地是**总览的 Gemini 档**，不再是 AI 用量的平台详情页
+        #    （用户实报「点账号怎么跳到 ai 用量去了」）。判据还是"必须指明去哪"，
+        #    只是那个"哪"变了 —— 所以认这两种之一，而不是锁死其中一种。
+        self.assertTrue("navigate-platform" in m.group(1) or "navigate-overview" in m.group(1),
+                        "AgyRow 的 onOpen 没指定目的地")
 
 
 class AgyVisibilityDistinguishesTwoKindsOfAbsence(unittest.TestCase):

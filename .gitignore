@@ -90,3 +90,6 @@ relay/relays.local.json.corrupt-*
 relay/route.local.json
 relay/.relays.lock
 .relay-usage.json
+
+# agy 运行日志（探针/刷新/切号的逐号结果）。含账号 label，与其它 *.log 同级。
+agy.log
