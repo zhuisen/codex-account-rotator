@@ -81,7 +81,7 @@ def _due(now, last, period):
     return d >= period or d < -CLOCK_BACK_TOL_SECS
 
 
-def _reset_crossed(state, now):
+def _reset_crossed(state, now, served=None):
     """有没有哪个账号的额度窗口,在**上次读数之后**跨过了重置时刻。
 
     跨过的那一刻,旧读数在语义上就作废了(`helpers.ts::winRem` 会把它显示成"未知",
@@ -89,15 +89,39 @@ def _reset_crossed(state, now):
     最想立刻看到新数的那一刻,却偏偏是显示"未知"最久的一段。
 
     ★★ 判据必须是「**快照拍摄于重置之前**」,不能只是「重置时刻已过」。
-      后者在服务端迟迟不更新 `resets_at` 时会**恒为真**,把兜底节拍变成每 60s 一扫,
-      在 /usage 的 bot challenge 面前就是自找 403。这样写还顺带**自我清零**:
-      扫描成功后 `captured_at > resets_at`,条件自动不再成立,不需要额外记"已触发过"。
+      后者在服务端迟迟不更新 `resets_at` 时会恒为真。
+
+    ★★★ **旧版声称的"自我清零"只在扫描成功时成立 —— 而它恰好在扫描失败时失效。**
+      （2026-09-14 实测,本机连烧 6 小时）旧注释写的是「扫描成功后 `captured_at > resets_at`,
+      条件自动不再成立,不需要额外记"已触发过"」。前半句对,结论错:
+
+        `captured_at` **只在 `/usage` 回 HTTP 200 且带 rate_limit 窗口时**才前进
+        (`codex-rotate` 的 `_win_from_usage` 之后那一处;非 2xx 不替换是 v0.12.10 的**刻意**设计)。
+        ⇒ 扫描失败 ⇒ `captured_at` 原地不动 ⇒ 条件**恒真** ⇒ 每 `RESET_SWEEP_MIN_GAP`(60s) 再扫一次
+        ⇒ 而扫描失败的头号原因正是 `/usage` 的 bot challenge 403。
+
+      **这道守卫因此在 403 出现的那一刻变成 403 的放大器** —— 正是它自己那段注释
+      判过死刑的「把兜底节拍变成每 60s 一扫 = 自找 403」,只是触发条件写反了:
+      不是"服务端不更新 resets_at"时发生,是"我们拿不到新读数"时发生。
+      实测 2026-09-14 本机(按"时间倒退=跨日"从 `quotad.log` 切出当天那段再逐小时统计):
+      03:00–08:59 全池扫描 **22/44/43/43/44/32 次/小时**,设计节拍是 12 次/小时;
+      09:00 起回落到 1~2 次/小时。这段**正好罩住 06:03 的 dawn-probe 全军覆没**
+      (5 个号同时 `SSL: UNEXPECTED_EOF_WHILE_READING`),是"本机把自己打进边缘限流"
+      这个假说的正向证据。
+
+    ★ 修法:**每个「账号 × 窗口 × 重置时刻」只即时扫一次**,由调用方持有 `served` 备忘录。
+      旧注释说"不需要额外记已触发过" —— 需要,因为自我清零是**有条件**的。
+      扫失败了就退回 300s 的固定节拍兜底(`USAGE_SECS`),那正是这个特性存在之前的行为,
+      是可接受的降级;而 60s 重试换来的是一场把自己打进限流的正反馈。
+      `served` 传 None 时退化成纯判定(给测试与只读调用用),不记账。
 
     ★ 这是「`captured_at` vs `resets_at`」这条判据的又一份副本(另外三份:
       `helpers.ts::winRem` · `lib.rs` 托盘 · `proxy.py::_win_used`)。它们回答
       "这个读数还能不能信",这里回答"该不该现在就去拿新的" —— 同一条线上的两个问题。
     """
-    for slot in (state.get("slots") or {}).values():
+    slots = (state.get("slots") or {})
+    hit = False
+    for aid, slot in slots.items():
         if not isinstance(slot, dict) or slot.get("auth_dead"):
             continue
         q = slot.get("quota") or {}
@@ -106,9 +130,21 @@ def _reset_crossed(state, now):
             continue
         for wkey in ("primary", "secondary"):
             ra = ((q.get(wkey) or {}) if isinstance(q.get(wkey), dict) else {}).get("resets_at")
-            if ra and cap < ra <= now:
-                return True
-    return False
+            if not (ra and cap < ra <= now):
+                continue
+            if served is not None:
+                # ★ 同一个重置时刻只服务一次。一次全池扫描覆盖所有号,所以这一轮里
+                #   每个跨过重置点的号都要记上,不能 `return` 早退 —— 早退会让第二个号
+                #   在下一拍再触发一次扫描,等于把节流按号乘了一遍。
+                if served.get((aid, wkey)) == ra:
+                    continue
+                served[(aid, wkey)] = ra
+            hit = True
+    if served is not None:
+        # 号被删掉后清掉它的备忘,别让这个 dict 随时间只增不减。
+        for key in [k for k in served if k[0] not in slots]:
+            served.pop(key, None)
+    return hit
 
 
 def log(msg):
@@ -229,6 +265,9 @@ def main():
 
     watch = ActivityWatch()
     last_usage = last_tick = last_event_refresh = last_reset_sweep = 0.0
+    # ★ 「账号 × 窗口 × 重置时刻」→ 已经为它扫过一次了。见 `_reset_crossed` 的 ★★★:
+    #   自我清零是**有条件**的(只在扫描成功时),所以这本备忘录是必需的,不是冗余。
+    reset_served = {}
     pending_since = None
     retry_at, retry_n = None, 0
 
@@ -278,7 +317,7 @@ def main():
         # 两个触发口。固定节拍是**兜底**;窗口刚跨过重置点则是**即时失效** ——
         # 那一刻旧读数已经作废,而它偏偏是显示"未知"最久的一段(最坏 300s)。
         reset_due = (_due(now, last_reset_sweep, RESET_SWEEP_MIN_GAP)
-                     and _reset_crossed(state, now))
+                     and _reset_crossed(state, now, reset_served))
         if _due(now, last_usage, USAGE_SECS) or reset_due:
             if reset_due:
                 last_reset_sweep = now

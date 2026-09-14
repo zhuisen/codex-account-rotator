@@ -262,10 +262,51 @@ class EveryOperationLeavesATrace(unittest.TestCase):
         self.assertIn("AGY_LOG = P.STORE /", CLI, "★★ 日志落在脚本旁边了")
 
     def test_the_ui_reads_it(self):
-        """★★★ 只写不读等于没写。判据打在**读取那一侧**。"""
+        """★★★ 只写不读等于没写。判据打在**读取那一侧**。
+
+        ⚠️⚠️ **这条闸此前是空的，而它的断言方式正好掩盖了它要防的那件事**（2026-09-14 查实）。
+
+        旧判据：`"agy.log"` 出现在 `fn read_logs()` 之后 500 字符内。它同时犯了两个错：
+
+        1. **它证明不了"UI 读了"** —— `read_logs` 这条命令**前端一个调用方都没有**
+           （`grep -rn read_logs codexbar/src/` 为空）。日志页的列表来自
+           `read_proxy_rotation → rotation.py::scan_proxy_log`，而那个解析器
+           **只认 `[proxy` 开头的行**。所以 agy 的任何一行都到不了界面，
+           而这条闸一直是绿的 —— 正是本仓的「这一枪没打中和确实没问题返回同一个值」。
+        2. **它会因为无关重构假红** —— 把清单抽成 `LOG_SOURCES` 常量（行为一字未变）
+           就把它打红了，因为字面量不再落在那 500 字符的窗口里。
+
+        现在分成两条真断言：收集侧看 `LOG_SOURCES`（行为，不看位置）；
+        接线侧用**异或闸**——「有前端调用方」与「挂着 UNWIRED 标记」恰好成立一个。
+        """
         rs = code(RS)
-        i = rs.index("fn read_logs()")
-        self.assertIn('"agy.log"', rs[i:i + 500], "★★★ 日志页不读 agy.log")
+        m = re.search(r"const LOG_SOURCES[^=]*=\s*&\[(.*?)\n\];", rs, re.S)
+        self.assertIsNotNone(m, "★ LOG_SOURCES 不见了 —— 这条闸在守一个不存在的东西")
+        self.assertIn('"agy.log"', m.group(1), "★★★ 后端不再收集 agy.log")
+
+    def test_the_unwired_state_is_declared_exactly_once(self):
+        """★★ 异或闸：`read_logs` **要么真有前端调用方，要么显式挂着 UNWIRED**。
+
+        两者都不成立 = 悄悄退化成孤儿（就是这次查出来的状态，而当时没有任何闸会红）；
+        两者都成立 = 接线了却忘了删标记，注释开始说假话。
+        ★ 这条闸的价值在**接线那一天**：那天它会变红，逼人回来删掉标记。
+        """
+        callers = [p for p in (ROOT / "codexbar" / "src").rglob("*.ts*")
+                   if "read_logs" in p.read_text(encoding="utf-8")]
+        # ★ 标记**本来就是注释**，所以这里读原文，不能用剥了注释的 `code(RS)`
+        #   —— 第一版就是这么写的，当场把自己判红了。
+        # ★★ 判**出现次数 == 1**，不是 `in`。第二版用 `in` 时，删掉真标记后闸照样绿 ——
+        #   因为同一份注释里解释这条闸的那段话也写了一遍同样的字，`in` 匹配到了它自己的说明。
+        #   （变异验证当场抓出；本仓「闸被自己的说明文字判绿」的又一例。）
+        hits = RS.read_text(encoding="utf-8").count("@unwired(read_logs)")
+        self.assertLessEqual(hits, 1,
+                             "★ 标记出现了 {} 次 —— 记号必须唯一，否则删掉真的那处也不会红".format(hits))
+        marked = hits == 1
+        self.assertTrue(
+            bool(callers) != marked,
+            "★ `read_logs` 的接线状态与代码里的登记不一致：前端调用方 {} 个、UNWIRED 标记 {}。\n"
+            "  接线了就删掉标记；没接线就必须留着标记说明现状。"
+            .format(len(callers), "在" if marked else "不在"))
 
     def test_failures_are_not_the_same_colour_as_successes(self):
         """★★ `✗` 行和成功行同色，等于把"成功与否"藏起来 —— 用户点名要看的就是这个。"""

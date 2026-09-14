@@ -55,6 +55,13 @@ fn data_dir() -> String {
 fn spawn_cmd(program: &str) -> Command {
     let mut c = Command::new(program);
     c.env("CODEX_ROTATE_STORE", data_dir());
+    // ★★★ **谁按下去的** —— 计费探针的来源标记（2026-09-14 加）。
+    //   起因：当天 08:45 有一次 `probe --all`（5 次真实计费），而**没有任何记录
+    //   能说出是定时器、界面按钮还是终端触发的**。本仓最贵的问题是「谁在自动花钱」，
+    //   而那条链路当时一个字都答不上来。`_write_last_probe` 把它记进 `last_probe.via`。
+    //   ★ 放在这里而不是逐个调用点：这个函数是**所有**子进程的唯一入口
+    //     （见上面的文档注释），逐个加迟早漏一个，而漏掉的那条正好会伪装成"从终端跑的"。
+    c.env("CODEX_ROTATE_CALLER", "ui");
     // ★★★ **agy 池有它自己的变量,不吃 `CODEX_ROTATE_STORE`。**（2026-09-13 用户实报
     //    「codex 能切、agy 不能切」）`agy/pool.py` 按 `__file__` 往上两级推数据目录 ——
     //    打进安装包之后那就是 `Contents/Resources/scripts/`，里面**一个账号都没有**。
@@ -972,22 +979,98 @@ fn b64_decode(input: &str) -> Result<Vec<u8>, String> {
 
 // ---- read logs for the UI ----
 
+/// 运行日志的来源清单 —— **必须与 `scripts/install-launchd.sh` 真正 emit 的任务集合一致**。
+///
+/// ★★★ 那个脚本的 `log_path()` 上面就写着「CodexBar's log page reads these exact literals
+///   (src-tauri/src/lib.rs read_logs). Keep the two in sync.」—— 而**没有任何闸为此变红**，
+///   于是它朝**两个方向**同时漂了（2026-09-14 体检查出）：
+///
+///     多出来：`keepalive.log`(最后写入 08-26) · `refreshquota.log`(08-12)
+///             —— 这两个 launchd 任务 2026-08-29 就取消了，脚本不再 emit，plist 也已不在盘上。
+///     少掉了：`dawnprobe.log` · `autosync.log`
+///             —— 其中 **`dawnprobe` 是全仓唯一会自动花钱的任务**，它的成败一直不在日志里。
+///
+///   叠加旧的「先到先得」截断（先读到的文件把 300 行预算吃光），实测结果是：
+///   300 行里 **152 行是 8 月的尸体**，`quotad.log` 被砍掉一半，而 09-14 刚按用户要求
+///   加进来的 `agy.log` **一行都露不出来**。这正是本仓的「后端有字段 ≠ 已披露」。
+///
+/// ★ 清单不再手写重复的字面量：`JOB` 与安装脚本的任务名一一对应，
+///   闸在 `tests/test_log_sources_match_installer.py`。
+///   将来重新启用 keepalive/refreshquota，是在**安装脚本里加回任务**，这里跟着加一行 ——
+///   而不是现在先把名字留着（留着就是本仓禁止的「没人渲染的骨架」）。
+const LOG_SOURCES: &[(&str, &str)] = &[
+    // (launchd 任务名, 相对 data_dir 的日志路径)
+    // ★ `proxy` 的路径**不是** `proxy.log` 而是 `proxy/proxy.log`（它写在自己源码旁边）。
+    ("proxy", "proxy/proxy.log"),
+    ("quotad", "quotad.log"),
+    ("autosync", "autosync.log"),
+    ("dawnprobe", "dawnprobe.log"),
+    // agy 不是 launchd 任务，是 `bin/agy` wrapper 与 `agy-rotate` 的运行留痕。
+    // 2026-09-14 加入：此前 agy 那一侧**一个字都不落盘**，界面上点了探针/刷新/切号、
+    // 结果如何，事后完全无从复盘（用户实报要它）。
+    ("agy", "agy.log"),
+];
+
+/// 总行数上限。**不是**每份文件的上限 —— 见 `read_logs` 的配额说明。
+const LOG_BUDGET: usize = 300;
+
+/// 运行日志：每份来源**各有保底配额**，剩余预算再按序补齐。
+///
+/// ★★ 旧实现是「每份各取 100 行、依次 push、最后 `truncate(300)`」= **先到先得**。
+///   那等于让清单里**靠前**的文件决定后面还有没有得看，而排序本身毫无语义。
+///   实测（2026-09-14）：`keepalive` 100 + `refreshquota` 52 + `proxy` 100 + `quotad` 48 = 300，
+///   `agy.log` 的 4 行**全部**被截掉。截断和"这个源没有日志"在界面上长得一模一样。
+/// ★ 保底 = `LOG_BUDGET / 源数`，谁不够用谁把余量让出来，剩下的按序补。
+///   这样「某个源一条都看不到」只可能是它真的没写，不可能是被别人挤掉的。
+///
+/// ⚠️⚠️ **@unwired(read_logs) —— 前端目前没有任何地方调用这条命令。**
+///   （2026-09-14 查实，`grep -rn read_logs codexbar/src/` 为空）
+///   日志页（`LogsPage.tsx`）的日志列表来自 `read_proxy_rotation → rotation.py`，
+///   而那个解析器 **只认 `[proxy` 开头的行**（`scan_proxy_log`），所以 quotad / agy / dawnprobe
+///   的任何一行都到不了界面。连 `LogsPage` 里那条「`✗` 染红」的规则都是为 agy 写的、却永远用不上。
+///   ⇒ CLAUDE.md 与 `install-launchd.sh` 里「日志页读这些字面量」的说法**当前不成立**。
+///   ★ 接不接线是**用户要拍板的界面改动**（本仓铁律：UI 交互不要自己发明），未定。
+///   ★ 这行标记有闸（`tests/test_agy_actions.py` 的异或闸）：「有前端调用方」与
+///     「挂着上面那个标记」**恰好成立一个**。接线之后必须删掉它，否则变红。
+///     ⚠️ 闸按**出现次数 == 1** 判，所以别在别处重复那个记号 —— 第一版就是因为这段说明里
+///     也写了一遍同样的字，把标记删掉后闸照样绿（本仓「闸被自己的说明文字判绿」的又一例）。
 #[tauri::command]
 fn read_logs() -> Result<String, String> {
-    let mut lines = Vec::new();
-    // ★ `agy.log` 2026-09-14 加入：此前 agy 那一侧**一个字都不落盘** ——
-    //   界面上点了探针/刷新/切号、结果如何，事后完全无从复盘（用户实报要它）。
-    for name in ["keepalive.log", "refreshquota.log", "proxy/proxy.log", "quotad.log", "agy.log"] {
-        let path = format!("{}/{}", data_dir(), name);
-        if let Ok(data) = fs::read_to_string(&path) {
-            for line in data.lines().rev().take(100) {
-                if !line.trim().is_empty() {
-                    lines.push(line.to_string());
-                }
+    let per: Vec<Vec<String>> = LOG_SOURCES
+        .iter()
+        .map(|(_, name)| {
+            let path = format!("{}/{}", data_dir(), name);
+            match fs::read_to_string(&path) {
+                Ok(data) => data
+                    .lines()
+                    .rev()
+                    .filter(|l| !l.trim().is_empty())
+                    .take(LOG_BUDGET)
+                    .map(|l| l.to_string())
+                    .collect(),
+                // 读不到 = 这个任务还没跑过/没装。**不是错误**，静默给空。
+                Err(_) => Vec::new(),
             }
+        })
+        .collect();
+
+    let reserve = LOG_BUDGET / LOG_SOURCES.len().max(1);
+    let mut taken: Vec<usize> = per.iter().map(|v| v.len().min(reserve)).collect();
+    // 余量按序补给还没取完的源（配额没用满的源把额度让出来）。
+    let mut left = LOG_BUDGET - taken.iter().sum::<usize>();
+    for (i, v) in per.iter().enumerate() {
+        if left == 0 {
+            break;
         }
+        let more = (v.len() - taken[i]).min(left);
+        taken[i] += more;
+        left -= more;
     }
-    lines.truncate(300);
+
+    let mut lines = Vec::with_capacity(LOG_BUDGET);
+    for (i, v) in per.iter().enumerate() {
+        lines.extend(v[..taken[i]].iter().cloned());
+    }
     Ok(lines.join("\n"))
 }
 

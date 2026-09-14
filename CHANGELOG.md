@@ -2507,6 +2507,125 @@ Fable 评审 40 条 + 四方评审 9 条，全部处理完。17 个 commit 未�
 
 ---
 
+### B46 · 一次运行日志体检：查出 4 件，其中最大的一件**四条原始判断里没有一条提到** — 2026-09-14 ✅
+
+用户问「目前的运行日志正常吗」。我先给了 4 条结论，随后用 opus / codex / grok 三方复核
+（agy 缺席：omc 300s 超时 + 直连 headless 权限自动拒绝）。**三家各打掉我一条前提**，
+而真正最贵的那条是复核里才浮出来的。逐条记，因为每一条的形状都值钱。
+
+#### 我的 4 条里错了 2 条（都是"用坏掉的尺子量"）
+
+| 我说的 | 实际 | 谁抓到 |
+|---|---|---|
+| 「日志页 300 行预算被退役日志吃掉」 | **`read_logs` 一个前端调用方都没有**（`grep -rn read_logs codexbar/src/` 为空）。那段截断从来没运行过 | codex |
+| 「5h 窗口今天没被锚定」 | **锚上了**：6 个号 5 个 `quota_anchor["300"].state == anchored`。锚定它的是 08:45 一次手动 `probe --all` | opus |
+| 「同时段 quotad.log 零条 SSL 失败」当反证 | **空探针**。`tick_usage()` 把 `cmd_refresh_all` 全部输出吞进 `StringIO` —— 而这条**就写在本仓自己的「已知验证缺口」一节里，我读过还照用** | opus |
+| 「`health` 是只读的」 | **不是**，`cmd_health` 会 `_mutate_state` 写 `auth_dead` | codex |
+| 「8 次里第 3 次全军覆没」 | `dawnprobe.log` **一个时间戳都没有**，8 段记录归不到具体日期 | opus |
+| 「kickstart quotad 能治 dawn-probe」 | 治不了。dawnprobe 是**独立 launchd job**（`emit dawnprobe … "$ROT" dawn-probe`），`quota_daemon.py` 里 `dawn_probe` 出现 **0 次** | codex + grok |
+
+★ 六条里有四条是同一个形状：**我的测量工具坏了，而坏掉的样子长得像"通过"**。
+  这正是 §7.-1 那一节的主题，而我依然踩了 —— 包括那条"已知验证缺口"是我当天读过的。
+
+#### ⑥ 真正最大的一件：`_reset_crossed` 把自己变成了 403 的放大器
+
+`_reset_crossed` 的旧注释写着：
+
+> 判据必须是「快照拍摄于重置之前」…… 这样写还顺带**自我清零**：扫描成功后
+> `captured_at > resets_at`，条件自动不再成立，**不需要额外记"已触发过"**。
+
+前半句对，**结论错**。`captured_at` 只在 `/usage` 回 HTTP 200 **且带 rate_limit 窗口**时才前进
+（非 2xx 不替换是 v0.12.10 的刻意设计）⇒
+
+    扫描失败 ⇒ captured_at 原地不动 ⇒ 条件恒真 ⇒ 每 60s 再扫一次 ⇒ 更容易 403 ⇒ 继续失败
+
+**这道守卫在 403 出现的那一刻变成 403 的放大器** —— 正是它那段注释判过死刑的形状，
+只是触发条件写反了：不是"服务端不更新 `resets_at`"时发生，是"**我们拿不到新读数**"时发生。
+
+实测（`quotad.log` 无日期，按「时间倒退＝跨日」从尾部切出当天 264 行再逐小时统计）：
+
+    03:00→22  04:00→44  05:00→43  06:00→43  07:00→44  08:00→32    ← 设计节拍 12 次/小时
+    09:00 之后→ 1~2 次/小时
+
+六小时、约 228 次多余的全池 `/usage`，**正好罩住 06:03 那次 dawn-probe 全军覆没**。
+⚠️ 这给出第三个假说 **H3「本机把自己打进了边缘限流」**，它强于原来那两个：
+  (a) LibreSSL 指纹 —— 被同日 08:45 的 `probe --all` 反证（同解释器、同 TLS 栈、同 host，全 200）；
+  (b) Clash 黑洞 loopback —— dawn-probe 打的是外网，不是 loopback。
+  **H3 仍是假说，不是结论**，闸 `TheEvidenceIsNotOverstated` 专门盯着注释别把它写成已证。
+
+修法：每个「账号 × 窗口 × 重置时刻」只即时扫一次（调用方持 `served` 备忘录）。
+旧注释说"不需要额外记已触发过" —— **需要，因为自我清零是有条件的**。
+扫失败就退回 300s 固定节拍兜底，那正是这个特性存在之前的行为。
+
+#### ③ 日志链两个方向同时漂，而安装脚本早就写着要同步
+
+`install-launchd.sh` 的 `log_path()` 上面写着「CodexBar's log page reads these exact literals
+(src-tauri/src/lib.rs read_logs). **Keep the two in sync.**」——**没有任何闸为此变红**：
+
+    多出来：keepalive.log(08-26) · refreshquota.log(08-12)  —— 任务 08-29 已取消
+    少掉了：dawnprobe.log · autosync.log                     —— 前者是全仓唯一会自动花钱的任务
+
+叠加「先到先得」截断，实测 300 行里 **152 行是 8 月的尸体**，`agy.log` 一行露不出来。
+现在：清单与安装脚本的任务集合对齐、每源保底配额（`LOG_BUDGET / 源数`）、
+闸在 `tests/test_log_sources_match_installer.py`。
+
+★ 顺带修掉一条**自己既假绿又假红**的老闸：`test_the_ui_reads_it` 断言 `"agy.log"` 出现在
+  `fn read_logs()` 之后 500 字符内，docstring 却写着「判据打在**读取那一侧**」。
+  它既证明不了 UI 读了（UI 根本不调这条命令），又会因为把清单抽成常量这种行为无关的重构假红。
+  改成两条真断言 + 一条**异或闸**：「有前端调用方」与「挂着 `@unwired(read_logs)` 标记」恰好成立一个。
+  ⚠️ 异或闸的第一版**变异验证当场判它是空的** —— 因为解释这条闸的注释里也写了一遍同样的记号，
+    `in` 匹配到了它自己的说明。改成**出现次数 == 1**。本仓「闸被自己的说明文字判绿」的又一例。
+
+#### ④ 计费探针白跑了没人说 —— 第三次了，所以这次是闸
+
+今天 06:03 dawn-probe 5 个号全败，而 `health` 只字未提、设置页把 `0/5 可用` 和 `4/4 可用`
+画成同一行中性文字、`dawn_probe.note` 是 `""`（**`done` 路径恒写空**，拿它判就是恒绿）。
+
+新 `dawn_probe_gate()` 四态。★ 判据刻意**不是**「窗口有没有锚定」—— 今天锚上了，
+但锚定它的是手动 `probe --all`；拿结果当判据会让「定时器连着几天白跑」永远不报
+（`keepalive` 的 `runs = 0` 就是这个形状）。它报的是**运营事实**。
+★★ 两种失败**下一步动作正好相反**，所以绝不合并：
+
+    全部 send err  ⇒ 可证未计费 ⇒ warn    ⇒「今天可以安全重跑 --force」
+    含 committed   ⇒ 可能已计费 ⇒ unknown ⇒「**不要**重跑，那是二次扣费」
+
+为此 `cmd_dawn_probe` 现在把**本次**逐号计费相位摘进 `phases`/`billing`
+—— 不能事后读 `last_probe` 重算，那个键会被任何后来的探针覆盖（今天 08:45 就覆盖了 06:03）。
+判不出来时按"可能已计费"处理（钱这一侧 fail-safe）。
+
+#### ⑦ 「谁在自动花钱」原来答不上来
+
+08:45:00–08:45:50 有一次 `probe --all`（7 个槽位被写：5 真探 + 2 跳过 ⇒ **5 次真实计费**），
+而 `last_probe` 里**没有任何字段**能说出是定时器、界面按钮还是终端触发的。
+现在记 `via`：`dawn-probe` 传 `dawn`、Tauri 侧在 `spawn_cmd`（所有子进程的唯一入口）
+统一带 `ui`、其余缺省 **`cli?`** —— 带问号，因为写成 `cli` 会把「没传这个变量」
+和「真的从终端跑的」折叠成同一个值。
+
+#### 顺带结案 ⑤（零成本，用盘上现成数据）
+
+`dawn_probe.at` 仍是 06:03（**没有二次占天**）· 只有 qq55 一个号 `last_probe.at=17:57:45`
+· 该记录带 `billed:true`（只有 `cmd_probe` 写得出）⇒ **卡片上的单号探针**，
+不是 dawn 泄漏、不是重复计费。
+
+#### 动作与验证
+
+证据保全在 `~/archive/codex-account-rotator/runtime-20260914/`（launchctl print × 4 · plist × 4 ·
+state/anchors/日志副本 · repo HEAD + 三个源文件 sha256）。
+★ 顺带取证：**dawnprobe 的 plist 是健康的** —— `StartCalendarInterval` 完整、
+`EnvironmentVariables` 非空、解释器钉在 `/opt/homebrew/bin/python3`（OpenSSL 3.6.3）。
+那个至今未查明、专吃 `StartCalendarInterval` 的外力**没有碰过它**。
+
+`kickstart -k … quotad` **只重启 quotad**（68310 → 34929），proxy 的 81134 原地不动 ——
+三家一致：不存在版本配对要求，而 `kickstart -k` 是 SIGKILL，打断在途 `POST /responses`
+落在 committed 相位（可能已计费），且 `_conv`/`_affinity` 是纯内存 FIFO，重启即失去全部会话粘性。
+
+**测试 1206 → 1245 passed** · `cargo check` 干净 · `npx tsc -b` 干净 ·
+变异验证 **13 个**全部符合预期（含 3 次「把被断言的东西整个删掉」方向与 4 次防假红）。
+⚠️ 其中两次变异当场抓出**我自己新写的闸是空的**（异或闸匹配到自己的说明文字；
+`-k TheGate` 只选中 15 条里的 9 条而漏掉的 6 条恰好守着那次变异）—— 工具挡住了流程漏项。
+
+---
+
 ### B45 · Gemini 档「切档跳来跳去」：真因是**已验证的值被陈旧种子覆盖**，不是没做缓存 — 2026-09-14 ✅
 
 用户报：「gemini 没有对应的缓存，因此在总览里切换导致跳来跳去」。

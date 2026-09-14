@@ -2055,7 +2055,20 @@ def _write_last_probe(aid, **fields):
     ★ **刻意不存 used%。** stdout 已经打了 before→after;再存一份,20 秒后就会和
     usage-api 的读数分叉,而 UI 一不小心就会拿这个**事件里的陈旧数**当现值。
     一份事实只能有一个家。
+
+    ★★★ **`via` = 这次是谁按下去的**（2026-09-14 加）。起因是一次查不清的账：
+      当天 08:45:00–08:45:50 有一次 `probe --all`（7 个槽位全被写过，5 真探 + 2 跳过），
+      **5 次真实计费，而没有任何记录能说出是谁触发的** —— 定时器？界面按钮？终端？
+      本仓最贵的问题是「谁在自动花钱」，而这条链路当时**一个字都答不上来**。
+      现在：`dawn-probe` 传 `dawn`；Tauri 侧所有子进程都带 `CODEX_ROTATE_CALLER=ui`
+      （`lib.rs::spawn_cmd` 是唯一入口，见那里的注释）；其余默认 `cli`。
+      ⚠️ 这是**尽力而为的线索，不是审计证据**：环境变量可以被伪造，也可能漏传。
+        所以取不到时写 `cli` 而不是 `unknown` —— 不对，见下：
+      ★ 取不到写 `"cli"` 会把「没传」和「真的从终端跑的」折叠成一个值，正是本仓反复记的那种。
+        所以缺省是 `"cli?"`（带问号）:它读起来就是"看着像终端，但没有证据"。
     """
+    fields.setdefault("via", os.environ.get("CODEX_ROTATE_CALLER") or "cli?")
+
     def f(st, a=aid, kv=fields):
         sl = st.get("slots", {}).get(a)
         if sl is not None:
@@ -2413,6 +2426,7 @@ def cmd_dawn_probe(args):
     #     `failed` 同样满足 `date == today`，所以它**仍然挡住重跑**，只是把真相说出来。
     ok_n = total = 0
     try:
+        os.environ["CODEX_ROTATE_CALLER"] = "dawn"   # ★ 这一路的计费必须认得出来
         ok_n, total = cmd_probe([], aids=targets)
     except BaseException as e:
         _save({"date": today, "at": int(time.time()), "state": "failed",
@@ -2422,7 +2436,62 @@ def cmd_dawn_probe(args):
         raise
     _save({"date": today, "at": int(time.time()), "state": "done",
            "ok": ok_n, "total": total,
-           "model": PROBE_MODEL, "effort": PROBE_EFFORT, "note": ""})
+           "model": PROBE_MODEL, "effort": PROBE_EFFORT, "note": "",
+           **_dawn_phases(targets)})
+
+
+# 失败明细里的**计费相位**前缀。语义见 `_billed_probe` 的注释：
+#   send err   —— 请求没完整送达 ⇒ **确定未计费**（所以只有它可以重试）
+#   committed  —— 已送达、服务端可能已判决 ⇒ **可能已计费**，绝不重试
+_PHASE_UNBILLED = "send err"
+_PHASE_MAYBE_BILLED = "committed"
+
+
+def _dawn_phases(targets):
+    """本次 dawn-probe 逐号的**计费相位**摘要。
+
+    ★★★ **为什么不能事后去读 `last_probe` 重算**（2026-09-14）：那个键会被**任何**
+      后来的探针覆盖。本机当天的实测就是这个形状 —— 06:03 dawn-probe 5 个号全败，
+      08:45 一次 `probe --all` 把同样这几个号的 `last_probe` 全部改写成 `HTTP 200`。
+      事后看 `last_probe` 会得出「今天探针很正常」，与真相相反。
+      所以摘要必须在**本次运行结束的当下**就摘出来，和 `ok/total` 存在一起。
+
+    ★★ **为什么 `ok/total` 这个标量不够**：它把"为什么失败"整个扔掉，而那恰恰决定了
+      **下一步动作是相反的**：
+        全部 `send err`  ⇒ 可证未计费 ⇒ 今天**可以**安全重跑（`dawn-probe --force`）
+        含 `committed`   ⇒ 可能已计费 ⇒ **绝不能**重跑，重跑就是二次扣费
+      本仓 §5d：「披露要说'做什么'，不是只说'坏了'」——而这两种情况要做的事正好相反。
+
+    返回 `{"phases": {...}, "billing": "none|unbilled|maybe"}`，
+    取不到就返回 `{}`（**不编造** —— 缺这几个键时 gate 走"未知"分支，不走"正常"）。
+    """
+    try:
+        s = _state()
+    except Exception:
+        return {}
+    phases = {}
+    billing = "none"
+    for aid in targets:
+        lp = ((s.get("slots") or {}).get(aid) or {}).get("last_probe") or {}
+        detail = str(lp.get("detail") or "")
+        status = str(lp.get("status") or "")
+        if status.startswith("ok"):
+            key = "ok"
+        elif status.startswith("skipped"):
+            key = status
+        elif detail.startswith(_PHASE_UNBILLED):
+            key = "send_err"
+        elif detail.startswith(_PHASE_MAYBE_BILLED):
+            key = "committed_err"
+        else:
+            key = "http_or_other"
+        phases[key] = phases.get(key, 0) + 1
+    # ★ 只要有**一个**号可能已计费，整次就按"可能已计费"处理 —— 重跑是全池动作。
+    if phases.get("committed_err") or phases.get("http_or_other"):
+        billing = "maybe"
+    elif phases.get("send_err"):
+        billing = "unbilled"
+    return {"phases": phases, "billing": billing}
 
 
 def _credit_days_left(c, now=None):
@@ -2882,6 +2951,98 @@ def relay_route_gate():
         "    请更新 `relay_route_gate`;在那之前以 CodexBar 中转站页的路由卡为准。"]}
 
 
+#: 06:00 的定时任务，到几点还没有当天记录就算"没跑"。给一个宽限：Mac 多半在睡，
+#: launchd 唤醒后补跑要时间，而 app 内补跑的判据本来就是"今天过了 6 点"。
+DAWN_LATE_HOUR = 9
+
+
+def dawn_probe_gate(now=None, state=None):
+    """★★ **每日清晨计费探针今天到底跑成没有**。-> {level, detail, lines}
+
+    2026-09-14 体检查出：今天 06:03 的 dawn-probe **5 个号全败**
+    （全部 `SSL: UNEXPECTED_EOF_WHILE_READING`，重试后同错），而
+    **没有任何一处会为此变红** —— `health` 只字未提，设置页把 `0/5 可用` 和
+    `4/4 可用` 画成同一行中性文字。是翻 `dawnprobe.log` 才看到的。
+    这是本仓「第二次抓到同一类 bug，交付物是一条会变红的检查」的第三次。
+
+    ★★★ **判据刻意不是「窗口有没有锚定」。** 那个问题的答案今天是"锚定了"——
+      但锚定它的是 08:45 一次**手动** `probe --all`，不是这个定时器。
+      拿结果当判据会让「定时器已经连着几天白跑」永远不报（本仓 `runs = 0` 的前科正是这个形状）。
+      这条闸报的是**运营事实**：今天这次自动计费尝试，成了没有。
+
+    ★★ **`note` 不能当判据**：`done` 路径**恒写 `note: ""`**（本文件 `cmd_dawn_probe` 末尾），
+      所以"note 是空的"永远成立，拿它判就是恒绿。
+
+    四态：
+      ok      —— 今天跑过且至少一个号成功；或功能没开（没开就没承诺，不该告警）；
+                 或池里没有 Plus 号（`total == 0` 不是故障）
+      warn    —— 跑了但一个都没成，**且可证未计费**（失败全是 `send err`/`skipped`）
+                 ⇒ 动作是「今天可以安全重跑」
+      unknown —— 跑了但一个都没成，而**可能已计费**（含 `committed err` / HTTP 错），
+                 或者旧记录没有 `phases` 字段判不出来 ⇒ 动作是「**不要**重跑」
+      warn    —— 已过 `DAWN_LATE_HOUR` 而今天没有任何记录 ⇒ 定时器根本没跑
+      unknown —— `state` 还钉在 `running` 且已陈旧 ⇒ 那次中途死了，日期已占
+
+    ★ warn 与 unknown 的**下一步动作正好相反**，所以绝不能合并成一个"失败"等级 ——
+      合并等于让用户在"可能重复扣费"上掷硬币。
+    """
+    now = now or time.time()
+    try:
+        s = state if state is not None else _state()
+    except Exception as e:
+        return {"level": "unknown", "detail": f"读不到 state: {e}", "lines": []}
+    d = (s.get(DAWN_KEY) or {})
+    if not d.get("enabled"):
+        return {"level": "ok", "detail": "dawn-probe 未启用（未启用就没有承诺）", "lines": []}
+
+    today = time.strftime("%Y-%m-%d", time.localtime(now))
+    hour = int(time.strftime("%H", time.localtime(now)))
+    W = "⚠️  每日清晨探针"
+
+    if d.get("date") != today:
+        if hour < DAWN_LATE_HOUR:
+            return {"level": "ok", "detail": "今天还没到判定时刻", "lines": []}
+        return {"level": "warn",
+                "detail": f"今天({today})没有任何运行记录",
+                "lines": [f"{W}今天没跑过 —— 定时任务可能没触发。",
+                          f"    上次记录: {d.get('date') or '从来没有过'}",
+                          "    查: launchctl print gui/$(id -u)/com.doushutangmu.codex-rotate.dawnprobe",
+                          "    重跑: codex-rotate dawn-probe --force"]}
+
+    st = d.get("state")
+    if st == "running":
+        age = int(now - int(d.get("at") or 0))
+        if age < DAWN_STALE_SECS:
+            return {"level": "ok", "detail": "正在跑", "lines": []}
+        return {"level": "unknown",
+                "detail": f"running 记录已陈旧 {age}s",
+                "lines": [f"{W}今天那次**中途死了**（running 卡了 {age}s）。",
+                          "    ⚠️ 它可能已经花过钱，**别直接重跑**；先看 dawnprobe.log 确认。"]}
+
+    total = d.get("total") or 0
+    ok_n = d.get("ok")
+    if total == 0:
+        return {"level": "ok", "detail": "池里没有存活的 Plus 号", "lines": []}
+    if ok_n:
+        return {"level": "ok", "detail": f"今天 {ok_n}/{total} 成功", "lines": []}
+
+    # 一个都没成。下一步动作取决于**计费相位**，两种情况正好相反。
+    billing = d.get("billing")
+    phases = d.get("phases") or {}
+    detail = f"今天 {ok_n}/{total} —— 一个都没成"
+    if billing == "unbilled":
+        return {"level": "warn", "detail": detail + "（可证未计费）",
+                "lines": [f"{W}今天 0/{total}，**5h 窗口没有被它锚定**。",
+                          f"    失败相位: {phases}",
+                          "    ✓ 全部是 `send err`（请求没完整送达）⇒ **确定没有计费**，",
+                          "      今天可以安全重跑: codex-rotate dawn-probe --force"]}
+    return {"level": "unknown", "detail": detail + f"（计费相位: {billing or '未知'}）",
+            "lines": [f"{W}今天 0/{total}，**5h 窗口没有被它锚定**。",
+                      f"    失败相位: {phases or '这条记录没有相位字段（旧版本写的）'}",
+                      "    ⚠️ 无法证明未计费 ⇒ **不要**用 --force 重跑，那可能是二次扣费。",
+                      "      先看 dawnprobe.log 里每个号的失败原因。"]}
+
+
 def proxy_env_gate():
     """★ 系统代理会不会黑洞掉发往本机代理的请求。-> {level, detail, lines}
 
@@ -2956,6 +3117,7 @@ def cmd_health(args):
     agate = agy_wrap_gate()
     dgate = stale_daemon_gate()
     rgate = relay_route_gate()
+    pgate = dawn_probe_gate()
     # ★ 旧代码那条排在最前面:它一响,下面所有额度数字都可能是旧逻辑算出来的,
     #   先看到它才不会照着一个假数字去排查别的东西。
     if dgate["level"] != "ok":
@@ -2964,6 +3126,12 @@ def cmd_health(args):
     if rgate["level"] != "ok":
         for _l in rgate["lines"]:
             print(_l)
+    # ★ 计费探针那条紧跟其后：它是全仓唯一会**自动花钱**的东西，
+    #   而它白跑一次的症状（额度窗口没被锚定）在别处只会表现成"数字看着不对"。
+    if pgate["level"] != "ok":
+        for _l in pgate["lines"]:
+            print(_l)
+        print()
     if gate["level"] != "ok":
         for _l in gate["lines"]:
             print(_l)
