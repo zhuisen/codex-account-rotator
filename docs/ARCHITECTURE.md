@@ -34,6 +34,8 @@
 | `proxy/proxy.py` | 轮换代理 `127.0.0.1:8011` | 对 live 号**只读**，过期就 failover；绝不刷 active 号的 token |
 | `proxy/cxp` | 日常入口 = `codex --profile rotateproxy` | **所有*运行时*子命令一律走代理**，没有例外分支；`doctor`/`update`/`plugin` 等本地工具子命令原样透传（codex 0.154 起对它们带 `--profile` 会硬报错） |
 | `daemon/quota_daemon.py` | 让 `state.json` 的额度持续准确 | 三条循环全部零额度成本（GET） |
+| `agy-rotate` + `agy/pool.py` | **agy 账号池**。与 codex 池机制不同：agy 只在**进程启动时**读凭证 ⇒ 换号发生在 `bin/agy` exec 真身**之前**，且只对下一次启动生效。★★★ 登录态在 **macOS 钥匙串**（单槽，被多个常驻 agy 进程并发写），不在那个 token 文件里 —— 细节见 `CLAUDE.md` §8 与 `CHANGELOG.md` B44 |
+| `grok-quota-sampler` | grok 周额度水位采样器（grok 活着时 ~15s 一次，只 GET、不刷 token）。由 `lib.rs` 起，单实例锁自我终结 |
 
 ### 为什么必须走代理，而不只是"能轮换就行"
 

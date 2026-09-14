@@ -4,6 +4,75 @@
 
 ---
 
+## 已知验证缺口（长期）
+
+> 2026-09-14 从 `memory.md` §1a **整段搬来，逐字未改** —— 它们是「已发版但某一面没验到」的
+> 长期状态，不是进行时。里面有几条带当时的实测数字（`67501 行里各 0 次`、`谷底 ~1037px`、
+> `Δinput 98 与 4681`…），摘要会把那部分磨掉，所以只搬不压。
+> **判「这个验过了吗」先搜这一节。**
+
+
+- **额度未知的号会饿死**（机制已写进 `CLAUDE.md` §8「续期只剩代理」）：**未做**根治 —— 要给这类号留一条最低限度的探测配额，否则「过期→读不到→排最后→更不被挑中」这个环不会自己断。
+- **`tick_usage` 用 `redirect_stdout(StringIO())` 吞掉 `cmd_refresh_all` 的每账号结果**。
+  「plus5 连续两百多次刷新失败」本该是个信号，却一个字都没留 —— 18 小时无人知晓。未修。
+- **plist 被谁改写的仍未查明**（现象与判法已进 `CLAUDE.md` §3.1）。重跑脚本能修，但会被再次改写。
+
+- **v0.12.9 的根因是强推断，不是实证**：受影响机器上 100% 那一帧的 `quota` 快照**没拿到**。
+  一个问题即可定案 —— 跳变时那张卡上**有没有出现「5h」标签**（Pro 号本无 5h 窗口，
+  出现即证明 `codex_bengalfox` 那套被写进去了）。本机数据只能证明机制存在、能产生那两个数。
+- **`proxy.log` 对额度写入零留痕**（67501 行里 quota/primary/secondary/window/x-codex 各 0 次）。
+  proxy 每个请求都写 quota 却一个字不记，事后无法复盘"当时写进去的是什么"。
+  这次全靠恰好抓到一次实时写入。`quota_marks` 也只记 primary 的**整数**变化 ——
+  secondary 被写 null、window_minutes 翻转、resets_at 变化**统统不可回溯**。
+
+- **「名字被截断」这类缺陷 harness 结构上抓不到**：`make_harness.py` 的探针对
+  `textOverflow: ellipsis` 的元素直接 `continue`。v0.12.8 里紧凑格名字被截成 `Anti…`
+  就是**肉眼**发现的，不是探针。只能靠宽度采样 + 人看，别以为 sweep 绿就没截断。
+- **紧凑区列宽随窗宽呈锯齿波**，谷底在 ~1037px（rail 展开）与 ~913px（折叠），
+  每格只剩 264px、名字仅余 68px，`Antigravity` 余量近零。已把这两档加进 sweep，
+  但**没有把"余量"本身做成断言** —— 换一个更长的平台名进注册表，谷底会先破。
+
+- **v0.12.7 的像素验证全在 Chrome headless**，线上是 WKWebView。本仓库为此栽过一次
+  （`zoom` 在 Chrome 干净、真机炸）。本次逐版本地构建交给用户真机看过，但**没有自动化的
+  WKWebView 闸** —— 抓屏被 TCC 挡住（CLAUDE.md §2），这条缺口是结构性的。
+
+- **小时桶只有形状闸（AST），没有行为闸**。grok 给了做法且**不需要改生产接口**：
+  测试里 `patch.object(scan.time, "time", …)` + `TZ=Pacific/Chatham`，把「今天」钉在 DST 切换日，
+  写一条本地 02:50 的行真跑 `scan()`，assert 小时键是 `T02` 不是 `T03`。
+  （小时桶只对「今天」建，所以必须能控时钟。）
+- **AST 闸的固有上限**（grok 实测，非本轮新引入）：日桶仍用 `bisect_right`、小时桶改走
+  赋值别名 / `bisect.bisect` / `//3600`，或把 `strftime("%Y-%m-%dT%H"` 只留在注释里 —— 仍会绿。
+  形状闸拦得住诚实改动，拦不住刻意绕过；真要钉死只能上行为闸（见上一条）。
+- **单实例闸门未经真实脏关机重启验证**（需重启机器）。已验:并发竞态、崩溃后无陈旧锁、fail-open。
+- **`_scan_dsh_file` 一条真实数据都没跑过**：`~/.dsh` 不存在、dsh CLI 未装。它的口径是外部贡献者的实测**转述**。
+  第一次真扫到数据时，照 `_scan_openclaw_file` 的做法先做一次「朴素求和 vs 去重后」交叉核对再信。
+- **入场动效的运动过程没验过**：headless 的 virtual time 会跳到终态，`.cb-wipe` 与数字滚动的**动感**只能真机看。
+  已验的是最终值正确、无负数、无卡 0、零报错、零溢出。
+- **`codex-rotate add <label>` 仍不校验重名**（只堵了 rename）。重名会让 `switch`/`probe` 静默操作到错的号上。
+- **菜单栏高度那个 bug 的真因没能区分**（RO 没触发 / 隐藏窗口 setSize 失败 / 只量了一次）。
+  修法在三种假说下都成立，真机也验过（空跑 12 小时无数据后首次弹出正常），但**机制仍是未知**。
+  ⚠️ **harness 判不了这件事**：RO 在 headless 虚拟时间下投递不确定，同配置连跑 3 次结果不同 ——
+  以后再碰 ResizeObserver 驱动的行为，别拿 harness 当判据。
+- **增量解析未覆盖 `/compact` 与 resume/fork 是否原地重写** transcript —— 那正是锚点守卫要挡的场景，
+  本轮没触发到。真发生时会退回全量重解析（不会算错），但**「守卫真的挡住了」这件事没有实证**。
+  判别实验：跑一次 `/compact` 后看 `scan.py` 的 `scanned` 是否为该文件 +1（而不是走 incr）。
+- **增量只对 claude 启用**。grok/kimi/openclaw/agy 逐行无状态、可加但只占热数据 3%；
+  codex/reasonix/dsh **不可能加**（跨行状态 / 整文件解压）。别看到 `lines` 就以为是通用能力。
+- **agy 覆盖率仍是上界**（主源换 SQLite 后 95.2%，见 CHANGELOG B41）：分母来自
+  `transcript.jsonl`，agy 清理过旧会话的话分母也偏小，缺口补不回来。
+  ⚠️ **额度序列（`agy_quota`）是另一本账**：单位是额度% 不是 token，
+  **不可相加、不可相减、不可折算成钱**。两本账并存这一点没变。
+- **agy 的 CLI 自报 usage 与线上 wire 对不上**，n=2 且差值不稳（Δinput 98 与 4681）。会话累计语义解释掉了
+  output 那一项，input 仍差一截。判别实验：连开 3 个全新会话各跑一轮，看 Δ 是否稳定在同一个小常数。
+  不影响记账（记的就是 CLI 自报值，差分自洽），但**别拿它当"精确到 token"用**。
+- **`model=unknown` 若再出现 = 回填坏了，不是正常态**：wrapper 在 agy 退出后立刻读日志，正常必取得到。
+  真出现只可能是日志目录不可读、或 agy 改了日志格式。回填脚本范式 `scratch/backfill_agy_model_20260819.py`
+  （已做变异测试：日志查不到的会话如实留 `null`，不瞎编）。
+
+- **Reasonix 日志自带厂商真实费用**（`cost_amount`），我们按峰价上界估，对调价前的历史记录高估 3.2 倍。
+  已知取舍不是 bug —— 要算准得让 row 多带一位成本并贯穿到前端，当前量级（单请求 $0.003）不值得。
+
+
 ## 构建里程碑
 
 ### 账号池层(单号 swap)— 2026-06-09
@@ -2437,6 +2506,131 @@ Fable 评审 40 条 + 四方评审 9 条，全部处理完。17 个 commit 未�
 两份夹具（**稠密夹具下新旧实现结果完全一样，那些闸恒绿**）。
 
 ---
+
+### B44 · agy 账号池端到端：真因是登录态在**钥匙串**，此前换号一直是静默空操作 — 2026-09-13/14 ✅
+
+用户从「新增 agy 版块的账号额度更新和自动轮换」开始，两天里报了十几处，
+每一处的真因都不在它表现出来的地方。按**发现顺序**记，因为后面几条是前面几条的连锁。
+
+#### ① 真因：agy 1.2.2 的登录态在 **macOS 钥匙串**里，不在那个文件里
+
+用户实报 `agy-rotate login` 走完浏览器 OAuth、回来却被告知「读不到登录态」。
+查 agy 自己的日志，登录**成功了**：
+
+    auth.go:148]  ChainedAuth: authenticated via keyring (effective: keyring)
+    browser.go:167] consumerOAuth: authenticated successfully as <新号>
+    composite_token_storage.go:237] Failed to save token to keyring, falling back to file
+
+`~/.gemini/antigravity-cli/antigravity-oauth-token` 只是**钥匙串写失败时的兜底**。
+本机一直有那个文件，是因为 09-13 11:23 真发生过一次那种失败 —— 我们把兜底路径当成了主路径。
+
+**判别实验**（已跑，别再推理）：文件里放 A 号、钥匙串留 B 号，跑 `agy models` →
+日志 `applyAuthResult: email=B`。**文件被完全忽略。**
+⇒ 在这之前 `agy-rotate switch` 一直是**静默空操作**：写成功、退出码 0、打印「已切到」，
+而 agy 根本不读那份。又一次「写入侧标志会撒谎，判据要由被作用对象自证」。
+
+- 主存储 = 钥匙串 `svce=gemini` / `acct=antigravity`，值是
+  `go-keyring-base64:` + base64(JSON{auth_method, id_token, token{...}})。
+- 读序跟 agy 的 `ChainedAuth` 一致：**钥匙串优先**（实测 13/13 次 `effective: keyring`）。
+- ★★ **写钥匙串只能走 argv。** `security -w` 从 stdin 读时**静默截断到 128 字节**
+  （`readpassphrase` 缓冲区），而凭证约 2.2 KB。退出码 0、读回来还带正确前缀，
+  只有 agy 说「你没登录」—— 我的第一版就这么把用户的登录态截没了（靠池里备份复原）。
+  所以 `keyring_write()` **写完必须读回来逐字比**。
+- ★★★ **测试默认 `AGY_KEYRING=0`**（两处 bootstrap 都设）：钥匙串**没有临时目录这种东西**，
+  换 `AGY_TOKEN_FILE` 挡不住，一条用例就能覆盖用户真实的登录态。
+
+#### ② 钥匙串是**被多个常驻 agy 进程并发写的单槽**
+
+用户报「界面说当前是 B，打开 agy 看到的是 A」。本机同时跑着 **5 个** agy 进程
+（最久 6 天）。时间线：
+
+    17:58     switch 到 B，`agy models` 日志证明新进程认到 B（当时 token expiry = 18:23:16）
+    18:23:17  钥匙串 mdat 被改写 ← 某个身份为 A 的常驻 agy 在自己 token 到期时写回了自己
+    18:59     用户开 agy → applyAuthResult: email=A
+
+⇒ **「当前账号」不是我们能维持的状态，只是一个随时会被冲刷的观测值。**
+三方评审（Claude / codex / grok）独立得出同一结论。落地：
+
+- 新增 `agy-rotate live [--json]`：**只读钥匙串**回答"现在到底是谁"。
+  UI 的「当前」徽章由它驱动，`live_seen` 降级为诊断字段。分歧时出琥珀提示并说明原因。
+- `auto` 新增 `live_wanted`：**先兑现用户显式选的号，再谈额度够不够**。
+  此前 `if _score(cur) >= LOW_WATER: return` 会在 A 抢回槽后看到 A 健康就不动 ⇒
+  **静默撤销用户的 switch**，比显示错严重（工具撤销一个明确指令且不出声）。
+
+#### ③ agy 的探针 / 检查 token / 自动切号 —— **三条都不是 codex 那一套**
+
+| | codex | agy |
+|---|---|---|
+| 检查 token | 问 OpenAI「这 token 被作废了吗」 | 刷一次 access_token + 打一次 `fetchAvailableModels`，两步都过才算能用。零消耗 |
+| 探针 | 直接 `POST /responses` | **起一次 `agy -p`** —— agy 只在进程启动时读凭证，没有"指定号发一次请求"这种东西 |
+| 自动切号 | 代理逐请求挑号 | `bin/agy` 在 exec 真身**之前**调 `agy-rotate auto`，开关存池里 |
+
+★★★ **探针不能自己拼 HTTP（实测，别再试）**：直接打
+`v1internal:streamGenerateContent` 恒 **429 RESOURCE_EXHAUSTED**，即使该号额度满格、
+模型 id 取自它自己的 `fetchAvailableModels`、也带上了 `loadCodeAssist` 回的
+`aicode-consumers`。**那个 429 长得和「额度用光了」一模一样** ——
+用它做探针会把"我们拼错了"报成"你的号没额度了"。
+起 agy 真身顺带拿到**精确到 token 的用量**（实测一次 15,195 token / 约 30s），
+比 codex 那边只能拿到整数百分比还清楚。判据同 codex：**模型真吐出字**，不是退出码 0。
+非当值号先切过去再探，**还原放在 `finally`**。
+
+★★ **自动切号开关能做，我曾判断"做不了"并说给用户听过 —— 那个结论是错的。**
+当时的理由是「自动选号发生在 wrapper 里」，那句话没错但结论错了：wrapper 调的是
+`agy-rotate auto`，**而它读池**。全局 `auto_off` + 按号 `rotate_off`，两个都**存反向**
+（缺省 = 参与轮换；正向命名要写迁移，漏迁移的号会静默退出轮换池），恢复时**删键**不写 `False`。
+
+#### ④ 周额度的**归属**：`agy-quota` 打的是"第一个应答的 pid"，不是当值号
+
+多个常驻进程身份不同 ⇒ 那份带「周」的读数属于**那个进程**。实测：卡上
+`user-b` 的「周 98.9%」实际来自 pid 24433（`user-a`，起于 09-07）。
+现在 `agy-quota` 记 `pid_email`（取自 agy 自己日志的 `applyAuthResult:`），
+**归属对不上就不用那份**。同「按 `response_id` 精确 join，不按时间猜」。
+★ `ps -o lstart=` 的日期顺序**跟 locale 走**（本机是日在前），只写一种格式会让归属
+**静默恒空** —— 闸打在 `_parse_lstart` 这个纯函数上。
+
+#### ⑤ 两个"看不见的空"
+
+- **GUI 切不了 agy 号而 codex 可以**：`agy/pool.py` 按 `__file__` 推数据目录，
+  打进 app 后是 `Contents/Resources/scripts/`（空池）⇒ 点「切换」跑的是空池，
+  命令成功、退出码 0、什么也没发生。`spawn_cmd` 补 `AGY_POOL_STORE`。
+  闸从两边解析（打包清单里"默认值来自 `__file__`"的变量必须都被喂到），
+  **当场揪出第二处**：`agy_quota_sampler.py` 与 `scan.py` 对同一本账本推出两个路径。
+- **总览 Gemini 档整块灰**：`colorOf()` 三级链的末端 `PLATFORM_COLORS` 里没有 `agy`
+  ⇒ 落到 `?? "#5b6472"` 那个死灰。同一形态记过一次（MiMo/DeepSeek）。
+
+#### ⑥ 缺一个额度窗口时**画出来并说明为什么**
+
+四处都用 `visibility: hidden` 的同构占位行（为了跨卡对齐），用户看到的是一整行空白。
+改成 `—` + 悬浮说明，高度仍同构。★ **两种缺失的文案刻意不同**：
+agy 缺「周」= 这个号读不到（切过去就能看到）；grok 缺「5h」= **上游根本没有这个窗口**
+（实测 `window_minutes = 10080`，等也没用）。合并成一句话就把两种状态又折叠回同一个值。
+
+#### ⑦ 其余
+
+- 总览按供应商分三档 **Codex / Gemini / Grok**，清单抽到 `codexbar/src/platforms.ts`
+  （主窗分档与菜单栏芯片行**共用一份**）。`Google → Gemini`、`xAI → Grok` 改名，
+  旧 localStorage 值仍然认（否则停在该档的用户下次打开会静默跳回 Codex）。
+  ⚠️ **「AI 用量」页仍是 8 家**，用户明确分开：账号池 = 我有凭证能管的号；用量 = 本机哪些 CLI 落了盘。
+- 菜单栏 **v4 平台 logo 芯片行**（1:1 复刻 `design_handoff_codexbar 11`），
+  一档一份列表、底栏随平台变。logo 走 CSS `mask-image` 一张图覆盖两态、资产内置。
+  ⚠️ 与稿的两处刻意偏离：Grok 档**不给**「检查 token / 探针」（稿假设 grok 有自己的池，
+  而本机 grok 单号只读、探针属 codex）；Tab 上的数字是**全平台总数**（用户当面否了稿的"当前档"）。
+- 托盘标题**去掉** grok 的 `Gxx%`（用户点名）；同时收编另一会话已在线上跑着的
+  `grok-quota-sampler`（三条判据全过：自带 29 条测试、`cargo check` 干净、线上已在跑）。
+- 新增 `<store>/agy.log` 运行日志：`switch`/`auto`/`quota`/`health`/`probe` 逐号留痕，
+  **成败与用量都写**；`read_logs` 收它，日志页把 `✗` 行染红。
+- 「AI用量信息」补回交接稿 §1/§5 的**数据源副标**与**请求数** KPI
+  （`grandRounds` 一直算着没人消费 —— 后端有值 ≠ 已披露）。
+- 菜单栏点账号行**不再跳到 AI 用量**：三档统一成「点行 = 开主界面的总览并停在这一档」。
+- Gemini 卡补 `⌘N` 角标，且 ⌘1~⌘9 **真的按档分流**（角标是承诺，不接线就不该画）。
+
+#### 被推翻/撤回的
+
+- ~~「Gemini 档不许有 ProbeButton」~~ —— 当时探针只有 codex 一套。agy 有了自己的之后，
+  那条闸锁死的是一个已不成立的前提，已改写成「不许跑 **codex 的那条** probe」。
+- ~~「agy 绝不能长出切换入口」~~ —— 前提是"agy 切不了号"，打通之后作废。
+- ~~「菜单栏至少装得下 4 个账号」~~ —— 用户当场撤回（「这个需求不要了」），代码与闸一并回退。
+- ~~直接打 `streamGenerateContent` 做探针~~ —— 恒 429，见 ③。
 
 ### B43 · 四方评审 14 条：①-⑥ 全修，⑦-⑭ 判为不做 — 2026-09-12 ✅
 

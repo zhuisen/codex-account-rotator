@@ -170,6 +170,13 @@ loopback RPC,**不联网、不消耗配额**)。没装那家 CLI 的机器上**�
 | `traffic/discover.py` | **数据源体检**(`--json`):找本机还有哪些 AI 把用量落了盘,并现场验算它的 token 口径。纯本地只读、不联网、不碰凭证,SQLite 一律 `mode=ro`,**只出报告不自动启用**(接一家的实质是写解析器) |
 | `claude/claude_tokens.py` | ⚠️ 只统计 Claude 的旧扫描器,能力已被 `traffic/scan.py` 完全覆盖(v0.7.0 起 app 不再调用)。保留仅作 CLI |
 | `scripts/install-launchd.sh` | **生成并加载 3 个 launchd 服务**(autosync/quotad/proxy)。★ keepalive(04:30)与 refreshquota(07:00)已于 2026-08-29 按需取消 —— 前者职责由代理接手(覆盖面见上表①),后者与 quotad 的 300s 全池扫描重复。两个 CLI 子命令仍可手动跑。生成而非提交成文件:plist 内嵌绝对路径,提交的副本换台机器就是错的,且会静默漂移(旧的 `launchd/*.plist` 就漂到了写死 `/usr/bin/python3`)。★脚本会**解析并钉住 OpenSSL 版的 python3**,见「维护约定」 |
+| `agy-rotate` | ★ **agy(Antigravity) 账号池 CLI** —— `login` / `list` / `quota` / `switch` / `pick` / `auto` / `live` / `health` / `probe` / `rotate` / `auto-switch` / `rename` / `remove`。与 codex 池**机制完全不同**：agy 只在**进程启动时**读凭证，所以换号只对**下一次启动的 agy** 生效。★★★ 登录态在 **macOS 钥匙串**（`svce=gemini`/`acct=antigravity`），那个 `antigravity-oauth-token` 文件只是钥匙串写失败时的兜底 |
+| `agy/pool.py` | agy 池的凭证与额度层（钥匙串读写、OAuth 刷新、`fetchAvailableModels` 按账号取额度）。OAuth client 从**本机 agy 二进制**现取，**绝不入库**（本仓公开） |
+| `auth/agy/`(gitignored) | agy 每号凭证 `<sub>.json`(0600) |
+| `.agy-pool.json`(gitignored) | agy 池（账号、额度、`live_seen`/`live_wanted`、`auto_off`/`rotate_off`、缓存的 OAuth client） |
+| `agy.log`(gitignored) | agy 侧**运行日志**：`switch`/`auto`/`quota`/`health`/`probe` 逐号留痕，**成败与用量都写**。CodexBar 日志页读它，`✗` 行染红 |
+| `grok-quota-sampler` | grok 周额度**水位采样器**（grok 进程活着时约 15s 一次，只 GET、**不刷 token**）。单实例锁 + 自我终结 |
+| `codexbar/src/platforms.ts` | ★ **账号池平台清单的单一数据源**（codex / gemini / grok）。主窗分档 Tab 与菜单栏 logo 芯片行共用。⚠️ 这**不是**「AI 用量」那张 8 家的表 —— 前者是"我有凭证能管的号"，后者是"本机哪些 CLI 落了盘" |
 | `auth/`(gitignored) | 每号凭证槽位 `<account_id>.json`(0600) |
 | `state.json`(gitignored) | 池状态(slots/active/last_aid/last_proxy_ts) |
 | `docs/INSTALL.md` | 安装指南(两半分装/数据源/卸载/自检) |
@@ -248,6 +255,19 @@ codex-rotate probe plus5 --model gpt-5.5 --effort low
 ## 安全边界(红线)
 
 全 **loopback(127.0.0.1)**、**单人**、**只轮你自己的号**、保活**串行不并发**、**不对外共享 Base URL**。守住这些,风险与你手动切号同级。⚠️ 用订阅 auth 做池化自动化偏离 OpenAI 官方推荐(官方推 API key),个人自用属灰区。
+
+**三家的 refresh token 规矩完全不同,照搬任何一边都会杀号:**
+
+| | 能不能刷 | 为什么 |
+|---|---|---|
+| codex(池中**非活跃**号) | 可以 | refresh_token 一次性轮换,但池里那份是我们独占的 |
+| codex(**active** 号) | ★★★ **绝不** | codex 原生刷新器不持我们的 flock,插手 = 两边互相作废(B7/B8/B14 连环杀号) |
+| grok | ★★★ **绝不** | `~/.grok/auth.json` 与 grok CLI **共用同一份**,它单次有效,我们一刷 CLI 立刻掉线。也**绝不取它的 `.lock`** |
+| agy | **可以** | 实测 Google 默认**不轮换** refresh_token(响应里没有那个字段)⇒ 刷我们这份不作废 agy 手里那份 |
+
+★ **两个会花钱的控件**(全 app 仅此二者,都带琥珀 + ⚡ + 两段确认):
+`codex-rotate probe`(扣 **codex** 周额度,单次 <1%)与 `agy-rotate probe`(起一次 `agy -p`,
+扣 **agy 自己**的额度,实测约 15k token / 30s)。**两者扣的不是同一家的钱,界面上不许混放。**
 
 ## 维护约定
 
