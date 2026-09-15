@@ -99,6 +99,10 @@ AGY_BIN = Path(os.environ.get("AGY_REAL", str(Path.home() / ".local" / "bin" / "
 TOKEN_HOST, TOKEN_PATH = "oauth2.googleapis.com", "/token"
 API_HOST = "cloudcode-pa.googleapis.com"
 MODELS_PATH = "/v1internal:fetchAvailableModels"
+#: ★★★ 按账号读**完整**额度摘要（含周窗口）。2026-09-15 从 agy 二进制
+#:   `strings` 里挖出来的，与本地 RPC `…/RetrieveUserQuotaSummary` 并列摆着。
+#:   见 `fetch_quota` 的说明 —— 它推翻了本仓「周窗口非当值号读不到」那个结论。
+QUOTA_SUMMARY_PATH = "/v1internal:retrieveUserQuotaSummary"
 #: ★★ 这三个头是**必需**的，不是装饰：只带 Bearer 会 403（2026-09-13 实测）。
 ANTIGRAVITY_HEADERS = {
     "User-Agent": "antigravity/1.11.5 windows/amd64",
@@ -465,17 +469,28 @@ def expired(cred, skew=120):
 
 # ── 额度 ──────────────────────────────────────────────────────────────
 def fetch_quota(access_token):
-    """-> (`{"gemini"|"claude": {remaining, reset, models:[…]}}`, 错误说明)。
+    """-> (额度摘要的 `groups` 列表, 错误说明)。
 
-    ★ 分组判据是 **(remainingFraction, resetTime) 这一对**，不是模型名：
-      服务端不下发组名，而同一个池里的模型这两个值**逐字相同**。
-      按模型名前缀猜分组会在下一次改名时静默错位。
-    ★ 没有 `resetTime` 的那一组（`tab_*` 之类）**不是额度池，是不限量** ——
-      把它算进"剩余最少"的比较里，选号会永远挑不中真正空闲的号。
+    ★★★ 走 `retrieveUserQuotaSummary`，**不再走 `fetchAvailableModels`**（2026-09-15）。
+      后者每个号只回 2 个桶（一个 5h、一个 `resetTime=None` 的不限量），**没有周窗口**；
+      前者按账号返回完整摘要（`gemini-weekly` / `gemini-5h` / `3p-weekly` / `3p-5h`），
+      而且**与本机 loopback RPC 同形同源** —— 前端那套 `AgySnapshot` 可以直接吃。
+
+    ⚠️ 在这之前本仓一直写着「周窗口只有本机 RPC 有，非当值号结构性读不到」——
+      **那是错的**。它建立在"`fetchAvailableModels` 只回 5h"这**一个**观测上，
+      而从来没去找过第二个端点。正是 `CLAUDE.md` §6 那条最贵的错：
+      **只看默认响应就断言"接口没有这个能力" = 假阴性**。
+      端点是从 `agy` 二进制里 `strings` 出来的，与本地 RPC 方法名并列摆着。
+
+    ★ 顺带干掉一个启发式：旧实现按 `(remainingFraction, resetTime)` 分桶、再"按成员数最多
+      的那组是 gemini"来猜组名。新端点自带 `displayName` 与 `bucketId`，**组名不再靠猜**。
+
+    ★ 失败返回 `(None, 说明)`；**绝不返回空结构** —— 空会被上层当成"额度是 0"，
+      而 0 是"用光了"的合法值。这条降级契约一个字没变。
     """
     try:
         c = HTTPSConnection(API_HOST, timeout=TIMEOUT)
-        c.request("POST", MODELS_PATH, body="{}",
+        c.request("POST", QUOTA_SUMMARY_PATH, body="{}",
                   headers={"Authorization": "Bearer " + access_token,
                            "Content-Type": "application/json", **ANTIGRAVITY_HEADERS})
         r = c.getresponse()
@@ -486,21 +501,30 @@ def fetch_quota(access_token):
     if r.status != 200:
         return None, "额度 HTTP %s: %s" % (r.status, raw[:120].decode("utf-8", "replace"))
     try:
-        models = (json.loads(raw).get("models") or {})
+        groups = (json.loads(raw).get("groups") or [])
     except ValueError:
         return None, "额度响应不是 JSON"
-    buckets = {}
-    for name, m in models.items():
-        q = (m or {}).get("quotaInfo") if isinstance(m, dict) else None
-        if not q or q.get("resetTime") is None:
+    if not groups:
+        # ★ 200 但没有分组 = 上游形状变了。**当失败处理** —— 静默返回空会被画成
+        #   "额度全是 0"，而那是一个看着很合理的谎。
+        return None, "额度响应里没有 groups（上游形状可能变了）"
+    return groups, ""
+
+
+def quota_by_group(groups):
+    """把摘要折成旧的 `{组名: {remaining, reset}}` —— 选号与 CLI 打印仍吃这个形状。
+
+    ★ 它是 `groups` 的**投影**，不是第二份事实：只在这里算一次，
+      所以不会出现"摘要说 97%、选号按 100% 排"这种分叉。
+    ★ 每组取**最紧的那个桶**（与卡片、Hero 同一条口径：取第一个桶等于把真正的约束藏起来）。
+    """
+    out = {}
+    for g in groups or []:
+        buckets = [b for b in (g.get("buckets") or [])
+                   if isinstance(b.get("remainingFraction"), (int, float))]
+        if not buckets:
             continue
-        k = "%s|%s" % (q.get("remainingFraction"), q.get("resetTime"))
-        b = buckets.setdefault(k, {"remaining": q.get("remainingFraction"),
-                                   "reset": q.get("resetTime"), "models": []})
-        b["models"].append(name)
-    # ★ 成员最多的那组是 gemini（实测 20 vs 3）。**按成员数判，不按模型名** ——
-    #   模型名每隔几周就换一批，而"哪一组更大"是结构性的。
-    ordered = sorted(buckets.values(), key=lambda b: -len(b["models"]))
-    names = ["gemini", "claude", "other"]
-    return {names[i] if i < len(names) else "g%d" % i: b
-            for i, b in enumerate(ordered)}, ""
+        tight = min(buckets, key=lambda b: b["remainingFraction"])
+        name = "gemini" if str(g.get("displayName", "")).lower().startswith("gemini") else "claude"
+        out[name] = {"remaining": tight["remainingFraction"], "reset": tight.get("resetTime")}
+    return out

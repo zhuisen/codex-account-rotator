@@ -13,8 +13,8 @@
 
 ## ★ 两种缺失的文案**必须不同**，这是这一组闸真正在守的东西
 
-    agy 缺「周」  = **这个号读不到**（云端按账号那条只给 5h；周窗口只有本机 RPC 有，
-                    而那条只看得到当前登录的号）→ 切过去再刷新就能看到
+    agy 缺某格   = **这一次没取到**（2026-09-15 起走 `retrieveUserQuotaSummary`，
+                    每个号按账号直接拿到完整摘要含周窗口）→ 点 ↻ 重取
     grok 缺「5h」 = **上游根本没有这个窗口**（实测 `window_minutes = 10080`，只有周）
                     → 永远看不到，等也没用
 
@@ -69,7 +69,7 @@ class NoWindowRowIsSilentlyBlank(unittest.TestCase):
     #: ★ 判据因此改成「**这一行上有没有一个能读的结论**」，而不是某个字符。
     #:   上一版钉的是字面 `↻—`，于是把 `—` 换成更清楚的中文时**闸自己红了**，
     #:   而语义是变好的 —— 逐字匹配守的是"代码长什么样"，不是"用户看不看得懂"。
-    SAYS = {"AgyCard": ("用过才有", "这次没读到"), "AgyRow": ("↻—",)}
+    SAYS = {"AgyCard": ("这次没读到",), "AgyRow": ("↻—",)}
 
     def test_every_component_can_render_a_dash(self):
         """★ 正面：四处都必须有那个缺失行。只验"没有隐藏行"的话，
@@ -88,9 +88,13 @@ class NoWindowRowIsSilentlyBlank(unittest.TestCase):
         for name, p in TARGETS.items():
             with self.subTest(component=name):
                 c = code(p)
-                anchor = next(w for w in self.SAYS[name] if w in c)
-                i = c.index(anchor)
-                seg = c[max(0, i - 900):i + 60]
+                # ⚠️ 锚点要落在**渲染那一段**里。文案同时出现在 `missTitle` 里，
+                #   从文件开头 `index()` 会命中那一处，而它离 `barTrack` 很远 ⇒ 假红。
+                #   所以先切到行渲染入口之后再找（本仓「命中了但命中错了」的又一次）。
+                base = c.index(self.ROW_ENTRY[name])
+                anchor = next(w for w in self.SAYS[name] if w in c[base:])
+                i = base + c[base:].index(anchor)
+                seg = c[max(base, i - 900):i + 60]
                 self.assertIn("barTrack", seg, f"★★ {name} 缺失行没有条槽 —— 高度对不齐")
 
 

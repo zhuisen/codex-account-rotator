@@ -732,7 +732,61 @@ Fable 评审 40 条 + 四方评审 9 条，全部处理完。17 个 commit 未�
 `test_relay_day_models_budget` / `test_p2_last_batch`，以及 `?relay=sparse` / `?relay=mixed`
 两份夹具（**稠密夹具下新旧实现结果完全一样，那些闸恒绿**）。
 
---------
+---------
+
+### B53 · 周额度「非当值号读不到」是**错的** —— 端点一直都在，我没找 — 2026-09-15 ✅
+
+用户第二次追问：「我现在 gemini 第一个号的周额度还是没看到是什么内容」。
+
+#### 我错在哪
+
+B49/B52 里我反复写：「周窗口只有本机 loopback RPC 有，非当值号**结构性**读不到」，
+还据此做了 `weekly_seen`（把当值时读到的记下来）、把卡片文案改成「用过才有」。
+
+**那个前提是错的。** 它建立在**一个观测**上 —— `fetchAvailableModels` 每个号只回 2 个桶
+（一个 5h、一个 `resetTime=None` 的不限量）—— 而我**从来没去找过第二个端点**。
+
+端点就摆在 `agy` 二进制的 `strings` 里，与本地 RPC 的方法名**并排**：
+
+    本地  /exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary
+    云端  /v1internal:retrieveUserQuotaSummary          ← 按账号，吃 Bearer
+
+实测两个号都 HTTP 200，各自返回自己的完整摘要：
+
+    sam  gemini-weekly 98.78%   gemini-5h 100%
+    dbk  gemini-weekly 97.33%   gemini-5h 100%     ← 用户要看的就是这个
+
+这正是 `CLAUDE.md` §6 那条最贵的错：**只看默认响应就断言"接口没有这个能力" = 假阴性。**
+上一次是中转站的 `?start_date=`，当时用户说「你多看看」。**这次是用户追问两次才逼出搜索。**
+
+#### 改了什么
+
+- `fetch_quota` 换成 `retrieveUserQuotaSummary`，返回**完整 groups**（与本机 RPC 同形同源）。
+- 顺带干掉一个启发式：旧实现按 `(remainingFraction, resetTime)` 分桶、再"成员最多的那组是
+  gemini"来猜组名。新端点自带 `displayName` / `bucketId`，**组名不再靠猜**。
+- 池里存 `quota_summary`（完整）+ `quota`（旧形状，选号与 CLI 打印仍吃它）。
+  后者是前者的**投影**（`quota_by_group`），只算一次 —— 不会分叉成"摘要说 97%、选号按 100% 排"。
+- 前端 `toSnapshot` 直译摘要，每个号都有自己的 5h **与周**。
+- ★ **`weekly_seen` 整个删除**（活了几小时）。它存在的唯一理由是那个错误前提；
+  留着就是「没人渲染的骨架」，而且会变成第二份事实，迟早在某条失败路径上分叉。
+  池文件里的残留也一并清掉。
+- 卡片文案从「用过才有」退回「这次没读到」——**换了数据源，页面上的话必须跟着换**（§5d）。
+
+#### 闸
+
+`QuotaGroupingKeysOffTheNumbersNotTheNames` 整类重写为 `TheQuotaComesFromTheSummaryEndpoint`，
+并**钉住旧启发式不许回来**（两条互相矛盾的分组逻辑并存比只有旧的更糟）。
+`test_the_weekly_row_is_never_faked` 的判据也跟着换：窗口现在**全部直译上游**，
+所以判据变成"不许写死窗口类型、不许给额度值兜底"——
+上游 `remainingFraction` 的缺省恰好是 1.0，「没有」和「满格」仍然只隔一个默认值。
+
+⚠️ `test_fetch_quota_returns_none_not_empty_on_http_error` 用的是**定长切片** `[i:i+1200]`，
+换端点后 docstring 变长，真正的 `return` 被切在窗口外 ⇒ 假红。改成切到下一个 `def`。
+（§7.-1 第 3 条：定长切片会滑出被测范围 —— 今天又踩一次。）
+
+**测试 1292 → 1294 passed** · `tsc -b` 干净 · `sweep.py` **16**（基线）。
+
+--
 
 ### B52 · Gemini「一个 USE，一个当前」—— 排名时拿了两把不同的尺 — 2026-09-15 ✅
 

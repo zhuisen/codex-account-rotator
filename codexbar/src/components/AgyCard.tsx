@@ -134,15 +134,11 @@ export default function AgyCard({ t, color, snap, busy, err, disabled, winSlots,
    *   `weekly_seen`（B49），此后这一格显示的是那次的真实读数（带 `~` 标龄）。
    *   所以这句话描述的是一个**有终点**的状态，不是一条永久免责。
    */
-  const missTitle = (label: string, cur?: boolean) =>
-    cur
-      ? `${label} 窗口这次没读到`
-      // 云端 `fetchAvailableModels` 只返回 5h；周窗口只在本机 loopback RPC 里，
-      // 而那条**只看得到当前登录的那个号**。所以非当值号结构上就缺这一格。
-      : `${label} 窗口只有**当前登录**的号读得到（本机 RPC）——云端按账号那条结构上没有周`
-        + `（2026-09-15 实测：每个号 27 个模型只有 2 个桶，一个 5h、一个不限量）。`
-        + `★ 这个号**下次当值时会自动记下来**，之后这里就会显示那次的真实读数（带 ~ 标龄）。`
-        + `想立刻看到：切到它、跑一次 agy。`;
+  /** 这一格为什么读不到。★ 说清**原因**和**下一步**，不是只说"没有"。 */
+  const missTitle = (label: string, _cur?: boolean) =>
+    `${label} 窗口这次没读到 —— 点右上角 ↻ 重取一次。`
+    + `（2026-09-15 起每个号都按账号直接读完整摘要，含周窗口；`
+    + `所以这里为空**不再是"非当值号"那种结构性缺失**，就是这一次没取到。）`;
 
   return (
     <div onClick={onSelect ?? onOpen} style={{
@@ -285,7 +281,7 @@ export default function AgyCard({ t, color, snap, busy, err, disabled, winSlots,
                 <div style={{ flex: 1, height: Z.bar, borderRadius: 2, background: t.barTrack }} />
                 <span style={{ fontSize: Z.eta, color: t.muted, fontFamily: MONO,
                                whiteSpace: "nowrap" }}>
-                  {isCurrent ? "这次没读到" : "用过才有"}</span>
+                  "这次没读到"</span>
               </div>
             ) : (
               // ★★★ `seen_at` = 这一格是**上次当值时看到的**，不是现在读到的

@@ -99,15 +99,16 @@ class TheMissingWeeklySaysWhatToDo(unittest.TestCase):
     """
 
     def test_the_inline_text_is_actionable(self):
-        self.assertIn("用过才有", CARD, "★ 行上那句话还是在描述内部状态")
+        """★ 2026-09-15 端点换代之后，缺一格**不再是结构性的** —— 它就是这一次没取到。
+        文案跟着事实走（本仓 §5d：换了数据源，页面上的话必须跟着换）。"""
+        self.assertIn("这次没读到", CARD)
         self.assertNotIn(">非当值号<", CARD)
+        self.assertNotIn(">用过才有<", CARD, "★ 旧前提的文案还留着 —— 它描述的事实已经不存在")
 
-    def test_the_tooltip_says_it_will_fill_in(self):
+    def test_the_tooltip_says_what_to_do(self):
         i = CARD.index("const missTitle")
-        seg = CARD[i:i + 900]
-        self.assertIn("下次当值时会自动记下来", seg,
-                      "★ 没说这一格会自己补上 —— 会被当成永久免责")
-        self.assertIn("切到它", seg, "★ 没给「想立刻看到」的那条路")
+        seg = CARD[i:i + 700]
+        self.assertIn("↻", seg, "★ 没给下一步动作")
 
 
 if __name__ == "__main__":

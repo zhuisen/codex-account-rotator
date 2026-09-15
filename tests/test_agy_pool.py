@@ -246,9 +246,13 @@ class FailureNeverRendersAsZero(unittest.TestCase):
                       "★★★ 失败时写了数字 —— 与真的 0% 分不开")
 
     def test_fetch_quota_returns_none_not_empty_on_http_error(self):
+        """⚠️ 窗口从 1200 放宽到函数体全长（2026-09-15）：换端点后 docstring 变长，
+        固定长度切片把真正的 `return` 切在外面了 —— 那是**定长切片**的老坑
+        （`CLAUDE.md` §7.-1 第 3 条：定长切片会滑出被测范围）。改成切到下一个 `def`。"""
         i = self.SRC.index("def fetch_quota(")
-        seg = self.SRC[i:i + 1200]
-        self.assertIn("return None, \"额度 HTTP", seg)
+        seg = self.SRC[i:self.SRC.index("\ndef ", i + 10)]
+        self.assertIn('return None, "额度 HTTP', seg, "★★ 非 200 没有返回 None")
+        self.assertIn('return None, "取额度失败', seg, "★★ 网络异常没有返回 None")
 
     def test_an_unknown_account_sorts_last_not_first(self):
         """★★ 取不到额度的号 `_score` 必须是**负数**。返回 0 会让它排在"用光的号"里，
@@ -439,34 +443,73 @@ class AutoSwitchIsFailOpenAndSticky(unittest.TestCase):
         self.assertIn('"switch", want', seg, "★ 指定号走的不是 switch")
 
 
-class QuotaGroupingKeysOffTheNumbersNotTheNames(unittest.TestCase):
-    """★ 服务端**不下发组名**，同一池里的模型 `(remainingFraction, resetTime)` 逐字相同。
-    按模型名前缀猜分组，会在下一次改名时静默错位。"""
+class TheQuotaComesFromTheSummaryEndpoint(unittest.TestCase):
+    """★★★ **端点换代了**（2026-09-15）：`fetchAvailableModels` → `retrieveUserQuotaSummary`。
+
+    ## 为什么换：旧结论是错的，而且错得很贵
+
+    此前本仓写着「周窗口只有本机 loopback RPC 有，非当值号**结构性**读不到」，
+    并据此在 `toSnapshot` 里只造 5h 那一格、在卡片上画「非当值号」。
+
+    那个结论建立在**一个观测**上 —— `fetchAvailableModels` 每个号只回 2 个桶
+    （一个 5h、一个 `resetTime=None` 的不限量）—— 而**从来没去找过第二个端点**。
+    正是 `CLAUDE.md` §6 记着的那条最贵的错：
+    **只看默认响应就断言"接口没有这个能力" = 假阴性**（上一次是中转站的 `?start_date=`）。
+
+    端点就摆在 `agy` 二进制的 `strings` 里，与本地 RPC 方法名并列：
+        本地  /exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary
+        云端  /v1internal:retrieveUserQuotaSummary          ← 按账号，吃 Bearer
+    实测两个号都 HTTP 200，各自返回自己的 `gemini-weekly`（98.78% / 97.33%）。
+
+    ⇒ 用户追问了**两次**「第一个号的周额度还是没看到」才逼出这次搜索。
+      判据因此不只钉"用了新端点"，还钉住**旧启发式不许回来**。
+    """
 
     SRC = (ROOT / "agy" / "pool.py").read_text(encoding="utf-8")
 
-    def test_groups_are_keyed_by_the_value_pair(self):
+    def test_it_calls_the_summary_endpoint(self):
+        self.assertIn('QUOTA_SUMMARY_PATH = "/v1internal:retrieveUserQuotaSummary"', self.SRC)
         i = self.SRC.index("def fetch_quota(")
-        seg = self.SRC[i:]
-        self.assertIn('"%s|%s" % (q.get("remainingFraction"), q.get("resetTime"))', seg)
+        self.assertIn("QUOTA_SUMMARY_PATH", self.SRC[i:i + 1600],
+                      "★★★ fetch_quota 没用那个能拿到周窗口的端点")
 
-    def test_the_unlimited_bucket_is_dropped(self):
-        """★★ 没有 `resetTime` 的那组（`tab_*` 之类）**不是额度池，是不限量**。
-        把它算进"剩余最少"的比较里，选号会永远挑不中真正空闲的号。"""
-        i = self.SRC.index("def fetch_quota(")
-        self.assertIn('q.get("resetTime") is None', self.SRC[i:], "★ 不限量的那组没有剔除")
+    def test_the_name_guessing_heuristic_is_gone(self):
+        """★★ 旧实现按 `(remainingFraction, resetTime)` 分桶、再"成员最多的那组是 gemini"。
+        新端点自带 `displayName` 与 `bucketId` —— **组名不再靠猜**。
+        留着那套启发式 = 两条互相矛盾的分组逻辑并存。"""
+        code = re.sub(r"#[^\n]*", "", re.sub(r'"""[\s\S]*?"""', "", self.SRC))
+        self.assertNotIn('"%s|%s" % (q.get("remainingFraction")', code,
+                         "★★ 按数值对分桶的旧启发式又回来了")
+        self.assertNotIn('ordered = sorted(buckets.values()', code,
+                         "★★ 「成员最多的那组是 gemini」那条猜测又回来了")
 
-    def test_the_required_headers_are_present(self):
-        """★★ 只带 Bearer → **403**（实测）。这三个头是必需的，不是装饰。"""
+    def test_the_required_headers_are_still_sent(self):
+        """★★ 只带 Bearer → **403**（实测）。换端点**不换**这三个头。"""
         for h in ("User-Agent", "X-Goog-Api-Client", "Client-Metadata"):
             with self.subTest(header=h):
                 self.assertIn(h, self.SRC)
         i = self.SRC.index("def fetch_quota(")
-        self.assertIn("**ANTIGRAVITY_HEADERS", self.SRC[i:i + 900], "★ 请求没带那三个头")
+        self.assertIn("**ANTIGRAVITY_HEADERS", self.SRC[i:i + 1600], "★ 请求没带那三个头")
 
+    def test_an_empty_groups_list_is_treated_as_failure(self):
+        """★★★ 200 但没有 `groups` = 上游形状变了，**当失败处理**。
 
-if __name__ == "__main__":
-    unittest.main()
+        静默返回空会被上层画成"额度全是 0" —— 而 0 是"用光了"的合法值，
+        用户没有第二个办法分辨。这条降级契约换端点也不能松。
+        """
+        i = self.SRC.index("def fetch_quota(")
+        seg = self.SRC[i:i + 2200]
+        self.assertIn("if not groups:", seg, "★★★ 空 groups 没有当失败处理")
+
+    def test_the_legacy_shape_is_a_projection_not_a_second_truth(self):
+        """★ 选号与 CLI 打印仍吃旧形状 `{组名: {remaining, reset}}`。
+        它必须是**同一份数据的投影**（`quota_by_group`），只算一次 ——
+        两处各算一次迟早分叉成"摘要说 97%、选号按 100% 排"。"""
+        self.assertIn("def quota_by_group(groups):", self.SRC)
+        i = self.SRC.index("def quota_by_group(")
+        seg = self.SRC[i:i + 900]
+        self.assertIn("min(buckets", seg,
+                      "★ 投影没取最紧的那个桶 —— 会把真正的约束藏起来")
 
 
 class TheGoogleTabShowsThePoolNotAReadOnlyCard(unittest.TestCase):
@@ -530,17 +573,19 @@ class TheGoogleTabShowsThePoolNotAReadOnlyCard(unittest.TestCase):
         """
         hook = (ROOT / "codexbar" / "src" / "hooks" / "useAgyPool.ts").read_text(encoding="utf-8")
         i = hook.index("function toSnapshot(")
-        seg = hook[i:hook.index("\n}", i)]
-        seg = re.sub(r"//[^\n]*", "", seg)          # ★ 剥注释：说明里正解释着这条规则
-        self.assertIn('window: "5h"', seg)
-        if '"weekly"' in seg:
-            self.assertIn("weekly_seen", seg,
-                          "★★★ 造了周窗口却不是来自 `weekly_seen` —— 那就是凭空造")
-            self.assertIn("seen_at", seg,
-                          "★★★ 周窗口没带 `seen_at` —— 它会冒充成新鲜读数")
-            self.assertNotRegex(
-                seg, r"remaining_percent:\s*(b\.remaining_percent\s*(\?\?|\|\|)|100|1\b)",
-                "★★★ 周窗口的数值有默认值 —— 「没有」会从这里变成「满格」")
+        seg = re.sub(r"//[^\n]*", "", hook[i:hook.index("\n}", i)])
+        # ★ 2026-09-15 起窗口**全部来自上游摘要**（`retrieveUserQuotaSummary`），
+        #   前端一格都不造。所以判据变成：窗口值只能直译，不许有任何兜底。
+        self.assertIn("a.quota_summary", seg, "★★★ 不再从上游摘要取窗口了")
+        self.assertIn("b.window", seg, "★ 窗口类型不是直译上游的")
+        self.assertNotRegex(
+            seg, r'window:\s*"(5h|weekly)"',
+            "★★★ 前端又在写死窗口类型 —— 那是在造上游没说过的事实")
+        self.assertNotRegex(
+            seg, r"remainingFraction\s*(\?\?|\|\|)\s*\d",
+            "★★★ 额度值有默认值 —— 上游缺省恰好是 1.0，「没有」会从这里变成「满格」")
+        self.assertIn('typeof b.remainingFraction === "number"', seg,
+                      "★★ 没有过滤掉缺额度的桶 —— undefined 会被算成 NaN 或 0")
 
     def test_the_local_rpc_snapshot_needs_proof_of_ownership(self):
         """★★★ **这条 2026-09-13 被推翻并改写过，旧判据是错的。**

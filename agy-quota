@@ -410,76 +410,12 @@ def _note_anchors(out):
         return
 
 
-def _pool_mod():
-    """按路径载 `agy/pool.py`（同 `_quota_anchors_mod` 的范式）。取不到返回 None，**不抛**。"""
-    import importlib.util
-    p = Path(__file__).resolve().parent / "agy" / "pool.py"
-    try:
-        spec = importlib.util.spec_from_file_location("agy_pool_q", p)
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        return mod
-    except Exception:                                 # noqa: BLE001
-        return None
-
-
-def _remember_weekly(out):
-    """把**这次读到的周窗口**记到它所属的那个账号头上（`weekly_seen`）。
-
-    ## 为什么需要（2026-09-15 用户实报：「两个号一个有周额度，一个没有，这就是问题」）
-
-    周窗口**只有本机 loopback RPC 有**，而那条打的是"第一个应答的 agy 进程"，
-    那个进程只有一个身份。云端按账号那条（`fetchAvailableModels`）**结构上就没有周** ——
-    这不是推断，是当天实测：两个号各 27 个模型、**各只有 2 个桶**
-    （一个 5h、一个 `resetTime=None` 的不限量），**没有任何周桶**。
-
-    所以「另一个号的周额度」不可能现取。但它**曾经可以读到** —— 那个号当值的时候。
-    本仓 §7.0b：**「这次读不到」不许覆盖「上次读到过」**。以前那一格直接画空，
-    等于把"我们知道但现在取不到"降级成"从来不知道"，而这两件事差着一个真实的数字。
-
-    ★ 记的是**观测**不是现值，所以必带 `at`；UI 按它标龄并降级显示，绝不冒充新鲜读数。
-    ★ 写在这里而不是前端：这是唯一同时握着「读数」和「它属于谁」（`pid_email`）的地方。
-      前端只有快照，判不了归属；让它去写就是把归属判断复制一份出去。
-    ★ **只在 `available` 且归属明确时写**。取不到的时候一个字都不动 —— 那正是这条规则本身。
-    """
-    try:
-        if not out.get("available"):
-            return
-        email = out.get("pid_email")
-        q = out.get("quota")
-        if not email or not isinstance(q, dict):
-            return
-        # 取每组的 weekly 桶。★ 判 `window == "weekly"`，不按 bucket_id 前缀猜名字。
-        weekly = {}
-        for g in q.get("groups") or []:
-            for b in g.get("buckets") or []:
-                if b.get("window") != "weekly" or b.get("remaining_percent") is None:
-                    continue
-                weekly[b.get("bucket_id") or (g.get("name") or "?")] = {
-                    "remaining_percent": b.get("remaining_percent"),
-                    "reset_at": b.get("reset_at"),
-                    "group": g.get("name"),
-                }
-        if not weekly:
-            return
-        mod = _pool_mod()
-        if mod is None:
-            return
-        with mod._lock(mod.POOL):
-            pool = mod.load()
-            accs = (pool or {}).get("accounts") or {}
-            hit = [s for s, a in accs.items()
-                   if (a or {}).get("email") and a["email"] == email]
-            if len(hit) != 1:
-                # 认不出是谁 / 撞了两个 ⇒ **不写**。宁可少一格，也不把 A 的数字记到 B 头上。
-                return
-            accs[hit[0]]["weekly_seen"] = {"at": int(out.get("fetched_at") or time.time()),
-                                           "buckets": weekly}
-            mod.save(pool)
-    except Exception:                                 # noqa: BLE001
-        # 记不下来不该让额度读取本身失败 —— 它只是一个附带的观测留痕。
-        pass
-
+# ⚠️ `_remember_weekly()` 2026-09-15 **整个删除**（B49 加的，活了几小时）。
+#   它存在的唯一理由是「周窗口只有当值号读得到，所以要把读到过的记下来」——
+#   而那个前提当天就被推翻了：`retrieveUserQuotaSummary` 按账号直接给完整摘要。
+#   ★ 留着它就是本仓禁止的「没人渲染的骨架」，而且会变成**第二份事实**：
+#     池里同时存"记忆里的周"和"现读的周"，迟早在某一次失败路径上分叉。
+#   要恢复请从 git 历史取（commit 40eca67）。
 
 def main(argv):
     prev = None
@@ -540,7 +476,6 @@ def main(argv):
         out["last_good"] = carried
 
     _note_anchors(out)
-    _remember_weekly(out)
     json.dump(out, sys.stdout, ensure_ascii=False)
     sys.stdout.write("\n")
     return 0

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { emit, listen } from "@tauri-apps/api/event";
-import type { AgyBucket, AgyQuota, AgySnapshot } from "../agy";
+import type { AgyQuota, AgySnapshot } from "../agy";
 
 /**
  * 「现在钥匙串里是谁」的**跨 webview 广播**。
@@ -47,10 +47,17 @@ export interface AgyPoolAccount {
    * 所以非当值号的周额度不可能现取 —— 但它当值时读到过，那个数字是真的。
    * §7.0b：「这次读不到」不许覆盖「上次读到过」。
    */
-  weekly_seen?: {
-    at: number;
-    buckets: Record<string, { remaining_percent: number; reset_at: number | null; group?: string | null }>;
-  } | null;
+  /**
+   * ★★★ **完整额度摘要**（含周窗口），由 `agy-rotate quota` 走
+   * `/v1internal:retrieveUserQuotaSummary` 按账号取回（2026-09-15 起）。
+   *
+   * 形状与本机 loopback RPC 的快照**同形同源**，所以 `toSnapshot` 基本是直译。
+   * ⚠️ 在此之前本仓写着「周窗口只有当值号读得到」——**那是错的**，
+   *   它建立在 `fetchAvailableModels` 只回 5h 这一个观测上，而从没找过第二个端点。
+   */
+  quota_summary?: { displayName?: string; buckets?: {
+    bucketId?: string; window?: string; resetTime?: string; remainingFraction?: number;
+  }[] }[] | null;
 }
 
 interface PoolFile {
@@ -73,40 +80,35 @@ interface LiveProbe {
 }
 
 /**
- * 把云端那份按账号的额度，翻成卡片认识的 `AgySnapshot` 形状。
+ * 把按账号取回的**完整额度摘要**翻成卡片认识的 `AgySnapshot` 形状。
  *
- * ★★ **只造 5h 那一格，绝不补一个假的周格。** 云端 `fetchAvailableModels` 给的
- *   `remainingFraction` 实测就是 5h 窗口（0.9566 与本机 RPC 的 `gemini-5h` 95.66 逐位相同）；
- *   周窗口它根本不返回。补一格「周 100%」会让每张卡都显示满格周额度 ——
- *   而上游那个字段的缺省值恰好也是 1.0，这条链路上「没有」和「满格」只隔一个默认值。
- *   不造那一格，卡片按槽位补一行等高空行，用户看到的是"这里没有数"，那是真话。
+ * ★★★ 2026-09-15 起走 `retrieveUserQuotaSummary` —— 每个号都带自己的 5h **与周**，
+ *   所以这里基本是直译（两边同形同源）。
  *
- * ★★★ **但"从来没有过"和"现在取不到"是两件事**（2026-09-15 用户实报：
- *   「两个号一个有周额度，一个没有，这就是问题」）。这个号当值时我们**读到过**它的周额度，
- *   `agy-quota` 把它记进了 `weekly_seen`。把那一格画出来并标龄，比画空诚实得多 ——
- *   画空等于把「我们知道，只是现在取不到」降级成「从来不知道」，而两者差着一个真实的数字。
- *   ⚠️ 它带 `seen_at`，卡片据此**降级显示**，绝不冒充新鲜读数。
+ * ⚠️ **此前这里造的是"只有 5h"的残缺快照**，因为老端点 `fetchAvailableModels`
+ *   只回 5h。当时还写了一大段"绝不补一个假的周格"的注释 —— 那条判断本身没错
+ *   （不许拿默认值 1.0 冒充满额），错的是**前提**：以为周窗口根本取不到。
+ *   `CLAUDE.md` §6：**只看默认响应就断言"接口没有这个能力" = 假阴性。**
+ *
+ * ★ 失败时 `quota` 恒 `null`（不是空对象）—— 卡片据此走降级态，而不是画一条满格的条。
+ *   上游 `remainingFraction` 的缺省恰好是 1.0，这条链路上「没有」和「满格」只隔一个默认值。
  */
 function toSnapshot(a: AgyPoolAccount): AgySnapshot {
-  const seen = a.weekly_seen;
-  const weeklyFor = (k: string): AgyBucket[] => {
-    // 云端那条的组名是 `gemini` / `claude`；`weekly_seen` 的键是快照的 bucket_id
-    // （`gemini-weekly` / `3p-weekly`）。按前缀对上，对不上就不画 —— 宁可少一格。
-    const want = k === "claude" ? "3p-weekly" : "gemini-weekly";
-    const b = seen?.buckets?.[want];
-    if (!b || !seen) return [];
-    return [{ bucket_id: want, window: "weekly", remaining_percent: b.remaining_percent,
-              reset_at: b.reset_at, seen_at: seen.at }];
-  };
-  const groups = Object.entries(a.quota ?? {}).map(([k, v]) => ({
-    name: k === "claude" ? "Claude / GPT" : "Gemini Models",
-    buckets: [{
-      bucket_id: `${k}-5h`,
-      window: "5h",
-      remaining_percent: Math.round(v.remaining * 1000) / 10,
-      reset_at: Math.round(Date.parse(v.reset) / 1000),
-    }, ...weeklyFor(k)],
-  }));
+  // ★★★ 优先用**完整摘要**：每个号都带自己的 5h + 周，非当值号不再缺一格。
+  //   （2026-09-15：`retrieveUserQuotaSummary` 按账号返回，实测两个号都 200。）
+  const groups = (a.quota_summary ?? []).map((g) => ({
+    name: g.displayName || "?",
+    buckets: (g.buckets ?? [])
+      .filter((b) => typeof b.remainingFraction === "number")
+      .map((b) => ({
+        bucket_id: b.bucketId ?? null,
+        window: b.window ?? null,
+        // ★ 上游是 0~1 的 fraction，我们对外一律 0~100 的百分比。
+        //   这层换算丢了会画出一条 0.99% 的条 —— 看着像"快用光了"，方向还挺合理，肉眼极难发现。
+        remaining_percent: Math.round((b.remainingFraction as number) * 1000) / 10,
+        reset_at: b.resetTime ? Math.round(Date.parse(b.resetTime) / 1000) : null,
+      })),
+  })).filter((g) => g.buckets.length > 0);
   const ok = groups.length > 0 && !a.quota_err;
   return {
     schema: 1, fetched_at: a.quota_at ?? 0, available: ok,
@@ -116,6 +118,7 @@ function toSnapshot(a: AgyPoolAccount): AgySnapshot {
     last_good: null,
   };
 }
+
 
 /**
  * 重进 Gemini 档时，多新的 `live` 探测还算数。

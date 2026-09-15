@@ -237,9 +237,14 @@ def cmd_quota(args):
             a["quota_err"] = err
             out.append({"sub": sub, "label": a.get("label"), "err": err})
             continue
-        q, err = P.fetch_quota(cred["token"]["access_token"])
+        groups, err = P.fetch_quota(cred["token"]["access_token"])
         # ★★ 失败态一律**不写数字**：`0` 是"用光了"的合法值，一旦某条失败路径悄悄写出 0，
         #    UI 会画一条正常的红条，而用户没有第二个办法分辨。同 grok/agy 额度那条降级契约。
+        # ★★★ `quota_summary` 是**完整摘要**（含周窗口，2026-09-15 起）；
+        #    `quota` 是它的投影，只为选号与 CLI 打印保留旧形状。
+        #    两者只在 `quota_by_group` 里算一次 —— 不会分叉成两份事实。
+        q = P.quota_by_group(groups) if not err else None
+        a["quota_summary"] = groups if not err else None
         a["quota"] = q if not err else None
         a["quota_err"] = err or None
         a["quota_at"] = int(time.time())
@@ -493,7 +498,8 @@ def cmd_health(args):
         q, qerr = P.fetch_quota(cred["token"]["access_token"])
         rows.append((sub, a, "ok" if not qerr else "api_error", qerr or ""))
         if not qerr:
-            a["quota"] = {k: {"remaining": v["remaining"], "reset": v["reset"]} for k, v in q.items()}
+            a["quota_summary"] = q
+            a["quota"] = P.quota_by_group(q)
             a["quota_at"] = int(time.time())
     a_now = int(time.time())
     for sub, a, kind, _d in rows:
