@@ -74,11 +74,24 @@ class TheGeminiTabHasAHeroLikeCodex(unittest.TestCase):
 
     def test_unknown_quota_never_gets_recommended(self):
         """★★★ 读不到额度的号**不参与**排名。让"未知"冒充满额被推荐，
-        是本仓在 codex 选号器上栽过的同一条（未知被当成 0% 已用 ⇒ 排最空闲）。"""
+        是本仓在 codex 选号器上栽过的同一条（未知被当成 0% 已用 ⇒ 排最空闲）。
+
+        ⚠️ **判据 2026-09-15 改过，而且是收紧不是放松。** 旧版钉的是字面
+        `x.pct != null`；那一版只挡"一行都没有"的号。现在两道：
+          ① `.filter((x) => x.rows.length > 0)` —— 一行都读不到的号直接出局；
+          ② `Number.isFinite(x.pct)` —— 共同基准为空时 `Math.min()` 返回 `Infinity`，
+             不挡的话会冒出一个"余量 Infinity"的假最优号（比 null 更难发现，
+             因为它是个数字，一路都不会报错）。
+        逐字钉实现的闸在这次重构里假红了一次 —— 判据因此改成**行为**：
+        候选集必须同时被这两道挡过。
+        """
         c = code(APP)
-        i = c.index("const agyRank")
+        i = c.index("const agyRowsOf")
         seg = c[i:c.index("const agyTop", i)]
-        self.assertIn("x.pct != null", seg, "★★★ 额度未知的号会被当成候选")
+        self.assertIn("x.rows.length > 0", seg,
+                      "★★★ 一行额度都读不到的号仍会进候选集")
+        self.assertIn("Number.isFinite", seg,
+                      "★★★ 没挡 Infinity —— 共同基准为空时会造出一个假的最优号")
 
 
 class TheGeminiCardHasTheSameActionBar(unittest.TestCase):

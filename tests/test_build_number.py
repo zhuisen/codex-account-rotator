@@ -1,13 +1,16 @@
 """版本号 `X.Y.Z+B` 的不变量（用户 2026-09-15 定，正本在 `CLAUDE.md` §3.7）。
 
     X.Y.Z  住 tauri.conf.json + Cargo.toml   —— **发版**才动（`$release-cut`）
-    B      住仓库根的 `BUILD`（一个整数）      —— **`git push` 之后 +1**，发版归 0
+    B      住仓库根的 `BUILD`（一个整数）      —— **每跑一次 `deploy.sh` +1**，发版归 0
 
-## ★★ 本地反复 `deploy.sh` 不动 `B`
+## ★★ `B` 跟着**本地部署**动，不是跟着 push 动
 
-它要回答的是「我装的这份对应远端哪一次推送」，不是「我今天重编了几次」——
-后者没人关心，还会让版本号每天跳十几下。
-⚠️ 这条**收窄了**全局 CLAUDE.md 的「B +1 per local build」，以项目这条为准。
+⚠️ 我 2026-09-15 一度把它写成「只在 `git push` 时 +1」，**用户当场纠正**：
+「本地更新本地版本就需要 `X.Y.Z+B`」。
+
+`B` 回答的是**「我现在装的这份是第几次本地构建」** —— 它唯一的用处就是让用户一眼看出
+「刚给我装的那份，和我五分钟前看的那份，不是同一个」。只在 push 时动，那个问题永远答不了。
+（这本来就是全局 CLAUDE.md 的原文「B +1 per local build」，是我自己拐弯了。）
 
 ## ★ 为什么要有这个文件
 
@@ -75,6 +78,19 @@ class TheVersionIsShownFromOnePlace(unittest.TestCase):
                 self.assertNotIn("getVersion(", _ts(src),
                                  "★★ {} 又直接调 getVersion 了 —— 那一处会丢掉 +B".format(name))
 
+    def test_deploy_bumps_it(self):
+        """★★ **`deploy.sh` 自己 +1**，不靠人记得。
+
+        规则写下来而没有闸，一定会被违反（本仓铁律）——
+        这条的"闸"就是把动作放进那个唯一的部署入口，而这个测试守着它还在。
+        ★ 必须在 `building…` **之前**：`include_str!` 是编译期读的，
+          放在 build 之后 = 这次装的二进制里还是旧号，下次才对上。
+        """
+        sh = (ROOT / "codexbar" / "scripts" / "deploy.sh").read_text(encoding="utf-8")
+        self.assertIn("BUILD_FILE", sh, "★★ deploy.sh 不再给 B +1 了")
+        self.assertLess(sh.index("BUILD_FILE"), sh.index('echo "==> building'),
+                        "★★ B 的 +1 排在 build 之后 —— 这次装的还是旧号")
+
     def test_a_missing_build_number_shows_no_plus_suffix(self):
         """★ 取不到 `B` 就**只显示 `X.Y.Z`**，不显示 `+?` —— 那是关于版本的一句假话。"""
         i = HELPERS.index("export async function fullVersion")
@@ -111,8 +127,8 @@ class TheBuildNumberStaysOutOfTheManifests(unittest.TestCase):
 
 
 class TheDeployRuleIsWrittenDown(unittest.TestCase):
-    """★ 「改完就部署，不问」与「B 只在 push 时 +1」是**用户定的规矩**，
-    必须留在项目正本里 —— 不然下一个会话又会回来问一遍。
+    """★ 「改完就部署，不问」与「B 每次本地部署 +1」是**用户定的规矩**，
+    必须留在项目正本里 —— 不然下一个会话又会回来问一遍（或者像我一样记反）。
     """
 
     CLAUDE = (ROOT / "CLAUDE.md").read_text(encoding="utf-8")
@@ -130,8 +146,13 @@ class TheDeployRuleIsWrittenDown(unittest.TestCase):
                       "★★ 没写清 push 不在豁免范围内 —— 那条边界必须显式")
 
     def test_the_build_bump_trigger_is_written_down(self):
-        self.assertIn("只在 `git push` 那一刻 +1", self.CLAUDE,
-                      "★ `B` 什么时候加没写下来")
+        self.assertIn("每次本地部署 +1", self.CLAUDE, "★ `B` 什么时候加没写下来")
+
+    def test_the_wrong_version_of_the_rule_is_not_lying_around(self):
+        """★★ 我写错过一版（「只在 git push 时 +1」）。正本里**不许**再留着那句话 ——
+        两句互相矛盾的规矩并存，比只有一句错的更糟：下一个人不知道该信哪句。"""
+        self.assertNotIn("只在 `git push` 那一刻 +1", self.CLAUDE,
+                         "★★ 写错的那版规矩还留在正本里，和新的那句互相矛盾")
 
 
 if __name__ == "__main__":

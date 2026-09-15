@@ -275,11 +275,44 @@ export default function App() {
    * —— 拿 `windows[0]` 比等于把真正的约束藏起来（本仓 §8 的老规矩）。
    * ★ 读不到额度的号**不参与**（`remaining` 取不到就跳过），否则"未知"会冒充满额被推荐。
    */
-  const agyRank = agyPool.accounts.map((a) => {
-    const rows = agyWinRows(agyShown(agyPool.snapshotOf(a, agySnap))?.quota);
-    const pct = rows.length ? Math.min(...rows.map(r => r.remaining)) : null;
-    return { a, pct };
-  }).filter((x): x is { a: typeof agyPool.accounts[number]; pct: number } => x.pct != null);
+  //
+  // ★★★ **只在所有候选都测到的窗口上比较**（2026-09-15 用户实报：
+  //   「出现一个 use，一个当前」—— USE 挂在 dbk 上，而"当前"是 sam）。
+  //
+  //   当时的真实数字：
+  //       dbk  5h 99.x%   周 **没测到**（非当值号）  ⇒ min = 99.x
+  //       sam  5h 100%    周 98.78%                ⇒ min = 98.78
+  //   于是 99.x > 98.78，dbk 被判成"最优"并挂上 USE —— 而它只是**少测了一个窗口**。
+  //
+  //   这正是本仓 §8 那条「基准必须用 tightest，不能用 windows[0] —— 两把不同的尺」
+  //   在**账号之间**的形态：`min(5h)` 和 `min(5h, 周)` 根本不是同一个量，
+  //   把它们比大小，就是在奖励"测得少的那个"。
+  //   ⚠️ 而周窗口对非当值号是**结构性测不到**的（只有本机 RPC 有，云端那条没有周 ——
+  //     2026-09-15 实测：两个号各 27 模型、各只有 2 个桶，没有任何周桶）。
+  //     所以"等数据齐了再比"不是一个选项，**必须定义在什么基础上比**。
+  //
+  //   判据：取所有候选**都有**的那些窗口（交集）作为共同基准；交集为空 ⇒ 不给推荐。
+  //   ★ 本例交集 = {5h} ⇒ dbk 99.x vs sam 100 ⇒ sam 胜 ⇒ USE 落在当前号上，矛盾消失。
+  //   ★ 代价是显式的：若 dbk 的周其实只剩 5%，按 5h 比仍会推荐它 —— 我们**无法知道**。
+  //     所以下面 `agyPartial` 标出"这次比较少看了哪些窗口"，由徽章的 title 如实说出来。
+  const agyRowsOf = agyPool.accounts.map((a) => ({
+    a, rows: agyWinRows(agyShown(agyPool.snapshotOf(a, agySnap))?.quota),
+  })).filter((x) => x.rows.length > 0);
+  /** 所有候选都测到的窗口标签。★ 用**交集**而不是并集：并集会把"没测到"当成一格空，
+   *  而空格在取 `min` 时会被静默跳过 —— 那正好等于奖励测得少的那个号。 */
+  const agyCommonWins = agyRowsOf.length
+    ? agyRowsOf.reduce<string[]>((acc, x, i) => {
+        const mine = x.rows.map(r => r.label);
+        return i === 0 ? mine : acc.filter(l => mine.includes(l));
+      }, [])
+    : [];
+  /** 这次比较**少看了**哪些窗口（有号测到、但不是人人都有）。空 = 大家窗口齐平。 */
+  const agyPartial = [...new Set(agyRowsOf.flatMap(x => x.rows.map(r => r.label)))]
+    .filter(l => !agyCommonWins.includes(l));
+  const agyRank = agyRowsOf.map(({ a, rows }) => ({
+    a,
+    pct: Math.min(...rows.filter(r => agyCommonWins.includes(r.label)).map(r => r.remaining)),
+  })).filter(x => Number.isFinite(x.pct));
   // ★★ **打平时当前号赢。** `reduce` 取第一个最大值，于是两个号都是 96% 时
   //   会推荐"切到另一个 96%"——那是一次零收益的换号，而换号在 agy 上的代价是
   //   得重开一个会话。判据与差值角标同一条：**领先/持平不建议切**。
@@ -768,6 +801,7 @@ export default function App() {
                                      isSelected={selectedCard === a.sub}
                                      reserveActions={selectedCard !== null}
                                      isBest={agyBest?.sub === a.sub} bestPct={agyBestPct ?? undefined}
+                                     partialWins={agyPartial}
                                      onSelect={() => setSelectedCard(selectedCard === a.sub ? null : a.sub)}
                                      onRename={(next) => agyPool.renameTo(a.label, next)}
                                      /* ★ 移除**不可逆**：卡片上两段确认，`agy-rotate remove`

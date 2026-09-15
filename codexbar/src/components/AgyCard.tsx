@@ -13,6 +13,10 @@ import { useState } from "react";
 
 const MONO = "'JetBrains Mono'";
 
+/** 「这次是在哪些窗口上比的」—— 给 `最优`/`USE` 的 title 用。 */
+const cmpBasis = (missing: string[]): string =>
+  missing.length ? "各号都读得到的那些窗口" : "全部窗口";
+
 /**
  * 总览九宫格里的 agy(Antigravity)额度卡。与 `GrokCard` 同款外形 —— 同样的圆环、
  * 细条、卡片外框，理由见那份文件（细长条用户读不出来）。
@@ -35,7 +39,7 @@ const MONO = "'JetBrains Mono'";
  * ★ 颜色由调用方传入（`colorOf(traffic, "agy")`），不写死：用户在设置页能改平台色。
  */
 export default function AgyCard({ t, color, snap, busy, err, disabled, winSlots, onOpen, onRefresh,
-                                 isSelected, reserveActions, shortcut, isBest, bestPct,
+                                 isSelected, reserveActions, shortcut, isBest, bestPct, partialWins,
                                  onSelect, onRename, onRemove, onProbe, probing,
                                  rotates, onToggleRotate,
                                   label, email, isCurrent, onSwitch, switching }: {
@@ -74,6 +78,15 @@ export default function AgyCard({ t, color, snap, busy, err, disabled, winSlots,
   isBest?: boolean;
   /** 最优号的余量，用来算本卡的差值角标 `-N%`。 */
   bestPct?: number;
+  /**
+   * ★★★ 这次"谁最优"的比较**少看了**哪些窗口。
+   *
+   * 周窗口只有当值号读得到（云端按账号那条结构上没有周），所以池里各号的窗口集合
+   * 常常**不齐**。比较只能落在大家都有的那些窗口上 —— 而"少看了什么"必须说出来，
+   * 否则 `USE` 会被读成"这个号全面最优"，事实只是"在我们都量到的那部分上最优"。
+   * 2026-09-15 用户实报的「一个 USE 一个当前」就是这个比较出的岔子。
+   */
+  partialWins?: string[];
   onSelect?: () => void;
   /** 改显示名。★ label 只是昵称，身份始终是 `sub`（同 codex 的 aid）。 */
   onRename?: (next: string) => void;
@@ -113,12 +126,23 @@ export default function AgyCard({ t, color, snap, busy, err, disabled, winSlots,
     ? -Math.round(bestPct - rem) : null;
 
   /** 这一格为什么读不到 —— 说清楚**原因**和**怎么才能看到**，不是只说"没有"。 */
+  /**
+   * ★★ 文案 2026-09-15 从「非当值号」改成「用过才有」（用户：「还存在什么非当值号，
+   *   一次性找办法根治啊」）。「非当值号」说的是**我们的内部状态**，而用户要知道的是
+   *   **他能做什么**。本仓 §5d：披露要说"做什么"，不是只说"坏了"。
+   * ★ 而且它现在是**会自己消失**的：这个号下次当值时 `agy-quota` 会把周额度记进
+   *   `weekly_seen`（B49），此后这一格显示的是那次的真实读数（带 `~` 标龄）。
+   *   所以这句话描述的是一个**有终点**的状态，不是一条永久免责。
+   */
   const missTitle = (label: string, cur?: boolean) =>
     cur
       ? `${label} 窗口这次没读到`
       // 云端 `fetchAvailableModels` 只返回 5h；周窗口只在本机 loopback RPC 里，
       // 而那条**只看得到当前登录的那个号**。所以非当值号结构上就缺这一格。
-      : `${label} 窗口只有**当前登录**的号读得到（本机 RPC）——云端按账号那条只给 5h。切过去再刷新即可看到。`;
+      : `${label} 窗口只有**当前登录**的号读得到（本机 RPC）——云端按账号那条结构上没有周`
+        + `（2026-09-15 实测：每个号 27 个模型只有 2 个桶，一个 5h、一个不限量）。`
+        + `★ 这个号**下次当值时会自动记下来**，之后这里就会显示那次的真实读数（带 ~ 标龄）。`
+        + `想立刻看到：切到它、跑一次 agy。`;
 
   return (
     <div onClick={onSelect ?? onOpen} style={{
@@ -204,11 +228,22 @@ export default function AgyCard({ t, color, snap, busy, err, disabled, winSlots,
             {!!err && <StaleMark t={t} note={`读不到本机的额度快照：${err}`} tone="red" size={11} />}
             {/* ★ 与账号卡同一套语义：`最优` = 全池余量最多；`USE` = 最优**且不是当前号**
                 （已经在用最优号时再喊一句"用这个"只是噪音）。 */}
-            {isBest && (isCurrent
-              ? <span style={{ fontSize: Z.curBadge, fontWeight: 700, padding: "1px 5px", borderRadius: 5,
-                               color: "#27B26B", border: "1px solid #27B26B55" }}>最优</span>
-              : <span style={{ fontSize: Z.curBadge, fontWeight: 700, padding: "1px 5px", borderRadius: 5,
-                               color: t.accent, border: `1px solid ${t.accent}55` }}>USE</span>)}
+            {/* ★ `title` 如实说出这次比较的**基础**。少看了窗口就直说少看了哪些 ——
+                不说的话 `USE` 会被读成"全面最优"，而事实只是"在都量到的那部分上最优"。 */}
+            {isBest && (() => {
+              const why = partialWins?.length
+                ? `在**${(partialWins.length ? cmpBasis(partialWins) : "")}**上余量最多。`
+                  + `⚠️ 这次比较没算上 ${partialWins.join("、")} —— 那些窗口不是每个号都读得到`
+                  + `（周窗口只有当值号有，云端按账号那条没有周）。`
+                : "在所有号都读到的窗口上余量最多。";
+              return isCurrent
+                ? <span title={why}
+                        style={{ fontSize: Z.curBadge, fontWeight: 700, padding: "1px 5px", borderRadius: 5,
+                                 color: "#27B26B", border: "1px solid #27B26B55" }}>最优</span>
+                : <span title={why}
+                        style={{ fontSize: Z.curBadge, fontWeight: 700, padding: "1px 5px", borderRadius: 5,
+                                 color: t.accent, border: `1px solid ${t.accent}55` }}>USE</span>;
+            })()}
             {/* 差值角标：**只在落后时画**。领先/持平画一个 `+0%` 只是噪音。 */}
             {gap != null && !isBest && (
               <span title={`比最优的号少 ${-gap}%`}
@@ -250,7 +285,7 @@ export default function AgyCard({ t, color, snap, busy, err, disabled, winSlots,
                 <div style={{ flex: 1, height: Z.bar, borderRadius: 2, background: t.barTrack }} />
                 <span style={{ fontSize: Z.eta, color: t.muted, fontFamily: MONO,
                                whiteSpace: "nowrap" }}>
-                  {isCurrent ? "这次没读到" : "非当值号"}</span>
+                  {isCurrent ? "这次没读到" : "用过才有"}</span>
               </div>
             ) : (
               // ★★★ `seen_at` = 这一格是**上次当值时看到的**，不是现在读到的

@@ -69,7 +69,7 @@ class NoWindowRowIsSilentlyBlank(unittest.TestCase):
     #: ★ 判据因此改成「**这一行上有没有一个能读的结论**」，而不是某个字符。
     #:   上一版钉的是字面 `↻—`，于是把 `—` 换成更清楚的中文时**闸自己红了**，
     #:   而语义是变好的 —— 逐字匹配守的是"代码长什么样"，不是"用户看不看得懂"。
-    SAYS = {"AgyCard": ("非当值号", "这次没读到"), "AgyRow": ("↻—",)}
+    SAYS = {"AgyCard": ("用过才有", "这次没读到"), "AgyRow": ("↻—",)}
 
     def test_every_component_can_render_a_dash(self):
         """★ 正面：四处都必须有那个缺失行。只验"没有隐藏行"的话，
