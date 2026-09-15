@@ -201,5 +201,46 @@ class TheChangelogIsSplitNotSummarised(unittest.TestCase):
                           f"★ 归档卷 {a.name} 没有被主 CHANGELOG 索引到 —— 等于丢了")
 
 
+class NoTestReadsAGitignoredDocAtImportTime(unittest.TestCase):
+    """★★★ 在**导入期**读 gitignored 文件 = CI 上整个 suite 中断。
+
+    2026-09-15 v1.6.0 那次：`test_build_number.py` 在类体里
+    `(ROOT / "CLAUDE.md").read_text()`，本地 1294 条全绿，
+    而 CI 的干净 checkout 上 `CLAUDE.md` 根本不存在 ⇒ `FileNotFoundError` ⇒
+    pytest 算 collection error ⇒ **一条测试都没跑**，红在发版那一刻。
+
+    ★ 这是本仓「测试环境 ≠ 镜像」的又一形态，而且比那条更隐蔽：
+      不是"某条测试挂了"，是"全体没跑"，而退出码看起来就是普通的失败。
+    判据：`CLAUDE.md` / `AGENTS.md` / `memory.md` 这三个 gitignored 的文件，
+    在 `tests/*.py` 里**不许出现在方法体之外**的 `read_text()` 调用里。
+    """
+
+    GITIGNORED_DOCS = ("CLAUDE.md", "AGENTS.md", "memory.md")
+
+    def test_no_module_level_read(self):
+        import ast
+        bad = []
+        for f in sorted((ROOT / "tests").glob("test_*.py")):
+            tree = ast.parse(f.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not (isinstance(node, ast.Call)
+                        and isinstance(node.func, ast.Attribute)
+                        and node.func.attr == "read_text"):
+                    continue
+                src = ast.get_source_segment(f.read_text(encoding="utf-8"), node) or ""
+                if not any(d in src for d in self.GITIGNORED_DOCS):
+                    continue
+                # 在函数体内读是允许的（配 skipTest）；类体/模块层不行。
+                inside_fn = any(
+                    isinstance(p, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    and node.lineno >= p.lineno and node.end_lineno <= (p.end_lineno or node.end_lineno)
+                    for p in ast.walk(tree))
+                if not inside_fn:
+                    bad.append("{}:{}".format(f.name, node.lineno))
+        self.assertEqual(bad, [],
+                         "★★★ 这些地方在导入期读 gitignored 文档 —— CI 上会整个 suite 中断：\n  "
+                         + "\n  ".join(bad))
+
+
 if __name__ == "__main__":
     unittest.main()

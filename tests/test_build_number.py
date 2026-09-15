@@ -131,27 +131,37 @@ class TheDeployRuleIsWrittenDown(unittest.TestCase):
     必须留在项目正本里 —— 不然下一个会话又会回来问一遍（或者像我一样记反）。
     """
 
-    CLAUDE = (ROOT / "CLAUDE.md").read_text(encoding="utf-8")
+    #: ⚠️ **绝不在类体/模块层读它。** `CLAUDE.md` 是 gitignored 的（仓库红线），
+    #:   CI 的干净 checkout 上**根本不存在** —— 在导入期读就是 `FileNotFoundError`，
+    #:   而 pytest 把它算成 collection error，**整个 suite 直接中断**。
+    #:   2026-09-15 v1.6.0 那次 CI 就是这么红的：本地 1294 全绿，CI 一条都没跑起来。
+    #:   同 `test_doc_boards.py` 的范式：进方法里读，缺了就 `skipTest`。
+    @classmethod
+    def _claude(cls):
+        f = ROOT / "CLAUDE.md"
+        if not f.exists():
+            raise unittest.SkipTest("CLAUDE.md 不存在（gitignored，CI 的干净 checkout 上没有）")
+        return f.read_text(encoding="utf-8")
 
     def test_the_auto_deploy_rule_is_in_claude_md(self):
-        self.assertIn("改完就部署，不要问", self.CLAUDE,
+        self.assertIn("改完就部署，不要问", self._claude(),
                       "★ 自动部署那条规矩没写进项目 CLAUDE.md")
 
     def test_it_does_not_also_wave_through_git_push(self):
         """★★ 豁免的**只有** deploy 这一个问题。`git push` 仍然要用户开口（全局规则）。
         把两者混为一谈 = 把代码推到远端而没人同意过。"""
-        i = self.CLAUDE.index("改完就部署，不要问")
-        seg = self.CLAUDE[i:i + 900]
+        i = self._claude().index("改完就部署，不要问")
+        seg = self._claude()[i:i + 900]
         self.assertIn("`git push` 仍然要用户明确开口", seg,
                       "★★ 没写清 push 不在豁免范围内 —— 那条边界必须显式")
 
     def test_the_build_bump_trigger_is_written_down(self):
-        self.assertIn("每次本地部署 +1", self.CLAUDE, "★ `B` 什么时候加没写下来")
+        self.assertIn("每次本地部署 +1", self._claude(), "★ `B` 什么时候加没写下来")
 
     def test_the_wrong_version_of_the_rule_is_not_lying_around(self):
         """★★ 我写错过一版（「只在 git push 时 +1」）。正本里**不许**再留着那句话 ——
         两句互相矛盾的规矩并存，比只有一句错的更糟：下一个人不知道该信哪句。"""
-        self.assertNotIn("只在 `git push` 那一刻 +1", self.CLAUDE,
+        self.assertNotIn("只在 `git push` 那一刻 +1", self._claude(),
                          "★★ 写错的那版规矩还留在正本里，和新的那句互相矛盾")
 
 
