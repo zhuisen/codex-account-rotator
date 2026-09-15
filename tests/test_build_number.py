@@ -155,5 +155,31 @@ class TheDeployRuleIsWrittenDown(unittest.TestCase):
                          "★★ 写错的那版规矩还留在正本里，和新的那句互相矛盾")
 
 
+class TheHarnessStubsIt(unittest.TestCase):
+    """★★★ 不打桩就是假绿。
+
+    `build_number` 没打桩时会落到 harness 的 default 返回 `null`，
+    `fullVersion()` 的 catch 接住 ⇒ 版本退回纯 `X.Y.Z` ⇒ **截图里永远看不到 `+B`**，
+    而页面照常渲染、零报错、sweep 报干净。本仓反复记的「打桩缺口 ⇒ 看着像通过」。
+
+    实测（2026-09-15，`--dump-dom` 剥掉 `<script>` 后数）：
+        ?build 默认   → 页面上是 `v1.5.0+7`
+        ?build=0      → 页面上是 `v1.5.0`（不显示 `+0`）
+    """
+
+    HARNESS = (ROOT / "codexbar" / "uishot" / "make_harness.py").read_text(encoding="utf-8")
+
+    def test_the_command_is_stubbed(self):
+        self.assertIn("case 'build_number':", self.HARNESS,
+                      "★★★ harness 没打桩 build_number —— `+B` 在截图里永远不出现")
+
+    def test_the_zero_case_is_drivable(self):
+        """★ 「刚发版、还没本地构建过」那一态也要能渲染 —— 它和"取不到 B"长得一样，
+        而两者的含义完全不同。"""
+        i = self.HARNESS.index("case 'build_number':")
+        self.assertIn("p.get('build')", self.HARNESS[i:i + 200],
+                      "★ 没给 `?build=` 开关 ⇒ B=0 那一态验不到")
+
+
 if __name__ == "__main__":
     unittest.main()

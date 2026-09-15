@@ -715,6 +715,12 @@ function relayEntry() {
         return Promise.resolve(Object.fromEntries(Object.keys(STATE.slots).map(function (k) {
           return [k, { exp: Math.floor(Date.now() / 1000) + 7 * 86400 }];
         })));
+      // ★★ 构建号 `B`（`vX.Y.Z+B`）。**不打桩就是假绿**：落到 default 返回 null ⇒
+      //   `fullVersion()` 的 catch 接住 ⇒ 版本退回纯 `X.Y.Z` ⇒ 截图里**永远看不到 `+B`**，
+      //   而页面照常渲染、零报错。这正是本仓反复记的「打桩缺口 ⇒ 零渲染看着像通过」。
+      //   `?build=<n>`：给 0 就验"刚发版还没本地构建过"那一态（只显示 X.Y.Z）。
+      case 'build_number':
+        return Promise.resolve(p.get('build') || '7');
       case 'read_logs':
         return Promise.resolve(LOGS_TXT);
       // ★ 代理轮换台账。**不打桩就是假绿** —— 落到 default 返回 null ⇒ `rot` 恒 null ⇒
