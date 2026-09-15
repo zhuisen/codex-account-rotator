@@ -171,7 +171,7 @@ loopback RPC,**不联网、不消耗配额**)。没装那家 CLI 的机器上**�
 | `claude/claude_tokens.py` | ⚠️ 只统计 Claude 的旧扫描器,能力已被 `traffic/scan.py` 完全覆盖(v0.7.0 起 app 不再调用)。保留仅作 CLI |
 | `scripts/install-launchd.sh` | **生成并加载 3 个 launchd 服务**(autosync/quotad/proxy)。★ keepalive(04:30)与 refreshquota(07:00)已于 2026-08-29 按需取消 —— 前者职责由代理接手(覆盖面见上表①),后者与 quotad 的 300s 全池扫描重复。两个 CLI 子命令仍可手动跑。生成而非提交成文件:plist 内嵌绝对路径,提交的副本换台机器就是错的,且会静默漂移(旧的 `launchd/*.plist` 就漂到了写死 `/usr/bin/python3`)。★脚本会**解析并钉住 OpenSSL 版的 python3**,见「维护约定」 |
 | `agy-rotate` | ★ **agy(Antigravity) 账号池 CLI** —— `login` / `list` / `quota` / `switch` / `pick` / `auto` / `live` / `health` / `probe` / `rotate` / `auto-switch` / `rename` / `remove`。与 codex 池**机制完全不同**：agy 只在**进程启动时**读凭证，所以换号只对**下一次启动的 agy** 生效。★★★ 登录态在 **macOS 钥匙串**（`svce=gemini`/`acct=antigravity`），那个 `antigravity-oauth-token` 文件只是钥匙串写失败时的兜底 |
-| `agy/pool.py` | agy 池的凭证与额度层（钥匙串读写、OAuth 刷新、`fetchAvailableModels` 按账号取额度）。OAuth client 从**本机 agy 二进制**现取，**绝不入库**（本仓公开） |
+| `agy/pool.py` | agy 池的凭证与额度层（钥匙串读写、OAuth 刷新、`retrieveUserQuotaSummary` 按账号取**完整**额度含周窗口）。OAuth client 从**本机 agy 二进制**现取，**绝不入库**（本仓公开） |
 | `auth/agy/`(gitignored) | agy 每号凭证 `<sub>.json`(0600) |
 | `.agy-pool.json`(gitignored) | agy 池（账号、额度、`live_seen`/`live_wanted`、`auto_off`/`rotate_off`、缓存的 OAuth client） |
 | `agy.log`(gitignored) | agy 侧**运行日志**：`switch`/`auto`/`quota`/`health`/`probe` 逐号留痕，**成败与用量都写**。CodexBar 日志页读它，`✗` 行染红 |
