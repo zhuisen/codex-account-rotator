@@ -1,16 +1,25 @@
 """版本号 `X.Y.Z+B` 的不变量（用户 2026-09-15 定，正本在 `CLAUDE.md` §3.7）。
 
     X.Y.Z  住 tauri.conf.json + Cargo.toml   —— **发版**才动（`$release-cut`）
-    B      住仓库根的 `BUILD`（一个整数）      —— **每跑一次 `deploy.sh` +1**，发版归 0
+    B      **不住任何文件** —— `src-tauri/build.rs` 从 git 现算
 
-## ★★ `B` 跟着**本地部署**动，不是跟着 push 动
+## ★★★ 判据只有一条
 
-⚠️ 我 2026-09-15 一度把它写成「只在 `git push` 时 +1」，**用户当场纠正**：
-「本地更新本地版本就需要 `X.Y.Z+B`」。
+    B == 0  →  显示 `vX.Y.Z`    「你跑的这份**就是** release」
+    B  > 0  →  显示 `vX.Y.Z+B`  「发版之后本地改过，还没发出去」
 
-`B` 回答的是**「我现在装的这份是第几次本地构建」** —— 它唯一的用处就是让用户一眼看出
-「刚给我装的那份，和我五分钟前看的那份，不是同一个」。只在 push 时动，那个问题永远答不了。
-（这本来就是全局 CLAUDE.md 的原文「B +1 per local build」，是我自己拐弯了。）
+`B` = 距最近 tag 的 commit 数，工作区脏再 +1。发版后工作区正好停在 tag 上 ⇒ B=0 ⇒
+本地 `deploy.sh` 出来的东西与已发布产物**报同一个版本**。这就是这次改动的全部目的。
+
+## ⚠️ 两次写错，都记在这儿
+
+1. 先写成「只在 `git push` 时 +1」——用户纠正：「本地更新本地版本就需要 `X.Y.Z+B`」。
+2. 改成 `deploy.sh` 里的计数器（在 build **之前** +1）——于是 tag 刚推完、本地构建
+   就报 `v1.6.0+1`，用户问：「发版了，本地为什么还是 +1，进行了什么修改吗？」**什么都没改。**
+   计数器分不出「比 release 多一次构建」和「就是 release」，因为它**不知道 release 这件事**。
+
+★ 第三版换成**派生值**，顺带**删掉了一条规则** —— 没有文件可以忘记重置，也就没有规则
+  可以被违反。本仓老教训：写下来但没有闸的规则一定会被违反，**包括被写它的人**。
 
 ## ★ 为什么要有这个文件
 
@@ -24,7 +33,6 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-BUILD = ROOT / "BUILD"
 RS = (ROOT / "codexbar" / "src-tauri" / "src" / "lib.rs").read_text(encoding="utf-8")
 HELPERS = (ROOT / "codexbar" / "src" / "helpers.ts").read_text(encoding="utf-8")
 APP = (ROOT / "codexbar" / "src" / "App.tsx").read_text(encoding="utf-8")
@@ -37,22 +45,48 @@ def _ts(src):
     return re.sub(r"//[^\n]*", "", src)
 
 
-class TheBuildNumberIsASingleInteger(unittest.TestCase):
+class TheBuildNumberIsDerivedFromGit(unittest.TestCase):
 
-    def test_the_file_exists_and_is_an_integer(self):
-        self.assertTrue(BUILD.exists(), "★ 仓库根的 `BUILD` 不见了")
-        raw = BUILD.read_text(encoding="utf-8").strip()
-        self.assertRegex(raw, r"^\d+$",
-                         "★ `BUILD` 不是一个纯整数：{!r}".format(raw))
+    BUILD_RS = (ROOT / "codexbar" / "src-tauri" / "build.rs").read_text(encoding="utf-8")
 
-    def test_it_is_compiled_in_not_read_at_runtime(self):
-        """★ `include_str!` 让 `BUILD` 成为**编译依赖** —— 改了它下次构建必然重编。
+    def test_there_is_no_counter_file(self):
+        """★★★ 主闸：**不许再出现 `BUILD` 计数器文件**。
 
-        换成运行期读文件的话，会出现「文件改了、二进制里还是旧数字」，
-        而那种不一致**没有任何症状**（本仓 `quotad` 跑旧代码那次就是这个形状）。
+        它活过一天，症状是「tag 刚推完、本地构建就报 +1」——
+        计数器不知道 release 这件事，所以分不出"多一次构建"和"就是 release"。
         """
-        self.assertIn('include_str!("../../../BUILD")', RS,
-                      "★ `BUILD` 不再是编译期依赖 —— 会出现文件与二进制不一致且无症状")
+        self.assertFalse((ROOT / "BUILD").exists(),
+                         "★★★ `BUILD` 计数器文件回来了 —— 它分不出「就是 release」")
+        self.assertNotIn("include_str!(\"../../../BUILD\")", RS,
+                         "★★★ 又去读那个计数器文件了")
+
+    def test_it_counts_commits_since_the_last_tag(self):
+        """★★ 判据是**距最近 tag 的 commit 数**，不是任何形式的自增。"""
+        self.assertIn("describe", self.BUILD_RS, "★★ 没有以 tag 为基准")
+        self.assertIn("rev-list", self.BUILD_RS, "★★ 没有数 tag 之后的 commit")
+
+    def test_a_dirty_tree_counts_as_modified(self):
+        """★ 未提交的改动**也是**「发版之后本地改过」。不算的话，
+        `vX.Y.Z` 就会出现在一个并非 release 的构建上 —— 那是关于版本的一句假话。"""
+        self.assertIn("status", self.BUILD_RS)
+        self.assertIn("porcelain", self.BUILD_RS, "★ 没有把脏工作区算进去")
+
+    def test_it_is_a_compile_time_env_not_a_runtime_read(self):
+        """★ 编译期注入（`cargo:rustc-env`）—— 运行期读会出现「树变了、二进制里还是旧数字」，
+        而那种不一致**没有任何症状**（本仓 `quotad` 跑旧代码那次就是这个形状）。"""
+        self.assertIn("cargo:rustc-env=CODEXBAR_BUILD", self.BUILD_RS)
+        self.assertIn('env!("CODEXBAR_BUILD")', RS, "★ lib.rs 没读那个编译期变量")
+
+    def test_it_reruns_when_head_moves(self):
+        """★★ 不声明 `rerun-if-changed` 的话 cargo 会**缓存**上次算出来的数字，
+        于是切了分支、提交了东西，版本号纹丝不动 —— 静默失准。"""
+        self.assertIn("cargo:rerun-if-changed", self.BUILD_RS,
+                      "★★ 没声明重算条件 —— cargo 会缓存一个过期的构建号")
+
+    def test_deploy_does_not_bump_anything(self):
+        """★★★ `deploy.sh` **不许**再动构建号。它正是上一版把 release 构建打成 `+1` 的地方。"""
+        sh = (ROOT / "codexbar" / "scripts" / "deploy.sh").read_text(encoding="utf-8")
+        self.assertNotIn("BUILD_FILE", sh, "★★★ deploy.sh 又开始维护计数器了")
 
 
 class TheVersionIsShownFromOnePlace(unittest.TestCase):
@@ -77,19 +111,6 @@ class TheVersionIsShownFromOnePlace(unittest.TestCase):
             with self.subTest(file=name):
                 self.assertNotIn("getVersion(", _ts(src),
                                  "★★ {} 又直接调 getVersion 了 —— 那一处会丢掉 +B".format(name))
-
-    def test_deploy_bumps_it(self):
-        """★★ **`deploy.sh` 自己 +1**，不靠人记得。
-
-        规则写下来而没有闸，一定会被违反（本仓铁律）——
-        这条的"闸"就是把动作放进那个唯一的部署入口，而这个测试守着它还在。
-        ★ 必须在 `building…` **之前**：`include_str!` 是编译期读的，
-          放在 build 之后 = 这次装的二进制里还是旧号，下次才对上。
-        """
-        sh = (ROOT / "codexbar" / "scripts" / "deploy.sh").read_text(encoding="utf-8")
-        self.assertIn("BUILD_FILE", sh, "★★ deploy.sh 不再给 B +1 了")
-        self.assertLess(sh.index("BUILD_FILE"), sh.index('echo "==> building'),
-                        "★★ B 的 +1 排在 build 之后 —— 这次装的还是旧号")
 
     def test_a_missing_build_number_shows_no_plus_suffix(self):
         """★ 取不到 `B` 就**只显示 `X.Y.Z`**，不显示 `+?` —— 那是关于版本的一句假话。"""
@@ -155,40 +176,25 @@ class TheDeployRuleIsWrittenDown(unittest.TestCase):
         self.assertIn("`git push` 仍然要用户明确开口", seg,
                       "★★ 没写清 push 不在豁免范围内 —— 那条边界必须显式")
 
-    def test_the_build_bump_trigger_is_written_down(self):
-        self.assertIn("每次本地部署 +1", self._claude(), "★ `B` 什么时候加没写下来")
+    def test_the_build_semantics_are_written_down(self):
+        c = self._claude()
+        self.assertIn("derived from git", c, "★ `B` 怎么来的没写下来")
+        self.assertIn('"what you are running IS the release"', c,
+                      "★ 最要紧的那条语义（B==0 就是 release）没写下来")
 
-    def test_the_wrong_version_of_the_rule_is_not_lying_around(self):
-        """★★ 我写错过一版（「只在 git push 时 +1」）。正本里**不许**再留着那句话 ——
-        两句互相矛盾的规矩并存，比只有一句错的更糟：下一个人不知道该信哪句。"""
-        self.assertNotIn("只在 `git push` 那一刻 +1", self._claude(),
-                         "★★ 写错的那版规矩还留在正本里，和新的那句互相矛盾")
+    def test_the_two_wrong_versions_are_not_lying_around(self):
+        """★★ 这条规矩我写错过**两次**（先"只在 push 时 +1"，再 deploy.sh 计数器）。
+        正本里不许留着任何一版 —— 互相矛盾的规矩并存，比只有一句错的更糟。"""
+        c = self._claude()
+        for wrong in ("只在 `git push` 那一刻 +1", "每次本地部署 +1"):
+            with self.subTest(wrong=wrong):
+                self.assertNotIn(wrong, c, "★★ 写错的旧规矩还留在正本里：{}".format(wrong))
 
-
-class TheHarnessStubsIt(unittest.TestCase):
-    """★★★ 不打桩就是假绿。
-
-    `build_number` 没打桩时会落到 harness 的 default 返回 `null`，
-    `fullVersion()` 的 catch 接住 ⇒ 版本退回纯 `X.Y.Z` ⇒ **截图里永远看不到 `+B`**，
-    而页面照常渲染、零报错、sweep 报干净。本仓反复记的「打桩缺口 ⇒ 看着像通过」。
-
-    实测（2026-09-15，`--dump-dom` 剥掉 `<script>` 后数）：
-        ?build 默认   → 页面上是 `v1.5.0+7`
-        ?build=0      → 页面上是 `v1.5.0`（不显示 `+0`）
-    """
-
-    HARNESS = (ROOT / "codexbar" / "uishot" / "make_harness.py").read_text(encoding="utf-8")
-
-    def test_the_command_is_stubbed(self):
-        self.assertIn("case 'build_number':", self.HARNESS,
-                      "★★★ harness 没打桩 build_number —— `+B` 在截图里永远不出现")
-
-    def test_the_zero_case_is_drivable(self):
-        """★ 「刚发版、还没本地构建过」那一态也要能渲染 —— 它和"取不到 B"长得一样，
-        而两者的含义完全不同。"""
-        i = self.HARNESS.index("case 'build_number':")
-        self.assertIn("p.get('build')", self.HARNESS[i:i + 200],
-                      "★ 没给 `?build=` 开关 ⇒ B=0 那一态验不到")
+    def test_the_language_policy_is_declared(self):
+        """★ 用户 2026-09-15：项目 CLAUDE.md 用英文写。把这条**写进文件本身**，
+        否则下一个会话会按仓库里满屏的中文"入乡随俗"，规矩就悄悄失效了。"""
+        self.assertIn("Language policy for this file", self._claude(),
+                      "★ 语言规矩没写进正本")
 
 
 if __name__ == "__main__":

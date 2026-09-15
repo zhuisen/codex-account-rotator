@@ -21,19 +21,9 @@ if [ ! -d "$ROOT/node_modules" ]; then
     if [ -f "$ROOT/package-lock.json" ]; then npm ci; else npm install; fi
 fi
 
-# ★★ 构建号 `B` +1 —— **在 build 之前**，这样编出来的二进制里带的就是新号。
-#   `B` 回答的是「我现在装的这份是第几次本地构建」，所以它必须跟着**部署**动，
-#   而不是跟着 commit/push 动（用户 2026-09-15 定，正本在 CLAUDE.md §3.7）。
-#   ★ 动作放在这个唯一的部署入口里，不靠人记得 —— 写下来但没有闸的规则一定会被违反。
-#   ⚠️ `lib.rs` 用 `include_str!` 读它，所以改了它下面那次 build 必然重编，不会漏。
-BUILD_FILE="$(cd "$ROOT/.." && pwd)/BUILD"
-if [ -f "$BUILD_FILE" ]; then
-    _b=$(tr -dc '0-9' < "$BUILD_FILE")
-    printf '%s\n' "$(( ${_b:-0} + 1 ))" > "$BUILD_FILE"
-    echo "==> build number: $(cat "$BUILD_FILE")"
-else
-    echo "==> ⚠️  找不到 $BUILD_FILE —— 版本号将退回纯 X.Y.Z（见 CLAUDE.md §3.7）"
-fi
+# ★ 构建号 `B` 不在这里维护了 —— `src-tauri/build.rs` 从 git 现算
+#   （发版后本地就是 release ⇒ B=0 ⇒ 显示纯 `vX.Y.Z`；改过才有 `+B`）。
+#   见 CLAUDE.md §3.7。这里刻意什么都不做，别把计数器加回来。
 
 echo "==> building…"
 npx tauri build --bundles app 2>&1 | tail -3

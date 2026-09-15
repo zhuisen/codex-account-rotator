@@ -689,20 +689,24 @@ async fn relay_ctl(sub: String, arg: Option<String>, payload: Option<String>) ->
     Ok(body)
 }
 
-/// 构建号 `B`（`vX.Y.Z+B` 里的那一位）。
+/// 构建号 `B`（`vX.Y.Z+B` 里的那一位）—— **由 `build.rs` 从 git 现算**，不再有 `BUILD` 文件。
 ///
-/// ★★ **`B` 只在 `git push` 那一刻 +1**（用户 2026-09-15 定）。本地反复 `deploy.sh`
-///   **不动它** —— 那个数要回答的是「我装的这份，对应远端的哪一次推送」，
-///   而不是「我今天重编了几次」。后者没人关心，还会让版本号每天跳十几下。
-/// ★ `X.Y.Z` 仍留在 `tauri.conf.json` / `Cargo.toml` 两处（发版才动，走 `$release-cut`）；
-///   `B` **不进 manifest**，只活在这里和界面上 —— 全局规则那条「B 不写进 manifest」仍然成立。
-/// ★ `include_str!` 让 `BUILD` 成为编译依赖：改了它下次构建必然重编，
-///   不会出现「文件改了、二进制里还是旧数字」那种静默不一致。
-const BUILD_NO: &str = include_str!("../../../BUILD");
-
+/// 语义（用户 2026-09-15 定，正本在 `CLAUDE.md` §3.7）：
+///
+///     B == 0  →  显示 `vX.Y.Z`    「你跑的这份**就是** release」
+///     B  > 0  →  显示 `vX.Y.Z+B`  「发版之后本地改过，还没发出去」
+///
+/// ⚠️ 上一版是 `deploy.sh` 里的计数器，在 build **之前** +1 —— 于是 tag 刚推完、
+///   本地构建出来的东西就报 `v1.6.0+1`。用户当场问：「发版了，本地为什么还是 +1，
+///   进行了什么修改吗？」**什么都没改。** 计数器分不出「比 release 多一次构建」和
+///   「就是 release」，因为它**根本不知道 release 这件事**。git 知道。
+///
+/// ★ 换成派生值还有一层好处：**没有文件可以忘记重置，也就没有规则可以被违反**。
+///   本仓的老教训是「写下来但没有闸的规则一定会被违反」—— 所以修法是**把规则删掉**，
+///   不是把它写得更用力。
 #[tauri::command]
 fn build_number() -> String {
-    BUILD_NO.trim().to_string()
+    env!("CODEXBAR_BUILD").to_string()
 }
 
 #[tauri::command]
