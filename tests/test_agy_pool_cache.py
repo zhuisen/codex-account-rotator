@@ -102,29 +102,41 @@ def _probe(url):
        不编就是测旧代码 —— 本仓已经因此假绿过两次（CLAUDE.md §4），
        而 `sweep.probe` 只是去打静态服务，`make_harness.py` 的
        `_assert_fresh_bundle()` 在这条路径上**根本不会被调用**。
-       所以这道防线必须由本测试自己建，不能指望别处。
     ⚠️ `vite build --outDir uishot/app` 会清空目录、连 harness.html 一起删掉，
        所以两步顺序固定：先 build，再 make_harness。
-    """
-    sys.path.insert(0, str(UISHOT))
-    import sweep
 
+    ★★★ **`import sweep` 必须排在产物就位之后。** `uishot/sweep.py` 在**模块层**就
+       `clickable_account()` → 读 `app/harness.html`，产物不在时 **import 本身**抛
+       `FileNotFoundError` —— 那是 error 不是 skip，而 CI 的干净 checkout 上没有
+       node_modules / Chrome，必然走到这一条。v1.6.0 那次 CI 的 8 个 error 就是它。
+    ★ 缺任何一环都 **skip 并说明"这一轮没跑"** —— skip 不是绿（memory.md §3）。
+    """
+    harness = CODEXBAR / "uishot" / "app" / "harness.html"
     if not _built:
         for cmd in (["./node_modules/.bin/vite", "build", "--outDir", "uishot/app"],
                     [sys.executable, "uishot/make_harness.py"]):
-            r = subprocess.run(cmd, cwd=str(CODEXBAR), capture_output=True,
-                               text=True, timeout=600)
+            try:
+                r = subprocess.run(cmd, cwd=str(CODEXBAR), capture_output=True,
+                                   text=True, timeout=600)
+            except OSError as e:          # node_modules 不在时连可执行文件都找不到
+                raise unittest.SkipTest("构建 harness 跑不起来（{}）：{}".format(cmd[0], e))
             if r.returncode != 0:
                 raise unittest.SkipTest(
                     "构建 harness 失败（{}）：{}".format(cmd[0], (r.stderr or r.stdout)[-400:]))
-        ok, how = sweep.server_alive(BASE)
-        if not ok:
-            # ★ skip 不是绿。memory.md §3 记着：服务没起来时这类测试是 skip，
-            #   把 skip 读成通过就是把「没测」当成「测过了」。
-            raise unittest.SkipTest(
-                "harness 静态服务没起来（{}）—— 这条闸这一轮**没有跑**，别当成通过。"
-                "起法见 CLAUDE.md §4。".format(how))
         _built.append(True)
+    if not harness.exists():
+        raise unittest.SkipTest(
+            "harness 产物不存在（CI 的干净 checkout 上没有 node_modules / Chrome）"
+            " —— 这条闸这一轮**没有跑**，别当成通过")
+
+    sys.path.insert(0, str(UISHOT))
+    import sweep                                   # ← 只有产物就位之后才 import
+
+    ok, how = sweep.server_alive(BASE)
+    if not ok:
+        raise unittest.SkipTest(
+            "harness 静态服务没起来（{}）—— 这条闸这一轮**没有跑**，别当成通过。"
+            "起法见 CLAUDE.md §4。".format(how))
     return sweep.probe(url, 1200)
 
 

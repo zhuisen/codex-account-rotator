@@ -134,7 +134,17 @@ class TheHourlyBucketsSumToTheDayBucket(unittest.TestCase):
             d = json.loads(r.stdout)
         except ValueError:
             raise unittest.SkipTest("scan.py 输出不是 JSON")
-        cls.plats = d.get("platforms") or d
+        plats = d.get("platforms") or d
+        # ★★ CI 的干净 runner 上**一个 CLI transcript 都没有** ⇒ 扫出来是空的/None。
+        #   这条闸验的是"按小时拆有没有拆丢"，没有数据就**没有东西可验** ——
+        #   那是 skip，不是红。⚠️ 但必须**显式**：让它安静通过才是真正危险的
+        #   （零输入的扫描器报"干净"，本仓记过）。
+        plats = {k: v for k, v in (plats or {}).items() if isinstance(v, dict)}
+        if not any((v.get("days") or v.get("hours")) for v in plats.values()):
+            raise unittest.SkipTest(
+                "本机没有任何 CLI transcript（CI 的干净 checkout 就是这样）——"
+                "这条闸这一轮**没有跑**，别当成通过")
+        cls.plats = plats
 
     def test_yesterday_has_a_full_24_buckets(self):
         """★ 整天要补满 24 格 —— 那些小时确实过完了，空就是真的没用。
