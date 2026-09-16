@@ -215,3 +215,88 @@ class TheProbeIsNeverAutomatic(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TheErrorSummaryKeepsTheUsefulHalf(unittest.TestCase):
+    """★★ 报错摘要必须留**有用的那一半**（2026-09-16）。
+
+    原来是 `stderr[-160:]` —— 取**末尾**。实测 eligibility 被拒时 agy 吐的是
+    一大段 JSON + 一个很长的 Google 登录 URL，于是记录里只剩
+    `…flowName=GlifWebSignIn&authuser`，而真正那句
+    **"Verify your account to continue."** 在开头、被截掉了。
+    「报错里只剩最没用的那一段」等于没有报错 —— 实测为此多绕了一整轮排查。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        ns = {"re": re}
+        exec(compile(ast.Module(body=[_fn("_err_gist")], type_ignores=[]),
+                     "agy-rotate", "exec"), ns)
+        # ★ 必须 staticmethod：普通函数存成类属性会被当成方法绑定，self 会被当第一个参数。
+        cls.gist = staticmethod(ns["_err_gist"])
+
+    def test_it_prefers_the_structured_message(self):
+        """★★★ 结构化 `message` 必须被**优先**抓出来，即使它埋在很后面。
+
+        ⚠️ 这条的第一版把 message 放在开头 —— 于是**头部兜底也能命中**，
+          删掉正则那段照样绿（变异实测）。那是在验"真话还在"，不是在验"优先抓"。
+          判据档位必须挑**只有被测那条能挡住**的输入（本仓空守卫形态⑩）：
+          所以这里把 message 推到 180 字符之外，头部兜底够不着。
+        """
+        stderr = ("agy: request failed; " + "preamble noise " * 30 + "\n"
+                  '{"message": "Verify your account to continue.", '
+                  '"validation_url": "https://accounts.google.com/v3/signin/'
+                  + "x" * 400 + '&flowName=GlifWebSignIn&authuser"}\n')
+        assert stderr.index("Verify your account") > 180, "★ 夹具没能把真话推到头部之外"
+        got = self.gist(stderr)
+        self.assertIn("Verify your account", got,
+                      "★★★ 没有优先抓结构化 message —— 真话埋在后面就丢了")
+        self.assertNotIn("flowName=GlifWebSignIn", got,
+                         "★ 摘要里塞满了没用的 URL")
+
+    def test_it_falls_back_to_the_head_not_the_tail(self):
+        """★★ 没有结构化 message 时取**头部**。
+
+        判据用一段「前面是真话、后面是噪音」的输入 —— 取尾的实现会漏掉真话。
+        """
+        stderr = "real reason here: token expired\n" + ("noise " * 200)
+        got = self.gist(stderr)
+        self.assertIn("real reason here", got, "★★ 还在取尾部")
+
+    def test_empty_stderr_says_so_instead_of_returning_blank(self):
+        """★ 空要说「空」—— 空字符串会让报错行看起来像"没有原因"。"""
+        self.assertTrue(self.gist("").strip())
+        self.assertTrue(self.gist(None).strip())
+
+
+class HealthHonoursTheLabelArgument(unittest.TestCase):
+    """★★ `agy-rotate health <label>` 必须**真的**限定到那个号（2026-09-16）。
+
+    此前 `cmd_health` **完全不读 `args` 里的名字**，`health <label>` 会静默检查全部号。
+    零消耗所以没烧钱，但这是本仓最不能容忍的那类「参数被静默吃掉」——
+    **限定了和没限定，在输出上分辨不出来**（同「点错位置和没点中长得一模一样」）。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        src = CLI.read_text(encoding="utf-8")
+        i = src.index("def cmd_health(args):")
+        j = src.index("\ndef ", i + 10)
+        cls.body = re.sub(r"#[^\n]*", "", src[i:j])   # 剥注释：注释里正解释着这条规则
+
+    def test_it_reads_the_positional_names(self):
+        self.assertRegex(self.body, r"for\s+x\s+in\s+args|\[x\s+for\s+x\s+in\s+args",
+                         "★★ `cmd_health` 没读 `args` 里的名字 —— 限定是假的")
+        self.assertIn("_by_label", self.body, "★★ 没把名字解析成 sub")
+
+    def test_an_unknown_label_exits_instead_of_silently_doing_everything(self):
+        """★★★ 打错一个字母就该看见 —— 静默退回全池正是这条 bug 的原形。"""
+        m = re.search(r"if not sub or sub not in accs:(.*?)\n\n", self.body, re.S)
+        self.assertIsNotNone(m, "★ 找不到未知名字的分支 —— 断言可能打空了")
+        self.assertIn("sys.exit", m.group(1),
+                      "★★★ 未知的 label 没有报错退出 —— 它会静默跑全池")
+
+    def test_no_names_still_means_the_whole_pool(self):
+        """★ 不传名字时仍是全池 —— 这是既有行为，别顺手改掉。"""
+        self.assertRegex(self.body, r"if names:",
+                         "★ 没有「不传名字 = 全池」这个分支")

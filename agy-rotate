@@ -492,6 +492,22 @@ def cmd_health(args):
     if not accs:
         sys.exit("池是空的 —— 先 `agy-rotate login --current`")
     live = _mark_live(pool)
+
+    # ★★ **按 label 限定范围**（2026-09-16 补）。此前这里**完全不读 `args` 里的名字** ——
+    #   `agy-rotate health <label>` 会**静默地**检查全部号：用户以为限定了范围，其实没有。
+    #   零消耗所以没烧钱，但这是本仓最不能容忍的那一类「参数被静默吃掉」：
+    #   **限定了和没限定，输出上分辨不出来**（同「点错位置和没点中长得一模一样」）。
+    #   ★ 认不出的名字**直接报错退出**，不静默退回全池 —— 打错一个字母就该看见。
+    names = [x for x in args if not x.startswith("-")]
+    if names:
+        want = {}
+        for n in names:
+            sub = _by_label(pool, n)
+            if not sub or sub not in accs:
+                sys.exit("池里没有这个号：%s（`agy-rotate list` 看有哪些）" % n)
+            want[sub] = accs[sub]
+        accs = want
+
     rows = []
     for sub, a in accs.items():
         cred = P.read_cred(sub)
@@ -600,6 +616,27 @@ def _run_identity(started_at):
         return None
 
 
+def _err_gist(stderr):
+    """把 agy 的 stderr 压成一句**有用**的话。
+
+    ⚠️ 原来这里写的是 `stderr[-160:]` —— 取**末尾**。2026-09-16 实测：
+      eligibility 被拒时 agy 吐的是一大段 JSON + 一个很长的 Google 登录 URL，
+      于是留在记录里的只有 `…flowName=GlifWebSignIn&authuser`，
+      而真正那句 **"Verify your account to continue."** 在开头，被截掉了。
+      「报错里只剩最没用的那一段」等于没有报错 —— 排查要多绕一整轮（实测绕了一轮）。
+
+    ★ 判据：**先找结构化的 `"message": "..."`**（agy 的错误 JSON 里就有），
+      找不到再退回取**头部**。尾部只在栈回溯时有用，而 agy 这条路径不吐栈。
+    """
+    s = " ".join((stderr or "").split())
+    if not s:
+        return "(无 stderr)"
+    m = re.search(r'"(?:validation_error_)?message"\s*:\s*"([^"]{4,200})"', s)
+    if m:
+        return m.group(1)
+    return s[:180] + ("…" if len(s) > 180 else "")
+
+
 def _probe_one(label):
     """对**当前登录**的号跑一次真实生成
     -> (ok, 说明, usage dict|None, **实际跑成的账号 email**|None)。
@@ -629,7 +666,7 @@ def _probe_one(label):
     except subprocess.TimeoutExpired:
         return False, "超时（%ds）" % PROBE_TIMEOUT, None, None
     if r.returncode != 0:
-        return False, "agy 退出码 %d：%s" % (r.returncode, (r.stderr or "")[-160:]), None, \
+        return False, "agy 退出码 %d：%s" % (r.returncode, _err_gist(r.stderr)), None, \
                _run_identity(started_at)
     try:
         d = json.loads((r.stdout or "").strip())
