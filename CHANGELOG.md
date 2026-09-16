@@ -778,6 +778,73 @@ v1.5.0（2026-09-10）以来 **44 个 commit**。按发版规则是 **Y 级**：
 
 ---
 
+### B54 · 公开仓库里的身份泄漏：**搬一段文字换了信任边界** — 2026-09-16 ✅
+
+用户问「github 项目有没有暴露 codex 信息、中转站信息，暴露 key/oauth 就很严重」。
+
+#### 结论先说：**没有凭证泄漏**
+
+全历史 1355 个 blob 逐个扫（9 条正则，每条先在已知阳性上自检过）：
+`sk-` 命中 4 条**全是夹具**（`sk-AT-REST-DO-NOT-LEAK-…` / `sk-same-prefix-A|B` / `sk-73a1…`）、
+JWT 0、`access_token`/`refresh_token` 赋值 0、`GOCSPX-` 0、`auth/` 与 `state.json` 从未入库。
+2385 条「hex/base64」命中全是 git SHA。**作者 ident 是 GitHub noreply，不含真实邮箱。**
+
+#### 真问题是身份，而且是**我这一轮亲手造成的**
+
+把 `CLAUDE.md` §8 整段搬进 `.claude/rules/credentials.md` 时，
+**`.claude/rules/*.md` 是入库并推到公开仓库的，而 `CLAUDE.md` 是 gitignored 的** ——
+搬运保真了，**信任边界没跟着一起想**。搬过去 = 公开。
+
+★ 这是本仓「写下来但没有闸的规则一定会被违反」的又一次实证：
+`test_doc_boards.py::TheCommittedRulesCarryNoLocalFacts` **本来就存在**，
+它当场红了两条（`plus3/plus4`、`Pro1/plus6`）—— 闸是好的。
+**但它看不见 `user-b` / `user-a` 这类用户自起的 Google 账号名**，
+因为那条闸按 `plus\d+|Pro\d+` 的**形状**找。
+⇒ 探针看不见目标 ⇒「没命中」被读成「没有」，本仓最贵的那类错。
+
+#### 修了两件事
+
+1. **补了一条从真源派生的闸**（`test_no_real_account_identifier_appears_in_the_committed_rules`）：
+   不再猜标识符长什么样，**现读本机 `state.json` / `.agy-pool.json` 里真实存在的名字**
+   再去 rules 里搜。⚠️ 清单**只能现读，绝不能写进那个入库的测试** —— 写进去它自己就是泄漏。
+   已双向变异验证（塞回真名→红；换成不指人的措辞→绿）。
+2. **重写了公开 git 历史**（用户 2026-09-16 拍板，我原本建议不做）。
+
+#### 历史重写的执行记录
+
+范围（用户选定）：**只清 Google 账号名 + email + sub ID**；
+`tokendun`（中转站厂商名）、`plus3–plus7`（账号标签）、`doushutangmu`**保持原样**。
+★ `doushutangmu` 被明确排除是因为它**不是脱敏而是改功能**：
+bundle id `com.doushutangmu.codexbar` 与 launchd 标签前缀都含它 ——
+改完 macOS 视为另一个 app（TCC 权限重置、Application Support 目录变、已装服务成孤儿）。
+
+- 备份：`git bundle create --all` → `~/archive/codex-account-rotator/pre-filter-repo-20260916/`
+  （⚠️ **那份 bundle 里仍是未脱敏的历史**，它就是回滚路径，别当它干净）。
+- 重写：`git filter-repo --replace-text --replace-message`，**在干净克隆里跑**
+  （本仓 2026-08-31 跑过一次，`.git/filter-repo/already_ran` 会触发续跑确认）。
+- 结果：202 个 commit 全保留；**v1.3.0~v1.5.0 的 tag SHA 未变**（泄漏内容首次出现在 v1.5.0 之后），
+  只有 `main`（`9a38659` → `0846fb4`）与 `v1.6.0`（`ae8c194` → `932b274`）强推。
+- 验收：**从 GitHub 重新克隆**再扫 —— 1353 blob + 全部 commit message **零残留**，
+  且正向对照确认替换值真的存在（否则"扫到 0"可能是扫错了历史）。
+- 重写后的树跑完整测试：**1284 绿 / 15 skip / 0 失败**。
+
+#### ⚠️ 一个把我卡了 10 分钟的坑（值得记）
+
+第一次跑 `git filter-repo … 2>&1 | tail -12` **十分钟零输出**。
+判据不是"等久一点"，是 **`ps` 显示它 10 分钟只烧了 0.07s CPU、`.git` 15 分钟零改动**
+⇒ 它在**阻塞**不是在干活。`sample` 抓栈，栈顶是 **`builtin_input`** ——
+它在等 `already_ran` 的续跑确认，而**那句提问被 `| tail` 吞掉了**。
+★ 正是「六问」里的④**我把失败输出静音了吗**。
+交互式提示 + 管道 = 一个看起来像"跑得很慢"的死锁。
+
+#### 已知残留（用户知情并接受）
+
+- 旧 commit 在 GitHub GC 之前**仍可用 SHA 直链访问**。仓库 0 fork / 2 star，
+  用户选了「只强制推送，接受短期残留」，没走 Support ticket 也没删库重建。
+- 所有 commit SHA 都变了 ⇒ 文档里引用旧 SHA 的地方会对不上号。
+
+---
+
 ### B53 · 周额度「非当值号读不到」是**错的** —— 端点一直都在，我没找 — 2026-09-15 ✅
 
 用户第二次追问：「我现在 gemini 第一个号的周额度还是没看到是什么内容」。
