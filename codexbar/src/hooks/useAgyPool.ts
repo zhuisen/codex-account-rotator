@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { emit, listen } from "@tauri-apps/api/event";
+import { getSettings } from "../pages/SettingsPage";
 import type { AgyQuota, AgySnapshot } from "../agy";
 
 /**
@@ -68,6 +69,19 @@ interface PoolFile {
    *  把整份凭证写回钥匙串 —— B 被冲掉，而这个字段毫不知情。用户看到的就是
    *  「界面说 B、agy 里是 A」。真相只能**现读**，见 `live --json`。 */
   live_seen?: string | null;
+  /**
+   * 上次**跑过** `agy-rotate quota` 的时刻（epoch 秒），**成败都写**。
+   *
+   * ★★★ 自动保鲜的判据只能是它，**绝不能用各号的 `quota_at`**：取数失败那条分支
+   *   不写 `quota_at`，于是一个坏掉的号会让"最旧的读数过期了吗"**永远为真** ⇒
+   *   30s 心跳变成每 30s 起一次 18.6s 的子进程猛打云端。
+   *   与 B46 的 `_reset_crossed` 同形：拿**成功的副作用**当**尝试过**的判据，
+   *   失败时自我锁死成放大器，且没有任何症状。
+   *
+   * ★ 它落在**盘上**而不是 hook 的 ref 里，所以两个 webview 与重启之间共享同一个事实 ——
+   *   各存一份 ref 的话，主窗和菜单栏会各跑各的。
+   */
+  quota_ran_at?: number | null;
 }
 
 /** `agy-rotate live --json` 的回答：**现在**钥匙串里是谁。 */
@@ -132,6 +146,37 @@ function toSnapshot(a: AgyPoolAccount): AgySnapshot {
  *   那些路径重读的正是它们刚改掉的东西。
  */
 const PROBE_FRESH_MS = 8000;
+
+/**
+ * 云端每账号额度的保鲜阀（用户 2026-09-16：「刷新情况太慢了，都要我手动去刷新」）。
+ *
+ * ★★★ **真因不是阈值调得太松，是这条链路上根本没有自动刷新。**
+ *   在此之前 `agy-rotate quota` 的**唯一**调用方是 ↻ 按钮：挂载只 `readPool()` 读盘，
+ *   `probeLive()` 只查身份不查额度。实测本机三个号的 `quota_at` 全停在 **18.2 小时前**，
+ *   而同机 `.agy-quota.json`（本机 RPC，有采样器）是 **0.4 分钟前** —— 一冷一热。
+ *   所以这里加的是**缺失的那一半**，不是把某个数字改小（§7.1：先问信息是不是被丢掉了）。
+ *
+ * ★ 10 分钟的来历是**实测成本**：一次 `agy-rotate quota` = **18.6s / 3 个号**
+ *   （34% CPU，几乎全是网络等待），占空比 18.6s ÷ 10min ≈ 3%。
+ *   而 agy 的 5h 窗口每 1% ≈ 3 分钟、周窗口更慢 —— 10 分钟丢不掉任何用户看得见的精度。
+ *   ⚠️ 别照抄 `useAgyQuota` 的 2 分钟：那条是**本机 loopback**，零网络零额度，成本差两个量级。
+ *
+ * ★★ 零额度消耗、**不写钥匙串**（`cmd_quota` 用每个号自己存的 token 逐个取，不切号），
+ *   所以后台跑它不会和用户当值的号抢槽 —— 这是它敢自动化的前提，不是顺带的好处。
+ */
+const QUOTA_FRESH_MS = 10 * 60 * 1000;
+
+/** 心跳只是"到点看一眼岁数"，不过期什么都不做 —— 所以 30s 节拍 ≠ 30s 取一次。 */
+const TICK_MS = 30 * 1000;
+
+/** 池文件被重写了（额度刚取完）⇒ 另一个 webview **读盘**即可，别也去起一个子进程。 */
+const POOL_EVT = "agy-pool-updated";
+
+/** 与 `useTraffic` / `useQuotaSidecar` 共用设置页那一个「后台自动刷新」开关。
+ *  ★ 每次 tick 现读：两个 webview 的 localStorage **不互通**，建立 effect 时读一次会漂。 */
+function autoRefreshEnabled(): boolean {
+  try { return getSettings().autoRefresh !== false; } catch { return true; }
+}
 
 /**
  * agy 账号池。→ 每个号一张卡所需的一切。
@@ -204,6 +249,9 @@ export function useAgyPool(enabled: boolean): {
   const probedAt = useRef(0);
   /** `read()` 在途 —— 来回点分档不该把子进程叠起来。 */
   const readingRef = useRef(false);
+  /** 盘上那条「上次跑过 `agy-rotate quota`」的时刻（毫秒）。0 = 从没跑过 ⇒ 必取一次。
+   *  ★ 每次 `readPool()` 现读，不自己累加 —— 另一个 webview 跑完时我们靠读盘知道。 */
+  const quotaRanAt = useRef(0);
 
   /**
    * 读池文件。**只读盘**：不起子进程、不联网、不消耗配额，所以它在挂载时就跑（见 ①）。
@@ -224,6 +272,9 @@ export function useAgyPool(enabled: boolean): {
         return;
       }
       const p = JSON.parse(raw) as PoolFile;
+      // ★ 现读「上次尝试过」的时刻。另一个 webview 刚跑完时，我们靠这一行知道，
+      //   于是两边不会各跑一次同样的 18.6s 子进程。
+      quotaRanAt.current = (p.quota_ran_at ?? 0) * 1000;
       setAccounts(Object.entries(p.accounts ?? {})
         .map(([sub, a]) => ({ sub, ...a }))
         // ★ 按 label 排，不按额度：位置一变，用户就得重新找他的号。
@@ -322,15 +373,90 @@ export function useAgyPool(enabled: boolean): {
   }, []);
   useEffect(() => { if (enabled) void read(); }, [enabled, read]);
 
-  const refresh = useCallback(() => {
+  /**
+   * 取一次云端每账号额度。`refresh()`（手动 ↻）与自动保鲜**共用这一条** ——
+   * 两条各写一份的话，迟早只有一条带上了 `running` 守卫或广播。
+   *
+   * ★ `silent`：自动那次**不点亮按钮转圈**。后台保鲜让整排卡每 10 分钟转一次圈，
+   *   用户会以为自己碰了什么；而手动点 ↻ 必须立刻有反馈。
+   *   ⚠️ 但**失败仍然照常写 `err`** —— 静默的是"忙"，不是"坏了"。
+   */
+  const runQuota = useCallback((silent: boolean) => {
     if (running.current) return;
     running.current = true;
-    setBusy(true); setErr(null);
+    if (!silent) setBusy(true);
+    setErr(null);
     void invoke<string>("run_agy_rotate", { args: ["quota"] })
       .then(() => read(true))
+      // ★ 广播「池文件变了」：另一个 webview 收到后**只读盘**（~1ms），
+      //   而不是也起一个 18.6s 的子进程。同 `useTraffic` 的 `traffic-updated`。
+      .then(() => emit(POOL_EVT))
       .catch((e: unknown) => setErr(String(e).slice(0, 200)))
-      .finally(() => { running.current = false; setBusy(false); });
+      .finally(() => { running.current = false; if (!silent) setBusy(false); });
   }, [read]);
+
+  const refresh = useCallback(() => { runQuota(false); }, [runQuota]);
+
+  /**
+   * 过期才取。**判据是盘上的 `quota_ran_at`（尝试过没有），不是各号的 `quota_at`（取成没有）** ——
+   * 理由写在 `PoolFile.quota_ran_at` 上，那是这次改动里唯一会自我锁死成放大器的地方。
+   */
+  const refreshQuotaIfStale = useCallback(() => {
+    if (running.current) return;
+    if (Date.now() - quotaRanAt.current < QUOTA_FRESH_MS) return;
+    runQuota(true);
+  }, [runQuota]);
+
+  /**
+   * ★★★ 云端额度的**自动保鲜**，三个触发点共用同一条 `QUOTA_FRESH_MS`
+   *   （用户 2026-09-16：「刷新情况太慢了，都要我手动去刷新，额度才更新上去」）。
+   *
+   * 形状照抄 `useTraffic`，**不另发明**：
+   *   ① 进到这一档时看一眼岁数；② 可见时 30s 心跳；③ 托盘弹出。
+   * ★ 三处**必须是同一个阀**。曾经挂载用 10 分钟、心跳用 2 分钟，结果启动 30s 后必定多取一次
+   *   （`useTraffic` 实测过）——「新鲜」只能有一套标准。
+   *
+   * ⚠️ **不受 `enabled` 之外的条件放宽**：没人在看 Gemini 档时不该往云端发请求。
+   *   这与 ① 那条「池文件挂载就读」不冲突 —— 那是读盘，这是联网。
+   */
+  useEffect(() => {
+    if (!enabled) return;
+    // ① 进档即看一眼（岁数没过阀就什么都不做）。手动 ↻ 仍然随时可用。
+    if (autoRefreshEnabled()) refreshQuotaIfStale();
+    // ② 心跳。★ `visibilityState` 与开关都**每 tick 现读** —— 窗口藏起来时零开销。
+    const id = setInterval(() => {
+      if (!autoRefreshEnabled()) return;
+      if (document.visibilityState === "visible") refreshQuotaIfStale();
+    }, TICK_MS);
+    return () => clearInterval(id);
+  }, [enabled, refreshQuotaIfStale]);
+
+  /**
+   * ③ 托盘弹出 —— 菜单栏 webview **只在 app 启动时挂载一次**（show/hide 不重建），
+   * 所以初始化 effect 之后再不会跑。少了这条，菜单栏里的额度会冻在开机那一刻
+   * （`useTraffic` 实测踩过，用户报「过了几十分钟还没刷新」）。
+   */
+  useEffect(() => {
+    if (!enabled) return;
+    let un: (() => void) | undefined;
+    let dead = false;
+    void listen("menubar-shown", () => {
+      if (autoRefreshEnabled()) refreshQuotaIfStale();
+    }).then((f) => { if (dead) f(); else un = f; });
+    return () => { dead = true; un?.(); };
+  }, [enabled, refreshQuotaIfStale]);
+
+  /**
+   * 另一个 webview 取完了 ⇒ **只读盘**，不重取。
+   * ★ 不受 `enabled` 约束：这是别人已经取好的数据，收下它零成本（同 `LIVE_EVT` 那条理由）。
+   */
+  useEffect(() => {
+    let un: (() => void) | undefined;
+    let dead = false;
+    void listen(POOL_EVT, () => { void readPool(); })
+      .then((f) => { if (dead) f(); else un = f; });
+    return () => { dead = true; un?.(); };
+  }, [readPool]);
 
   const switchTo = useCallback((label: string) => {
     setSwitching(label);

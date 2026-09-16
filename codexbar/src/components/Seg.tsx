@@ -16,7 +16,13 @@ export default function Seg<T extends string | number>({ opts, cur, on, label, t
   t: Theme;
 }): React.ReactElement {
   return (
-    <div style={{ display: "flex", gap: 2, padding: 2, border: `1px solid ${t.ghostBorder}`, borderRadius: 9,
+    // ★ `data-seg`：给 harness 的 `segRows` 探针认的标记。
+    //   ⚠️ 加它的理由是**现有探针结构上看不见这个缺陷**：`wrapped` 只判**叶子文本节点**
+    //   的渲染高，而 Seg 折行时每个 span 仍是单行、折的是**容器** ——
+    //   于是「控件被压成两行」这一整类只能靠肉眼发现（2026-08-24 用户连报三处、
+    //   2026-09-16 又报一次）。本仓规矩：同一类 bug 抓到第二次，交付物是**一条会变红的闸**。
+    <div data-seg={opts.map(String).join("|")}
+         style={{ display: "flex", gap: 2, padding: 2, border: `1px solid ${t.ghostBorder}`, borderRadius: 9,
                   // ★ 900px 实测:六个档位「分模型/总量/今日/7d/14d/30d」被压成三行竖排
                   //   (探针:内容高 48/行高 13)。与总览头部按钮同一个病根。
                   flexWrap: "wrap", rowGap: 2 }}>

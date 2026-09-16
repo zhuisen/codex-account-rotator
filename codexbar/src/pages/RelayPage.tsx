@@ -46,7 +46,9 @@ export default function RelayPage({ t }: { t: Theme }): React.ReactElement {
         </span>
         {/* ★ 用全 app 同一个 `Seg`，不是另发明一种 tab —— 两种切换器长得不一样，
             用户要多认一种结构却什么也没多得到。 */}
-        <div style={{ marginLeft: "auto" }} data-relay-tabs>
+        {/* ★ `flexShrink: 0`：同 `PlatformPage` 那条 —— 同排的说明文字自带省略号，
+            该退让的是它不是控件。不加的话这组 Tab 会在窄窗里折成两行（同一类缺陷）。 */}
+        <div style={{ marginLeft: "auto", flexShrink: 0 }} data-relay-tabs>
           <Seg opts={TABS} cur={tab} on={setTab} label={TAB_LABEL} t={t} />
         </div>
       </div>

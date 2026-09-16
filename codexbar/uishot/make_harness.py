@@ -659,9 +659,34 @@ function relayEntry() {
               buckets: { 'gemini-weekly': { remaining_percent: 93.4,
                                             reset_at: __NOW__ + 380000, group: 'Gemini Models' } },
             } : undefined,
+            // ★★★ **卡片真正吃的是这个**（`toSnapshot` 只读 `quota_summary`）。
+            //   上面那个 `quota` 是 B53 之前的旧形状，只剩选号与 CLI 打印在用。
+            //   ⚠️ 2026-09-16 发现夹具**一直没跟上 B53**：只给旧形状 ⇒ `groups` 为空 ⇒
+            //      `ok=false` ⇒ agy 卡在 harness 里**永远渲染降级态**，
+            //      而降级态照常渲染、零报错，看着完全像通过。
+            //      于是「页脚画的是什么」这一格**根本验不到** —— 本仓那条
+            //      「sweep 报干净之前先正面证明被测的东西真的渲染了」的又一次实证。
+            quota_summary: [
+              { displayName: 'Gemini Models', buckets: [
+                { bucketId: 'gemini-5h', window: '5h',
+                  remainingFraction: i === 1 ? 0.08 : 0.956,
+                  resetTime: new Date(__NOW__ * 1000 + 4300000).toISOString() },
+                { bucketId: 'gemini-weekly', window: 'weekly',
+                  remainingFraction: i === 1 ? 0.41 : 0.934,
+                  resetTime: new Date(__NOW__ * 1000 + 380000000).toISOString() } ] },
+              { displayName: 'Claude + GPT Models', buckets: [
+                { bucketId: 'claude-5h', window: '5h', remainingFraction: 1,
+                  resetTime: new Date(__NOW__ * 1000 + 18000000).toISOString() } ] },
+            ],
           };
         }
-        return Promise.resolve(JSON.stringify({ accounts: accs, live_seen: subs[0] }));
+        // ★ `quota_ran_at` = 「上次**尝试过** `agy-rotate quota`」。给成"刚跑过"，
+        //   否则 harness 一挂载就触发自动保鲜，把打桩的 `run_agy_rotate` 卷进截图时序。
+        //   ⚠️ 要验"过期会自动取"那条路径，传 `?agystale=1` 把它推回 0。
+        return Promise.resolve(JSON.stringify({
+          accounts: accs, live_seen: subs[0],
+          quota_ran_at: p.get('agystale') === '1' ? 0 : __NOW__,
+        }));
       }
       case 'run_agy_rotate':
         // ⚠️ 打桩里读载荷一律用 **`args`** —— 这个 stub 的签名就是 `invoke(cmd, args)`。
@@ -1214,6 +1239,24 @@ function relayEntry() {
         //   判据只能是**渲染高 vs 单行高**:叶子文本节点高过 1.6 行 = 它折行了。
         //   2026-08-24 用户连报三处(头部按钮 / 菜单栏刷新时间 / 卡片动作条),
         //   全部靠肉眼截图发现 —— 这个探针就是为了让下一次不必再靠肉眼。
+        // ★★ 互斥单选控件（`Seg`）**折成了几行**。
+        //   上面那个 `wrapped` 探针看不见这一类：它判的是**叶子文本节点**的渲染高，
+        //   而 Seg 折行时每个 span 仍是单行、折的是**容器**。
+        //   2026-08-24 用户连报三处「控件被压成竖排」、2026-09-16 又报一次
+        //   （平台详情页「分模型/总量」折两行、旁边的档位条一行，两个控件组高度对不齐）
+        //   —— 全部靠肉眼截图发现。这条探针就是为了让下一次不必再靠肉眼。
+        //   ★ 判据 = 容器 clientHeight ÷ 第一个子项 offsetHeight，四舍五入即行数。
+        segRows: (function () {
+          var out = [], all = document.querySelectorAll('[data-seg]');
+          for (var i = 0; i < all.length; i++) {
+            var e = all[i], k = e.firstElementChild;
+            if (!k || !k.offsetHeight) continue;
+            out.push({ opts: e.getAttribute('data-seg'),
+                       rows: Math.round(e.clientHeight / k.offsetHeight),
+                       w: Math.round(e.getBoundingClientRect().width) });
+          }
+          return out;
+        })(),
         wrapped: (function () {
           var r0 = document.getElementById('root');
           var out = [], all = r0 ? r0.querySelectorAll('*') : [];

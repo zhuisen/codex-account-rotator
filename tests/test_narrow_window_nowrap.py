@@ -292,3 +292,90 @@ class WideTableMinWidthIsDerivedNotMeasured(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ControlGroupsNeverWrapIntoTwoRows(unittest.TestCase):
+    """★★ 互斥单选控件组（`Seg` / `RangeBar`）在**支持的全部窗口宽度**下都只占一行。
+
+    ## 起因（2026-09-16，用户截图点名）
+
+    平台详情页头部「分模型 / 总量」折成两行，而紧邻的档位条「今日 7d 30d 年度 范围▾」
+    是一行 —— 两个同类控件组高度对不齐。实测折行阈值 **≤1200px**，而窗口下限是 860px，
+    也就是**日常宽度下几乎一直是坏的**（1400px 才不折；107px 被挤到 61px）。
+
+    ## 根因不是 `Seg` 的 `flexWrap`
+
+    那是它挤到极限时的兜底，是对的。错的是**这一行里被挤的是不该被挤的那个**：
+    同排的源路径 span 自带 `overflow:hidden + textOverflow:ellipsis`，
+    **它才是设计来吸收挤压的**；而控件组没有 `flexShrink: 0`，于是 flex 从两边一起压。
+    ★ 判据：一行里谁能优雅退让谁就退让 —— **会截断的让给会省略号的**。
+
+    ## ⚠️ 为什么非要新加探针
+
+    现有的 `wrapped` 探针**结构上看不见这一类**：它判的是**叶子文本节点**的渲染高，
+    而控件组折行时每个 span 仍是单行、折的是**容器**。
+    所以「控件被压成竖排」这一整类只能靠肉眼发现 —— 2026-08-24 用户连报三处，
+    2026-09-16 又报一次。本仓规矩：**同一类 bug 抓到第二次，交付物是一条会变红的闸**，
+    不是再写一行散文。现在 `Seg` 与 `RangeBar` 的容器都带 `data-seg`，
+    harness 的 `segRows` 探针按「容器 clientHeight ÷ 子项 offsetHeight」报行数。
+    """
+
+    #: 窗口下限 860（D 档字号，见 CLAUDE.md §2），1200 是实测的折行阈值，必须覆盖。
+    WIDTHS = (1200, 1000, 860)
+    VIEWS = ("platform:agy", "traffic", "relay")
+
+    @classmethod
+    def setUpClass(cls):
+        import json as _json
+        import shutil
+        import subprocess
+        import urllib.error
+        import urllib.request
+        cls._json, cls._sub = _json, subprocess
+        cls.chrome = ("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
+        if not Path(cls.chrome).exists() and not shutil.which("google-chrome"):
+            raise unittest.SkipTest("本机没有 Chrome —— 跳过而不是假绿")
+        try:
+            urllib.request.urlopen("http://127.0.0.1:3304/harness.html", timeout=3).read(1)
+        except (urllib.error.URLError, OSError) as e:
+            raise unittest.SkipTest(
+                "harness 静态服务(3304)没在跑：{} —— 先 `python3 codexbar/uishot/make_harness.py`。"
+                "★ 跳过不是绿，别当它验过了".format(str(e)[:60]))
+
+    def _segs(self, view: str, width: int):
+        import html as _html
+        out = self._sub.run(
+            [self.chrome, "--headless=new", "--disable-gpu", "--no-sandbox",
+             "--window-size={},900".format(width), "--virtual-time-budget=3500", "--dump-dom",
+             "http://127.0.0.1:3304/harness.html?nav={}&intro=0".format(view)],
+            capture_output=True, text=True, timeout=120).stdout
+        m = re.search(r"<title>__PROBE__(.*?)</title>", out, re.S)
+        self.assertIsNotNone(m, "★ 没拿到探针 —— 是 harness 坏了，不是页面干净")
+        return self._json.loads(_html.unescape(m.group(1))).get("segRows") or []
+
+    def test_the_probe_actually_finds_the_control_groups(self):
+        """★★★ 已知阳性自检 —— **必须先证明探针看得见目标**。
+
+        少了这条，一个恒返回空数组的探针会让下面每一条都"通过"，
+        而"没扫到"与"没折行"在报告里长得一模一样。这是本仓最贵的一类错。
+        """
+        segs = self._segs("platform:agy", 1200)
+        self.assertGreaterEqual(
+            len(segs), 2,
+            "★★★ 平台详情页应当有 2 组控件（分模型/总量 + 档位条），探针只看到 {} 组 —— "
+            "是 `data-seg` 掉了或探针坏了，不是页面没问题".format(len(segs)))
+
+    def test_no_control_group_wraps_at_any_supported_width(self):
+        bad = []
+        for view in self.VIEWS:
+            for w in self.WIDTHS:
+                for s in self._segs(view, w):
+                    if s["rows"] > 1:
+                        bad.append("    {} @{}px · {} → {} 行（宽 {}px）"
+                                   .format(view, w, s["opts"], s["rows"], s["w"]))
+        self.assertEqual(
+            bad, [],
+            "★★ 这些控件组被挤成了多行：\n" + "\n".join(bad)
+            + "\n   → 修法**不是**去掉 `Seg` 的 `flexWrap`（那是挤到极限时的兜底），"
+              "\n     而是给控件组所在的那个 flex 容器加 `flexShrink: 0` ——"
+              "\n     让同排自带省略号的说明文字去吸收挤压。")

@@ -42,7 +42,11 @@ export default function RangeBar({ st, today, onChange, onToast, t }: {
   });
 
   return (
-    <div style={{ display: "flex", gap: 2, padding: 2, border: `1px solid ${t.ghostBorder}`,
+    // ★ `data-seg`：与 `Seg` 同一条探针（`segRows`）。它虽然是**另一个组件**，
+    //   但对用户是同一类控件（互斥单选），折行的后果一模一样 ——
+    //   只给 `Seg` 打标记，探针就正好漏掉用户红框里的另一半。
+    <div data-seg="range"
+         style={{ display: "flex", gap: 2, padding: 2, border: `1px solid ${t.ghostBorder}`,
                   borderRadius: 9, fontFamily: MONO, fontSize: 11.5, alignItems: "center",
                   position: "relative" }}>
       {PILLS.map((p) => (

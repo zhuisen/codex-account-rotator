@@ -191,6 +191,22 @@ export function fmtResetTime(ts?: number): string {
 }
 
 /**
+ * 重置时刻的**绝对**写法：`09-19 16:34`（本地时区）。
+ *
+ * ★ 与 `fmtEta`（"2h"、相对）是**互补而不是重复**：条形行上回答"还有多久"，
+ *   卡片底注回答"具体哪一天" —— 跨天的窗口（周）光看 `↻3d` 说不出是哪天。
+ * ★ 与 CLI 侧 `agy-rotate` 的 `_fmt_reset` **同一个格式**（`%m-%d %H:%M`）：
+ *   同一个事实在终端和界面上长得不一样，用户会以为是两个数。
+ * ⚠️ 一律转本地时区 —— 服务端给的是 UTC，混着看会差 8 小时。
+ */
+export function fmtResetDate(ts?: number | null): string {
+  if (!ts) return "—";
+  const d = new Date(ts * 1000);
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+/**
  * 额度**窗口**的识别色（用户 2026-08-26 从四版 demo 里选的 C：「两行 + 双色相，5h 青 / 周 绿」）。
  *
  * ★★ **这是一个知情的取舍，不是疏漏 —— 改之前先读完。**

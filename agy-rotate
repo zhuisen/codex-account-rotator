@@ -250,6 +250,17 @@ def cmd_quota(args):
         a["quota_at"] = int(time.time())
         out.append({"sub": sub, "label": a.get("label"), "live": sub == live_sub,
                     "quota": q, "err": err or None})
+    # ★★★ **池级「上次尝试过」的时刻，成败都写。**
+    #
+    # 判「该不该重取」绝不能看各号的 `quota_at`：上面那条失败分支 `continue` 掉了，
+    # **不写 `quota_at`** —— 于是一个坏掉的号会让"最旧的 quota_at 过期了吗"**永远为真**，
+    # 前端心跳就变成每 30s 起一次 18.6s 的子进程往云端猛打。
+    # 这与 B46 的 `_reset_crossed` 是**同一个形状**：拿"成功的副作用"当"尝试过"的判据，
+    # 失败时条件自我锁死成放大器，而且**没有任何症状**（日志安静、UI 照常）。
+    #
+    # ★ 「我们试过了」是一条独立的事实，就该独立写下来，不从别的字段反推
+    #   （同 §7.1「先列出那一刻我们已经知道但没写下来的事」）。
+    pool["quota_ran_at"] = int(time.time())
     with P._lock(P.POOL):
         P.save(pool)
     for _s, _a in _accounts(pool).items():

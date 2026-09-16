@@ -6,7 +6,7 @@ import type { AgySnapshot } from "../agy";
 import {
   agyShown, agyTightest, agyWinRows, agyQuotaVisible, agyReasonNote, agyReasonTone, agyResetText,
 } from "../agy";
-import { fmtAgo, winNumColor } from "../helpers";
+import { fmtAgo, fmtResetDate, winNumColor } from "../helpers";
 import { IconBtn, IcPen, IcTrash, IcRotate } from "./CardIcons";
 import ProbeButton from "./ProbeButton";
 import { useState } from "react";
@@ -248,12 +248,28 @@ export default function AgyCard({ t, color, snap, busy, err, disabled, winSlots,
                              fontVariantNumeric: "tabular-nums" }}>{gap}%</span>
             )}
           </div>
-          {/* grok 那行放的是账号邮箱;agy 的响应里**没有任何身份信息**(接口无鉴权),
-              所以这里放"哪一组最紧"—— 环上那个数字来自哪个池子,否则 4 个桶压成 1 个数后
-              用户无从知道是 Gemini 还是 Claude/GPT 见底。 */}
-          <div style={{ fontSize: Z.email, color: t.text2, fontFamily: MONO, overflow: "hidden",
+          {/* ★★ 这一格放**账号信息**（邮箱），与账号卡、grok 卡同位同义（用户 2026-09-16
+              点名要的一致性：「gemini model 最紧应该是放账号信息的」）。
+
+              ⚠️ **它原来放的是「gemini 最紧」，而那个理由已经过期了** —— 旧注释写着
+              「agy 的响应里没有任何身份信息（接口无鉴权）」，那说的是**本机 loopback RPC**。
+              2026-09-15（B53）起额度改走云端 `retrieveUserQuotaSummary`，**按账号读**，
+              池里每个号都带 `email`。所以"拿不到身份"不再成立。
+              ★ 本仓 §6：披露/文案的寿命跟着它描述的事实走，事实变了就该重新评估 ——
+                这条正是那个形状，只是它描述的是布局而不是免责。
+
+              ★ 「哪一组最紧」**没有被删掉，移进了 `title`**（§6：不要顺手简化掉已有功能）。
+                环上那个数字来自 4 个桶里最紧的一个，不说来自哪组，用户无从知道是
+                Gemini 还是 Claude/GPT 见底。 */}
+          <div title={tight?.group
+                 ? `环上的 ${Math.round(tight.b.remaining_percent)}% 来自**${tight.group}** —— `
+                   + `4 个桶（Gemini / Claude+GPT × 5h / 周）里最紧的那个。`
+                   + `任何一个见底 agy 就用不了，所以取最小值不取平均。`
+                 : undefined}
+               style={{ fontSize: Z.email, color: t.text2, fontFamily: MONO, overflow: "hidden",
                         textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-            {tight?.group ? `${tight.group} 最紧` : (busy ? "正在取额度…" : "未探测")}
+            {/* ★ 读不到就说读不到，不拿 label 顶替 —— label 是昵称，邮箱才是身份。 */}
+            {email ?? (busy ? "正在取额度…" : "—")}
           </div>
 
           {/* 弹性留白：把条形区压到卡片底边，与账号卡同款。 */}
@@ -321,13 +337,36 @@ export default function AgyCard({ t, color, snap, busy, err, disabled, winSlots,
           <div style={{ display: "flex", flexDirection: "column", gap: 6,
                         marginTop: 5, paddingTop: 7, borderTop: `1px solid ${t.divider}`,
                         color: alarmed ? "#E0901C" : t.muted }}>
-            <span style={{ fontSize: Z.exp, fontFamily: MONO, whiteSpace: "nowrap",
+            {/* ★★ 这一格与账号卡的「到期」同位（用户 2026-09-16 点名的一致性）。
+                放的是**最紧那个窗口的重置时刻**，绝对写法 `09-19 16:34`。
+
+                ⚠️ **agy 没有「订阅到期日」这个数据，不是我没找。** 三个独立探针一致
+                （2026-09-16，且有正向对照：同样写法在 codex 侧找到了 `sub_until`/`sub_checked`）：
+                  · 凭证文件只有 `token.expiry` —— 那是 access_token 的 ~6h 有效期；
+                  · `id_token` 是纯 Google OIDC（`at_hash/aud/azp/email/email_verified/exp/iat/iss/sub`），
+                    无任何 plan/tier/subscription 声明；
+                  · agy 二进制里没有 subscription/license 类端点。
+                所以这里**不能**写「到期」—— 把 6 小时的 token 有效期或额度重置日说成订阅到期，
+                就是本仓那条「把 5 小时的余量说成一周的余量」，比不显示更糟。
+                ★ 标签如实写「重置」，与账号卡的「到期」**同位不同义，且说出来**。
+
+                ★ 与上方行里的 `↻2h` **互补不重复**：那里答"还有多久"，这里答"具体哪天" ——
+                  周窗口只看 `↻3d` 说不出是哪一天。用户 2026-09-16 选了这一格放重置日，
+                  我用绝对写法正是为了不让它退化成同一个数的第二遍。 */}
+            {/* ★ 「在/不在轮换池」是**事实陈述**，原来住在这一格的兜底文案里。
+                这一格改放重置日之后它没有别处可去（动作条里的轮换图标只在卡被选中时可见），
+                所以并进 `title` —— **搬走一句真话之前要先给它找到家**，本仓 §7.-2 的规矩。 */}
+            <span title={(tight?.group
+                    ? `${tight.group} 是 4 个桶里最紧的，它在 ${fmtResetDate(tight.b.reset_at)} 重置。`
+                      + `⚠️ 这不是订阅到期日 —— agy 不提供订阅期（已实测确认，见代码注释）。`
+                    : "还没读到任何窗口的重置时刻")
+                    + `\n${onSwitch || isCurrent ? "Google 订阅 · 在轮换池" : "Google 订阅 · 不在轮换池"}`}
+                  style={{ fontSize: Z.exp, fontFamily: MONO, whiteSpace: "nowrap",
                          overflow: "hidden", textOverflow: "ellipsis" }}>{
+              // ★ 陈旧读数仍然**先说它是几时的** —— 数字绝不假装是活的（§7.0b）。
               shown?.stale ? `${fmtAgo(shown.at ?? undefined)}的读数`
-                // ★ 「在/不在轮换池」是**事实陈述**，跟着池走。写死"不在"是 2026-09-13
-                //   之前的事实，池建起来之后它就变成了一句假话。
-                : shown ? (email ?? (onSwitch || isCurrent ? "Google 订阅 · 在轮换池"
-                                                          : "Google 订阅 · 不在轮换池"))
+                : tight ? `重置 ${fmtResetDate(tight.b.reset_at)}`
+                : shown ? "重置 —"
                 : "额度暂时读不到"}</span>
             {/* agy 没有重置卡这个概念，占位只为让页脚与账号卡等高。 */}
             <span style={{ alignSelf: "flex-end" }}><CardBadgeGhost /></span>

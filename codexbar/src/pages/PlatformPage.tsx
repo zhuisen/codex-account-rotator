@@ -405,7 +405,20 @@ export default function PlatformPage({ t, data, raw, cacheMode, pk, st, setSt, o
             "这一页的数字从哪来"。单独占一行会把 KPI 往下推、且看着像一条告警。 */}
         <RouteSplit t={t} p={data?.platforms[pk]} labels={v?.labels ?? []}
                     rangeTxt={st.preset === "custom" ? `${md(range.s)}→${md(range.e)}` : rangeLabel(st.preset)} />
-        <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
+        {/* ★★ `flexShrink: 0` —— 用户 2026-09-16 实报「分模型/总量」折成两行、
+            与旁边的档位条高度对不齐。实测折行阈值是 **≤1200px**，而窗口下限是 860px，
+            也就是**日常宽度下几乎一直是坏的**（1400px 才不折，107px → 被挤到 61px）。
+
+            根因不是 `Seg` 的 `flexWrap`（那是它挤到极限时的兜底，是对的），
+            而是**这一行里被挤的是不该被挤的东西**：同排的源路径 span 自带
+            `overflow:hidden + textOverflow:ellipsis`，**它才是设计来吸收挤压的**；
+            控件组没有 `flexShrink: 0`，于是 flex 从两边一起压。
+            ★ 判据：一行里谁能优雅退让谁就退让 —— 会截断的让给会省略号的。
+
+            ⚠️ 现有的 `wrapped` 探针**结构上看不见这一类**：它判叶子文本节点的渲染高，
+            而 Seg 折行时每个 span 仍是单行、折的是容器。所以这条缺陷只能靠肉眼发现
+            （2026-08-24 已经连报三处）。本轮已补 `segRows` 探针把它变成会红的闸。 */}
+        <div style={{ marginLeft: "auto", display: "flex", gap: 8, flexShrink: 0 }}>
           <Seg opts={["models", "total"] as const} cur={mode} on={setMode}
                label={(x) => (x === "models" ? "分模型" : "总量")} t={t} />
           <RangeBar st={st} today={today} onChange={setSt} onToast={showToast} t={t} />

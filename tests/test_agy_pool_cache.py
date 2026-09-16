@@ -333,3 +333,185 @@ class TheHookBroadcastsAndListens(unittest.TestCase):
         body = self.src[head:self.src.index("}, [", i)]
         self.assertNotIn("if (!enabled)", body, "★ 收听被 enabled 挡住了")
         self.assertNotIn("enabled &&", body, "★ 收听被 enabled 挡住了")
+
+
+class TheCloudQuotaRefreshesItself(unittest.TestCase):
+    """★★★ 云端每账号额度必须**自动保鲜**（用户 2026-09-16：「刷新情况太慢了，
+    都要我手动去刷新，额度才更新上去」）。
+
+    ## 真因不是阈值，是这条链路上根本没有自动刷新
+
+    2026-09-16 实测本机：三个号的 `quota_at` 全停在 **18.2 小时前**，而同机
+    `.agy-quota.json`（本机 RPC，有采样器）是 **0.4 分钟前** —— 一冷一热。
+    `agy-rotate quota` 此前的**唯一**调用方是 ↻ 按钮：挂载只 `readPool()` 读盘，
+    `probeLive()` 只查身份不查额度。
+    ★ 本仓 §7.1：症状是「要等很久才更新」时**先问信息是不是被丢掉了**，别先调阈值。
+      这里丢掉的不是信息，是整条触发路径。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.src = _strip_comments(HOOK.read_text(encoding="utf-8"))
+
+    def test_there_is_an_automatic_trigger_at_all(self):
+        """★★★ 主闸：必须存在**不靠用户点击**的取数路径。"""
+        self.assertIn("setInterval(", self.src,
+                      "★★★ 没有心跳 —— 额度又只能靠手点 ↻ 才更新")
+        self.assertIn("refreshQuotaIfStale", self.src,
+                      "★★★ 没有「过期才取」这条路径")
+
+    def test_the_manual_and_automatic_paths_share_one_implementation(self):
+        """★ 手动 ↻ 与自动保鲜走**同一个** `runQuota` ——
+        各写一份的话，迟早只有一条带上了 `running` 守卫或广播。"""
+        self.assertIn("const runQuota", self.src)
+        self.assertIn("runQuota(false)", self.src, "★ 手动那条没走共用实现")
+        self.assertIn("runQuota(true)", self.src, "★ 自动那条没走共用实现")
+
+    def test_the_heartbeat_respects_the_user_switch_and_visibility(self):
+        """★ 设置页「后台自动刷新」关掉时，后台心跳必须闭嘴；窗口藏起来时零开销。
+        ★ 两者都**每 tick 现读** —— 两个 webview 的 localStorage 不互通。"""
+        i = self.src.index("setInterval(")
+        body = self.src[i:i + 400]
+        self.assertIn("autoRefreshEnabled()", body, "★ 心跳没看那个开关")
+        self.assertIn('visibilityState === "visible"', body, "★ 没人看时还在跑")
+
+    # ------------------------------------------------------------------
+    # ★★★ 下面这条是这次改动里**唯一能自我锁死**的地方，单独给一条闸。
+    # ------------------------------------------------------------------
+
+    def test_freshness_is_judged_by_did_we_try_not_by_did_it_succeed(self):
+        """★★★ 判据必须是池级的 `quota_ran_at`（**尝试过没有**），
+        绝不能是各号的 `quota_at`（**取成没有**）。
+
+        `cmd_quota` 的失败分支 `continue` 掉了、**不写 `quota_at`** ⇒ 一个坏掉的号会让
+        「最旧的读数过期了吗」**永远为真** ⇒ 30s 心跳变成每 30s 起一次 18.6s 的子进程
+        猛打云端。与 B46 的 `_reset_crossed` **同一个形状**：拿「成功的副作用」当
+        「尝试过」的判据，失败时条件自我锁死成放大器，**而且没有任何症状**。
+        """
+        i = self.src.index("const refreshQuotaIfStale")
+        body = self.src[i:self.src.index("}, [", i)]
+        self.assertIn("quotaRanAt.current", body,
+                      "★★★ 保鲜判据没用「尝试过」的时刻")
+        self.assertNotIn("quota_at", body,
+                         "★★★ 保鲜判据用了各号的 `quota_at` —— 一个坏号就把它变成 403 放大器")
+
+    def test_the_cli_records_the_attempt_even_when_it_fails(self):
+        """★★★ 上一条的另一半：CLI 必须**成败都写** `quota_ran_at`。
+
+        只在成功时写 = 那个字段与 `quota_at` 等价 = 放大器原样还在，
+        而闸却因为"前端读的是新字段"而变绿。**两侧都要验，缺一侧等于没验。**
+        """
+        cli = (ROOT / "agy-rotate").read_text(encoding="utf-8")
+        i = cli.index("def cmd_quota")
+        body = cli[i:cli.index("\ndef ", i + 10)]
+        self.assertIn('pool["quota_ran_at"]', body, "★★★ CLI 没记录「尝试过」")
+        # ★ 判据：赋值必须在**逐号循环之外**（循环里 `continue` 会跳过它）。
+        #   用缩进判层级 —— 顶层语句是 4 空格，循环体内是 8+。
+        line = next(l for l in body.splitlines() if 'pool["quota_ran_at"]' in l)
+        self.assertEqual(len(line) - len(line.lstrip()), 4,
+                         "★★★ `quota_ran_at` 写在循环体里 —— 失败的号会 `continue` 跳过它")
+
+    def test_a_finished_run_tells_the_other_webview_to_read_not_refetch(self):
+        """★ 取完广播，兄弟 webview **读盘**（~1ms）而不是也起一个 18.6s 的子进程。"""
+        self.assertIn("emit(POOL_EVT", self.src, "★ 取完不广播 —— 两个 webview 各跑各的")
+        self.assertIn("listen(POOL_EVT", self.src, "★ 只发不收")
+
+    def test_the_automatic_run_does_not_spin_the_button(self):
+        """★ 后台保鲜**不点亮转圈**（每 10 分钟整排卡转一次，用户会以为自己碰了什么）；
+        但**失败仍然照常写 `err`** —— 静默的是"忙"，不是"坏了"。"""
+        i = self.src.index("const runQuota")
+        body = self.src[i:self.src.index("}, [read]", i)]
+        self.assertIn("if (!silent) setBusy(true)", body, "★ 自动那次也在转圈")
+        self.assertIn("setErr(", body, "★ 失败被一起静音了 —— 那是把坏了藏起来")
+
+
+class TheGeminiCardMatchesTheAccountCardLayout(unittest.TestCase):
+    """★★ 总览 Gemini 卡的两个文字槽与账号卡**同位同义**（用户 2026-09-16 点名整改一致性：
+    「gemini model 最紧应该是放账号信息的，目前账号信息应该是放到期日期的」）。
+
+        槽位            账号卡(codex)        Gemini 卡(agy)
+        ────────────────────────────────────────────────
+        名字下方        邮箱                 邮箱          ← 本轮改
+        分隔线下(页脚)  `到期 YYYY-MM-DD`    `重置 MM-DD HH:MM`  ← 本轮改
+
+    ## ⚠️ 页脚**刻意不写「到期」**，这不是偷懒
+
+    agy **没有订阅到期日这个数据**。三个独立探针一致（2026-09-16，带正向对照 ——
+    同样写法在 codex 侧找到了 `sub_until`/`sub_checked`）：
+      · 凭证文件只有 `token.expiry`（access_token 的 ~6h 有效期）；
+      · `id_token` 是纯 Google OIDC，无任何 plan/tier/subscription 声明；
+      · agy 二进制里没有 subscription/license 类端点。
+    把 6 小时的 token 有效期或额度重置日说成「到期」，就是本仓那条
+    **「把 5 小时的余量说成一周的余量」** —— 比不显示更糟。
+    """
+
+    CARD = (Path(__file__).resolve().parents[1] / "codexbar" / "src"
+            / "components" / "AgyCard.tsx")
+
+    @classmethod
+    def setUpClass(cls):
+        cls.src = _strip_comments(cls.CARD.read_text(encoding="utf-8"))
+
+    def test_the_subtitle_slot_holds_the_account_email(self):
+        """★ 名字下方那一格 = 账号信息。"""
+        i = self.src.index("fontSize: Z.email")
+        body = self.src[i:i + 320]
+        self.assertIn("email", body, "★ 副标题槽没放账号信息")
+
+    def test_the_subtitle_no_longer_holds_the_tightest_group(self):
+        """★★ 「X 最紧」必须从副标题槽**消失**。
+
+        它原来占着账号信息那一格，理由是「agy 的响应里没有身份信息」——
+        那说的是**本机 loopback RPC**，而 2026-09-15(B53) 起额度改走云端按账号读，
+        每个号都带 `email`。**旧理由已过期**（§6：披露的寿命跟着它描述的事实走）。
+        """
+        i = self.src.index("fontSize: Z.email")
+        self.assertNotIn("最紧", self.src[i:i + 320],
+                         "★★ 副标题槽里还留着「最紧」—— 账号信息被挤掉了")
+
+    def test_the_tightest_group_is_kept_in_a_title_not_deleted(self):
+        """★ 但它**没有被删掉**，只是移进 `title`（§6：不要顺手简化掉已有功能）。
+
+        环上那个数字是 4 个桶里最紧的一个；不说来自哪组，用户无从知道是
+        Gemini 还是 Claude/GPT 见底。
+        """
+        self.assertIn("tight.group", self.src, "★ 「哪一组最紧」被整个删掉了")
+
+    def test_the_footer_shows_a_reset_date_with_an_absolute_format(self):
+        """★ 页脚放最紧那个窗口的重置时刻，**绝对写法**。
+
+        与行上的 `↻2h`（相对）**互补不重复**：那里答"还有多久"，这里答"具体哪天" ——
+        周窗口只看 `↻3d` 说不出是哪一天。
+        """
+        self.assertIn("fmtResetDate", self.src, "★ 页脚没用绝对日期")
+        i = self.src.index("fontSize: Z.exp")
+        # 页脚那一段：往前找到它所在的 <span>
+        head = self.src.rindex("<span", 0, i)
+        body = self.src[head:i + 300]
+        self.assertIn("重置", body, "★ 页脚没写「重置」标签")
+
+    def test_the_footer_never_claims_a_subscription_expiry(self):
+        """★★★ 页脚**不许**出现「到期」—— agy 没有这个数据，写了就是编造。
+
+        ⚠️ **判据只能打在真正渲染出来的那几个字上。**
+        第一版把窗口开成「`<span` 起 + 400 字符」，于是扫进了 `title` 里那句
+        **免责说明**「⚠️ 这不是订阅到期日」—— 当场假红。
+        本仓空守卫形态⑫（断言撞上解释这条规则的文字），2026-09-13 一轮里踩过五次；
+        这次是第六次，而**一条会假红的闸，用户学会的是忽略它**。
+        所以窗口收敛到 `}}>` 与 `</span>` 之间的 children 表达式 —— `title` 与注释都在窗口外。
+        """
+        i = self.src.index("fontSize: Z.exp")
+        # children 从这个 span 的 style 属性收尾（`}}>`）开始，到 `</span>` 结束。
+        start = self.src.index("}}>", i) + 3
+        body = self.src[start:self.src.index("</span>", start)]
+        # ★ 已知阳性自检：窗口必须真的框住了渲染文案，否则"没扫到"会被读成"没写"。
+        self.assertIn("重置", body, "★ 窗口没框住页脚文案 —— 是切片坏了，不是文案对了")
+        self.assertNotIn("到期", body,
+                         "★★★ 页脚写了「到期」—— agy 无订阅期数据，那是一句编造")
+
+    def test_the_rotation_pool_fact_found_a_new_home(self):
+        """★ 「在/不在轮换池」原来住在页脚的兜底文案里，改版后没别处可去
+        （动作条里的轮换图标只在卡被选中时可见）—— 必须并进 `title`。
+        **搬走一句真话之前要先给它找到家。**
+        """
+        self.assertIn("在轮换池", self.src, "★ 「在/不在轮换池」被顺手弄丢了")
