@@ -75,8 +75,13 @@ def _fn():
     return node
 
 
-def select_with(cache, home_cache=None):
-    """在**隔离**的 CODEX_HOME 下跑选择器。→ 选中的模型。"""
+def select_with(cache, home_cache=None, pinned=None):
+    """在**隔离**的 CODEX_HOME 下跑选择器。→ 选中的模型。
+
+    ★ `pinned` 默认 `None` = **关掉钉死**，于是下面这批用例仍然在验
+      「按清单挑」那套**兜底**逻辑（`PROBE_MODEL_PINNED = None` 时它就是真实行为）。
+      钉死本身的语义由 `ThePinnedDefaultIsNotVetoedByTheCatalog` 单独验。
+    """
     import ast, tempfile
     from unittest.mock import patch
     with tempfile.TemporaryDirectory() as d:
@@ -85,7 +90,8 @@ def select_with(cache, home_cache=None):
         (ch / "models_cache.json").write_text(json.dumps(cache))
         (home / ".codex" / "models_cache.json").write_text(
             json.dumps(home_cache if home_cache is not None else cache))
-        ns = {"Path": Path, "json": json, "CODEX_HOME": ch}
+        ns = {"Path": Path, "json": json, "CODEX_HOME": ch,
+              "PROBE_MODEL_PINNED": pinned}
         exec(compile(ast.Module(body=[_fn()], type_ignores=[]), "cr", "exec"), ns)
         with patch.object(Path, "home", return_value=home):
             return ns["_probe_model_default"]()
@@ -105,14 +111,56 @@ class DefaultModelIsReal(unittest.TestCase):
         self.assertTrue(self.m.PROBE_MODEL)
         self.assertIsInstance(self.m.PROBE_MODEL, str)
 
-    def test_default_is_in_the_authoritative_list(self):
-        """★★ 事故本体。清单不在(CI)就跳过 —— 不能拿「本机没这个文件」当通过。"""
-        models = cached_models()
-        if models is None:
-            self.skipTest("本机没有 ~/.codex/models_cache.json（CI 环境）")
-        self.assertIn(self.m.PROBE_MODEL, models,
-                      "默认探针模型不在 codex 的权威清单里 —— 每次探针都会 400，"
-                      "而 5h 窗口因此永远锚定不了")
+    def test_default_is_a_model_this_machine_has_actually_called_successfully(self):
+        """★★★ 判据 2026-09-16 换了：从「**在不在清单里**」改成「**我们真的调通过没有**」。
+
+        ## 旧判据被双向证伪（同一天，同一台机器）
+
+        原来这条断言 `PROBE_MODEL in models_cache.json`，前提是"清单即权威"。当天实测两个方向都错：
+
+          · `gpt-5.4-mini` **在**清单里（`visibility=list`），实际调用 **HTTP 400
+            「已不被这个 ChatGPT 账号支持」** —— 清单**多报**；
+          · `gpt-5.6-luna` **不在**清单里，实际调用**成功**
+            （06:00 dawn-probe 4/4、16:50 单号复测 1/1）—— 清单**少报**。
+
+        根因：`models_cache.json` 是 **codex 客户端**按 `client_version`/`etag` 拉的快照，
+        而"能不能调"是**按 ChatGPT 账号授权**的。两者从来不是同一个集合。
+        ⚠️ 而且它**会被 codex 自己随时改写**：当天 16:44 刷新后 luna 当场消失，
+           16:48 用户点探针就顺位掉到坏掉的 mini，症状是
+           **「我点了探针，额度还是没刷新」** —— 与 2026-09-06 那次事故一字不差。
+
+        ★ 所以旧判据不只是失效，它**会主动挡掉正确答案**（把能用的 luna 判成非法）。
+          新判据用的是本机**可观测的成功记录**：`last_probe.status == "ok"`
+          或 `dawn_probe` 里 `ok == total` 的那次所用模型。
+          这也正是当天能救场的那条信息 —— 它一直躺在 `state.json` 里，只是没人拿它当判据。
+        """
+        import json as _json
+        st = ROOT / "state.json"
+        if not st.exists():
+            self.skipTest("本机没有 state.json（gitignored，CI 的干净 checkout 上没有）"
+                          " —— 无法派生「真的调通过」的真源，跳过而不是假绿")
+        d = _json.loads(st.read_text(encoding="utf-8"))
+        proven = set()
+        for sl in (d.get("slots") or {}).values():
+            lp = sl.get("last_probe") or {}
+            if lp.get("status") == "ok" and lp.get("model"):
+                proven.add(lp["model"])
+        dp = d.get("dawn_probe") or {}
+        if dp.get("model") and dp.get("total") and dp.get("ok") == dp.get("total"):
+            proven.add(dp["model"])
+
+        if not proven:
+            self.skipTest("本机还没有任何一次成功的探针记录 —— 没有真源可比，"
+                          "跳过而不是假绿（跑一次 `codex-rotate probe <号>` 就有了）")
+        self.assertIn(
+            self.m.PROBE_MODEL, proven,
+            "★★★ 默认探针模型 {!r} 在本机**没有任何一次成功记录**（有记录的是 {}）。\n"
+            "   探针失败 ⇒ 没有计费请求落在 5h 窗口上 ⇒ `quota_anchor` 停在 "
+            "`billed=false / floating` ⇒ **重置时间永远跟着「现在」滑**，\n"
+            "   用户看到的就是「我点了探针，额度还是没刷新」。\n"
+            "   ⚠️ 改默认模型前先真跑一次 `codex-rotate probe <号> --model <新的>`，"
+            "别只看它在不在 `models_cache.json` 里 —— 那份清单两个方向都会错。"
+            .format(self.m.PROBE_MODEL, sorted(proven)))
 
     def test_retired_model_is_not_in_the_preference_order(self):
         """★ `gpt-5.4` 已被上游下架（实测 400）。它不该再出现在偏好序里。"""
@@ -222,3 +270,61 @@ class UnsupportedModelSaysWhatToDo(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ThePinnedDefaultIsNotVetoedByTheCatalog(unittest.TestCase):
+    """★★★ 钉死的默认模型**不许被 `models_cache.json` 否决**（用户 2026-09-16 定）。
+
+    这是 2026-09-16 那次事故的直接闸。当时的链条是：
+      codex 16:44 刷新缓存 → `gpt-5.6-luna` 从清单里消失 →
+      `_probe_model_default()` 顺位到 `gpt-5.4-mini` → 每个号 HTTP 400 →
+      **一次计费请求都没发出去** → `quota_anchor` 停在 `billed=false / floating` →
+      重置时间一直跟着「现在」滑 → 用户报「我点了探针，额度还是没刷新」。
+
+    ⚠️ 而 luna **当天 06:00 的 dawn-probe 还是 4/4 成功的** —— 也就是说，
+       清单把一个**正在正常工作**的模型判成了非法。让清单有否决权，
+       就是把「codex 客户端缓存什么时候刷新」变成我们探针能不能用的隐藏开关。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.src = CR.read_text(encoding="utf-8")
+
+    def test_the_pin_is_a_module_level_constant(self):
+        """★ 钉死值住模块级，不埋在函数体里 —— 换模型是改一行，不是读懂一个选择器。"""
+        # ⚠️ `assertRegex` **不开** `re.M`，`^` 不是行首 —— 第一版就栽在这里(假红)。
+        self.assertRegex(self.src, re.compile(r"^PROBE_MODEL_PINNED\s*=", re.M),
+                         "★ `PROBE_MODEL_PINNED` 不在模块级")
+
+    def test_the_pin_wins_even_when_the_catalog_omits_it(self):
+        """★★★ 主闸：清单里**没有**钉死的那个，也必须返回它。
+
+        这一条直接复现事故当天的缓存内容（luna 已被刷掉）。
+        """
+        catalog_without_luna = {"models": [M("gpt-5.4-mini"), M("gpt-5.5"),
+                                           M("gpt-5.6"), M("gpt-5.6-sol"),
+                                           M("gpt-5.6-terra"), M("gpt-6-astra")]}
+        got = select_with(catalog_without_luna, pinned="gpt-5.6-luna")
+        self.assertEqual(got, "gpt-5.6-luna",
+                         "★★★ 钉死值被清单否决了 —— 事故会原样复发")
+
+    def test_the_pin_wins_even_when_the_catalog_is_unreadable(self):
+        """★ 缓存读不到时也返回钉死值，而不是崩或回落到别的。"""
+        got = select_with({"models": "不是列表"}, pinned="gpt-5.6-luna")
+        self.assertEqual(got, "gpt-5.6-luna")
+
+    def test_clearing_the_pin_restores_the_catalog_fallback(self):
+        """★★ 兜底**必须还活着**：钉死的那个终有一天会真下架，
+        那时要有一条能自己找路的路。`pinned=None` ⇒ 回到按清单挑。
+
+        少了这条，上面两条会让人以为"清单逻辑可以删了"，
+        而删掉之后钉死值一旦失效就没有任何退路。
+        """
+        got = select_with({"models": [M("gpt-5.5"), M("gpt-5.6-sol")]}, pinned=None)
+        self.assertIn(got, {"gpt-5.5", "gpt-5.6-sol"},
+                      "★★ 关掉钉死后没有回到「按清单挑」—— 兜底被写死了")
+
+    def test_the_effort_stays_low(self):
+        """★ 探针只要证明「这个号能干活」，effort 越低越省 —— 用户 2026-09-16 同时定的。"""
+        self.assertRegex(self.src, re.compile(r'^PROBE_EFFORT\s*=\s*"low"', re.M),
+                         "★ 探针 effort 不是 low 了")
