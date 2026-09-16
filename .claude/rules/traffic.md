@@ -1,11 +1,11 @@
 ---
 paths:
   - "traffic/**"
-  - "codexbar/src/traffic.ts"
-  - "codexbar/src/rates.ts"
-  - "codexbar/src/hooks/useTraffic.ts"
-  - "codexbar/src/pages/TrafficPage.tsx"
-  - "codexbar/src/pages/PlatformPage.tsx"
+  - "**/src/traffic.ts"
+  - "**/src/rates.ts"
+  - "**/useTraffic.ts"
+  - "**/TrafficPage.tsx"
+  - "**/PlatformPage.tsx"
 ---
 
 # 流量总览 / 多 AI 用量口径（path-scoped）

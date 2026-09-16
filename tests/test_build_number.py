@@ -164,16 +164,24 @@ class TheDeployRuleIsWrittenDown(unittest.TestCase):
             raise unittest.SkipTest("CLAUDE.md 不存在（gitignored，CI 的干净 checkout 上没有）")
         return f.read_text(encoding="utf-8")
 
+    #: ⚠️ **判据是英文的**（用户 2026-09-15：项目 CLAUDE.md 全英文，见正本 §3.8）。
+    #:   2026-09-16 全文翻译时这两条闸当场变红 —— 它们钉的是**中文原句**。
+    #:   这正是本仓记过的形状：**逐字匹配守的是"文本长什么样"，不是"规矩在不在"**。
+    #:   所以判据换成翻译后的定稿措辞；改写这段话时要连着这里一起改。
+    DEPLOY_RULE = "Deploy after changes; do not ask"
+    PUSH_BOUNDARY = "**`git push` still requires the user to ask for it explicitly**"
+
     def test_the_auto_deploy_rule_is_in_claude_md(self):
-        self.assertIn("改完就部署，不要问", self._claude(),
+        self.assertIn(self.DEPLOY_RULE, self._claude(),
                       "★ 自动部署那条规矩没写进项目 CLAUDE.md")
 
     def test_it_does_not_also_wave_through_git_push(self):
         """★★ 豁免的**只有** deploy 这一个问题。`git push` 仍然要用户开口（全局规则）。
         把两者混为一谈 = 把代码推到远端而没人同意过。"""
-        i = self._claude().index("改完就部署，不要问")
-        seg = self._claude()[i:i + 900]
-        self.assertIn("`git push` 仍然要用户明确开口", seg,
+        c = self._claude()
+        i = c.index(self.DEPLOY_RULE)
+        seg = c[i:i + 900]
+        self.assertIn(self.PUSH_BOUNDARY, seg,
                       "★★ 没写清 push 不在豁免范围内 —— 那条边界必须显式")
 
     def test_the_build_semantics_are_written_down(self):
@@ -186,7 +194,13 @@ class TheDeployRuleIsWrittenDown(unittest.TestCase):
         """★★ 这条规矩我写错过**两次**（先"只在 push 时 +1"，再 deploy.sh 计数器）。
         正本里不许留着任何一版 —— 互相矛盾的规矩并存，比只有一句错的更糟。"""
         c = self._claude()
-        for wrong in ("只在 `git push` 那一刻 +1", "每次本地部署 +1"):
+        wrong_rules = (
+            # 中文原版（2026-09-16 全文英译前的措辞）—— 回潮也要红
+            "只在 `git push` 那一刻 +1", "每次本地部署 +1",
+            # 英文版的等价说法
+            "bumped on `git push`", "bumped on every local deploy",
+        )
+        for wrong in wrong_rules:
             with self.subTest(wrong=wrong):
                 self.assertNotIn(wrong, c, "★★ 写错的旧规矩还留在正本里：{}".format(wrong))
 

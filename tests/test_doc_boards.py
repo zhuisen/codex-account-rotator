@@ -175,6 +175,136 @@ class TheCommittedRulesCarryNoLocalFacts(unittest.TestCase):
                          "★★ 入库的 rule 里有本机事实/凭证痕迹：\n" + "\n".join(bad)
                          + "\n   → 那类内容留在 gitignored 的 `CLAUDE.md`，别跟着搬。")
 
+    # ------------------------------------------------------------------
+    # ★★★ 上面那条是**模式**闸，它按 `plus\d+|Pro\d+` 这种形状找。
+    #     2026-09-16 §8 搬进 `credentials.md` 时它红了两条（`plus3/plus4`、`Pro1/plus6`），
+    #     **但同一次搬运里还有两个它看不见的**：`user-b`、`user-a`
+    #     —— 用户自己起的 Google 账号名，不符合任何预设形状。
+    #
+    #     这正是本仓那条老教训的形状：**探针看不见目标，于是"没命中"被读成"没有"。**
+    #     所以补一条**从真源派生**的闸 —— 不再猜标识符长什么样，直接读本机池子里
+    #     真实存在的那些名字，拿它们去 rules 里搜。全局 `testing-discipline`：
+    #     「守卫测试的期望值必须从真源派生」，写死一份清单的闸会恰好在它该红的那次保持绿。
+    #
+    #     ⚠️ 清单本身是本机事实，所以**只能现读、绝不能写进这个文件**
+    #        —— 把待查的标识符硬编码进一个入库的测试里，那个测试自己就是泄漏。
+    # ------------------------------------------------------------------
+
+    #: 太短/太通用的标识符会把正常英文词判成泄漏（`ok`、`main`、`plan`…）。
+    #: 6 是实测下界：本机最短的真实标签是 4 字符，而 4~5 的英文常用词太多。
+    _MIN_IDENT = 6
+
+    @staticmethod
+    def _identifiers_from(path):
+        """从一份 gitignored 的池文件里现读账号标识符。文件不在就返回空集。"""
+        import json
+        if not path.exists():
+            return set()
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return set()
+        out = set()
+        for slot in (data.get("slots") or data.get("accounts") or {}).values():
+            if not isinstance(slot, dict):
+                continue
+            for key in ("label", "name", "email"):
+                v = slot.get(key)
+                if not isinstance(v, str) or not v.strip():
+                    continue
+                out.add(v.strip())
+                if key == "email" and "@" in v:
+                    out.add(v.split("@", 1)[0].strip())   # 本地部分单独也算标识符
+            for old in slot.get("label_history") or []:
+                if isinstance(old, str) and old.strip():
+                    out.add(old.strip())
+        return {s for s in out if len(s) >= TheCommittedRulesCarryNoLocalFacts._MIN_IDENT}
+
+    def test_no_real_account_identifier_appears_in_the_committed_rules(self):
+        """★★★ 本机池子里**真实存在**的账号名，一个都不许出现在入库的 rules 里。"""
+        idents = (self._identifiers_from(ROOT / "state.json")
+                  | self._identifiers_from(ROOT / ".agy-pool.json"))
+        if not idents:
+            self.skipTest("本机没有池文件（state.json / .agy-pool.json 都 gitignored，"
+                          "CI 的干净 checkout 上不存在）—— 无法派生真源，跳过而不是假绿")
+
+        rules = sorted((ROOT / ".claude" / "rules").glob("*.md"))
+        self.assertTrue(rules, "一条 rule 都没有 —— 探针坏了，不是规则没了")
+
+        # ★ 已知阳性自检：探针必须能在"确实含有标识符"的文本上响。
+        #   少了这一步，一个恒不命中的探针会安静地报"干净"（本仓 2026-09-14 踩过）。
+        probe = "prefix {} suffix".format(sorted(idents)[0])
+        self.assertTrue(any(i in probe for i in idents),
+                        "★ 探针在已知阳性上不响 —— 是探针坏了，不是 rules 干净")
+
+        bad = []
+        for f in rules:
+            t = f.read_text(encoding="utf-8")
+            hit = sorted(i for i in idents if i in t)
+            if hit:
+                bad.append("    {} · 真实账号标识符 ×{}: {}".format(f.name, len(hit), hit[:3]))
+        self.assertEqual(
+            bad, [],
+            "★★★ 入库的 `.claude/rules/*.md` 里出现了本机池子里真实存在的账号名：\n"
+            + "\n".join(bad)
+            + "\n   → rules 是**入库并推到公开仓库**的，`CLAUDE.md` 不是。"
+              "\n     从 `CLAUDE.md` 往 rules 搬内容时**边界跟着变了：搬过去 = 公开**。"
+              "\n     改法是脱敏（`某个 Plus 号` / `A 号`），**不是**把这条闸关掉 ——"
+              "\n     实测数字全部保留，只换掉指向具体某个人某个号的那几个字。")
+
+
+class TheRulesUseThePathFormThatIsKnownToLoad(unittest.TestCase):
+    """★ `.claude/rules/*.md` 的 `paths:` 一律写成**带通配的 glob**（`"**/name"` / `"dir/**"`）。
+
+    ## 这是**约定**，不是已证实的语法要求 —— 区别很重要
+
+    2026-09-16 实测：`traffic.md`（**早就存在**的规则）在打开 `traffic/rotation.py` 时
+    如约注入；而同一会话里**刚建出来**的 `credentials.md` / `verification.md` /
+    `rotation-lanes.md`，对任何匹配文件都没注入过一次。
+
+    两个假说同样能解释这组观测，**当时那个会话分不开**：
+      (a) 规则索引在**会话启动时枚举一次**，之后新建的文件要等下一个会话才可见；
+      (b) 那几份的 `paths:` 写法本身不匹配。
+    ⚠️ **(a) 单独就能解释全部观测**，而专门冲着 (b) 去的那次实验（把路径改成
+    `**/LogsPage.tsx` 再打开该文件）**同样没有触发** —— 那是**反对** (b) 的证据。
+
+    所以这条闸**不断言"没有通配就不生效"**（那是把一个未定论的推断写成实测，
+    本仓明令禁止）。它只钉一件事：**统一成本机上已知能加载的那批规则用的形状**。
+    代价为零，顺手排除掉一个候选原因。
+
+    ★ 真正的判别实验写在 `CLAUDE.md` §5 —— **必须在新会话里跑**。
+    """
+
+    def test_every_path_entry_is_a_glob(self):
+        rules = sorted((ROOT / ".claude" / "rules").glob("*.md"))
+        self.assertTrue(rules, "一条 rule 都没有 —— 探针坏了，不是规则没了")
+
+        bare = []
+        seen_entries = 0
+        for f in rules:
+            parts = f.read_text(encoding="utf-8").split("---", 2)
+            self.assertGreaterEqual(
+                len(parts), 3,
+                "★ {} 没有 frontmatter —— 没有 `paths:` 的规则**永远不会**按路径加载".format(f.name))
+            for m in re.finditer(r'^\s*-\s*"([^"]+)"', parts[1], re.M):
+                seen_entries += 1
+                if "*" not in m.group(1):
+                    bare.append("    {} · {}".format(f.name, m.group(1)))
+
+        # ★ 已知阳性自检：解析器必须真的读出了条目。
+        #   少了这一步，一个正则写错、恒 0 命中的闸会安静地报"全部合规"
+        #   —— 本仓最贵的那类错（探针看不见目标 ⇒ "没命中"被读成"没有"）。
+        self.assertGreater(seen_entries, 5,
+                           "★ 只解析出 {} 条 paths —— 是**正则坏了**，不是规则都合规"
+                           .format(seen_entries))
+
+        self.assertEqual(
+            bare, [],
+            "★ 这些 `paths:` 条目没有通配符：\n" + "\n".join(bare)
+            + "\n   → 统一改成 `\"**/<文件名>\"` 或 `\"<目录>/**\"`。"
+              "\n     本机**已知能加载**的规则（`~/.claude/rules/*.md`）全是这个形状；"
+              "\n     逐字路径**是否**生效至今未定论（见本文件类 docstring 与 `CLAUDE.md` §5）。")
+
 
 class TheChangelogIsSplitNotSummarised(unittest.TestCase):
     """`CHANGELOG.md` **不压缩**，到点分卷。"""
