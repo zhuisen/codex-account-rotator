@@ -58,4 +58,28 @@ fi
 
 echo "==> launching"
 open "$APP"
-echo "✓ deployed"
+
+# ★★★ 把这次烤进产物的版本号**当场打出来**（2026-09-17 补）。
+#
+#   起因：v1.6.1 发版后用户在界面上看到 `v1.6.1+10`。产物没错 —— 它确实是在
+#   `git tag` **之前 38 秒**、从一个脏工作区构建的，`B` 从 git 现算就是 10。
+#   错的是顺序（见 CLAUDE.md §3）。但真正让它难发现的是：
+#   **deploy 全程不说自己烤了什么版本**，于是"版本对不对"要等用户打开界面才知道。
+#   ★ 一个在动作发生那一刻就能看见的事实，不该留到事后由人去界面上发现。
+# ★ 用脚本开头就算好的 `$ROOT`（绝对路径）—— 此处已经 `cd "$ROOT"` 过，
+#   再拿 `$0` 推相对路径会解析失败，实测当场把版本打成 `?`。
+VER=$(node -p "require('$ROOT/src-tauri/tauri.conf.json').version" 2>/dev/null || echo "?")
+TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+if [ -n "$TAG" ]; then
+    B=$(git rev-list --count "$TAG..HEAD" 2>/dev/null || echo 0)
+    [ -n "$(git status --porcelain 2>/dev/null)" ] && B=$((B + 1))
+else
+    B=0
+fi
+if [ "$B" = "0" ]; then
+    echo "✓ deployed — v${VER}（B=0：你跑的这份**就是** release）"
+else
+    echo "✓ deployed — v${VER}+${B}"
+    echo "   ⚠️  B=${B} ≠ 0：这份产物**不是** release。距 ${TAG:-?} 有 $((B)) 个改动"
+    echo "      （commit 数 + 脏工作区）。发版时请在 \`git tag\` **之后**再跑本脚本 —— 见 CLAUDE.md §3。"
+fi

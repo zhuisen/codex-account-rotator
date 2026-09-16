@@ -213,3 +213,136 @@ class TheDeployRuleIsWrittenDown(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DeployTellsYouWhichVersionItJustBaked(unittest.TestCase):
+    """★★★ `deploy.sh` 必须**当场报出**它烤进产物的版本，并在 `B != 0` 时告警。
+
+    ## 起因（2026-09-17，v1.6.1 发版后）
+
+    用户在界面上看到 `v1.6.1+10`。产物**没错** —— 它确实是在 `git tag` **之前 38 秒**、
+    从一个脏工作区构建的（距 `v1.6.0` 9 个 commit + 脏 1 = 10），`B` 从 git 现算就是 10。
+
+    ★ 真正的缺陷是**顺序**：`B` 改成从 git 派生（§3.7）之后，
+      `$release-cut` 那条通用顺序（… → build → commit → tag → push）
+      **结构性地做不到** `B == 0`，因为构建那一刻 tag 还不存在。
+      §3.7 承诺「`B == 0` 就是 release」，§3 的顺序却保证它不成立 ——
+      **两条规则从 `B` 变成派生值那一刻起就互相矛盾**。正本已改（§3 新增 4.5）。
+
+    ## 为什么这里要一条闸，而不是再写一句话
+
+    这个缺陷在部署那一刻**完全不可见**：构建成功、app 正常启动、只有版本字符串在撒谎。
+    **只能靠事后打开界面才发现的东西，就会由用户来发现，而不是由你。**
+    所以判据是「deploy 当场把版本打出来」——把一个隐形事实变成可见事实。
+    """
+
+    SH = (ROOT / "codexbar" / "scripts" / "deploy.sh").read_text(encoding="utf-8")
+
+    @staticmethod
+    def _code(src):
+        """剥掉 shell 注释 —— 注释里正解释着这条规则（本仓空守卫形态④）。"""
+        return re.sub(r"(?m)^\s*#.*$", "", src)
+
+    def test_both_branches_report_the_version(self):
+        """★★★ **两条分支都要报版本**，不是只有一条。
+
+        ⚠️ 这条的第一版写成「全文里有一处 `deployed … ${VER}` 就算过」——
+          于是把 `B != 0` 那条 echo 整个删掉，闸**照样绿**（正则命中了 `B == 0` 那条）。
+          空守卫形态①：**子串存在 ≠ 规则存在**。现在逐分支断言。
+        """
+        code = self._code(self.SH)
+        i = code.index('if [ "$B" = "0" ]')
+        j = code.index("fi", i)
+        zero, nonzero = code[i:j].split("else", 1)
+        for name, seg in (("B==0", zero), ("B!=0", nonzero)):
+            with self.subTest(branch=name):
+                self.assertRegex(seg, r"deployed[^\n]*\$\{?VER",
+                                 "★★★ {} 分支不报版本 —— 那一半的版本要等用户打开界面才知道"
+                                 .format(name))
+
+    def test_b_is_computed_by_actually_running_it(self):
+        """★★★ **行为闸**：把 deploy.sh 算 `B` 的那段**真跑一遍**。
+
+        ⚠️ 第一版是 `assertIn("porcelain", code)` 这类词面断言 —— 于是把
+          `B=$((B + 1))` 改成 `B=$B`（脏工作区不再计数）后，`porcelain` 仍在 `if` 条件里，
+          闸**照样绿**。词在 ≠ 规则在。只有真跑才分得出来。
+
+        判据是与 `build.rs` 同一个算法：干净树停在 tag 上 → 0；脏树 → +1；多一个 commit → +1。
+        """
+        import subprocess, tempfile
+        snippet = None
+        code = self._code(self.SH)
+        i = code.index('TAG=$(git describe')
+        j = code.index('if [ "$B" = "0" ]', i)
+        snippet = code[i:j]
+        self.assertIn("rev-list", snippet, "★ 没截到算 B 的那段 —— 断言可能打空了")
+
+        def b_of(setup):
+            with tempfile.TemporaryDirectory() as d:
+                sh = ("set -e; cd %s; git init -q .; git config user.email a@b.c;"
+                      " git config user.name t; echo x > f; git add f;"
+                      " git commit -qm init; git tag -a v1.0.0 -m t; %s\n%s\n echo \"B=$B\""
+                      % (d, setup, snippet))
+                out = subprocess.run(["bash", "-c", sh], capture_output=True,
+                                     text=True, timeout=60)
+                self.assertEqual(out.returncode, 0, out.stderr[-300:])
+                return out.stdout.strip().splitlines()[-1]
+
+        self.assertEqual(b_of(":"), "B=0",
+                         "★★★ 干净树正停在 tag 上，B 应当是 0 —— 那正是「这份就是 release」")
+        self.assertEqual(b_of("echo dirty >> f"), "B=1",
+                         "★★★ 脏工作区没有被计入 —— 一个并非 release 的构建会自称是 release")
+        self.assertEqual(b_of("echo y > g; git add g; git commit -qm more"), "B=1",
+                         "★★★ tag 之后的 commit 没有被计入")
+
+    def test_the_version_actually_resolves(self):
+        """★★★ **行为闸**：真跑那行取版本的命令，必须解出版本号而不是 `?`。
+
+        ⚠️ 第一版写成 `$(cd "$(dirname "$0")/.." && pwd)` —— 而脚本开头**已经
+          `cd "$ROOT"` 过**，于是那个相对路径解析失败，部署当场打出
+          `✓ deployed — v?（B=0…）`。**"报了版本"和"报对了版本"是两件事**，
+          只断言"有 VER 这个词"分不出来。所以这里真跑一次。
+        """
+        import json as _json, re as _re, subprocess, tempfile
+        code = self._code(self.SH)
+        m = _re.search(r"^VER=\$\(node -p .*$", code, _re.M)
+        self.assertIsNotNone(m, "★ 找不到取版本那一行 —— 断言可能打空了")
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "src-tauri").mkdir()
+            (Path(d) / "src-tauri" / "tauri.conf.json").write_text(
+                _json.dumps({"version": "9.9.9"}), encoding="utf-8")
+            out = subprocess.run(
+                ["bash", "-c", 'ROOT=%s\n%s\necho "VER=$VER"' % (d, m.group(0))],
+                capture_output=True, text=True, timeout=60)
+            self.assertEqual(out.returncode, 0, out.stderr[-300:])
+            self.assertIn("VER=9.9.9", out.stdout,
+                          "★★★ 版本解析失败，会打成 `v?` —— 实测发生过一次")
+
+    def test_a_nonzero_b_warns_loudly(self):
+        """★★★ `B != 0` 必须告警，且**说出下一步**（本仓 §5d：文本要说"做什么"）。"""
+        code = self._code(self.SH)
+        i = code.index('if [ "$B" = "0" ]')
+        seg = code[i:i + 700]
+        self.assertIn("⚠️", seg, "★★★ B≠0 时没有告警")
+        self.assertIn("git tag", seg,
+                      "★★ 告警没说下一步该干什么 —— 只说'坏了'的告警会被忽略")
+
+    def test_the_zero_case_says_it_is_the_release(self):
+        """★ `B == 0` 时正面说出「你跑的这份就是 release」—— 那是 §3.7 的全部意义。"""
+        code = self._code(self.SH)
+        i = code.index('if [ "$B" = "0" ]')
+        self.assertIn("release", code[i:i + 300])
+
+    def test_the_release_order_is_written_down(self):
+        """★★ 正本里必须写明「发版时先 tag 再本地 deploy」。
+
+        ⚠️ 这条与 `$release-cut` 的通用顺序**不同**，不写下来的话下一个会话会照通用顺序做，
+        然后本地产物又是 `+N`。
+        """
+        c = self._claude() if hasattr(self, "_claude") else None
+        f = ROOT / "CLAUDE.md"
+        if not f.exists():
+            self.skipTest("CLAUDE.md 不存在（gitignored，CI 的干净 checkout 上没有）")
+        t = f.read_text(encoding="utf-8")
+        self.assertIn("tag BEFORE you deploy locally", t,
+                      "★★ 发版顺序那条没写进正本 —— 下一次又会先 build 后 tag")
