@@ -27,6 +27,7 @@
 """
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -542,8 +543,69 @@ def cmd_health(args):
 PROBE_ASK = "Reply with exactly: ok"
 
 
+#: agy 自己的日志目录。探针的**归属证据**只能取自这里 —— 我们自己的记录在这件事上
+#: 恰好是不可信的那一方（我们记的是"打算探谁"，不是"实际跑成了谁"）。
+AGY_LOG_DIR = Path(os.environ.get(
+    "AGY_LOG_DIR", str(Path.home() / ".gemini" / "antigravity-cli" / "log")))
+
+#: 进程启动时刻与日志文件名时间戳的允许偏差（秒）。agy 在启动那一刻建日志，
+#: 但两者不保证同一秒。
+_LOG_SKEW = 5
+
+
+def _run_identity(started_at):
+    """这一次我们起的 `agy` **实际认证成了哪个账号**（email）。认不出返回 `None`。
+
+    ★★★ 为什么必须有（2026-09-16 补）：`_probe_one` 是"对**当前钥匙串里**那个号跑一次"，
+      而钥匙串是被**多个常驻 agy 进程并发写的单槽** —— 本机实测此刻有 **7 个**常驻 agy，
+      最老的跑了 8 天 23 小时，且**身份并不相同**（日志实证：2 个是 A、1 个是 B）。
+      它们各自在自己 access token 到期时把自己的身份整份写回钥匙串。
+      于是「我们装进去 B → 起 agy」中间存在一个窗口，B 可能已被冲掉 ⇒
+      **agy 实际以 A 的身份跑完，而我们把结果和 15k token 记在 B 头上**。
+      本机 `agy.log` 里「钥匙串被别的 agy 进程写回过」**已经出现 9 次**，最近一次就在当天 ——
+      这不是理论风险。
+
+    ★ 判据与 `agy-quota::pid_identity` **同源**：取 agy 自己日志里的
+      `applyAuthResult: email=`。那边守的是"周额度挂在谁的卡上"，这边守的是
+      "这 15k token 记在谁头上" —— 同一条纪律：**归属要有证据，没证据就不归属。**
+      ⚠️ 那边已经有闸而这边一直没有，正是这次要补的缺口。
+    """
+    try:
+        best = None
+        for f in AGY_LOG_DIR.glob("cli-*.log"):
+            m = re.match(r"cli-(\d{8}_\d{6})\.log$", f.name)
+            if not m:
+                continue
+            ts = time.mktime(time.strptime(m.group(1), "%Y%m%d_%H%M%S"))
+            if abs(ts - started_at) <= _LOG_SKEW:
+                # ★ 同一窗口里有两份 ⇒ **认不出就不猜**（同 agy-quota 那条）。
+                #   并发起两个 agy 时会撞上，猜错比认不出更糟。
+                if best is not None:
+                    return None
+                best = f
+        if best is None:
+            return None
+        found = re.findall(r"applyAuthResult: email=([^\s,]+)",
+                           best.read_text(errors="replace"))
+        # 取**最后**一条：进程中途换号时早先那条已过期。
+        return found[-1] if found else None
+    except (OSError, ValueError):
+        # ★★ **只吞真正的"读不到"**（文件没了 / 时间戳不是那个格式）。
+        #   第一版这里写的是裸 `except Exception`，而 `agy-rotate` **当时没有 `import re`** ⇒
+        #   `re.match` 抛 `NameError` ⇒ 被整个吞掉 ⇒ `ran_as` 恒 `None` ⇒
+        #   **归属核对静默地从不工作**，而探针输出、退出码、日志全都完全正常。
+        #   本仓已经记过一模一样的形状（`_quota_anchors_mod()` 的整体 fail-open
+        #   吞掉了 `Path` 未导入，账本静默从不记账）—— 我在修别的 bug 时又犯了一次。
+        #   闸：`tests/test_agy_probe_attribution.py::TheIdentityLookupIsActuallyWired`。
+        return None
+
+
 def _probe_one(label):
-    """对**当前登录**的号跑一次真实生成 -> (ok, 说明, usage dict|None)。
+    """对**当前登录**的号跑一次真实生成
+    -> (ok, 说明, usage dict|None, **实际跑成的账号 email**|None)。
+
+    ⚠️ `label` 只用于可读性，**它不决定跑哪个号** —— 跑的永远是"此刻钥匙串里那个"。
+      这正是第 4 个返回值存在的理由：调用方必须拿它核对，而不是假定 `label` 说了算。
 
     ★★★ 为什么是"起一次 agy"而不是自己拼 HTTP：
       2026-09-13 实测，直接打 `v1internal:streamGenerateContent` 恒 **429
@@ -558,25 +620,31 @@ def _probe_one(label):
     """
     real = Path(os.environ.get("AGY_REAL", str(Path.home() / ".local" / "bin" / "agy")))
     if not real.exists():
-        return False, "找不到 agy（%s）" % real, None
+        return False, "找不到 agy（%s）" % real, None, None
+    # ★ 记下启动时刻 —— 事后靠它在 agy 自己的日志里找到**这一次**运行，反查真实身份。
+    started_at = time.time()
     try:
         r = subprocess.run([str(real), "-p", PROBE_ASK, "--output-format", "json"],
                            capture_output=True, text=True, timeout=PROBE_TIMEOUT)
     except subprocess.TimeoutExpired:
-        return False, "超时（%ds）" % PROBE_TIMEOUT, None
+        return False, "超时（%ds）" % PROBE_TIMEOUT, None, None
     if r.returncode != 0:
-        return False, "agy 退出码 %d：%s" % (r.returncode, (r.stderr or "")[-160:]), None
+        return False, "agy 退出码 %d：%s" % (r.returncode, (r.stderr or "")[-160:]), None, \
+               _run_identity(started_at)
     try:
         d = json.loads((r.stdout or "").strip())
     except ValueError:
-        return False, "输出不是 JSON（前 120 字：%s）" % (r.stdout or "")[:120], None
+        return False, "输出不是 JSON（前 120 字：%s）" % (r.stdout or "")[:120], None, \
+               _run_identity(started_at)
     ans = (d.get("response") or "").strip()
     if d.get("status") != "SUCCESS" or not ans:
         # ★ 空回答判失败 —— 「受理了」不等于「干成了」。
-        return False, "没吐出字（status=%s）" % d.get("status"), d.get("usage")
+        return False, "没吐出字（status=%s）" % d.get("status"), d.get("usage"), \
+               _run_identity(started_at)
     # 答非所问只标 ⚠️ 不算失败：模型换个措辞不代表账号有问题（同 codex 探针）。
     note = "答「%s」" % ans[:24] + ("" if ans.lower().startswith("ok") else " ⚠️ 答非所问")
-    return True, note, d.get("usage")
+    # ★ 成功路径**必须**带回真实身份 —— 花掉的 15k token 记在谁头上由它决定。
+    return True, note, d.get("usage"), _run_identity(started_at)
 
 
 def cmd_probe(args):
@@ -616,10 +684,35 @@ def cmd_probe(args):
                 if P.install_live(cred) != "keyring":
                     out.append((a, False, "只写了兜底文件，agy 多半还在用别的号", None))
                     continue
-            ok, note, usage = _probe_one(a.get("label"))
-            out.append((a, ok, note, usage))
+            ok, note, usage, ran_as = _probe_one(a.get("label"))
+
+            # ★★★ **归属核对：没证据就不归属**（2026-09-16 补，同 `agy-quota` 那条纪律）。
+            #
+            #   `_probe_one` 跑的是"此刻钥匙串里那个号"，而钥匙串被 7 个常驻 agy 进程并发写
+            #   （本机实测，且它们身份不同）。装进去到 agy 真正读到之间有一个窗口，
+            #   期间可能已被别的进程冲掉 ⇒ **实际是 A 在跑，我们却把 ✓ 和 15k token 记给 B**。
+            #   本机 `agy.log` 的「钥匙串被别的 agy 进程写回过」已出现 9 次 —— 不是理论风险。
+            #
+            #   ★ 三态，**刻意不合并**：
+            #     · 对得上          → 正常记账；
+            #     · **对不上**      → 这一次的结果属于**另一个号**，绝不能记在本号上。
+            #                        钱已经花了，所以照实登记成一条失败并点名真身，
+            #                        而不是假装没发生过（花了钱却查不到，比记错更糟）。
+            #     · 认不出（None）  → 只标注"未证实"，**不翻转 `ok`** ——
+            #                        把「这一枪没打中」和「确实跑错了号」合并成同一个值，
+            #                        正是本仓反复记的那条错。
+            want = (a.get("email") or "").strip()
+            if ran_as and want and ran_as != want:
+                ok = False
+                note = "归属不符：实际跑的是 %s（本次结果属于那个号，不计在本号上）" % ran_as
+                usage = None          # ★ 用量也不能记 —— 它不是这个号花的
             a["last_probe"] = {"at": int(time.time()), "ok": ok, "note": note,
-                               "usage": usage}
+                               "usage": usage,
+                               # 证据本身要落盘：事后"到底跑成了谁"只能从这里查。
+                               "ran_as": ran_as,
+                               "attributed": bool(ran_as and want and ran_as == want),
+                               "via": os.environ.get("CODEX_ROTATE_CALLER") or "cli?"}
+            out.append((a, ok, note, usage))
     finally:
         # ★★ 把用户放回他原来的号。放在 finally 里：中途炸了也不能把他留在别处。
         if live and live in accs and (P.claims(P.read_live()) or {}).get("sub") != live:
