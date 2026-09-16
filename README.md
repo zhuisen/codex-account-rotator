@@ -224,7 +224,19 @@ codex-rotate refresh all             # 手动 OAuth 刷新非活跃号
 codex-rotate probe plus5 plus7       # 指定号:问 hi,要求答 ok;答出来才算通过
 codex-rotate probe --all             # 全池(必须显式,防手滑)
 codex-rotate probe plus5 --model gpt-5.5 --effort low
+# 默认模型/effort = gpt-5.6-luna / low（钉在 codex-rotate 的 PROBE_MODEL_PINNED）
+# ⚠️ 换默认前先真跑一次 --model <新的>：codex 的 models_cache.json 两个方向都会错
+#    （清单里有的可能 400，清单里没有的反而能跑 —— 2026-09-16 同日双向实测）
+
+agy-rotate health                    # 零消耗:全池验凭证
+agy-rotate health dbk                # 只验一个号(2026-09-16 起真的生效)
+agy-rotate probe dbk                 # ⚠️ 计费:起一次 agy -p,约 15k token
 ```
+
+> ★ **`health` 通过 ≠ 这个号能干活。** `health` 只验凭证与模型清单，**测不到
+> Antigravity 的 eligibility 闸**；后者只有 `probe`(真跑)才测得出来。
+> 同理「额度读得到、四桶 100%」也可能只是**窗口从未启动**（重置时刻 = 快照 + 窗口长度）。
+> **读得到额度 / 凭证有效 / 能干活,是三件事。**
 
 菜单栏(CodexBar)装好后顶部显示当前号周额度余量。标题有**四种风格**可在「设置」页切换 —— 完整 `pro1 周 67% ↻5d21h` / 简 `pro1 67%` / 极简 `67%` / 今日 `67% 🔹 1.29B`(最后一档把账号池余量与今日全平台 token 并成一行);百分比那一段按余量阈值**染色并加粗**(≥50% 绿 · <50% 琥珀 · 耗尽红),额度未知时退成 `—` 且不上色。**左键右键都打开弹窗**(托盘没有原生菜单——macOS 无法让右键不弹它)。弹窗分**账号｜今日**两个 Tab,停留页会记住、重开直达:
 

@@ -36,8 +36,21 @@ paths:
 - ★ **判死活用 `GET /backend-api/codex/models`，不是 `/usage`**：`/usage` 有 bot challenge，健康号照样 403，曾误判成全池死亡。403 只降级为"额度未知"。
 - ★ **看额度只走 `GET /backend-api/codex/usage`（零消耗）。`POST /responses` 是真计费**——旧版拿它当自动额度探测，新周额度模型下每天烧 17-18%，已废除。
   - 手动的计费探针保留为 `codex-rotate probe <label…|--all> [--model M] [--effort low|medium|high]`：问「hi」要求原样答「ok」，`effort=low`。
-    - ★★ **默认模型不写死，从 `<CODEX_HOME>/models_cache.json`（codex 自己的权威清单）现挑**，偏好序便宜优先（实测同代 luna $0.038/M vs sol $0.840/M，差 22 倍），写死的只作兜底。
-      起因是 2026-09-06 的事故：原来写死的 `gpt-5.4` 被上游下架，**每次探针都 400**、一个请求都没成功 ⇒ 5h 窗口永远锚定不了 ⇒ 用户报「我探针了，额度还是没刷新」。**把上游模型名写死在一个必须长期能用的工具里 = 预约一次故障，而且它坏得没有声音。**
+    - ★★★ **默认模型钉死在 `PROBE_MODEL_PINNED`（现为 `gpt-5.6-luna` / effort `low`，用户 2026-09-16 定），不经过 `models_cache.json` 过滤。**
+      ⚠️ **这条 2026-09-16 反转过一次，别按旧版改回去。** 旧版写的是「不写死、从清单现挑，写死的只作兜底」——
+      那是 2026-09-06 事故（写死的 `gpt-5.4` 被下架 ⇒ 每次探针都 400 ⇒ 5h 窗口永远锚定不了 ⇒
+      用户报「我探针了，额度还是没刷新」）的修法。**但它把故障开关换了个地方，没有拆掉。**
+      2026-09-16 同一天、同一台机器，清单在**两个方向**都被证伪：
+        · `gpt-5.4-mini` **在**清单里（`visibility=list`），实际调用 **HTTP 400「已不被这个 ChatGPT 账号支持」** —— 清单**多报**；
+        · `gpt-5.6-luna` **不在**清单里，实际调用**成功**（当天 06:00 dawn-probe 4/4、16:50 单号复测 1/1）—— 清单**少报**。
+      根因：`models_cache.json` 是 **codex 客户端**按 `client_version`/`etag` 拉的快照，而「能不能调」是**按 ChatGPT 账号授权**的 ——
+      两者从来不是同一个集合。且它**会被 codex 自己随时改写**：当天 16:44 刷新后 luna 当场消失，
+      16:48 用户点探针就顺位掉到坏掉的 mini，症状与 2026-09-06 **一字不差**。
+      ★ 所以判据从「**清单里有没有**」改成「**我们真的调通过没有**」：闸读 `state.json` 的
+        `last_probe.status == "ok"` / `dawn_probe` 的 `ok == total`（`tests/test_probe_model_is_supported.py`）。
+      ★ 偏好序（便宜优先，luna $0.038/M vs sol $0.840/M 差 22 倍）**保留为兜底** ——
+        `PROBE_MODEL_PINNED = None` 时回到按清单挑。钉死的那个终有一天会真下架，那时要有一条能自己找路的路。
+      ⚠️ **换默认模型前先真跑一次** `codex-rotate probe <号> --model <新的>`，别只看它在不在清单里。
     - ★ 只认 `models[*].slug` **一层取值**，不做递归遍历：每条模型记录里还有 `upgrade` 字段指向**推荐升级到的另一个模型**，递归会把它当成可用（实测夹具选中一个清单里没有的模型）。顺带也没了「深层 JSON `RecursionError` 打死 CLI」那个边界。跳过 `visibility: "hide"`（`gpt-reserve` / `codex-auto-review` 不是给人聊天用的，选中同样 400）。
     - ★★ **`slot["last_probe"]` 独立兄弟键**记每次运行结果（成功/失败/**跳过死号**都写），`completion_ok` 与 `quota_ok` 分开。理由：探针写回的 `quota` 会在 20~300s 内被 quotad 的 usage-api **整体替换**，于是 state 里永远找不到 `source == "probe"`，「到底探成没有」事后无从查证 —— 这次事故正是卡在这里，我据代码注释错误地答过一次「探针没坏」。**刻意不存 used%**：一份事实一个家，存两份 20 秒后就分叉。
     - ★ 「模型不被支持」的 400 单独给**可执行的下一步**（去哪查清单 / 怎么 `--model` 覆盖），不是甩一串原始 JSON。回答 `/models` 回答不了的问题——**「这号真的还能干活吗」**（订阅到期 / 模型权限被撤 / 被限流，token 有效也照样失败）。实测单次 Δ+0%（1% 整数位不动 ⇒ 成本 <1%，这是上界不是点估计）。
@@ -48,7 +61,8 @@ paths:
     - ★★ **先占天再探**：日期标记写在**发请求之前**（`_mutate_state` 持跨进程锁）。launchd 06:00 与 app 内补跑**两条路都会调它**，写在探测之后的话，那段窗口里第二个进程看到的仍是昨天的日期 ⇒ **双重计费**。3 进程并发实测：恰好 1 个进到探测阶段。⚠️ 代价是显式的：探测中途崩了今天不重试（日期已占）——在「少跑一次」和「可能多花一次钱」之间这个工具一律选前者。
     - **默认关闭**（`dawn_probe.enabled` 缺省假）。仓库已公开，默认开启的自动计费定时器会在别人机器上悄悄花钱。
     - **按 `plan` 判 Plus，绝不按 label** —— 老号从 Plus 升 Pro 时 label 一个字都不变，按名字挑会在升级那天开始给没有 5h 窗口的 Pro 号花钱，钱花了目的没达到且没有任何症状。
-    - **模型不写死**：走 `PROBE_MODEL`（现为 gpt-5.6-luna）/ `PROBE_EFFORT`（low），默认值从 codex 自己的 `models_cache.json` 现挑 —— 写死正是 v1.1.1 那次事故的成因。
+    - **模型与 effort**：走 `PROBE_MODEL` / `PROBE_EFFORT`，即上面那条钉死的 `gpt-5.6-luna` / `low`。
+      ⚠️ 旧版这里写「默认值从 `models_cache.json` 现挑」，**2026-09-16 已反转**，理由见上。
     - ★★ **为什么 launchd 之外还要 app 内补跑**：本项目的日历定时**有前科** —— keepalive/refreshquota 的 `StartCalendarInterval` 被 `install-launchd.sh` 以外的东西改写丢掉，`runs = 0`、**从未运行过**，而没有任何一处会为此报红（改写者至今未查明，见 §3）。所以那个 plist **不能是唯一触发路径**。补跑挂在**菜单栏 webview**（启动即创建、从不卸载）。判据是「今天过了 6 点、而 state 里记的日期不是今天」，**不是**「现在正好 6 点」—— Mac 凌晨多半在睡，卡点判定等于永远不触发。
     - **开关与状态的真源是 `state.json` 的 `dawn_probe`，不是 localStorage** —— launchd 在 app 没开时也要读它，两个真源迟早分叉成「界面说开着、定时器不认」。设置页那一格因此走 CLI (`dawn-probe --status/--enable/--disable`)。
     - ★ **设置页必须显示「上次运行」** —— 它是「定时到底跑没跑」的唯一可见证据，就是上面那个 `runs = 0` 前科的闸。闸在 `tests/test_dawn_probe.py`（15 条，3 次变异全红，全部在临时 store 上跑、不发任何请求）。
@@ -336,8 +350,38 @@ paths:
     **agy 真身**（`agy -p … --output-format json`），顺带拿到精确到 token 的用量
     （实测一次 15,195 token / 约 30s）。判据同 codex：**模型真吐出字**，不是退出码 0。
     非当值号先切过去再探，**还原放在 `finally`**。
-  - `agy-rotate health` 是**零消耗**的那一半：刷一次 access_token + 打一次 `fetchAvailableModels`，
+  - ★★★ **探针的归属必须有证据**（2026-09-16 补）。`_probe_one` 跑的是「**此刻钥匙串里那个号**」
+    —— 它的 `label` 形参当时在函数体里**一次都没被用过**。而钥匙串是被多个常驻 agy 进程并发写的
+    **单槽**（当天实测 **7 个**常驻 agy，最老的跑了 8 天 23 小时，且**身份并不相同**；
+    `agy.log` 里「钥匙串被别的 agy 进程写回过」**已出现 9 次**）。
+    于是 `probe <非当值号>` / `--all` 的「装进去 B → 起 agy」中间那个窗口里 B 可能已被冲掉 ⇒
+    **实际 A 在跑，而 ✓ 和 15k token 记在 B 头上**。
+    · 现在 `_run_identity(started_at)` 按**我们自己起的那次**的启动时刻定位它的 cli 日志，
+      读 `applyAuthResult: email=`（与 `agy-quota::pid_identity` **同源**）。
+    · **三态刻意不合并**：对得上 → 正常记账；**对不上** → `ok=False` + `usage=None`
+      （钱花在别号上，不能算本号的成功）；**认不出** → 只标注未证实，**不翻转 `ok`**
+      （「这一枪没打中」≠「确实跑错了号」）。
+    · 证据落盘：`last_probe` 增加 `ran_as` / `attributed` / `via`。
+    ⚠️ **别用裸 `except Exception` 包这类反查** —— 第一版就是这么写的，而 `agy-rotate` 当时
+      **没有 `import re`** ⇒ `NameError` 被整个吞掉 ⇒ 归属核对**静默地从不工作**，
+      而输出/退出码/日志全都完全正常（同 `_quota_anchors_mod()` 那次）。现已收窄到
+      `(OSError, ValueError)`，闸在 `tests/test_agy_probe_attribution.py`（含**行为闸**：
+      拿本机真实日志跑一次必须解出 email）。
+  - ★ **报错摘要取「有用的那一半」**：`_err_gist()` 优先抓结构化 `"message"`，否则取**头部**。
+    旧版取 `stderr[-160:]`（末尾）—— eligibility 被拒时 agy 吐一大段 JSON + 很长的 Google 登录 URL，
+    于是记录里只剩 `…flowName=GlifWebSignIn&authuser`，而真话 `Verify your account to continue.`
+    在开头、被截掉了。**报错里只剩最没用的那一段 = 等于没有报错**（实测为此多绕一整轮排查）。
+  - `agy-rotate health [label…]` 是**零消耗**的那一半：刷一次 access_token + 打一次 `fetchAvailableModels`，
     两步都过才算能用。`invalid_grant`（掉登录）与网络抖动**必须分开**报。
+    ★ **`health` 现在真的吃 label**（2026-09-16 修）：此前它**完全不读 `args` 里的名字**，
+    `health <label>` 会**静默检查全部号** —— 零消耗所以没烧钱，但「限定了和没限定，
+    在输出上分辨不出来」正是本仓最不能容忍的那类「参数被静默吃掉」。
+    未知名字**直接报错退出**，不静默退回全池（打错一个字母就该看见）。
+  - ★★ **`health` 通过 ≠ 这个号能干活。** 它只验凭证与模型清单，**测不到 Antigravity 的
+    eligibility 闸**。2026-09-16 实测某个号：额度读取 ✓（四桶 100%）、`health` ✓，
+    而 `probe` 真跑时被 `Verify your account to continue.` 挡住。
+    ★ 而那「四桶 100%」本身也不是「很充裕」——它的重置时刻恰好 = `快照时刻 + 窗口长度`，
+      那是**窗口从未启动**的签名。**「读得到额度」「凭证有效」「能干活」是三件事。**
   - **自动切号开关存在池里**：全局 `auto_off` + 按号 `rotate_off`，两个都**存反向**
     （缺省 = 参与轮换；正向命名要写迁移，漏迁移的号会静默退出轮换池），恢复时**删键**不写 `False`。
     ⚠️ 我曾判断"这条做不了"并说给用户听过 —— **错的**：wrapper 调的是 `agy-rotate auto`，而它读池。
