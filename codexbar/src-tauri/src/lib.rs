@@ -52,6 +52,35 @@ fn data_dir() -> String {
 ///    脚本一旦被打进安装包,数据就会跟着写进 app 内部(macOS 只读、更新即抹掉)。
 ///
 /// 新增任何子进程调用都必须走这里,别再直接 `Command::new`。
+/// 起一个**不要结果**的后台子进程，并**把它收尸**。→ 起成功了吗。
+///
+/// ★★★ **Rust 的 `Child` 没有会 `wait` 的 `Drop`。** 这是标准库明写的行为：
+///   句柄一离开作用域，子进程照常跑；等它自己退出，就变成**僵尸**（`<defunct>`），
+///   一直挂到父进程 reap 它、或者父进程自己退出为止。
+///   所以 `let _ = cmd.spawn();` 这一句 —— 看起来最无害的写法 —— **每跑一次留一个僵尸**。
+///
+/// ⚠️ **本仓两处采样器就是这么写的**（2026-09-17 用户报「CodexBar 会留下僵尸进程」）：
+///   定时器每 3 秒一拍、`% 60` ⇒ 每 3 分钟尝试拉一次；采样器空闲 180s 后自退 ⇒
+///   退了就成僵尸、锁文件随之消失 ⇒ 3 分钟后再拉一个。两个采样器轮流，**持续累积**。
+///   本机同期实测到的 17 个僵尸里，7 个是常驻 `agy` 的、10 个是另一个 app 的 ——
+///   **同一个形状在三个程序里各犯了一次**，说明它不是谁粗心，是这个 API 的默认行为在咬人。
+///
+/// ★ 收尸放在**独立线程**里 `wait()`：我们不要它的输出、也不想阻塞定时器。
+///   线程的寿命 = 子进程的寿命，子进程退出线程就结束，不是常驻开销。
+/// ★ **`Stdio::null()` 由调用方给** —— 这个函数不替调用方决定输出去哪。
+fn spawn_and_reap(mut cmd: Command) -> bool {
+    match cmd.spawn() {
+        Ok(mut child) => {
+            std::thread::spawn(move || {
+                // 拿不到退出码也无所谓：`wait()` 的**副作用**（收尸）才是目的。
+                let _ = child.wait();
+            });
+            true
+        }
+        Err(_) => false,
+    }
+}
+
 fn spawn_cmd(program: &str) -> Command {
     let mut c = Command::new(program);
     c.env("CODEX_ROTATE_STORE", data_dir());
@@ -2024,22 +2053,22 @@ pub fn run() {
                         if !std::path::Path::new(&lock).exists() {
                             let script = format!("{}/traffic/agy_quota_sampler.py", script_dir());
                             if std::path::Path::new(&script).exists() {
-                                let _ = py_cmd()
-                                    .arg(&script)
+                                let mut c = py_cmd();
+                                c.arg(&script)
                                     .stdout(std::process::Stdio::null())
-                                    .stderr(std::process::Stdio::null())
-                                    .spawn();
+                                    .stderr(std::process::Stdio::null());
+                                spawn_and_reap(c);
                             }
                         }
                         let lock = format!("{}/traffic/grok-quota-ledger/.sampler.lock", data_dir());
                         if !std::path::Path::new(&lock).exists() {
                             let script = format!("{}/grok-quota-sampler", script_dir());
                             if std::path::Path::new(&script).exists() {
-                                let _ = py_cmd()
-                                    .arg(&script)
+                                let mut c = py_cmd();
+                                c.arg(&script)
                                     .stdout(std::process::Stdio::null())
-                                    .stderr(std::process::Stdio::null())
-                                    .spawn();
+                                    .stderr(std::process::Stdio::null());
+                                spawn_and_reap(c);
                             }
                         }
                     }
