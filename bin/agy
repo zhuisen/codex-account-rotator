@@ -109,14 +109,47 @@ def start_quota_sampler() -> None:
     大部分时间不动的数,既浪费又多一个要维护的服务。采样器自己会在没有 agy 时退出。
     ★ `start_new_session=True` + devnull 三件套:不继承 TTY、不往用户终端吐字、
     不随 wrapper/agy 的进程组一起被信号带走。
+
+    ★★★ **必须双 fork —— 这里是本仓僵尸进程的真凶**(2026-09-17 四方评审抓出，实测坐实)。
+      原来是一句裸 `subprocess.Popen(...)`，紧接着第 91 行 `os.execv` 换进程映像。
+      **`execv` 换的是映像，不换父子关系**:采样器仍然挂在这个 pid 下，
+      而接管这个 pid 的 agy 真身**根本不认识它**，永不 `waitpid`。
+      于是采样器 180s 自退后 ⇒ **僵尸挂在常驻 agy 上，直到 agy 退出为止**。
+      ⚠️ `start_new_session=True` 只让子进程 `setsid`，**不改 PPID、不转移 reap 责任** ——
+        它防的是信号，不是僵尸。当时正是靠它误以为已经安全。
+      实测(2026-09-17):本机 17 个 `<defunct>` 里 **7 个**父进程是 `~/.local/bin/agy`，
+      每个常驻 agy 各挂 1 个；而同期 CodexBar 自己**一个都没有**。
+
+      双 fork 之后孙进程被 **launchd(PID 1) 收养**，由内核 init 负责收尸，
+      与 wrapper / agy 真身的生命周期彻底脱钩 —— 这正是"不属于本进程生命周期"那句话
+      本来就想要的语义。中间那个 fork 出来的进程**立刻**被 `waitpid` 回收，不留痕迹。
+
+    ⚠️ **绝不要改用 `signal.signal(SIGCHLD, SIG_IGN)`**:那个设置会**跨 `execv` 保留**，
+      被 agy 真身继承后它自己的 `waitpid` 全部拿到 `ECHILD` ——
+      用一个更贵、更难查的 bug 换掉这个。
     """
     try:
         if os.environ.get("AGY_SAMPLER_OFF") or not SAMPLER.exists():
             return
-        subprocess.Popen(
-            [sys.executable, str(SAMPLER)],
-            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL, start_new_session=True)
+        pid = os.fork()
+        if pid == 0:
+            # ── 中间进程:setsid 脱离控制终端，再 fork 一次让孙进程被 init 收养 ──
+            try:
+                os.setsid()
+                if os.fork() == 0:
+                    devnull = os.open(os.devnull, os.O_RDWR)
+                    for fd in (0, 1, 2):
+                        os.dup2(devnull, fd)
+                    os.execv(sys.executable, [sys.executable, str(SAMPLER)])
+            except Exception:            # noqa: BLE001
+                pass
+            finally:
+                os._exit(0)              # ★ 必须 `_exit`:普通 exit 会跑 atexit / flush
+                                         #   父进程的缓冲区，在 fork 出来的副本里重复副作用。
+        else:
+            # ★ 立刻回收中间进程 —— 它只活几毫秒。不收的话**它自己**就成了那个僵尸，
+            #   等于把问题从孙进程搬到儿子身上。
+            os.waitpid(pid, 0)
     except Exception:                    # noqa: BLE001 — 采集不到是小事,弄坏 agy 是大事
         pass
 

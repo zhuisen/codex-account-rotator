@@ -66,6 +66,7 @@ import os
 import subprocess
 import sys
 import time
+import signal
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -233,16 +234,45 @@ def agy_alive():
                for l in out.splitlines())
 
 
+# ★★★ **SIGTERM 要跑 `finally`**（2026-09-17）。Python 默认的 SIGTERM 是**直接终止**，
+#   不抛异常、不跑 `finally` ⇒ 下面那句 `lk.unlink()` 根本没机会执行 ⇒ **每次被收都留一个陈锁**。
+#   而 App 退出时正是发 SIGTERM 收子进程（`lib.rs::reap_all_children`），
+#   选 SIGTERM 而非 SIGKILL 的**全部理由**就是"让采样器有机会删掉自己的锁" ——
+#   不装这个处理器，那个理由就是空的。实测：app 退出后两个锁原样留在盘上。
+#   ★ 抛 `SystemExit` 而不是直接 `os._exit`：前者会正常展开栈、跑到 `finally`。
+def _on_term(_sig, _frm):
+    raise SystemExit(0)
+
+
+for _s in (signal.SIGTERM, signal.SIGINT):
+    try:
+        signal.signal(_s, _on_term)
+    except (ValueError, OSError):        # 非主线程 / 平台不支持 —— 不装也不能让脚本起不来
+        pass
+
+
 def main():
     ledger = LEDGER_DIR / LEDGER
-    if not take_lock(LEDGER_DIR / LOCK):
-        return 0
 
     # ★★ **起手先探 agy 是否在跑。** 不探的话:agy 没在跑(甚至没装)时,
     #    采样器照样进 90s 的 2 秒快轮询,每次 fetch 都起一个 python 子进程去打一个
     #    不存在的端口。而 app 每 60s 会把它再拉起来一次 ⇒ **永续空转**。
     #    没在跑就直接退出,把"要不要采"这件事交回给下一次补拉。
+    #
+    # ★★★ **探活必须排在 `take_lock` 之前**(2026-09-17 四方评审抓出，grok 侧早已如此、
+    #   agy 侧一直没同步 —— 典型的「修了症状、类没关」)。反过来的后果:
+    #   agy 没在跑时 `take_lock` **成功**、锁写上了盘，然后这里 `return 0` 直接退出 ——
+    #   而 `finally` 里的 `unlink` 在下面的 `try` 之后，**这条早退路径根本走不到它**。
+    #   ⇒ 采样器**自己给自己造了一个陈锁**，PID 随进程消亡而失效。
+    #   叠加上 App 侧那道闸（改之前只判文件存在），此后**永远不会再有采样器被拉起**。
+    #   grok 侧的同一段注释（`grok-quota-sampler` 里）逐字写过这条，并配了行为闸
+    #   `tests/test_grok_realtime.py::EarlyExitDoesNotLeaveALock`。本闸见
+    #   `tests/test_no_zombie_children.py::EarlyExitNeverLeavesALock`。
     if not agy_alive():
+        return 0
+
+    # ★ 取锁放在探活**之后**：从这一行往下，任何出口都必须经过下面那个 `finally` 的 unlink。
+    if not take_lock(LEDGER_DIR / LOCK):
         return 0
 
     started = time.time()

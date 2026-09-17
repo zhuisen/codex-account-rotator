@@ -68,12 +68,87 @@ fn data_dir() -> String {
 /// ★ 收尸放在**独立线程**里 `wait()`：我们不要它的输出、也不想阻塞定时器。
 ///   线程的寿命 = 子进程的寿命，子进程退出线程就结束，不是常驻开销。
 /// ★ **`Stdio::null()` 由调用方给** —— 这个函数不替调用方决定输出去哪。
+/// 采样器的单实例锁**还被活着的进程持着吗**。→ `true` = 有人在跑，别拉。
+///
+/// ★★★ **判据是"锁里的 PID 还活着吗"，不是"锁文件在不在"**（2026-09-17 四方评审抓出）。
+///   两个采样器自己的 `take_lock()` 都能按 PID 接管死锁 —— `agy_quota_sampler.py` 的
+///   docstring 甚至点名了后果：「不接管的话**采集会从此永久静默**」。
+///   但**我们根本不给它机会**：原来这里先判 `Path::exists()`，文件在就不 spawn，
+///   于是那段自愈逻辑**永远走不到**。两层各自正确，组合起来是坏的。
+///
+/// ⚠️ 实测后果（2026-09-17）：`grok-quota-ledger/.sampler.lock` 内容 `884`、进程早已不在，
+///   而 `samples.jsonl` **冻结了 49 小时** —— grok 的额度消耗序列静默停摆两天。
+///   grok 没有 `bin/agy` 那样的 wrapper 兜底，**App 是它唯一的补拉路径**，所以是永久闭锁。
+///   UI 上只表现为"数据旧了"，没有任何一处会为此报红。
+///
+/// ★ **一切拿不准都 fail-open 去拉**（读不到、内容不是 PID、非 unix）——
+///   采样器的 `take_lock()` 才是权威的单实例闸，多拉一次它立刻 `return 0`，代价是
+///   一个瞬时进程；而少拉一次的代价是**永久静默**。两边不对等，所以偏向拉。
+/// ⚠️ **绝不要改用 mtime 判陈旧**：实测活着的 agy 锁 mtime 停在 09:29 而当时已 10:17 ——
+///   采样器运行期间**不刷新**锁 mtime，按 mtime 判会把活锁误判成死锁，天天重复拉。
+fn sampler_lock_held(lock: &str) -> bool {
+    let Ok(txt) = fs::read_to_string(lock) else { return false };
+    let Ok(pid) = txt.trim().parse::<i32>() else { return false };
+    if pid <= 0 {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        // `kill(pid, 0)` 只探测存活，不发真信号。
+        unsafe { libc::kill(pid, 0) == 0 }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        false
+    }
+}
+
+/// 我们起过的、还活着的后台子进程 pid。→ 退出时统一 `SIGTERM`。
+///
+/// ★★★ **App 退出不清理子进程 = 采样器孤儿化**（2026-09-17 四方评审抓出，实测坐实）。
+///   `spawn_and_reap` 是即发即弃的，退出路径（`quit_app` → `app.exit(0)`，以及 ⌘Q）
+///   **一行清理都没有**。实测：pid 97371 的采样器 `PPID=1`，而当时 CodexBar 活在 26432 ——
+///   它是被**上一代实例**孤儿化的，`MAX_LIFETIME_SECS = 24*3600` 意味着它能在用户
+///   关掉 app 之后继续查额度**最长 24 小时**。
+///   ⚠️ 本仓自己写着「最贵的问题是**谁在自动花钱**」，而这条链路正好答不上来。
+/// ★ 次生后果更糟：孤儿**持着 `.sampler.lock`**；它若在休眠中被强杀就留下陈锁，
+///   直接喂给 `sampler_lock_held` 上游那条永久闭锁。
+static KIDS: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+
+/// 给所有还活着的子进程发 `SIGTERM`。退出路径上调用。
+///
+/// ★ 用 `SIGTERM` 不用 `SIGKILL`：采样器的 `finally` 会**删掉自己的锁**，
+///   而 `SIGKILL` 不给它这个机会 —— 那正好制造出上面那条陈锁。
+fn reap_all_children() {
+    let Ok(mut kids) = KIDS.lock() else { return };
+    for pid in kids.drain(..) {
+        #[cfg(unix)]
+        unsafe {
+            libc::kill(pid as i32, libc::SIGTERM);
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = pid;
+        }
+    }
+}
+
 fn spawn_and_reap(mut cmd: Command) -> bool {
     match cmd.spawn() {
         Ok(mut child) => {
+            let pid = child.id();
+            if let Ok(mut kids) = KIDS.lock() {
+                kids.push(pid);
+            }
             std::thread::spawn(move || {
                 // 拿不到退出码也无所谓：`wait()` 的**副作用**（收尸）才是目的。
                 let _ = child.wait();
+                // ★ 退出即销号 —— 否则表会无限长，且退出时会对早已消失的 pid 发信号
+                //   （那个 pid 可能已被系统复用给别人，`kill` 就打到无辜进程头上）。
+                if let Ok(mut kids) = KIDS.lock() {
+                    kids.retain(|&p| p != pid);
+                }
             });
             true
         }
@@ -217,6 +292,8 @@ fn python_bin() -> String {
 /// Settings.
 #[tauri::command]
 fn quit_app(app: AppHandle) {
+    // ★ 先收子进程再退 —— `app.exit(0)` 之后这里不再有执行机会。
+    reap_all_children();
     app.exit(0);
 }
 
@@ -2050,7 +2127,7 @@ pub fn run() {
                     sampler_tick += 1;
                     if sampler_tick % 60 == 0 {
                         let lock = format!("{}/traffic/agy-quota-ledger/.sampler.lock", data_dir());
-                        if !std::path::Path::new(&lock).exists() {
+                        if !sampler_lock_held(&lock) {
                             let script = format!("{}/traffic/agy_quota_sampler.py", script_dir());
                             if std::path::Path::new(&script).exists() {
                                 let mut c = py_cmd();
@@ -2061,7 +2138,7 @@ pub fn run() {
                             }
                         }
                         let lock = format!("{}/traffic/grok-quota-ledger/.sampler.lock", data_dir());
-                        if !std::path::Path::new(&lock).exists() {
+                        if !sampler_lock_held(&lock) {
                             let script = format!("{}/grok-quota-sampler", script_dir());
                             if std::path::Path::new(&script).exists() {
                                 let mut c = py_cmd();
@@ -2151,7 +2228,16 @@ pub fn run() {
                 }
                 apply_activation_policy(app);
             }
+            if let tauri::RunEvent::Exit = event {
+                // ★ 兜底：不管从哪条路退，这里都过一次（重复调用无害，表已被 drain 清空）。
+                reap_all_children();
+            }
             if let tauri::RunEvent::ExitRequested { code, api, .. } = event {
+                if code.is_some() {
+                    // ⌘Q / `app.exit(0)` 走这一支 —— 原来它整个不进任何分支，
+                    // 于是采样器被留下来继续跑（实测最长 24h）。
+                    reap_all_children();
+                }
                 if code.is_none() {
                     api.prevent_exit();
                     if let Some(w) = app.get_webview_window("main") {

@@ -24,6 +24,7 @@ import os
 import subprocess
 import sys
 import time
+import signal
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -186,6 +187,23 @@ def grok_alive():
     return any(l.strip() == "grok" or l.strip().endswith("/grok")
                or l.strip() == "grok.exe"
                for l in out.splitlines())
+
+
+# ★★★ **SIGTERM 要跑 `finally`**（2026-09-17）。Python 默认的 SIGTERM 是**直接终止**，
+#   不抛异常、不跑 `finally` ⇒ 下面那句 `lk.unlink()` 根本没机会执行 ⇒ **每次被收都留一个陈锁**。
+#   而 App 退出时正是发 SIGTERM 收子进程（`lib.rs::reap_all_children`），
+#   选 SIGTERM 而非 SIGKILL 的**全部理由**就是"让采样器有机会删掉自己的锁" ——
+#   不装这个处理器，那个理由就是空的。实测：app 退出后两个锁原样留在盘上。
+#   ★ 抛 `SystemExit` 而不是直接 `os._exit`：前者会正常展开栈、跑到 `finally`。
+def _on_term(_sig, _frm):
+    raise SystemExit(0)
+
+
+for _s in (signal.SIGTERM, signal.SIGINT):
+    try:
+        signal.signal(_s, _on_term)
+    except (ValueError, OSError):        # 非主线程 / 平台不支持 —— 不装也不能让脚本起不来
+        pass
 
 
 def main():

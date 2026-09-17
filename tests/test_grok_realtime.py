@@ -142,13 +142,28 @@ class TheAppBackfillsTheSampler(unittest.TestCase):
         rs = rs_no_comments()
         self.assertIn("grok-quota-sampler", rs)
 
-    def test_it_only_spawns_when_the_lock_is_absent(self):
+    def test_it_only_spawns_when_the_lock_is_held_by_a_live_process(self):
+        """★★★ 判据 2026-09-17 换了：从「**锁文件在不在**」改成「**锁里的 PID 还活着吗**」。
+
+        旧判据钉的是 `!Path::new(&lock).exists()` —— 而那正是被证伪的那个前提。
+        两个采样器自己的 `take_lock()` 都能按 PID 接管死锁（`agy_quota_sampler.py` 的
+        docstring 点名了后果：「不接管的话**采集会从此永久静默**」），
+        但 App 先判文件存在就不 spawn ⇒ **那段自愈逻辑永远走不到**。
+
+        ⚠️ 实测后果（2026-09-17）：`grok-quota-ledger/.sampler.lock` 内容 `884`、进程早已不在，
+          而 `samples.jsonl` **冻结 49 小时** —— grok 的额度消耗序列静默停摆两天。
+          grok 没有 `bin/agy` 那样的 wrapper 兜底，**App 是它唯一的补拉路径**，所以是永久闭锁。
+        ★ 所以旧判据不只是失效，它**会把正确的修复判成违规**。
+        """
         rs = rs_no_comments()
         i = rs.index("grok-quota-sampler")
         window = rs[max(0, i - 800):i]
         self.assertIn("grok-quota-ledger", window)
         self.assertIn(".sampler.lock", window)
-        self.assertIn("!std::path::Path::new(&lock).exists()", window)
+        self.assertIn("sampler_lock_held(&lock)", window,
+                      "★★★ 又退回按「锁文件在不在」判了 —— 陈锁会让补拉永久静默")
+        self.assertNotIn("Path::new(&lock).exists()", window,
+                         "★★★ 仍在对锁判 exists()")
 
     def test_it_uses_its_own_counter_not_the_reset_one(self):
         """复用 `since_tick` 会在 state.json 一变时被清零 ⇒ 每秒拉一次。"""

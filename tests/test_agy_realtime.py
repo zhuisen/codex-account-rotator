@@ -141,13 +141,28 @@ class TheAppBackfillsTheSampler(unittest.TestCase):
         rs = rs_no_comments()
         self.assertIn("agy_quota_sampler.py", rs)
 
-    def test_it_only_spawns_when_the_lock_is_absent(self):
-        """★ 采样器自己有单实例锁；不看锁就拉，每分钟白起一个 python 再立刻退出。"""
+    def test_it_only_spawns_when_the_lock_is_held_by_a_live_process(self):
+        """★★★ 判据 2026-09-17 换了：从「**锁文件在不在**」改成「**锁里的 PID 还活着吗**」。
+
+        原意没错（采样器有单实例锁，不看就拉会每分钟白起一个 python），
+        但**判据挑错了**：`exists()` 把**陈锁**也算成"有人在跑"。
+        采样器自己的 `take_lock()` 能按 PID 接管死锁，而 App 先判文件存在就不 spawn
+        ⇒ 那段自愈逻辑**永远走不到**。
+
+        ⚠️ 实测（2026-09-17）：grok 侧锁内容 `884`、进程早已不在，`samples.jsonl`
+          **冻结 49 小时**。agy 侧当时侥幸没中，因为它的锁恰好被一个**上一代 app 的孤儿**
+          活着持有 —— 那本身是另一个 bug。
+        ★ 多拉一次的代价是一个瞬时进程（`take_lock` 立刻 `return 0`）；
+          少拉一次的代价是**永久静默**。两边不对等，所以判据要偏向"拉"。
+        """
         rs = rs_no_comments()
         i = rs.index("agy_quota_sampler.py")
         window = rs[max(0, i - 600):i]
         self.assertIn(".sampler.lock", window)
-        self.assertIn("!std::path::Path::new(&lock).exists()", window)
+        self.assertIn("sampler_lock_held(&lock)", window,
+                      "★★★ 又退回按「锁文件在不在」判了 —— 陈锁会让补拉永久静默")
+        self.assertNotIn("Path::new(&lock).exists()", window,
+                         "★★★ 仍在对锁判 exists()")
 
     def test_it_uses_its_own_counter_not_the_reset_one(self):
         """★★ `since_tick` 会被 `changed` 分支清零。拿它做 `% 60`：state.json 一变就清零
