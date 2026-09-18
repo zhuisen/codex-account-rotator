@@ -1048,6 +1048,57 @@ async fn check_update() -> Result<String, String> {
         .ok_or_else(|| "远端没有 vX.Y.Z 形态的 tag".to_string())
 }
 
+/// 在系统浏览器里打开一个 http(s) 外链。
+///
+/// ★★★ **不要退回 `tauri-plugin-shell` 的 `open`。** 2026-09-18 用户实报「CodexBar 留僵尸进程」，
+///   在装机版 v1.6.3（**已含** `bin/agy` 那一轮修复）底下仍抓到一个：pid 36012、PPID = CodexBar、
+///   `Z` 态、诞生于 14:47:29 —— 正是点了「关于」里那两个链接之一的时刻。
+///   链路是 `openExternal()` → `tauri-plugin-shell::open` → `open::that_detached`，而后者
+///   （`open-5.3.5/src/lib.rs:380`）是 `pre_exec { setsid() }` + `self.spawn().map(|_| ())`：
+///   **`Child` 句柄当场 drop，从不 `wait()`**。
+/// ★ 这与本轮已修的 `bin/agy` 是**同一个形状**，只是换了语言：`setsid()` 只脱离控制终端，
+///   **不转移收尸责任**（Python 那边是 `start_new_session=True` + `os.execv`）。
+///   Rust 的 `std::process::Child` 没有会收尸的 `Drop`，所以 drop 掉句柄 = 定额留一具僵尸。
+/// ★ 修法只能是**自己起**：依赖里那行改不了，`spawn_and_reap` 也包不住它。
+///   代价是要自己处理 scheme 白名单与三个平台的启动器 —— 见下。
+#[tauri::command]
+fn open_url(url: String) -> Result<(), String> {
+    // ★ 只放 http(s)。这个字符串最终交给系统的 URL 派发器，而 macOS 的 `open` 会按 scheme
+    //   唤起**任意**已注册的应用（`file://`、各家自定义 scheme 都算）。前端只需要外链，
+    //   所以在这里就把范围收死，而不是指望调用点自律。
+    //   顺带挡掉空白/控制字符：URL 里本来就不该有，出现即是拼装出了问题。
+    let scheme_ok = url.starts_with("https://") || url.starts_with("http://");
+    if !scheme_ok || url.len() > 2048 || url.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err(format!("拒绝打开非 http(s) 链接: {}", url));
+    }
+    // 走 `spawn_cmd` 而不是裸 `Command::new`：它是本仓所有子进程的唯一入口（见其文档注释），
+    // Windows 的 `CREATE_NO_WINDOW` 也在那里 —— 裸起会闪一个黑窗。
+    #[cfg(target_os = "macos")]
+    let cmd = {
+        let mut c = spawn_cmd("open");
+        c.arg(&url);
+        c
+    };
+    #[cfg(target_os = "windows")]
+    let cmd = {
+        // `start` 是 cmd 的内建命令，第一个引号参数是窗口标题（省了它会把 URL 当标题吃掉）。
+        let mut c = spawn_cmd("cmd");
+        c.args(["/c", "start", "", &url]);
+        c
+    };
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let cmd = {
+        let mut c = spawn_cmd("xdg-open");
+        c.arg(&url);
+        c
+    };
+    if spawn_and_reap(cmd) {
+        Ok(())
+    } else {
+        Err("浏览器起不来".to_string())
+    }
+}
+
 #[tauri::command]
 fn read_auth_tokens() -> Result<Value, String> {
     let state: Value = read_state()?;
@@ -1909,7 +1960,6 @@ pub fn run() {
                 .with_denylist(&["menubar"])
                 .build(),
         )
-        .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
@@ -2205,6 +2255,7 @@ pub fn run() {
             run_relay_usage,
             relay_ctl,
             check_update,
+            open_url,
             set_dock_visible,
             set_main_visible,
             read_auth_tokens,

@@ -404,6 +404,123 @@ class SigtermLetsTheSamplerCleanItsLock(unittest.TestCase):
                     "app 每退出一次就留一个陈锁".format(name))
 
 
+class TheDetachedSpawningDependencyIsGone(unittest.TestCase):
+    """★★★ **泄漏的那次 spawn 可以不在我们的代码里。**（2026-09-18，装机版 v1.6.3 实测）
+
+    这份文件前面每一条闸扫的都是**本仓源码**，而 v1.6.3 —— 已经含了 `bin/agy` 双 fork、
+    `spawn_and_reap`、退出清理、SIGTERM 处理的那一版 —— 底下仍抓到一具僵尸：
+
+        pid 36012  PPID 14732(CodexBar)  STAT Z  诞生于 09-18 14:47:29
+
+    时刻正对上「设置 → 关于」里那两个外链之一被点开。链路：
+
+        SettingsPage `openExternal()`
+          → `tauri-plugin-shell::open`            (2.3.5 · src/open.rs:134)
+          → `::open::that_detached`               (open-5.3.5 · src/lib.rs:267)
+          → `spawn_detached()`                    (           · src/lib.rs:380)
+             = `pre_exec { setsid() }` + `self.spawn().map(|_| ())`
+
+    最后那行把 `Child` 句柄**直接 drop 掉，从不 `wait()`**。Rust 的
+    `std::process::Child` 没有会收尸的 `Drop`（这是**刻意的**语言设计），
+    所以 drop 句柄 = 定额留一具僵尸。
+
+    ★ 这与本文件开头那条 `bin/agy` 是**同一个形状，换了语言**：
+      `setsid()` / `start_new_session=True` 都只脱离控制终端，**不转移收尸责任**。
+      两次都是靠「它 detach 了所以安全」这个错觉过的关。
+
+    ⚠️ 判据因此必须**跨过仓库边界**：一条只扫 `src/**` 的闸对这件事是结构性沉默的，
+      而沉默在报告里长得和通过一模一样。
+    """
+
+    CARGO = ROOT / "codexbar" / "src-tauri" / "Cargo.toml"
+    PKG = ROOT / "codexbar" / "package.json"
+    CAPS = ROOT / "codexbar" / "src-tauri" / "capabilities"
+
+    @staticmethod
+    def _open_url_body():
+        """取 `open_url` 的函数体，只剥**整行**注释。
+
+        ⚠️ 不能用 `_strip_rs`：它的 `//[^\\n]*` 不认字符串字面量，会把
+        `starts_with("https://")` 里的 `//` 当成注释起点，**把白名单本身吃掉一半** ——
+        于是「没有白名单」这条断言恒红，而真因与白名单毫无关系。
+        （同族：本仓记过的「定长切片滑进下一段」——判据一旦依赖粗糙的文本切割，
+        它红的时候不指向真因。）
+        """
+        rs = (SRC / "lib.rs").read_text(encoding="utf-8")
+        rs = re.sub(r"(?m)^\s*//[^\n]*", "", rs)
+        i = rs.index("fn open_url(")
+        return rs[i:rs.index("\n}", i)]
+
+    def test_the_rust_dependency_is_not_declared(self):
+        txt = self.CARGO.read_text(encoding="utf-8")
+        # ★ 打在**依赖声明**的形态上，不是打在字符串 `tauri-plugin-shell` 上 ——
+        #   同一个词就写在紧挨着的注释里解释着「为什么删了它」（本仓空守卫形态④，
+        #   一轮踩过五次）。所以要求行首、且后面跟着 `=`。
+        decl = re.search(r"(?m)^\s*tauri-plugin-shell\s*=", txt)
+        self.assertIsNone(
+            decl, "★★★ `tauri-plugin-shell` 又被加回 Cargo.toml —— "
+                  "它的 `open` 走 `open::that_detached`，点一次外链留一具僵尸")
+
+    def test_the_npm_dependency_is_not_declared(self):
+        import json
+        pkg = json.loads(self.PKG.read_text(encoding="utf-8"))
+        for field in ("dependencies", "devDependencies"):
+            with self.subTest(field=field):
+                self.assertNotIn("@tauri-apps/plugin-shell", pkg.get(field, {}),
+                                 "★★★ npm 侧又装回了 plugin-shell")
+
+    def test_no_frontend_file_imports_it(self):
+        """★★ 删依赖不等于删用法：`node_modules` 里可能因别的包被提升而仍然存在，
+        于是 `import` 照样能解析，构建也照样过。
+
+        ⚠️ **必须先剥注释**（本仓空守卫形态④，本轮又撞了一次）：`SettingsPage.tsx` 顶上
+        正写着「不要用 `@tauri-apps/plugin-shell` 的 open」这条规则本身，
+        裸搜字符串会把**解释规则的那句话**判成违反规则。
+        """
+        hits = []
+        for f in (ROOT / "codexbar" / "src").rglob("*.ts*"):
+            src = re.sub(r"/\*[\s\S]*?\*/", "", f.read_text(encoding="utf-8"))
+            src = re.sub(r"(?m)^\s*//[^\n]*", "", src)
+            if "@tauri-apps/plugin-shell" in src:
+                hits.append(f.relative_to(ROOT).as_posix())
+        self.assertEqual(hits, [], "★★★ 这些文件还在 import 会泄漏的 shell 插件：{}".format(hits))
+
+    def test_the_capability_is_revoked(self):
+        """★ 权限还开着 = 那条 IPC 命令仍然可达。插件没注册时调用只是报错，
+        但把权限留着等于给「顺手装回去」留了一条无声的路。"""
+        for cap in self.CAPS.glob("*.json"):
+            with self.subTest(cap=cap.name):
+                self.assertNotIn('"shell:', cap.read_text(encoding="utf-8"),
+                                 "★★ {} 还授着 shell 权限".format(cap.name))
+
+    def test_the_replacement_command_exists_and_is_registered(self):
+        """★★★ **删掉一条路必须同时接上替代路**，否则「在浏览器打开」静默变成点了没反应。
+
+        ⚠️ 这条是反向闸：上面四条全绿也可能只是**把功能删了**。
+        """
+        rs = _strip_rs((SRC / "lib.rs").read_text(encoding="utf-8"))
+        self.assertIn("fn open_url(", rs, "★★★ 替代命令 `open_url` 不存在")
+        # 注册表里也要有 —— 定义了不注册，前端 `invoke` 一律报 "command not found"。
+        handler = rs[rs.index("generate_handler!["):]
+        self.assertIn("open_url", handler[:handler.index("]")],
+                      "★★★ `open_url` 没进 `generate_handler!` —— 前端调不到")
+
+    def test_the_replacement_goes_through_the_reaper(self):
+        """★★★ 自己起的那一次**必须**收尸，否则只是把泄漏点从依赖搬进了本仓。"""
+        body = self._open_url_body()
+        self.assertIn("spawn_and_reap", body,
+                      "★★★ `open_url` 没走 `spawn_and_reap` —— 泄漏点只是换了个家")
+        self.assertNotIn(".spawn()", body,
+                         "★★ `open_url` 里出现了裸 `spawn()`")
+
+    def test_the_replacement_refuses_non_http_schemes(self):
+        """★★ 这个参数最终交给系统的 URL 派发器（macOS `open` 会按 scheme 唤起任意应用）。
+        没有白名单就等于把「让系统执行点什么」这个能力开给了前端。"""
+        body = self._open_url_body()
+        self.assertIn('"https://"', body, "★★ 没有 scheme 白名单")
+        self.assertIn("return Err", body, "★★ 白名单没有拒绝分支 —— 检查了却不拦")
+
+
 class NoZombiesAreActuallyAccumulating(unittest.TestCase):
     """★ **断言真实 `ps`** —— 前面全是静态/半静态判据，这条看现实。
 

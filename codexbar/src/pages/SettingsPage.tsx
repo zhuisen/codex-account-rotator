@@ -1,7 +1,10 @@
 import { fullVersion } from "../helpers";
 import { useState, useEffect, useMemo, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { open as openExternal } from "@tauri-apps/plugin-shell";
+// ★ 外链走本仓自己的 `open_url`,**不用 `@tauri-apps/plugin-shell` 的 `open`**:
+//   那条路是 `open::that_detached`,spawn 完直接 drop `Child`,每点一次留一具僵尸
+//   (装机版 v1.6.3 实测,pid 36012)。理由全文在 `lib.rs::open_url` 的注释里。
+const openExternal = (url: string): Promise<void> => invoke("open_url", { url });
 // ★ 版本号只从 tauri 运行期取,前端不再写死。此前"版本号同步 5 处"里有 3 处在前端,
 //   发一次版要手改三个字符串,漏一个就显示错版本。现在只剩 tauri.conf.json + Cargo.toml 两处。
 import logo from "../../src-tauri/icons/128x128@2x.png";

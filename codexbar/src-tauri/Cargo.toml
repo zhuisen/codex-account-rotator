@@ -23,7 +23,10 @@ log = "0.4"
 #   它是圆角能成立的前提:没有透明窗口,CSS 的圆角外圈会被窗口底色填成四个黑角。
 tauri = { version = "2.11.3", features = ["tray-icon", "image-png", "macos-private-api"] }
 tauri-plugin-log = "2"
-tauri-plugin-shell = "2"
+# ★ `tauri-plugin-shell` 已于 2026-09-18 移除,别加回来。它的 `open` 走
+#   `open::that_detached` —— spawn 完直接 drop `Child`,每点一次外链留一具僵尸
+#   (装机版 v1.6.3 实测)。外链改走本仓自己的 `open_url` 命令,经 `spawn_and_reap` 收尸。
+#   闸:`tests/test_no_zombie_children.py::TheDetachedSpawningDependencyIsGone`
 tauri-plugin-notification = "2"
 tauri-plugin-autostart = "2"
 tokio = { version = "1", features = ["time"] }
