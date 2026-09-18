@@ -19,6 +19,7 @@ import { useGrokQuota } from "./hooks/useGrokQuota";
 import { useAgyQuota } from "./hooks/useAgyQuota";
 import { fmtAgo } from "./helpers";
 import { usePrivacy } from "./hooks/usePrivacy";
+import { useCardBannerDismiss } from "./hooks/useCardBannerDismiss";
 import { todayView, fmtTok, colorOf } from "./traffic";
 import "./App.css";
 import "./menubar.css";
@@ -104,6 +105,7 @@ const IconWarn = () => <svg width="15" height="15" viewBox="0 0 24 24" fill="cur
 
 export default function MenuBar() {
   const { accounts, hero, currentNode, counts, lastRefreshAt, cardAlert, loadingAction, toast, refresh, run, showToast } = useStore();
+  const { visible: bannerVisible, dismiss: bannerDismiss } = useCardBannerDismiss();
   const [theme, setTheme] = useState<"dark" | "light">(loadTheme);
   const [tab, setTabState] = useState<Tab>(loadTab);
   const [plat, setPlatState] = useState<PoolKey>(loadPlat);
@@ -410,26 +412,32 @@ export default function MenuBar() {
                          </span>
                        : <>{platformOf(plat).label}</>} />
 
-      {/* Expiring reset-card banner */}
-      {/* ★ 重置卡是 **codex** 专属的东西。挂在别家档上说的是另一家的事（同主窗那条纪律）。 */}
-      {plat === "codex" && cardAlert && (
-        <div className="mb-banner" style={{ background: "rgba(224,144,28,.1)", border: "1px solid rgba(224,144,28,.45)" }}>
+      {/* Expiring reset-card banner —— **单行、可关**（用户 2026-09-18：「太过了，喧宾夺主，
+          并且无法取消」）。
+          ★ 原来是 60px 三行 + 一颗大按钮，`CARD_WARN_DAYS = 3` 意味着它**连挂三天**且无关闭入口。
+            那颗「用卡: /usage」还**点了并不用卡**（服务端要求窗口"需要重置"才放行），只弹 toast。
+            ⇒ 一盏连亮三天、关不掉、又不能真正执行的灯 —— 本仓判过死刑的形态。
+          ★ 常驻那一半交给**卡上的 `CardBadge`**（琥珀 + 光晕 + `×3·1张3天`，本来就有），
+            横幅只在这张卡**刚进入 3 天窗口**时提醒一次；关掉之后只剩角标。
+            「怎么用卡」那句已补进角标的悬浮说明 —— 关掉横幅不丢任何信息。
+          ★ 重置卡是 **codex** 专属的东西。挂在别家档上说的是另一家的事（同主窗那条纪律）。 */}
+      {plat === "codex" && cardAlert && bannerVisible(cardAlert) && (
+        <div className="mb-banner mb-banner-slim"
+             style={{ background: "rgba(224,144,28,.1)", border: "1px solid rgba(224,144,28,.45)" }}>
           <span className="mb-banner-icon" style={{ color: "#f2b45c" }}><IconWarn /></span>
           <div className="mb-banner-body">
-            <div className="mb-banner-title" style={{ color: "#f2b45c" }}>
-              重置卡即将到期 — {cardAlert.node} · {cardAlert.cardsExpiring || 1} 张 {Math.max(1, Math.ceil(cardAlert.cardDays ?? 0))} 天后作废
-            </div>
-            <div className="mb-banner-sub" style={{ color: "#b08d55" }}>
-              {cardAlert.node} 共 {cardAlert.cards} 张 · 用卡可立即把周额度重置为 100%
+            <div className="mb-banner-title" style={{ color: "#f2b45c" }}
+                 title={`${cardAlert.node} 共 ${cardAlert.cards} 张 · 用卡可立即把周额度重置为 100%\n`
+                        + "用法：终端运行 codex → 输入 /usage → Redeem usage limit reset\n"
+                        + "（只能在交互式 TUI 里用，且服务端要求当前周窗口“需要重置”才放行）"}>
+              {cardAlert.node} {cardAlert.cardsExpiring || 1} 张重置卡 {Math.max(1, Math.ceil(cardAlert.cardDays ?? 0))} 天后作废
             </div>
           </div>
-          {/* Redeeming is interactive-TUI only: the consume endpoint is server-gated on the window
-              being eligible, and firing it blind would burn a card for a `nothingToReset`. So this
-              slot tells you how instead of pretending to do it. */}
-          <span className="mb-banner-hint"
-            title="重置卡只能在交互式 TUI 里用,且服务端要求当前周窗口“需要重置”才放行(codex exec 无效)"
-            onClick={() => showToast("终端运行 codex → 输入 /usage → Redeem usage limit reset")}
-            style={{ color: "#1c1104", background: "#E0901C", cursor: "pointer" }}>用卡: /usage</span>
+          {/* ★ 关闭按钮。按**这张卡的身份**记忆（节点 + 最早到期日），
+              换了新卡会重新提醒一次 —— 「关掉这一条」≠「以后都别提醒我」。 */}
+          <span className="mb-banner-x" role="button" aria-label="关闭这条提醒"
+                title="关掉这条提醒。卡上的角标仍会常驻；换了新卡会重新提醒一次"
+                onClick={() => bannerDismiss(cardAlert)}>×</span>
         </div>
       )}
 

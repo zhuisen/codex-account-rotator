@@ -103,9 +103,19 @@ export default function CardBadge({ a, t, compact }: { a: Account; t: Theme; com
 
   return (
     <span
-      title={a.cardExp
+      // ★ 「怎么用卡」这句 2026-09-18 从菜单栏横幅搬到这里。
+      //   横幅改成了单行可关（用户：「太过了，喧宾夺主，并且无法取消」），
+      //   而**用法**本来是它唯一独有的内容 —— 不搬过来，关掉横幅就等于丢信息。
+      //   角标是常驻的，所以它才是这句话的正确归宿（§5d：一天看一次的信息折叠进角标）。
+      // ⚠️ 只在**快到期**时才缀用法：平时那句是噪音，而本仓的规矩是
+      //   「披露的寿命跟着它描述的事实走」。
+      title={(a.cardExp
         ? `共 ${a.cards} 张 · 最早一张到期 ${a.cardExp}${a.cardsExpiring ? ` · ${a.cardsExpiring} 张在 ${CARD_WARN_DAYS} 天内作废` : ""}`
-        : `共 ${a.cards} 张 · 到期未知(运行 codex-rotate credits 取明细)`}
+        : `共 ${a.cards} 张 · 到期未知(运行 codex-rotate credits 取明细)`)
+        + (expiring
+          ? "\n用卡：终端运行 codex → 输入 /usage → Redeem usage limit reset"
+            + "\n（只能在交互式 TUI 里用，且服务端要求当前周窗口“需要重置”才放行）"
+          : "")}
       style={{
         ...shell(compact),
         color: expiring ? AMBER_TEXT : t.accent,

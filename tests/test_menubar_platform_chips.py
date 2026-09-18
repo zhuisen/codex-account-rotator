@@ -107,8 +107,17 @@ class TheFooterCannotSpendAnotherPlatformsQuota(unittest.TestCase):
         self.assertIn("refreshGrok()", seg)
 
     def test_the_reset_card_banner_stays_on_codex(self):
-        """★ 重置卡是 codex 专属的东西，挂在别家档上说的是另一家的事。"""
-        self.assertIn('{plat === "codex" && cardAlert && (', code(MB),
+        """★ 重置卡是 codex 专属的东西，挂在别家档上说的是另一家的事。
+
+        ⚠️ **前提已被取代，不是被违反**（2026-09-18）：原断言钉的是整句
+        `{plat === "codex" && cardAlert && (`，而横幅现在多了第三个条件
+        `bannerVisible(cardAlert)`（用户：「这个提醒太过了…并且无法取消」）。
+        钉到 `&& (` 那个闭合括号 = 把「渲染条件恰好是这两条」当成了不变量，
+        而真正的不变量只有「**必须先过平台档与 cardAlert 两关**」。
+        改成钉前缀：多加一条守卫仍绿，**删掉 `plat === "codex"` 或 `cardAlert` 立刻红**。
+        可关闭那一维由 `tests/test_card_banner_is_dismissible.py` 独立守着。
+        """
+        self.assertIn('{plat === "codex" && cardAlert &&', code(MB),
                       "★ 重置卡横幅没有按档收起")
 
 
