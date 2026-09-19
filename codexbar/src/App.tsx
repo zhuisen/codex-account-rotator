@@ -30,6 +30,7 @@ import { useAgyQuota } from "./hooks/useAgyQuota";
 import AgyCard from "./components/AgyCard";
 import IntegrationBanner from "./components/IntegrationBanner";
 import { useIntegration } from "./hooks/useIntegration";
+import { useCardOrder, applyOrder, moveItem } from "./hooks/useCardOrder";
 import ProviderTabs from "./components/ProviderTabs";
 import { POOL_PLATFORMS, loadPoolKey, savePoolKey, type PoolKey } from "./platforms";
 import { useAgyPool } from "./hooks/useAgyPool";
@@ -81,6 +82,13 @@ export default function App() {
   const [page, setPage] = useState<Page>("overview");
   // 接入闸：真源是 `codex-rotate integration`，与 `health` 共用同一个判定函数。
   const { integration } = useIntegration();
+  // 卡片自定义顺序（拖拽排序）。★ 走 localStorage + Tauri 广播，主窗与菜单栏不分叉。
+  const { order: cardOrder, setOrderFor } = useCardOrder();
+  /** 正在拖的那张卡的 aid；`overAid` 是当前悬停的落点。都只在拖拽期间有值。 */
+  const [dragAid, setDragAid] = useState<string | null>(null);
+  const [overAid, setOverAid] = useState<string | null>(null);
+  /** 只有按下 ⠿ 手柄才把根节点的 `draggable` 打开 —— 否则整张卡随手一拖就走。 */
+  const [armedAid, setArmedAid] = useState<string | null>(null);
   /** 时间范围（交接稿 §7 的 `RangeState`）。★ **默认 30d**（v1.5 是 14d）。
    *  总览与平台详情**共用这一份** —— 钻进详情再返回不该把档位重置。 */
   const [trafficSt, setTrafficSt] = useState<RangeState>(DEFAULT_RANGE);
@@ -177,6 +185,18 @@ export default function App() {
   }, [win]);
 
   const aliveByLabel = accounts.filter(a => a.status !== "dead").sort((a, b) => a.node.localeCompare(b.node, undefined, { numeric: true }));
+  /**
+   * ★★ **显示顺序与 ⌘N 用的是同一个数组**（用户 2026-09-19 从三个方案里选的这一档）。
+   *
+   * 左上角那个 `⌘N` 角标本来就是「按 ⌘N 能切到它」的承诺。拖拽之后若 ⌘N 仍按 label 序，
+   * 第一张卡上会写着 `⌘3` —— 角标与行为分叉，而**角标是唯一可见的那一半**，
+   * 用户会照着它按，然后切到别的号上。切号是有副作用的（换的是正在计费的账号）。
+   * 所以这里让两者共用 `orderedAlive`，角标退化成「第几张」，永远自洽。
+   *
+   * ⚠️ 已知代价（用户知情）：重排之后旧的肌肉记忆会切到别的号。
+   * ★ 没被排过的号**追加在末尾**，绝不丢（见 `applyOrder`）。
+   */
+  const orderedAlive = applyOrder(aliveByLabel, cardOrder["codex"], (a) => a.aid);
   useExpiryWatch(accounts, tokens);
   // Dead-account alerts live in the MAIN window only — the menubar popover renders the same store, so
   // running the watcher in both would double-notify.
@@ -188,9 +208,24 @@ export default function App() {
   //   接线按档分流，角标也只在真的接了线的那一档出现。
   //   ⚠️ agy **仍然不进 `alive`/`accounts`** —— 那两个数组还驱动着计数徽章、探针全池的号数、
   //     自动切号；这里只是把**键盘事件**按档分流，不是把 agy 塞进那条数组。
+  /**
+   * 把 `from` 这张卡放到 `to` 这张卡的位置，并把新顺序落盘 + 广播。
+   *
+   * ★ 落盘**完整 id 列表**而不是「谁排第几」的增量 —— 增量在有号新增/删除时无法解释，
+   *   完整列表天然自洽（`applyOrder` 会把没记录过的追加到末尾，不会丢号）。
+   */
+  const dropCardOnto = (toAid: string) => {
+    const from = orderedAlive.findIndex((x) => x.aid === dragAid);
+    const to = orderedAlive.findIndex((x) => x.aid === toAid);
+    if (from >= 0 && to >= 0 && from !== to) {
+      setOrderFor("codex", moveItem(orderedAlive, from, to).map((x) => x.aid));
+    }
+    setDragAid(null); setOverAid(null); setArmedAid(null);
+  };
+
   useKeyboard(win, refresh, setPage as (p: string) => void, (idx) => {
     if (page === "overview" && provider === "gemini") {
-      const a = agyPool.accounts[idx];
+      const a = orderedAgy[idx];            // ★ 与卡片显示顺序同源（同 codex 档）
       if (a && a.sub !== agyPool.liveSub) {
         agyPool.switchTo(a.label);
         showToast(`⌘${idx + 1} → ${a.label} · 下次启动 agy 生效`);
@@ -198,7 +233,7 @@ export default function App() {
       return;
     }
     if (page === "overview" && provider === "grok") return;   // 单号只读，没有可切的
-    const target = aliveByLabel[idx];
+    const target = orderedAlive[idx];          // ★ 与卡片显示顺序同源，见 orderedAlive
     if (target && target.aid !== currentNode) run(`switch-${target.aid}`, ["switch", target.node], `⌘${idx + 1} → ${target.node}`);
   });
 
@@ -214,6 +249,22 @@ export default function App() {
   // agy 账号池。★ 只在总览的 Google 档才读 —— 与 grok 额度同一条纪律：
   //   不是每个页面都需要它，而"顺手读一下"会变成"每次开 app 都读"。
   const agyPool = useAgyPool(page === "overview" && provider === "gemini");
+
+  /**
+   * Gemini 档的排序列表。★ 与 codex 档**同一条规则**：显示顺序与 ⌘N 共用一个数组。
+   * ⚠️ grok 档**刻意不接**：它是单号只读、永远只有一张卡，给它画一个拖不出效果的手柄
+   *   就是「画一个点了没反应的东西」—— 本仓判过死刑的形态。
+   */
+  const orderedAgy = applyOrder(agyPool.accounts, cardOrder["gemini"], (a) => a.sub);
+
+  const dropAgyOnto = (toSub: string) => {
+    const from = orderedAgy.findIndex((x) => x.sub === dragAid);
+    const to = orderedAgy.findIndex((x) => x.sub === toSub);
+    if (from >= 0 && to >= 0 && from !== to) {
+      setOrderFor("gemini", moveItem(orderedAgy, from, to).map((x) => x.sub));
+    }
+    setDragAid(null); setOverAid(null); setArmedAid(null);
+  };
   const trafficDays = daysNeeded(trafficSt, todayOf(null));
   const { data: traffic, raw: trafficRaw, cacheMode, prefs: platPrefs, busy: trafficBusy,
           err: trafficErr, refresh: refreshTraffic, requestHoursFor } = useTraffic({
@@ -649,7 +700,7 @@ export default function App() {
                 // ⌘N hints (derived from label order) read 1,3,4,2 across the grid — the shortcut
                 // numbers have to match reading order to be usable, and the handoff grid is label-
                 // ordered too. The "which should I use" answer is the Hero + USE badge, not position.
-                const alive = aliveByLabel;
+                const alive = orderedAlive;
                 const dead = accounts.filter(a => a.status === "dead");
                 // Delta baseline = best remaining quota among usable accounts.
                 // ★★ 基准必须用 `tightest`,不能用 `windows[0]`。后者在 5h 回归后会拿
@@ -687,10 +738,21 @@ export default function App() {
                     {provider === "codex" && (<>
                     <div data-cards-grid style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 12, alignContent: "start" }}>
                       {alive.map((a) => {
-                        const shortcutIdx = aliveByLabel.findIndex(x => x.aid === a.aid);
+                        const shortcutIdx = alive.findIndex(x => x.aid === a.aid);   // ★ 就是「第几张」
                         // 改名按 aid 不按 label:cmd_rename 两者都认,而 aid 唯一 —— 重名时不会改到别的号上
                         return (
                         <AccountCard key={a.aid} a={a} isCurrent={a.aid === currentNode} isBest={hero?.aid === a.aid} isSelected={selectedCard === a.aid} reserveActions={selectedCard !== null} shortcut={shortcutIdx >= 0 && shortcutIdx < 9 ? shortcutIdx + 1 : undefined} bestPct={bestPct} winSlots={winSlots} probing={loadingAction === `probe-${a.aid}`} privacy={privacy} t={t}
+                          drag={{
+                            draggable: armedAid === a.aid,
+                            isDragging: dragAid === a.aid,
+                            isOver: overAid === a.aid && dragAid !== a.aid,
+                            onHandleDown: () => setArmedAid(a.aid),
+                            onDragStart: () => setDragAid(a.aid),
+                            onDragEnd: () => { setDragAid(null); setOverAid(null); setArmedAid(null); },
+                            // ★ `preventDefault` 是必须的:不调用它浏览器根本不允许 drop。
+                            onDragOver: (e) => { e.preventDefault(); setOverAid(a.aid); },
+                            onDrop: () => dropCardOnto(a.aid),
+                          }}
                           onSelect={() => setSelectedCard(selectedCard === a.aid ? null : a.aid)}
                           onSwitch={() => run(`switch-${a.aid}`, ["switch", a.node], `当前号 → ${a.node}`)}
                           onShowDetail={(aid) => { invoke<AccountDetail>("read_account_detail", { aid }).then(d => setDetailModal(d)).catch(() => {}); }}
@@ -796,8 +858,8 @@ export default function App() {
                           （`agy-rotate login --current` 之前就是这个状态，它仍然成立）。
                           ★ 当值号的卡用**本机 RPC** 那份快照 —— 只有它带周窗口；
                             其余号只有云端的 5h。少一行是真话，补一行假的「周 100%」不是。 */}
-                      {agyPool.accounts.length > 0
-                        ? agyPool.accounts.map((a, i) => (
+                      {orderedAgy.length > 0
+                        ? orderedAgy.map((a, i) => (
                             <AgyCard key={a.sub} t={t} color={colorOf(traffic, "agy")}
                                      snap={agyPool.snapshotOf(a, agySnap)}
                                      label={a.label} email={a.email ?? undefined}
@@ -807,6 +869,16 @@ export default function App() {
                                      switching={agyPool.switching === a.label}
                                      disabled={!!platPrefs.by?.agy?.off} winSlots={winSlots}
                                      busy={agyPool.busy} err={agyPool.err}
+                                     drag={{
+                                       draggable: armedAid === a.sub,
+                                       isDragging: dragAid === a.sub,
+                                       isOver: overAid === a.sub && dragAid !== a.sub,
+                                       onHandleDown: () => setArmedAid(a.sub),
+                                       onDragStart: () => setDragAid(a.sub),
+                                       onDragEnd: () => { setDragAid(null); setOverAid(null); setArmedAid(null); },
+                                       onDragOver: (e) => { e.preventDefault(); setOverAid(a.sub); },
+                                       onDrop: () => dropAgyOnto(a.sub),
+                                     }}
                                      onRefresh={agyPool.refresh}
                                      /* ── 与 codex 账号卡对齐（用户 2026-09-13）── */
                                      // ★ 角标只在**真的接了线**的那一档画：⌘1~⌘9 在 Gemini 档

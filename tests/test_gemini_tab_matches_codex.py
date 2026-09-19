@@ -274,4 +274,12 @@ class TheShortcutBadgeOnlyAppearsWhereItWorks(unittest.TestCase):
         i = c.index("useKeyboard(win, refresh")
         seg = c[i:c.index("\n  });", i)]
         self.assertNotIn("aliveByLabel[idx].sub", seg)
-        self.assertIn("agyPool.accounts[idx]", seg, "★ Gemini 档取的不是它自己那列")
+        # ⚠️ 2026-09-19 起 Gemini 档的 ⌘N 取 `orderedAgy[idx]`（拖拽排序后的同一批号）。
+        #   **意图没变**：它仍然取「自己那一列」，只是那一列多了一层排序。
+        #   下面第二条确认 `orderedAgy` 确实源自 `agyPool.accounts` —— 否则这条就成了
+        #   「换了个名字就放行」的空守卫。
+        self.assertIn("orderedAgy[idx]", seg, "★ Gemini 档取的不是它自己那列")
+        self.assertIn("applyOrder(agyPool.accounts", c,
+                      "★★ orderedAgy 必须源自 agyPool.accounts —— 否则 agy 可能被塞进了池数组")
+        self.assertNotIn("orderedAlive", seg.split("provider === \"grok\"")[0],
+                         "★★★ Gemini 那一支取到了 codex 的池数组")

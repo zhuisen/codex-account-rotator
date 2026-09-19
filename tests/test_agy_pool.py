@@ -525,13 +525,18 @@ class TheGoogleTabShowsThePoolNotAReadOnlyCard(unittest.TestCase):
     RS = (ROOT / "codexbar" / "src-tauri" / "src" / "lib.rs").read_text(encoding="utf-8")
 
     def test_one_card_per_account(self):
-        self.assertIn("agyPool.accounts.map((a)", self.APP,
+        """⚠️ 2026-09-19 起渲染的是 `orderedAgy`（拖拽排序后的同一批号，
+        由 `applyOrder(agyPool.accounts, …)` 得来）—— **规则没变，来源多了一层排序**。
+        判据跟着真源走：仍然是「一号一卡」，只是数组名换了。"""
+        self.assertIn("orderedAgy.map((a", self.APP,
                       "★★ Google 档还是只画一张卡 —— 池里有几个号就该有几张")
+        self.assertIn("applyOrder(agyPool.accounts", self.APP,
+                      "★ orderedAgy 必须仍然源自 agyPool.accounts，不能是另一份清单")
 
     def test_it_falls_back_to_the_read_only_card_when_there_is_no_pool(self):
         """★ 池空时退回原来那张只读卡 —— 那条路 2026-09-13 之前一直成立，
         而「还没建池」与「池里有号」是两个不同的事实，不能用同一张卡讲。"""
-        self.assertIn("agyPool.accounts.length > 0", self.APP)
+        self.assertIn("orderedAgy.length > 0", self.APP)   # 见上：2026-09-19 改名，语义不变
 
     def test_the_read_only_badge_is_conditional(self):
         """★★★ 「只读」不能写死。它现在的意思是**还没建池**，不是"agy 不能轮换"。"""

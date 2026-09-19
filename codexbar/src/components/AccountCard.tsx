@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { STATUS_COLORS, STATUS_TEXT, CARD_TYPE as Z, type Theme } from "../theme";
 import StaleMark from "./StaleMark";
+import DragHandle, { type DragWiring } from "./DragHandle";
 import { type Account, fmtCd, fmtAgeSec, maskId, winBarColor, winNumColor,
          QUOTA_STALE_SEC } from "../helpers";
 import Ring from "./Ring";
@@ -25,8 +26,17 @@ function DeltaChip({ delta, t }: { delta: number; t: Theme }) {
 }
 
 
-export default function AccountCard({ a, isCurrent, isBest, isSelected, shortcut, bestPct, probing, privacy, t, onSelect, onSwitch, onShowDetail, onRemove, onProbe, onRename, onToggleRotate, reserveActions, winSlots }: {
+export default function AccountCard({ a, isCurrent, isBest, isSelected, shortcut, bestPct, probing, privacy, t, onSelect, onSwitch, onShowDetail, onRemove, onProbe, onRename, onToggleRotate, reserveActions, winSlots, drag }: {
   a: Account; isCurrent: boolean; isBest: boolean; isSelected: boolean; shortcut?: number;
+  /**
+   * 拖拽排序的接线（用户 2026-09-19 从三个方案里选的**专用手柄**）。
+   *
+   * ★★ 为什么是手柄而不是「整张卡可拖」：卡片现在「点一下 = 选中并展开动作条」。
+   *   整张卡可拖的话，快点会误触发拖拽、慢点又像没反应 —— 两种手感都坏。
+   *   手柄把两件事在**空间上**分开，零冲突（用户看过三个方案后选的就是这个）。
+   * ★ 不传 `drag` 时卡片行为与以前**完全一致**，一个像素都不变。
+   */
+  drag?: DragWiring;
   /** Highest remaining quota in the pool — the baseline the delta chip compares against. */
   bestPct: number;
   /**
@@ -90,15 +100,28 @@ export default function AccountCard({ a, isCurrent, isBest, isSelected, shortcut
   return (
     <div
       onClick={onSelect}
+      draggable={drag?.draggable ?? false}
+      onDragStart={drag?.onDragStart}
+      onDragEnd={drag?.onDragEnd}
+      onDragOver={drag?.onDragOver}
+      onDrop={drag?.onDrop}
       style={{
         position: "relative", background: isCurrent ? t.curCardBg : t.cardBg,
-        border: `1px solid ${border}`, borderRadius: 12,
+        // ★ 落点用**描边**而不是插入一条占位线:网格是三列的,插线会让整排卡片跳位,
+        //   而跳位期间鼠标下方的落点就变了 —— 拖到一半目标自己跑掉是最难用的一种。
+        border: `1px solid ${drag?.isOver ? t.accent : border}`, borderRadius: 12,
         padding: "16px 14px 12px", display: "flex", flexDirection: "column",
-        cursor: "pointer", userSelect: "none", opacity: isDead ? 0.55 : 1,
-        transition: "background .2s ease, border-color .2s ease",
+        cursor: "pointer", userSelect: "none",
+        // 被拖起的那张变淡,让下方的落点看得见
+        opacity: drag?.isDragging ? 0.4 : (isDead ? 0.55 : 1),
+        transition: "background .2s ease, border-color .2s ease, opacity .15s ease",
       }}>
 
       {shortcut && <span style={{ position: "absolute", top: 6, left: 10, fontSize: Z.shortcut, color: t.muted, fontFamily: "'JetBrains Mono'" }}>⌘{shortcut}</span>}
+
+      {/* 拖拽手柄（⠿）。`onMouseDown` 才把根节点的 `draggable` 打开 —— HTML5 DnD 只认
+          根节点上的 `draggable`，常开的话整张卡随手一拖就走，正是选「专用手柄」要避免的。 */}
+      {drag && <DragHandle t={t} dragging={drag.isDragging} onDown={drag.onHandleDown} />}
 
       {/* ★★ `flex:1` + 内容列 `alignSelf:stretch`：卡片在网格里本来就等高（`stretch`），
           这里把多出来的高度交给内容列，好让下方区块**吊在卡片底边**（见下方 spacer）。

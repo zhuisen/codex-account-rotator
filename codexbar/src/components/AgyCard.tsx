@@ -1,4 +1,5 @@
 import Ring from "./Ring";
+import DragHandle, { type DragWiring } from "./DragHandle";
 import StaleMark from "./StaleMark";
 import { CardBadgeGhost } from "./CardBadge";
 import { CARD_TYPE as Z, type Theme } from "../theme";
@@ -42,8 +43,11 @@ export default function AgyCard({ t, color, snap, busy, err, disabled, winSlots,
                                  isSelected, reserveActions, shortcut, isBest, bestPct, partialWins,
                                  onSelect, onRename, onRemove, onProbe, probing,
                                  rotates, onToggleRotate,
-                                  label, email, isCurrent, onSwitch, switching }: {
+                                  label, email, isCurrent, onSwitch, switching, drag }: {
   t: Theme;
+  /** 拖拽排序接线。与账号卡**同一份** `DragWiring` —— 两处各写一份迟早分叉。
+   *  不传时这张卡行为与以前完全一致。 */
+  drag?: DragWiring;
   /** 与账号卡**同一份**窗口槽位表。agy 没有的窗口画一行隐藏等高行 —— 不占槽的话
    *  它的「5h」会和别人的「周」画在同一条线上。 */
   winSlots: string[];
@@ -141,13 +145,23 @@ export default function AgyCard({ t, color, snap, busy, err, disabled, winSlots,
     + `所以这里为空**不再是"非当值号"那种结构性缺失**，就是这一次没取到。）`;
 
   return (
-    <div onClick={onSelect ?? onOpen} style={{
+    <div onClick={onSelect ?? onOpen}
+         draggable={drag?.draggable ?? false}
+         onDragStart={drag?.onDragStart}
+         onDragEnd={drag?.onDragEnd}
+         onDragOver={drag?.onDragOver}
+         onDrop={drag?.onDrop}
+         style={{
       position: "relative", background: isSelected ? t.heroBg : t.cardBg,
-      border: `1px solid ${isSelected ? t.accent : hexA(color, .30)}`, borderRadius: 12,
+      // 落点用描边、被拖的变淡 —— 与账号卡同一套反馈（理由见 AccountCard 那处注释）
+      border: `1px solid ${drag?.isOver ? t.accent : (isSelected ? t.accent : hexA(color, .30))}`,
+      borderRadius: 12,
       padding: "16px 14px 12px", display: "flex", flexDirection: "column",
       cursor: (onSelect ?? onOpen) ? "pointer" : "default", userSelect: "none",
-      transition: "background .2s ease, border-color .2s ease",
+      opacity: drag?.isDragging ? 0.4 : 1,
+      transition: "background .2s ease, border-color .2s ease, opacity .15s ease",
     }}>
+      {drag && <DragHandle t={t} dragging={drag.isDragging} onDown={drag.onHandleDown} />}
       {/* ★ 有快捷键就画 `⌘N`（与账号卡同位同字号），没有就退回 `CLI` ——
           那个角标本来就是"这张卡怎么来的"，两种写法都在回答同一个问题。 */}
       <span style={{ position: "absolute", top: 6, left: 10, color,
