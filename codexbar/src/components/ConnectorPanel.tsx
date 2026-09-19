@@ -99,6 +99,7 @@ export default function ConnectorPanel({ t }: { t: Theme }) {
   }, [load]);
 
   const chosen = plan ? plan.steps.filter((s) => picks[s.id]).map((s) => s.id) : [];
+  const extCount = plan ? plan.steps.filter((s) => s.state === "external").length : 0;
 
   const apply = async () => {
     // ★ `blocked` 也要挡在这里，不能只靠按钮变灰 —— 变灰只是样式，点击照样会跑。
@@ -243,6 +244,15 @@ export default function ConnectorPanel({ t }: { t: Theme }) {
             </span>
             {plan.ready && !plan.blocked && (
               <span style={{ fontSize: 10.5, color: "#27B26B" }}>✓ 这台机器已经接入轮换</span>
+            )}
+            {/* ★ 直接回答「为什么我一项都勾不上」。用户 2026-09-19 报过这个困惑 ——
+                当每一步都是 done/external 时，复选框全禁用、按钮写「没有要做的」，
+                看起来像功能坏了。**说出原因**比让人猜强。 */}
+            {!plan.blocked && !chosen.length && extCount > 0 && (
+              <span style={{ fontSize: 10.5, color: t.muted }}>
+                其中 {extCount} 项是你自己装的（蓝色「你自己装的」），Connector 不会去覆盖 ——
+                所以没有可勾选的。
+              </span>
             )}
           </div>
 

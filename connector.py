@@ -179,11 +179,33 @@ def _merge_managed(path, block):
 
 # ── plan ─────────────────────────────────────────────────────────────────────
 
+def _has_runtime(d):
+    """`d` 是不是一份**可直接使用**的运行时（几个代表性文件都在）。"""
+    d = Path(d)
+    return all((d / rel).exists() for rel in
+               ("codex-rotate", "proxy/proxy.py", "proxy/cxp", "daemon/quota_daemon.py"))
+
+
 def _runtime_dir(src, store):
-    """clone 装机原地用；安装包装机用 `<store>/runtime/`（理由见模块 docstring）。"""
-    if Path(src).resolve() == Path(store).resolve():
-        return Path(src).resolve()
-    return Path(store).resolve() / "runtime"
+    """运行时用哪一份：`store` 自己就是一份就原地用，否则复制到 `<store>/runtime/`。
+
+    ⚠️ **2026-09-19 修**：原来的判据是 `src == store`，**错的**。
+      `deploy.sh` 构建出来的 App 里，`script_dir()` 是 **bundle 的 Resources**，而
+      `data_dir()` 是构建期烧进去的**仓库路径** —— 两者从来不相等。于是一台
+      clone 装机的开发机被判成「安装包装机」，Connector 建议把运行时复制到
+      `<仓库>/runtime`，而仓库本身就是运行时。
+      症状正是用户报的那句：**「我没得勾选啊，只能勾选准备运行时」** ——
+      其余五步都是 done/external（本来就装好了），只剩这一步多余的复制可勾。
+
+    ★ 正确的问题不是「src 和 store 是不是同一个目录」，而是
+      **「store 里已经有一份能用的运行时没有」**：
+        · clone（含 deploy.sh 构建的 App）⇒ store = 仓库 ⇒ 有 ⇒ 原地用；
+        · `.dmg` 装机          ⇒ store = app 数据目录 ⇒ 没有 ⇒ 复制一份。
+    """
+    store = Path(store).resolve()
+    if _has_runtime(store):
+        return store
+    return store / "runtime"
 
 
 def _launchctl(args, timeout=20):
@@ -224,7 +246,10 @@ def plan(src, store):
     src = Path(src).resolve()
     store = Path(store).resolve()
     runtime = _runtime_dir(src, store)
-    inplace = runtime == src
+    # ★ `inplace` 的含义是「**不需要复制**」，所以比的是 runtime 与 store，不是与 src。
+    #   `deploy.sh` 构建的 App 里 src 是 bundle、store 是仓库，两者从不相等 ——
+    #   拿 src 比会让一台原地用的机器在界面上被描述成「复制到数据目录」。
+    inplace = runtime == store
     steps = []
 
     def add(sid, title, why, state, detail, preview="", optional=False):

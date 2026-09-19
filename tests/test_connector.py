@@ -93,6 +93,40 @@ class Sandbox(unittest.TestCase):
         return connector.apply(self.src, self.store, list(steps))
 
 
+class ADeployBuiltAppOnACloneUsesTheRepoInPlace(Sandbox):
+    """★★ 用户 2026-09-19 报：「我没得勾选啊，只能勾选准备运行时」。
+
+    根因：`_runtime_dir` 原来比的是 `src == store`。而 `deploy.sh` 构建出来的 App 里
+    `script_dir()` 是 **bundle 的 Resources**、`data_dir()` 是构建期烧进去的**仓库路径**
+    —— **两者从来不相等**。于是一台 clone 装机的机器被判成「安装包装机」，
+    Connector 建议把运行时复制到 `<仓库>/runtime`，而仓库本身就是运行时。
+    其余五步本来就装好了（done/external、不可勾），于是界面上只剩这一步多余的复制可勾。
+
+    ★ 正确判据不是「src 与 store 是不是同一个目录」，而是
+      **「store 里已经有一份能用的运行时没有」**。
+    """
+
+    def test_a_repo_store_is_used_in_place_even_when_src_differs(self):
+        # store 里放一份完整运行时（模拟仓库），src 是另一个目录（模拟 bundle）
+        for rel in connector.RUNTIME_FILES:
+            dst = self.store / rel
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            dst.write_text("x", encoding="utf-8")
+        p = connector.plan(self.src, self.store)
+        self.assertEqual(Path(p["runtime"]), self.store.resolve(),   # macOS /var→/private/var
+                         "★★ store 本身就是运行时，却还要往 store/runtime 复制一份")
+        self.assertTrue(p["inplace"], "inplace 应表示「不需要复制」")
+        self.assertEqual(self.step("runtime", p)["state"], "done",
+                         "★ 原地可用却报 todo —— 用户会看到一个多余的、唯一可勾的步骤")
+
+    def test_a_bare_store_still_copies(self):
+        """反向：store 里没有运行时（`.dmg` 装机）时必须仍然复制。"""
+        p = connector.plan(self.src, self.store)
+        self.assertEqual(Path(p["runtime"]), (self.store / "runtime").resolve())
+        self.assertFalse(p["inplace"])
+        self.assertEqual(self.step("runtime", p)["state"], "todo")
+
+
 class TheUsersConfigIsNeverRewritten(Sandbox):
     """★★★ 只在托管标记之间写。标记之外**一个字节都不动**。"""
 
