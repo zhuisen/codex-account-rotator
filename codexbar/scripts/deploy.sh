@@ -80,6 +80,21 @@ if [ "$B" = "0" ]; then
     echo "✓ deployed — v${VER}（B=0：你跑的这份**就是** release）"
 else
     echo "✓ deployed — v${VER}+${B}"
-    echo "   ⚠️  B=${B} ≠ 0：这份产物**不是** release。距 ${TAG:-?} 有 $((B)) 个改动"
-    echo "      （commit 数 + 脏工作区）。发版时请在 \`git tag\` **之后**再跑本脚本 —— 见 CLAUDE.md §3。"
+    echo "   ⚠️  B=${B} ≠ 0：这份产物**不是** release。距 ${TAG:-?} 有 $((B)) 个改动。"
+    # ★★ 把 B 拆成「commit 数」与「脏文件」两项分别报（2026-09-19 加）。
+    #    此前只笼统说「发版时请在 git tag 之后再跑」—— 而 v1.7.0 那次 tag 顺序**是对的**，
+    #    真因是 `Cargo.lock` 被构建改了却没进 commit（版本号写进它自己的 package 条目，
+    #    而它只在**构建之后**才变）。一条指向错误原因的告警比没有告警更糟：
+    #    它让人去检查一个本来就对的东西。所以这里必须说**是哪一项**、脏的是**哪些文件**。
+    _ahead="$(git -C "$ROOT" rev-list --count "${TAG:-HEAD}"..HEAD 2>/dev/null || echo '?')"
+    _dirty="$(git -C "$ROOT" status --porcelain 2>/dev/null)"
+    echo "      · 距 tag 的 commit 数：${_ahead}"
+    if [ -n "$_dirty" ]; then
+        echo "      · 脏工作区（+1）——以下文件未提交："
+        printf '%s\n' "$_dirty" | sed 's/^/          /'
+        echo "        ↳ 常见元凶：\`Cargo.lock\`（版本号改完、**构建之后**才会变）。"
+        echo "          把它并进 release commit 再 \`git tag -f\`，然后重跑本脚本。"
+    else
+        echo "      · 工作区干净 ⇒ B 全部来自 commit 数：在 \`git tag\` **之后**再跑本脚本（CLAUDE.md §3 4.5）。"
+    fi
 fi
