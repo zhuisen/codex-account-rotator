@@ -493,6 +493,67 @@ async fn read_integration() -> Result<String, String> {
     }
 }
 
+/// 账号池 Connector —— 把「只装了看板那一半」的机器接进轮换。
+///
+/// ★★ **`--src` 与 `--store` 必须由 Rust 侧显式传**，不能让 python 自己猜:
+///   `script_dir()` 是**代码**的家(安装包里是 `Resources/scripts`),
+///   `data_dir()` 是**数据**的家(安装包里是 app 数据目录)。两者在 clone 装机时相同、
+///   在安装包装机时不同 —— 而 Connector 正是靠这个差别决定「原地用」还是「复制一份运行时」。
+///   python 那边按 `__file__` 推只能推出前者,于是安装包场景会把运行时装进 app 内部,
+///   下次更新连人带服务一起没(本仓 `AGY_POOL_STORE` 那次踩过同一个形状)。
+///
+/// ★ 三条命令共用一个 helper：`plan` 只读、`apply`/`remove` 会动用户的 `~/.codex`,
+///   但**边界都在 python 侧**(托管标记 / 只删自己的 symlink / 绝不碰凭证),
+///   Rust 这层不做判断,只负责把两个目录喂对。
+async fn connector_cmd(args: Vec<String>) -> Result<String, String> {
+    let script = format!("{}/connector.py", script_dir());
+    let src = script_dir();
+    let store = data_dir();
+    let out = tauri::async_runtime::spawn_blocking(move || {
+        py_cmd()
+            .arg(&script)
+            .args(&args)
+            .arg("--src").arg(&src)
+            .arg("--store").arg(&store)
+            .arg("--json")
+            .output()
+    })
+    .await
+    .map_err(|e| format!("join: {}", e))?
+    .map_err(|e| format!("exec: {}", e))?;
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    // ★ `plan` 在「这份安装缺运行时文件」时会以 exit 1 返回,但 **stdout 里是完整结果**
+    //   —— 那不是执行失败,是判定结果。有 JSON 就交给前端,让它按 `blocked` 渲染。
+    if !stdout.trim().is_empty() {
+        return Ok(stdout);
+    }
+    Err(String::from_utf8_lossy(&out.stderr).to_string())
+}
+
+#[tauri::command]
+async fn connector_plan() -> Result<String, String> {
+    connector_cmd(vec!["plan".into()]).await
+}
+
+#[tauri::command]
+async fn connector_apply(app: AppHandle, steps: Vec<String>) -> Result<String, String> {
+    let r = connector_cmd(vec!["apply".into(), "--steps".into(), steps.join(",")]).await;
+    // 装完入口/服务之后池子与接线状态都可能变,广播一次让两个 webview 重读。
+    let _ = app.emit("state-changed", ());
+    r
+}
+
+#[tauri::command]
+async fn connector_remove(app: AppHandle, drop_runtime: Option<bool>) -> Result<String, String> {
+    let mut args: Vec<String> = vec!["remove".into()];
+    if drop_runtime.unwrap_or(false) {
+        args.push("--drop-runtime".into());
+    }
+    let r = connector_cmd(args).await;
+    let _ = app.emit("state-changed", ());
+    r
+}
+
 #[tauri::command]
 async fn run_discover() -> Result<String, String> {
     let script = format!("{}/traffic/discover.py", script_dir());
@@ -2271,6 +2332,9 @@ pub fn run() {
             run_traffic,
             run_discover,
             read_integration,
+            connector_plan,
+            connector_apply,
+            connector_remove,
             set_tray_style,
             read_traffic_snapshot,
             read_traffic_snapshot_days,

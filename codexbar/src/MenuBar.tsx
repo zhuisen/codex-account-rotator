@@ -423,10 +423,18 @@ export default function MenuBar() {
       {plat === "codex" && (() => {
         const p = presentIntegration(integration);
         if (!p) return null;
+        // ★ 只有「没装」和「断了」才可点去接入。`unknown` 不给 —— 我们根本不知道缺什么,
+        //   给一个「去接入」等于把「判定不了」说成「你没装」(同主窗那条)。
+        const canConnect = integration?.state === "not_installed"
+                        || integration?.state === "broken";
         return (
           <div className="mb-banner mb-banner-slim mb-banner-wrap"
-               style={{ background: `${p.color}1a`, border: `1px solid ${p.color}73` }}
-               title={integration?.lines.join("\n")}>
+               style={{ background: `${p.color}1a`, border: `1px solid ${p.color}73`,
+                        cursor: canConnect ? "pointer" : "default" }}
+               onClick={canConnect ? () => void openMain("navigate-settings") : undefined}
+               title={canConnect
+                 ? `${integration?.lines.join("\n")}\n\n点一下打开设置页的「账号池接入」`
+                 : integration?.lines.join("\n")}>
             <span className="mb-banner-icon" style={{ color: p.color }}><IconWarn /></span>
             <div className="mb-banner-body">
               {/* ★ 两行：徽章一行、**该做什么**一行。

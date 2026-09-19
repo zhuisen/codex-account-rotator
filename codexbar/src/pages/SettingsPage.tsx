@@ -1,6 +1,7 @@
 import { fullVersion } from "../helpers";
 import { useState, useEffect, useMemo, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import ConnectorPanel from "../components/ConnectorPanel";
 // ★ 外链走本仓自己的 `open_url`,**不用 `@tauri-apps/plugin-shell` 的 `open`**:
 //   那条路是 `open::that_detached`,spawn 完直接 drop `Child`,每点一次留一具僵尸
 //   (装机版 v1.6.3 实测,pid 36012)。理由全文在 `lib.rs::open_url` 的注释里。
@@ -666,6 +667,10 @@ function About({ t }: { t: Theme }) {
 
   return (
     <div style={{ marginTop: 22, paddingTop: 16, borderTop: `1px solid ${t.divider}` }}>
+      {/* ★ 账号池接入。放在「关于」之前、其余设置之后 —— 它不是日常开关,
+          而是**一次性的装机动作**,但用户随时可能回来撤销,所以不藏进二级页面。 */}
+      <ConnectorPanel t={t} />
+
       <div style={{ fontSize: 12, fontWeight: 600, color: t.muted, marginBottom: 12 }}>关于</div>
       <div style={{ display: "flex", gap: 16, alignItems: "flex-start" }}>
         <img src={logo} width={64} height={64} alt="CodexBar"

@@ -737,6 +737,63 @@ function relayEntry() {
       //   告警,而页面照常渲染、零报错。这正是本文件反复记的那类「打桩缺口 = 假绿」,
       //   只是这次方向相反:不是看不见,是永远看见一条假的。
       //   `?integ=ready|notinst|broken|noacc|unknown`,缺省 `ready`(= 不画横幅)。
+      // Connector 的 plan 必须打桩 —— 不打的话面板只会画出「读不到接入状态」,
+      // 而那看起来像功能坏了。`?conn=fresh|mixed|ready|blocked`,缺省 `mixed`。
+      // 注意:这段 JS 是从 Python 写进来的,**注释和字符串里都不要出现反斜杠转义** ——
+      // 多一层转义会把它变成真换行,把注释劈成两半/把字符串截断,整个 harness 脚本
+      // 解析失败 ⇒ React 从未挂载 ⇒ 截图一片空白。2026-09-19 实测踩过两次,
+      // 第二次正是那条**警告本身**被转义掉的。换行一律用 NL 变量拼。
+      case 'connector_plan': {
+        var _c = p.get('conn') || 'mixed';
+        var NL = String.fromCharCode(10);
+        var BT = String.fromCharCode(96);
+        var mk = function (id, title, why, state, detail, preview, optional) {
+          return { id: id, title: title, why: why, state: state,
+                   detail: detail, preview: preview || '', optional: !!optional };
+        };
+        var PROV = [
+          '# >>> codexbar-connector managed >>>',
+          '[model_providers.rotateproxy]',
+          'name = "codex-rotate proxy"',
+          'base_url = "http://127.0.0.1:8011"',
+          'wire_api = "responses"',
+          'supports_websockets = false',
+          '# <<< codexbar-connector managed <<<'
+        ].join(NL);
+        var st = function (a, b, c, d, e, f) {
+          return [
+            mk('runtime', '准备运行时', '★ 复制到数据目录，不指向 App 内部', a,
+               '18 个文件 → ~/Library/Application Support/com.doushutangmu.codexbar/runtime'),
+            mk('provider', '写入 model provider', 'codex 靠它知道请求要发给本机代理', b,
+               '只写托管标记之间那一段，config.toml 里你自己的内容一个字节都不动', PROV),
+            mk('profile', '建 profile overlay',
+               '缺了它 codex 不报错，会静默退回单号直连 —— 和正常运行长得一模一样', c,
+               '~/.codex/rotateproxy.config.toml'),
+            mk('entries', '建命令入口', 'cxp 走代理轮换 · cxd 单号直连 · codex-rotate 管池子', d,
+               '缺：cxp、cxd、codex-rotate、agy-rotate'),
+            mk('services', '装常驻服务（launchd）',
+               '轮换代理要一直在；额度要自动刷新。全部用户级，不需要 sudo', e,
+               '缺：proxy、quotad'),
+            mk('wrapper', '让 ' + BT + 'codex' + BT + ' 本身也走轮换',
+               '不装这一步，敲 codex 仍是官方单号直连；装了之后 cxd 是唯一的直连入口', f,
+               '~/.local/bin/codex → runtime/scripts/codex-wrapper-with-logout-guard.sh',
+               '', true)
+          ];
+        };
+        var body;
+        if (_c === 'fresh') body = { steps: st('todo','todo','todo','todo','todo','todo'), ready: false };
+        else if (_c === 'ready') body = { steps: st('done','done','done','done','done','done'), ready: true };
+        else if (_c === 'blocked') body = { steps: st('blocked','todo','todo','todo','todo','todo'),
+                                            ready: false, blocked: true };
+        else body = { steps: st('done','external','todo','done','done','external'), ready: false };
+        body.runtime = '~/Library/Application Support/com.doushutangmu.codexbar/runtime';
+        body.inplace = false; body.port = 8011; body.blocked = !!body.blocked;
+        body.codex_home = '~/.codex'; body.local_bin = '~/.local/bin';
+        return Promise.resolve(JSON.stringify(body));
+      }
+      case 'connector_apply':
+      case 'connector_remove':
+        return Promise.resolve(JSON.stringify({ ok: true, done: [], notes: [], removed: [], kept: [] }));
       case 'read_integration': {
         var _ig = p.get('integ') || 'ready';
         var _mk = function (state, level, lines) {
@@ -745,7 +802,7 @@ function relayEntry() {
         };
         if (_ig === 'notinst') return Promise.resolve(_mk('not_installed', 'warn', [
           'ℹ️  接入闸:这台机器**只装了用量看板那一半**,没有轮换能力。',
-          '     要轮换:clone 仓库,按 SETUP.md 配 provider + 装 launchd 服务,日常用 `cxp`。']));
+          '     ★ 最省事:打开 CodexBar → 设置 → 「账号池接入(Connector)」,逐项勾选即可。']));
         if (_ig === 'broken') return Promise.resolve(_mk('broken', 'warn', [
           '⚠️  接入闸:**接线断了** —— codex 对此不报错,会静默退回单号直连。',
           '     ✗ profile overlay:~/.codex/rotateproxy.config.toml 不存在']));

@@ -36,3 +36,11 @@ if not os.environ.get("CODEXBAR_QUOTA_ANCHORS"):
 #   一条用例调到 `install_live()` 就会把用户当前的 agy 登录态覆盖掉，
 #   代价是重新走一遍浏览器 OAuth。所以整条通路在测试里**默认关死**。
 os.environ.setdefault("AGY_KEYRING", "0")
+
+# ★★★ **launchctl 一律关死。**（2026-09-19 真事故）
+#   `connector.remove()` 会 `launchctl bootout` 四个常驻服务,而服务 label 是**固定的**,
+#   不随任何环境变量改变 —— 只隔离 plist 路径（`CODEXBAR_LAUNCH_AGENTS`）挡不住它。
+#   实测:跑一次 `test_connector` 就把真机上的 proxy/quotad/autosync/dawnprobe 全停了,
+#   轮换当场断掉,而整套测试**全绿**。与 2026-09-06「夹具写进真账本」同一形状:
+#   测试污染生产,且没有任何一处会为此变红。
+os.environ.setdefault("CODEXBAR_LAUNCHCTL", "0")

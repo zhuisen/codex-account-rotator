@@ -3355,9 +3355,12 @@ def codex_integration_gate():
     elif state == "not_installed":
         lines = [
             "ℹ️  接入闸:这台机器**只装了用量看板那一半**,没有轮换能力。",
-            "     `.dmg` 里不含 `proxy/`(proxy.py / cxp / auth-token),也不含 install-launchd.sh。",
-            "     所以裸 `codex` 走的是官方单号路径 —— 这不是故障,是**没装那一半**。",
-            "     要轮换:clone 仓库,按 docs/INSTALL.md §2~§4 装齐(入口 symlink + provider + launchd)。",
+            "     安装包里**带着**轮换运行时,但**不会自动装** —— 它要改你的 ~/.codex",
+            "     和 ~/.local/bin,那得你点头。所以裸 `codex` 现在走的是官方单号路径。",
+            "     这不是故障,是**还没同意接入**。",
+            "     ★ 最省事:打开 CodexBar → 设置 → 「账号池接入(Connector)」,逐项勾选即可。",
+            "       它只在托管标记之间写 ~/.codex,不需要管理员密码,可随时撤销。",
+            "     或手动照 docs/INSTALL.md §2~§4 装齐(入口 symlink + provider + launchd)。",
             "     装完**直接敲 `codex`** 就是轮换;要单号直连用 `cxd`。",
         ]
     elif state == "no_accounts":

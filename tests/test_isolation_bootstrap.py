@@ -49,8 +49,67 @@ if not os.environ.get("CODEXBAR_QUOTA_ANCHORS"):
 #   （与 2026-09-06 那次「夹具写进真账本」同族，只是这次的账本是系统钥匙串。）
 os.environ.setdefault("AGY_KEYRING", "0")
 
+# ★★★ **launchctl 一律关死。**（2026-09-19 真事故）
+#   `connector.remove()` 会 `launchctl bootout` 四个常驻服务,而服务 label 是**固定的**,
+#   不随任何环境变量改变 —— 只隔离 plist 路径（`CODEXBAR_LAUNCH_AGENTS`）挡不住它。
+#   实测:跑一次 `test_connector` 就把真机上的 proxy/quotad/autosync/dawnprobe 全停了,
+#   轮换当场断掉,而整套测试**全绿**。与 2026-09-06「夹具写进真账本」同一形状:
+#   测试污染生产,且没有任何一处会为此变红。
+os.environ.setdefault("CODEXBAR_LAUNCHCTL", "0")
+
 
 class IsolationIsInPlace(unittest.TestCase):
+    def test_launchctl_is_disabled(self):
+        """★★★ 判据是「变量**已设置**」，不是「代码里有隔离逻辑」。
+
+        2026-09-19 实测：跑一次 `test_connector` 就把真机上的四个常驻服务全 bootout 了
+        —— 轮换当场断掉，而整套测试全绿。服务 label 是固定的，隔离 plist 路径挡不住它。
+        """
+        self.assertEqual(os.environ.get("CODEXBAR_LAUNCHCTL"), "0",
+                         "★★★ launchctl 没被关死 —— 测试会停掉用户真实的常驻服务")
+
+    def test_the_connector_actually_honours_it(self):
+        """行为闸：隔离开着时 `remove()` 一次 launchctl 都不许真跑。
+
+        ★ 只断言变量被设置不够 —— `connector` 完全可以不读它（那正是这次事故的形状：
+          隔离存在、但被绕过的那条路径没接上）。所以这里把 `subprocess.run` 换成探针，
+          真调一次 `remove()`，数它有没有被碰。
+        """
+        import subprocess as _sp
+        import sys as _sys
+        import tempfile as _tf
+        from pathlib import Path as _P
+        _sys.path.insert(0, str(_P(__file__).resolve().parent.parent))
+        import connector as _c
+        calls = []
+        orig = _sp.run
+
+        class _Fake:
+            returncode, stdout, stderr = 0, "", ""
+
+        def spy(args, *a, **k):
+            # ★★ launchctl 一律**拦下不放行** —— 这条闸要能做变异验证（去掉隔离口应当变红），
+            #   而放行的话那次变异会**真的**再把用户的常驻服务 bootout 一遍。
+            #   验证工具本身不许有破坏性副作用。
+            if args and args[0] == "launchctl":
+                calls.append(args)
+                return _Fake()
+            return orig(args, *a, **k)
+
+        _sp.run = spy
+        try:
+            with _tf.TemporaryDirectory() as d:
+                os.environ["CODEXBAR_LOCAL_BIN"] = str(_P(d) / "bin")
+                os.environ["CODEXBAR_LAUNCH_AGENTS"] = str(_P(d) / "agents")
+                os.environ["CODEX_HOME"] = str(_P(d) / "home")
+                _c.remove(_P(d) / "store")
+        finally:
+            _sp.run = orig
+            for k in ("CODEXBAR_LOCAL_BIN", "CODEXBAR_LAUNCH_AGENTS", "CODEX_HOME"):
+                os.environ.pop(k, None)
+        self.assertEqual(calls, [],
+                         f"★★★ 隔离开着却真调了 launchctl：{calls}")
+
     def test_the_agy_keyring_path_is_disabled(self):
         """★ 判据是**变量已设置**，不是"代码里有隔离逻辑" —— 后者正是上一次
         让隔离只写在 `__init__.py` 里（discover 根本不导入它）而没被发现的原因。"""

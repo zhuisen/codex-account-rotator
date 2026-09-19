@@ -15,7 +15,7 @@ codex-rotate integration
 
 | 结果 | 真实含义 | 修 |
 |---|---|---|
-| ℹ️ **未接入轮换** | 你只装了**用量看板**那一半 | `.dmg`/`.exe` 里**不含** `proxy/`、不含 launchd 服务、也不装 `codex` wrapper。要轮换必须 clone 仓库走 [INSTALL §2~§4](INSTALL.md#2-入口-symlink) |
+| ℹ️ **未接入轮换** | 安装包带着运行时，但**还没经你同意装上** | **CodexBar → 设置 → 「账号池接入（Connector）」**，勾选后点「接入」（[INSTALL §1.5](INSTALL.md#15-最省事用-app-里的-connector-接入v180-起)）。想手动装走 [§2~§4](INSTALL.md#2-入口-symlink) |
 | ⚠️ **接线断了** | 装了，但某一环断了 | 照它列出的每一项修 |
 | ⚠️ **池子为空** | 接线齐全，只差登录 | `codex-rotate login`（★ **不要** `codex login`，会吊销当值号） |
 | ⚠️ **判定不了** | 配置读不到等 —— **不等于没问题** | 按它说的查（多半是权限） |

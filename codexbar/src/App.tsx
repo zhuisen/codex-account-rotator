@@ -584,7 +584,8 @@ export default function App() {
                   「敲 codex 没走 rotateproxy」，而当时界面上没有任何东西会为此变色。
                   ★ 只挂 codex 档：gemini/grok 的接入机制完全不同，这道闸判不了它们。 */}
               {provider === "codex" && (
-                <IntegrationBanner t={t} integration={integration} />
+                <IntegrationBanner t={t} integration={integration}
+                                   onConnect={() => setPage("settings")} />
               )}
 
               {/* ★★ Hero 是 **codex 的当值号**。挂在 Google 档上会写着「当前使用中 Asen」，

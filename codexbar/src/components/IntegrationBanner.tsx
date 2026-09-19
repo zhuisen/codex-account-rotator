@@ -59,11 +59,21 @@ export default function IntegrationBanner({
   t,
   integration,
   compact = false,
+  onConnect,
 }: {
   t: Theme;
   integration: Integration | null;
   /** 菜单栏 352px 下只留一行摘要；主界面给完整说明。 */
   compact?: boolean;
+  /**
+   * 点「去接入」时做什么（通常是跳到设置页的 Connector 面板）。
+   *
+   * ★★ 用户 2026-09-19 定的是**两段同意**：总览只提示并跳转，**真正动手在设置页**、
+   *   由用户逐项勾选。所以这里给的是一个**导航**动作，不是「一键装好」。
+   * ★ `ready` 与 `unknown` 不给这个按钮：前者没什么可装，后者我们根本不知道缺什么，
+   *   给一个「去接入」会把「判定不了」说成「你没装」。
+   */
+  onConnect?: () => void;
 }) {
   // 还没读回来 —— 不画。**不是**画成绿色：这一瞬间我们确实不知道。
   if (!integration) return null;
@@ -77,7 +87,10 @@ export default function IntegrationBanner({
   const body = tidy(integration.lines);
   const note = compact ? p.short : dedupeBadge(body.join(" "), p.badge);
 
-  return <DisclosureBanner t={t} tone={p.tone} badge={p.badge} note={note} />;
+  const act = onConnect && (integration.state === "not_installed" || integration.state === "broken")
+    ? { label: "去接入 →", onClick: onConnect }
+    : undefined;
+  return <DisclosureBanner t={t} tone={p.tone} badge={p.badge} note={note} action={act} />;
 }
 
 /**
