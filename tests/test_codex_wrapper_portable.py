@@ -46,6 +46,16 @@ class WrapperCase(unittest.TestCase):
         fake.chmod(0o755)
         self.link = self.bin / "codex"
         self.link.symlink_to(WRAPPER)
+        # ★★ **必须给一个隔离的 CODEX_HOME。**（2026-09-19，CI 抓到）
+        #    wrapper 在 exec 之前有一道硬检查：`$CODEX_HOME/rotateproxy.config.toml` 不存在
+        #    就 exit 78（因为 codex 对缺 profile **不报错**，会静默退回单号直连）。
+        #    不设这个变量时它读的是**跑测试那台机器的真 `~/.codex`** ——
+        #    作者机器上那份存在 ⇒ 全绿；CI 的 /home/runner 上没有 ⇒ 四条全红。
+        #    ⚠️ 这个文件通篇在讲「在我机器上是好的」，而它自己就犯了同一个错。
+        self.codex_home = d / "codexhome"
+        self.codex_home.mkdir()
+        (self.codex_home / "rotateproxy.config.toml").write_text(
+            'model_provider = "rotateproxy"\n', encoding="utf-8")
 
     def run_wrapper(self, *args, timeout=20, bare_path=False):
         env = dict(os.environ)
@@ -54,6 +64,7 @@ class WrapperCase(unittest.TestCase):
             #   所以「假装没有官方二进制」必须把 PATH 收窄，否则这条用例在作者机器上恒绿、
             #   在干净机器上才会红 —— 又是一次「在我机器上是好的」，同这个文件守的那个 bug。
             env["PATH"] = f"{self.bin}:/usr/bin:/bin"
+            env["CODEX_HOME"] = str(self.codex_home)
             env.pop("CODEX_ROTATE_STORE", None)
             env.pop("CODEX_NATIVE_BIN", None)
             return subprocess.run([str(self.link), *args], capture_output=True,
@@ -62,6 +73,7 @@ class WrapperCase(unittest.TestCase):
         #   不删的话这一整个测试文件在作者机器上会全绿而在别人机器上全红，正是它要防的事。
         env.pop("CODEX_ROTATE_STORE", None)
         env.pop("CODEX_NATIVE_BIN", None)
+        env["CODEX_HOME"] = str(self.codex_home)      # 见 setUp 里那段 ★★
         # wrapper 排在真二进制**前面** —— 递归风险最大的排法。
         env["PATH"] = f"{self.bin}:{self.real}:{env.get('PATH', '')}"
         return subprocess.run([str(self.link), *args], capture_output=True,
@@ -106,6 +118,23 @@ class TheWrapperNeverExecsItself(WrapperCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("找不到官方 codex", r.stderr)
         self.assertNotIn("ARGV:", r.stdout)
+
+
+class AMissingProfileFailsHardInsteadOfSilentlyDirectConnecting(WrapperCase):
+    """★★ codex 对「`--profile X` 但 `X.config.toml` 不存在」**不报错**，直接退回 base 配置
+    （直连单号、不轮换、WS 全开），和正常运行长得一模一样。wrapper 必须替它硬失败。
+
+    ⚠️ 这条以前是**隐式**依赖（测试靠跑测试那台机器上真有那个文件才绿），CI 上一跑就露馅。
+       现在它是一条被测行为。
+    """
+
+    def test_it_exits_78_and_says_to_use_cxd(self):
+        (self.codex_home / "rotateproxy.config.toml").unlink()
+        r = self.run_wrapper("exec", "x")
+        self.assertEqual(r.returncode, 78)
+        self.assertIn("profile 文件不存在", r.stderr)
+        self.assertIn("cxd", r.stderr, "必须告诉用户单号直连该用什么")
+        self.assertNotIn("ARGV:", r.stdout, "★ 静默退回直连了 —— 这正是它要防的事")
 
 
 class TheKillSwitchGuardStillFires(WrapperCase):
