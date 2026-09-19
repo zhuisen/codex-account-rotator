@@ -20,6 +20,8 @@ import { useAgyQuota } from "./hooks/useAgyQuota";
 import { fmtAgo } from "./helpers";
 import { usePrivacy } from "./hooks/usePrivacy";
 import { useCardBannerDismiss } from "./hooks/useCardBannerDismiss";
+import { useIntegration } from "./hooks/useIntegration";
+import { presentIntegration } from "./components/IntegrationBanner";
 import { todayView, fmtTok, colorOf } from "./traffic";
 import "./App.css";
 import "./menubar.css";
@@ -106,6 +108,7 @@ const IconWarn = () => <svg width="15" height="15" viewBox="0 0 24 24" fill="cur
 export default function MenuBar() {
   const { accounts, hero, currentNode, counts, lastRefreshAt, cardAlert, loadingAction, toast, refresh, run, showToast } = useStore();
   const { visible: bannerVisible, dismiss: bannerDismiss } = useCardBannerDismiss();
+  const { integration } = useIntegration();
   const [theme, setTheme] = useState<"dark" | "light">(loadTheme);
   const [tab, setTabState] = useState<Tab>(loadTab);
   const [plat, setPlatState] = useState<PoolKey>(loadPlat);
@@ -411,6 +414,32 @@ export default function MenuBar() {
                              .toTimeString().slice(0, 5)}
                          </span>
                        : <>{platformOf(plat).label}</>} />
+
+      {/* 接入闸 —— **不可关**，且排在重置卡横幅之前。
+          ★ 与重置卡那条的区别正是「该不该能关」的判据：重置卡是一条会自己过期的提醒
+            （3 天窗口一过就没了），所以连挂三天关不掉是噪音；而「这台机器没接上轮换」
+            **不会自己好**，关掉它等于把唯一的告警藏起来。本仓判过死刑的是前者，不是后者。
+          ★ 只挂 codex 档：gemini/grok 的接入机制完全不同，这道闸判不了它们。 */}
+      {plat === "codex" && (() => {
+        const p = presentIntegration(integration);
+        if (!p) return null;
+        return (
+          <div className="mb-banner mb-banner-slim mb-banner-wrap"
+               style={{ background: `${p.color}1a`, border: `1px solid ${p.color}73` }}
+               title={integration?.lines.join("\n")}>
+            <span className="mb-banner-icon" style={{ color: p.color }}><IconWarn /></span>
+            <div className="mb-banner-body">
+              {/* ★ 两行：徽章一行、**该做什么**一行。
+                  352px 下挤成一行会被省略号从尾部切掉，而被切掉的恰好是动作那半 ——
+                  本仓披露铁律要求告警必须说下一步，切掉它等于只剩「反正坏了」。
+                  实测：harness 352×640 截图里整句跑出右边界，而 overflow 探针报 0
+                  （`text-overflow` 只改渲染、DOM 文本仍完整，结构闸抓不到这一类）。 */}
+              <div className="mb-banner-title" style={{ color: p.color }}>{p.badge}</div>
+              <div className="mb-banner-sub" style={{ color: t.text2 }}>{p.text}</div>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Expiring reset-card banner —— **单行、可关**（用户 2026-09-18：「太过了，喧宾夺主，
           并且无法取消」）。

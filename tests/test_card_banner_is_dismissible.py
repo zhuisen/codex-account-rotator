@@ -179,8 +179,19 @@ class TheBannerIsOneLineNow(unittest.TestCase):
         cls.css = (SRC / "menubar.css").read_text(encoding="utf-8")
 
     def test_the_subtitle_row_is_gone(self):
-        self.assertNotIn("mb-banner-sub", self.mb,
-                         "★★ 副标题行还在 —— 横幅仍是多行")
+        """★ 判据 2026-09-19 由**整个文件**收窄到**重置卡那一段**。
+
+        原来断言的是 `mb-banner-sub` 不许出现在 `MenuBar.tsx` 里任何地方。那在当时是对的
+        （文件里只有重置卡一条横幅），但它把「这条横幅要单行」写成了「这个文件不许有副标题」。
+        同日新增的**接入闸**横幅合法地用两行（徽章一行 + 该做什么一行）——352px 下挤成一行
+        会被省略号从尾部切掉动作那半，而本仓披露铁律要求告警必须说下一步。
+        ⚠️ 前提被取代，不是规则被放弃：重置卡横幅**仍然**必须是单行，只是判据现在只看它。
+        """
+        seg = self.mb.split("cardAlert && bannerVisible", 1)
+        self.assertEqual(len(seg), 2, "找不到重置卡横幅那一段 —— 判据的锚点漂了")
+        block = seg[1].split("</div>\n      )}", 1)[0]
+        self.assertNotIn("mb-banner-sub", block,
+                         "★★ 重置卡横幅的副标题行又回来了 —— 它必须是单行")
 
     def test_the_fake_action_button_is_gone(self):
         """★★★ 那颗「用卡: /usage」**点了并不用卡**，只弹 toast。

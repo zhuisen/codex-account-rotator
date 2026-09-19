@@ -464,6 +464,35 @@ fn set_scan_source(key: String, on: bool) -> Result<(), String> {
     Ok(())
 }
 
+/// 装机链路总闸 —— 「这台机器敲 codex/cxp 到底会不会走轮换」。
+///
+/// ★★ **为什么要有一条专用的 IPC,而不是复用 `run_rotate`**:
+///   ① `run_rotate` 每次都 `emit("state-changed")` + `refresh_tray()`,而这是个**只读**查询,
+///      会被 UI 定期调 —— 顺带把两个 webview 全量重拉一遍是纯浪费;
+///   ② `run_rotate` 失败时把 stdout+stderr 拼成 `Err`,而这里**需要拿到 JSON 本身**:
+///      闸判「接线断了」时 CLI 仍然 exit 0,真正的信息在 stdout 里。
+///
+/// ★ 与 `codex-rotate health` **共用同一个真源** `codex_integration_gate()`。
+///   本仓在额度色阈值上有过两份实现各自演化的教训(`helpers.ts` 与 `rem_rgb()`),
+///   这里从一开始就只有一份。
+#[tauri::command]
+async fn read_integration() -> Result<String, String> {
+    let rot = format!("{}/codex-rotate", script_dir());
+    let out = tauri::async_runtime::spawn_blocking(move || {
+        py_cmd().arg(&rot).arg("integration").arg("--json").output()
+    })
+    .await
+    .map_err(|e| format!("join: {}", e))?
+    .map_err(|e| format!("exec: {}", e))?;
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).to_string())
+    } else {
+        // ⚠️ 这里**不能**把失败折成一个「看起来正常」的默认值 —— 前端会把 Err 渲染成
+        //    `unknown`(琥珀),而不是绿。本仓铁律:读不到 ≠ 没问题。
+        Err(String::from_utf8_lossy(&out.stderr).to_string())
+    }
+}
+
 #[tauri::command]
 async fn run_discover() -> Result<String, String> {
     let script = format!("{}/traffic/discover.py", script_dir());
@@ -2241,6 +2270,7 @@ pub fn run() {
             run_rotate,
             run_traffic,
             run_discover,
+            read_integration,
             set_tray_style,
             read_traffic_snapshot,
             read_traffic_snapshot_days,

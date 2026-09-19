@@ -734,6 +734,47 @@ Fable 评审 40 条 + 四方评审 9 条，全部处理完。17 个 commit 未�
 
 ---------
 
+## v1.7.0 — 2026-09-19
+
+**轮换接入这件事，第一次有了会变红的检查。**
+
+用户报「下载了 CodexBar，敲 `codex` 没走 rotateproxy」。查下来**不是 bug，是这套东西从来
+没被完整分发过** —— 而每一处缺口都静默，用户看到的是「一个看起来正常的空池」。
+
+### 新增
+
+- **`codex-rotate integration [--json]`** —— 装机链路总闸。一条命令查完
+  profile overlay / provider 块 / `supports_websockets` / 代理在不在听 / 池里有没有号 / 入口是否存在，
+  **五态**：`ready` / `not_installed`（中性）/ `broken`（红）/ `no_accounts`（琥珀）/ `unknown`。
+  已接进 `codex-rotate health`（排在所有闸之前）。
+- **CodexBar 总览页 + 菜单栏直接显示接线状态**（`read_integration` IPC，与 `health` **共用同一个
+  判定函数**）。此前 App 把 `run_rotate` 的 stdout 整个丢掉，`health` 里既有的几道闸一个字都到不了界面。
+
+### 修复
+
+- **`codex` PATH wrapper 现在可分发。** 它有两个**作者自己机器上恰好正确**的硬编码默认值：
+  仓库根写死 `~/Projects/tools/codex-account-rotator`、官方二进制写死 `~/.local/npm-global/bin/codex`。
+  改成自解析（按脚本自身位置上跳两级）+ 在 PATH 上找官方二进制并**跳过自己**（否则无限递归）。
+  找不到时**报错退出**，不会静默退回直连。
+
+### 文档
+
+- `docs/INSTALL.md` §2 **第一次把 `codex` wrapper 写进安装步骤**（这是根因）；补上
+  `cxd` 单号直连入口与三入口对照表；§3 补上**缺失的 `rotateproxy.config.toml` 创建步骤**
+  （此前只在 `SETUP.md` 里，照 INSTALL 装完仍然缺 profile）。
+- **服务数 3 → 4**（`install-launchd.sh` 一直 emit `autosync`/`quotad`/`proxy`/`dawnprobe`，
+  文档、`CLAUDE.md`、`docs/WINDOWS.md` 三处都写的 3）。
+- `docs/TROUBLESHOOTING.md` 新增「敲 `codex` 没有走轮换代理」整节。
+- README 明写：**只下载 `.dmg`/`.exe` 不会获得轮换能力**。
+
+### 闸
+
+`tests/test_codex_integration_gate.py`（17 条，**7 条变异全部被捕获**）·
+`tests/test_codex_wrapper_portable.py`（9 条，含「不许 exec 回自己」与「INSTALL.md 必须装 wrapper」）。
+全量 **1405** 条通过。
+
+---
+
 ## v1.6.4 — 2026-09-18
 
 v1.6.3 以来 **2 个 commit**。**Z 级**：两条都是修，没有新能力。
@@ -894,6 +935,46 @@ v1.5.0（2026-09-10）以来 **44 个 commit**。按发版规则是 **Y 级**：
 - 圆角真机 WKWebView 仍未验（抓屏被 TCC 挡）。
 
 ---
+
+### B58
+
+**「敲 `codex` 没走 rotateproxy」—— 不是 bug，是从没被分发过**（2026-09-19，用户报）
+
+一个下载了 CodexBar 的用户敲 `codex` 没有轮换。逐环节查下来**四处缺口，每一处单独就足以
+让轮换失效，而它们全都静默**：
+
+1. `.dmg` 的 `bundle.resources` 里**没有任何 `proxy/` 下的文件**（`proxy.py` / `cxp` /
+   `auth-token` 一个都没有），也没有 `install-launchd.sh` ⇒ 下载用户手里根本没有轮换引擎；
+2. `docs/INSTALL.md` §2 只建 `codex-rotate` / `cx` / `cxp` / `agy-rotate` 四个 symlink，
+   **没有 `codex`**。开发机上裸 `codex` 能轮换，靠的是 `~/.local/bin/codex` 那个 wrapper
+   **恒定注入 `--profile rotateproxy`** —— 而它不在任何安装步骤里；
+3. profile 缺失时 **codex 不报错**，静默退回 base 配置（直连单号、不轮换、WS 全开）；
+4. App 的 `useStore.run()` 丢掉 `run_rotate` 的 stdout ⇒ `health` 里既有的几道闸
+   **一个字都到不了 UI**。
+
+★★ **这是「在我机器上是好的」的字面形态**，而且比通常更难发现：`which codex` 对作者和用户
+给出的是**不同答案**（作者的 PATH 上第一个 `codex` 是 wrapper，还叠着一个 `alias codex=cxp`），
+所以在本机**怎么复现都复现不出来**。同族前车之鉴：LibreSSL 那条、系统代理黑洞那条 ——
+「本地环境让请求静默失败，用另一个工具复现不算独立证据」。
+
+★★ **wrapper 自己也不可分发**（查的时候才发现）：`CODEX_ROTATE_STORE` 默认值是作者的 clone
+路径、`CODEX_NATIVE_BIN` 默认值是作者的 npm prefix。直接让用户 symlink 它会把他们的 `codex`
+弄成 exit 78。已改成自解析 + PATH 发现（并跳过自己，否则 `~/.local/bin` 排前面时无限递归）。
+
+**交付物是一个会变红的检查，不是又一行散文** —— `codex_integration_gate()`，五态，
+`unknown` 绝不折叠成 `ok`，红灯放在**默认总览与菜单栏**（眼睛已经在的地方）。
+
+⚠️ **写这道闸的过程里，同一条铁律我自己犯了三次**（全部被它自己的用例抓住）：
+「读不到 ≠ 没有」在 `provider`、`ws` 两条检查上各错一次（把「文件不存在」和「存在但读不到」
+折成同一个 `None`），导致**一台干净的 .dmg 机器被判成 `broken`（红：你装了但坏了）**
+而不是 `not_installed`（中性：你只装了看板那一半）—— 两者的下一步完全相反。
+第三次是 `ws` 那条在「读得到的那半里没找到」时判了 `bad`。
+
+⚠️ **像素验证又抓出两个 tsc/测试都看不见的缺陷**：CLI 文案里的 `**粗体**` 是给终端看的
+markdown，在 HTML 里原样显示成星号；徽章与正文重复成「接线断了 · 接线断了 ——」。
+菜单栏 352px 下整句被省略号从尾部切掉，而**被切掉的恰好是「该做什么」那半** ——
+harness 的 overflow 探针报 0（`text-overflow` 只改渲染、DOM 文本仍完整，结构闸抓不到这一类，
+本仓已记过）。改成两行结构才解决。
 
 ### B57 · 僵尸进程第三幕：**泄漏的那次 spawn 不在我们的代码里** — 2026-09-18 ✅
 

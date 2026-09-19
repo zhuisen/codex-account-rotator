@@ -3137,6 +3137,262 @@ def proxy_env_gate():
             ]}
 
 
+def _proxy_port():
+    """代理端口的唯一真源 —— 与 `proxy/proxy.py::PORT` 读同一个环境变量。
+
+    ★ 刻意不做成模块常量:常量在 import 时就定死,测试没法在之后改 `CRP_PORT`。
+    """
+    try:
+        return int(os.environ.get("CRP_PORT", "8011"))
+    except ValueError:
+        return 8011
+
+
+def _read_text_or_none(p):
+    """读不到返回 `None` —— **不是空字符串**。
+
+    ★ 本仓铁律「读不到 ≠ 没有」在这里就是全部的重点:返回 `""` 会让下面每一条
+      「这个块在不在」都答「不在」,于是**一次权限错误被报成「你没配过」** ——
+      而这两件事的修法完全相反(一个去改权限,一个去写配置)。
+    """
+    try:
+        return p.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+
+
+def _toml_block(txt, header):
+    """切出 TOML 里 `[header]` 那一段(到下一个顶层 `[` 为止)。块不存在返回 `None`。
+
+    ★ 不用 `tomllib` —— 它是 3.11+,而本仓声明支持 3.9+(docs/INSTALL.md §0)。
+      也不用 `re`:`proxy_env_gate` 已经立过同一条规矩,这道闸不值得为它加一个模块级 import。
+    ★ `None`(块不存在) 与 `""`(块在但是空的) 必须分开 —— 又是同一条「读不到 ≠ 没有」。
+    """
+    if txt is None:
+        return None
+    want = "[" + header + "]"
+    found = inside = False
+    out = []
+    for ln in txt.splitlines():
+        s = ln.strip()
+        if s.startswith("[") and s.endswith("]"):
+            if inside:
+                break
+            if s == want:
+                found = inside = True
+            continue
+        if inside:
+            out.append(s)
+    return "\n".join(out) if found else None
+
+
+def codex_integration_gate():
+    """★★ 「这台机器敲 codex / cxp 到底会不会走轮换」—— 装机链路的总闸(2026-09-19)。
+
+    ## 为什么需要它
+
+    用户下载 `.dmg` 后报「敲 codex 没有走 rotateproxy」。逐环节查下来,**四处缺口
+    每一处单独就足以让轮换失效**,而它们全都**静默**:
+
+      · `.dmg` 的 `bundle.resources` 里**没有 `proxy/`**(proxy.py / cxp / auth-token
+        一个都没有),也没有 `install-launchd.sh` ⇒ 下载用户手里根本没有轮换引擎;
+      · `docs/INSTALL.md` §2 只建 `codex-rotate` / `cx` / `cxp` / `agy-rotate` 四个
+        symlink,**没有 `codex`** ⇒ 裸 `codex` 仍是官方二进制。开发机上之所以能轮换,
+        是因为 `~/.local/bin/codex` 那个 wrapper **恒定注入 `--profile rotateproxy`**
+        (`scripts/codex-wrapper-with-logout-guard.sh:186`),而它不在任何安装步骤里 ——
+        典型的「在我机器上是好的」,而且 `which codex` 对开发者和用户答案不同;
+      · profile 缺失时 **codex 不报错**,静默退回 base 配置(直连单号、不轮换、WS 全开);
+      · App 这边 `useStore.run()` 丢掉 `run_rotate` 的 stdout,所以 `health` 里既有的
+        几道闸**一个字都到不了 UI**。
+
+    ⇒ 用户看到的是「一个看起来正常的空池」。本仓铁律:同一类 bug 第二次出现,交付物
+      必须是**一个会变红的检查**,不是又一行散文规则。
+
+    ## 返回
+
+        {"level": ok|warn|unknown,       # 三态,与本文件其它闸同构,供 cmd_health 装配
+         "state": ready|no_accounts|broken|not_installed|unknown,   # 五态,供 UI 分色
+         "checks": [{"id","label","state":ok|bad|unknown,"detail","fix"}],
+         "lines": [...]}
+
+    ★★ **`unknown` 绝不折叠成 `ok`**。读不到配置和「确实没配过」的修法完全相反,
+      合并成一个值正是那种「让人以为已经查过」的写法(`proxy_env_gate` 同一条口径)。
+    ★★ **`not_installed` 与 `broken` 也必须分开**:前者是「你只装了看板那一半」(中性,
+      给安装指引),后者是「你装了但它坏了」(红,给修复指令)。用同一种颜色喊,第一种人
+      会以为自己坏了、第二种人会以为自己没装 —— 而这正是用户这次报错的由来。
+
+    ## 已知边界(别当它没说)
+
+    ⚠️ `listening` 只证明**有东西在听那个端口**,不证明那是我们的代理。要证明得发一个
+      真请求,而那条路是计费路径。端口被别的程序占用时这道闸会报绿 —— 写在这里,
+      不写进 `detail` 里假装已经查过。
+    """
+    port = _proxy_port()
+    checks = []
+
+    def _add(cid, label, state, detail, fix=""):
+        checks.append({"id": cid, "label": label, "state": state,
+                       "detail": detail, "fix": fix})
+
+    # ① profile overlay —— `cxp` 靠 `--profile rotateproxy` 找它;缺了 codex **静默**退回 base。
+    prof_path = CODEX_HOME / "rotateproxy.config.toml"
+    prof_txt = _read_text_or_none(prof_path)
+    if prof_txt is None:
+        unreadable = prof_path.exists()
+        _add("profile", "profile overlay", "unknown" if unreadable else "bad",
+             f"{prof_path} " + ("存在但读不到(权限?)" if unreadable else "不存在"),
+             "" if unreadable else
+             "按 docs/INSTALL.md §3「还要建 profile overlay」建这个文件。codex 对缺失不报错,"
+             "会静默退回单号直连 —— 和正常运行长得一模一样。")
+    else:
+        _add("profile", "profile overlay", "ok", str(prof_path))
+
+    # ② provider 块 —— base_url 必须指向本机代理,否则 codex 直连上游。
+    cfg_path = CODEX_HOME / "config.toml"
+    cfg_txt = _read_text_or_none(cfg_path)
+    blk = _toml_block(cfg_txt, "model_providers.rotateproxy")
+    hostport = "127.0.0.1:%d" % port
+    if cfg_txt is None:
+        # ★★ 「不存在」与「存在但读不到」必须分开 —— 这正是本闸 docstring 里那条铁律,
+        #    而第一版在这里自己违反了它:`_read_text_or_none` 对两种情况都返回 None,
+        #    我只在 ① profile 那条用 `.exists()` 分了,这条忘了 ⇒ 一台**干净的 .dmg 机器**
+        #    被判成 `broken`(红:"你装了但坏了"),而它其实是 `not_installed`(中性:"你只装了看板")。
+        #    两者的下一步完全相反,用同一种颜色喊正是用户这次报错的由来。实测于 2026-09-19。
+        missing = not cfg_path.exists()
+        _add("provider", "model_provider 块", "bad" if missing else "unknown",
+             f"{cfg_path} " + ("不存在" if missing else "存在但读不到(权限?)"),
+             "按 docs/INSTALL.md §3 配置 Codex provider。" if missing
+             else "先确认该文件可读 —— 读不到不等于没配。")
+    elif blk is None:
+        _add("provider", "model_provider 块", "bad",
+             f"{cfg_path} 里没有 [model_providers.rotateproxy]",
+             f'按 docs/INSTALL.md §3 追加该块(base_url = "http://{hostport}")。')
+    elif hostport not in blk:
+        _add("provider", "model_provider 块", "bad",
+             f"块在,但 base_url 没指向 {hostport}",
+             f"把 base_url 改成 http://{hostport}")
+    else:
+        _add("provider", "model_provider 块", "ok", f"base_url → {hostport}")
+
+    # ③ WS 直连必须关掉 —— codex 的 `responses_websocket` 端点硬编码 `wss://chatgpt.com/...`,
+    #    **不认 base_url**,开着就完全绕过代理、只烧 auth.json 那一个号(proxy/cxp:35-41)。
+    hay = "\n".join(x for x in (prof_txt, blk) if x)
+    norm = hay.replace(" ", "")
+    # ★★ 同一条铁律在这一个函数里我犯了**三次**(2026-09-19):这条查的是「找没找到某个键」,
+    #    而「在读得到的那半里没找到」≠「它不在」。任一来源是**存在但读不到**时,
+    #    结论只能是 `unknown` —— 否则一次权限错误会被报成「你的 WS 没关,正在烧单号」。
+    _src_unreadable = ((prof_txt is None and prof_path.exists())
+                       or (cfg_txt is None and cfg_path.exists()))
+    if "supports_websockets=false" in norm:
+        _add("ws", "WS 直连已关", "ok", "supports_websockets = false")
+    elif _src_unreadable:
+        _add("ws", "WS 直连已关", "unknown", "配置存在但读不到,判定不了",
+             "先确认 ~/.codex 下的配置可读。")
+    elif prof_txt is None and blk is None:
+        _add("ws", "WS 直连已关", "unknown", "两份配置都不存在,判定不了")
+    else:
+        _add("ws", "WS 直连已关", "bad", "没有 supports_websockets = false",
+             "在 provider 块里加 supports_websockets = false。否则 codex 走 WS 绕过代理,"
+             "只烧 auth.json 那一个号,而代理日志里**什么都看不到**。")
+
+    # ④ 端口上有没有东西在听(边界见 docstring:不证明那是我们的代理)。
+    import socket as _sk
+    try:
+        with contextlib.closing(_sk.create_connection(("127.0.0.1", port), timeout=0.6)):
+            _add("listening", "代理在听", "ok", hostport)
+    except OSError as e:
+        _add("listening", "代理在听", "bad",
+             f"连不上 {hostport} ({type(e).__name__})",
+             "已装过服务:launchctl kickstart -k gui/$(id -u)/com.doushutangmu.codex-rotate.proxy"
+             "；从没装过:见 docs/INSTALL.md §4。")
+
+    # ⑤ 池里有没有号。⚠️ 与上面几条**分开判**:没号是「装好了但还没加号」(琥珀),
+    #    不是接线断了(红)。混在一起会让一个只差登录的人去重装服务。
+    try:
+        nacc = len(_state().get("slots") or {})
+        _add("accounts", "池里有账号", "ok" if nacc else "bad", f"{nacc} 个",
+             "" if nacc else
+             "codex-rotate login 加号。★ **不要**用 `codex login` —— 它会 server-side "
+             "吊销当时 auth.json 里那个号。")
+    except Exception as e:
+        nacc = None
+        _add("accounts", "池里有账号", "unknown", f"读不到 state.json ({type(e).__name__})")
+
+    # ⑥ 入口在不在 —— `.dmg` 不含 `proxy/`,所以这条是「只装了看板那一半」最直接的签名。
+    cxp = STORE / "proxy" / "cxp"
+    if cxp.exists():
+        _add("entry", "入口 cxp", "ok", str(cxp))
+    else:
+        _add("entry", "入口 cxp", "bad", f"{cxp} 不存在",
+             "这台机器只有用量看板那一半(.dmg 里不含 proxy/)。完整装机见 docs/INSTALL.md §2。")
+
+    # ---- 定级 ----
+    # ★ 接线(wiring)与「有没有号」分开算,理由见 ⑤。
+    wiring = [c for c in checks if c["id"] != "accounts"]
+    by = {c["id"]: c["state"] for c in checks}
+    bad = [c for c in wiring if c["state"] == "bad"]
+    unk = [c for c in wiring if c["state"] == "unknown"]
+
+    # 「从没接入过」的签名:profile / provider / 入口**三者都确定性地不存在**。
+    # 要求三个都是 `bad`(不是 unknown),所以这里不会把「读不到」误判成「没装」。
+    never = all(by.get(k) == "bad" for k in ("profile", "provider", "entry"))
+
+    if never:
+        state, level = "not_installed", "warn"
+    elif bad:
+        state, level = "broken", "warn"
+    elif unk:
+        state, level = "unknown", "unknown"
+    elif by.get("accounts") == "bad":
+        state, level = "no_accounts", "warn"
+    elif by.get("accounts") == "unknown":
+        state, level = "unknown", "unknown"
+    else:
+        state, level = "ready", "ok"
+
+    if state == "ready":
+        lines = [f"  ✅ 接入闸:已接入账号池(profile / provider / 代理 / 入口齐全,{nacc} 个号)"]
+    elif state == "not_installed":
+        lines = [
+            "ℹ️  接入闸:这台机器**只装了用量看板那一半**,没有轮换能力。",
+            "     `.dmg` 里不含 `proxy/`(proxy.py / cxp / auth-token),也不含 install-launchd.sh。",
+            "     所以裸 `codex` 走的是官方单号路径 —— 这不是故障,是**没装那一半**。",
+            "     要轮换:clone 仓库,按 docs/INSTALL.md §2~§4 装齐(入口 symlink + provider + launchd)。",
+            "     装完**直接敲 `codex`** 就是轮换;要单号直连用 `cxd`。",
+        ]
+    elif state == "no_accounts":
+        lines = ["⚠️  接入闸:接线齐全,但**池子是空的** —— 轮换无号可换。",
+                 "     修:codex-rotate login(★ 不要用 `codex login`,它会吊销当前号)。"]
+    elif state == "broken":
+        lines = ["⚠️  接入闸:**接线断了** —— codex 对此不报错,会静默退回单号直连。"]
+        for c in bad:
+            lines.append(f"     ✗ {c['label']}:{c['detail']}")
+            if c["fix"]:
+                lines.append(f"       修:{c['fix']}")
+    else:
+        lines = ["⚠️  接入闸:**判定不了** —— 这不等于「没问题」。"]
+        for c in unk or [c for c in checks if c["state"] == "unknown"]:
+            lines.append(f"     ❔ {c['label']}:{c['detail']}")
+
+    return {"level": level, "state": state, "checks": checks, "lines": lines,
+            "port": port, "accounts": nacc}
+
+
+def cmd_integration(args):
+    """`codex-rotate integration [--json]` —— 装机链路总闸的独立入口。
+
+    ★ 存在的理由:App 需要拿到**结构化**结果才能在总览/菜单栏分色,而 `health`
+      的输出是给人读的文本。两边共用 `codex_integration_gate()` 这一个真源 ——
+      否则 UI 和 CLI 迟早给出两种答案(本仓在额度色阈值上已经有过两份实现的教训)。
+    """
+    g = codex_integration_gate()
+    if "--json" in args:
+        print(json.dumps(g, ensure_ascii=False))
+        return
+    for ln in g["lines"]:
+        print(ln)
+
+
 def cmd_health(args):
     """Token health: never rotates a token and costs no quota, but DOES record newly-found deaths.
 
@@ -3152,6 +3408,14 @@ def cmd_health(args):
     dgate = stale_daemon_gate()
     rgate = relay_route_gate()
     pgate = dawn_probe_gate()
+    igate = codex_integration_gate()
+    # ★★ 接入闸排在**所有**闸之前:它答的是「这台机器到底有没有轮换能力」。
+    #    没接上的时候,下面每一条(旧代码 / 路由 / 探针 / 代理环境)都是在体检一套
+    #    根本没装上的东西 —— 先看到它,才不会照着一堆无关告警去排查。
+    if igate["level"] != "ok":
+        for _l in igate["lines"]:
+            print(_l)
+        print()
     # ★ 旧代码那条排在最前面:它一响,下面所有额度数字都可能是旧逻辑算出来的,
     #   先看到它才不会照着一个假数字去排查别的东西。
     if dgate["level"] != "ok":
@@ -3178,6 +3442,9 @@ def cmd_health(args):
     s = _state()
     if not s["slots"]:
         print("no accounts")
+        if igate["level"] == "ok":
+            for _l in igate["lines"]:
+                print(_l)
         if rgate["level"] == "ok":
             for _l in rgate["lines"]:
                 print(_l)
@@ -3265,7 +3532,7 @@ CMDS = {"add": cmd_add, "login": cmd_login, "list": cmd_list, "switch": cmd_swit
         "refresh-all": cmd_refresh_all, "health": cmd_health, "remove": cmd_remove,
         "ensure-live": cmd_ensure_live, "credits": cmd_credits, "probe": cmd_probe,
         "dawn-probe": cmd_dawn_probe, "rotate": cmd_rotate,
-        "tokens": cmd_tokens}
+        "tokens": cmd_tokens, "integration": cmd_integration}
 
 
 # Disk-only commands run their whole load→mutate→save under the cross-process state mutex (lost-update

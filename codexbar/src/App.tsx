@@ -28,6 +28,8 @@ import { useGrokQuota } from "./hooks/useGrokQuota";
 import GrokCard from "./components/GrokCard";
 import { useAgyQuota } from "./hooks/useAgyQuota";
 import AgyCard from "./components/AgyCard";
+import IntegrationBanner from "./components/IntegrationBanner";
+import { useIntegration } from "./hooks/useIntegration";
 import ProviderTabs from "./components/ProviderTabs";
 import { POOL_PLATFORMS, loadPoolKey, savePoolKey, type PoolKey } from "./platforms";
 import { useAgyPool } from "./hooks/useAgyPool";
@@ -77,6 +79,8 @@ export default function App() {
   // ★ 版本一律走 `fullVersion()`（`X.Y.Z+B`），两个显示位同一个真源。
   useEffect(() => { void fullVersion().then(setVer).catch(() => {}); }, []);
   const [page, setPage] = useState<Page>("overview");
+  // 接入闸：真源是 `codex-rotate integration`，与 `health` 共用同一个判定函数。
+  const { integration } = useIntegration();
   /** 时间范围（交接稿 §7 的 `RangeState`）。★ **默认 30d**（v1.5 是 14d）。
    *  总览与平台详情**共用这一份** —— 钻进详情再返回不该把档位重置。 */
   const [trafficSt, setTrafficSt] = useState<RangeState>(DEFAULT_RANGE);
@@ -573,6 +577,15 @@ export default function App() {
                 </span>)}
                 </div>
               </div>
+
+              {/* ★★ 接入闸 —— 排在 Hero **之前**，因为没接上时下面整块（当值号、额度环、
+                  卡片）描述的是一个根本没在轮换的池子，而它们看起来完全正常。
+                  本仓铁律「把警报放在眼睛已经在的地方」：用户 2026-09-19 报的正是
+                  「敲 codex 没走 rotateproxy」，而当时界面上没有任何东西会为此变色。
+                  ★ 只挂 codex 档：gemini/grok 的接入机制完全不同，这道闸判不了它们。 */}
+              {provider === "codex" && (
+                <IntegrationBanner t={t} integration={integration} />
+              )}
 
               {/* ★★ Hero 是 **codex 的当值号**。挂在 Google 档上会写着「当前使用中 Asen」，
                   而那是另一家的账号 —— 与摘要那行同一条理由，且更显眼。 */}

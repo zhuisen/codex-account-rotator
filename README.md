@@ -2,7 +2,13 @@
 
 把 **多个个人 ChatGPT Plus/Pro 账号** 做成一个池子,为 **Codex CLI** 透明轮换使用——一个人、自己买的号、全程本机、loopback-only、同一家庭 IP。
 
-> 日常:用 **`cxp`** 代替 `codex`,你的 Codex 会话就会在多个号之间**逐请求透明轮换**:撞限自动换号、token 自动刷新、长会话消耗摊到所有号 ≈ **把额度上限扩成 N 倍**。菜单栏实时看每号余量。
+> 日常:**直接敲 `codex`**(装完 [§2](docs/INSTALL.md#2-入口-symlink) 的 PATH wrapper 之后),你的 Codex 会话就会在多个号之间**逐请求透明轮换**:撞限自动换号、token 自动刷新、长会话消耗摊到所有号 ≈ **把额度上限扩成 N 倍**。菜单栏实时看每号余量。
+> 需要单号直连时用 **`cxd`** —— 那是唯一绕过代理的入口(比如跑 `/usage` 看重置卡)。
+
+> ⚠️ **只下载 `.dmg` / `.exe` 不会获得轮换能力。** 安装包里是**用量看板**那一半(A),
+> 不含轮换代理(`proxy/`)、不含 launchd 服务、也不装 `codex` wrapper。
+> 轮换那一半(B)必须 clone 仓库按 `docs/INSTALL.md` §2~§4 装。
+> 装没装上,跑一句 `codex-rotate integration` 就知道;CodexBar 的总览页与菜单栏也会直接标出来。
 
 > 📦 **安装** → [**docs/INSTALL.md**](docs/INSTALL.md)（两半可以只装一半；凭证不搬运，新机 `codex login` 重新生成）。
 > 📚 **全部文档** → [**docs/README.md**](docs/README.md)（架构 · 排障 · 安装 · Windows）。

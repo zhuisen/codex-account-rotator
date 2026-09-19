@@ -140,6 +140,15 @@
 .mb-banner-slim { padding: 5px 10px; gap: 8px; }
 .mb-banner-slim .mb-banner-title { font-size: 11px; white-space: nowrap;
   overflow: hidden; text-overflow: ellipsis; }
+/* 接入闸的横幅**允许换到两行**。
+   ★ 省略号会恰好切掉「做什么」那半（本仓披露铁律要求告警必须说下一步动作），
+     而 352px 装不下一句完整的修复指令。裁切比变高更糟 —— 这条在弹窗高度上已经栽过一次。
+   ★ 仍钉 2 行上限：再长就该去主窗看，那里有完整文案。 */
+.mb-banner-wrap .mb-banner-title { white-space: nowrap; overflow: visible; }
+.mb-banner-wrap .mb-banner-sub {
+  white-space: normal; line-height: 1.35;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
 /* 关闭按钮：命中区比字形大一圈（10.5px 的 `×` 本身太小，点不中和没点长得一样）。 */
 .mb-banner-x {
   flex: none; cursor: pointer; user-select: none;

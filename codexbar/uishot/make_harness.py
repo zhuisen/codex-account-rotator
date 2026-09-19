@@ -732,6 +732,31 @@ function relayEntry() {
       }
       // ★ **脱敏** fixture。真实 state.json 的邮箱/account_id 能认人,绝不进伺服目录;
       //   结构、额度、套餐、到期日保留真实形状,否则量不出真实排版。
+      // ★★ 装机链路总闸。**必须打桩** —— 落到 default 返回 null 会被 `useIntegration` 的
+      //   catch 接住,合成 `unknown`(琥珀「判定不了」),于是每张截图都挂着一条**不该有的**
+      //   告警,而页面照常渲染、零报错。这正是本文件反复记的那类「打桩缺口 = 假绿」,
+      //   只是这次方向相反:不是看不见,是永远看见一条假的。
+      //   `?integ=ready|notinst|broken|noacc|unknown`,缺省 `ready`(= 不画横幅)。
+      case 'read_integration': {
+        var _ig = p.get('integ') || 'ready';
+        var _mk = function (state, level, lines) {
+          return JSON.stringify({ level: level, state: state, checks: [],
+                                  lines: lines, port: 8011, accounts: 9 });
+        };
+        if (_ig === 'notinst') return Promise.resolve(_mk('not_installed', 'warn', [
+          'ℹ️  接入闸:这台机器**只装了用量看板那一半**,没有轮换能力。',
+          '     要轮换:clone 仓库,按 SETUP.md 配 provider + 装 launchd 服务,日常用 `cxp`。']));
+        if (_ig === 'broken') return Promise.resolve(_mk('broken', 'warn', [
+          '⚠️  接入闸:**接线断了** —— codex 对此不报错,会静默退回单号直连。',
+          '     ✗ profile overlay:~/.codex/rotateproxy.config.toml 不存在']));
+        if (_ig === 'noacc') return Promise.resolve(_mk('no_accounts', 'warn', [
+          '⚠️  接入闸:接线齐全,但**池子是空的** —— 轮换无号可换。',
+          '     修:codex-rotate login(★ 不要用 `codex login`,它会吊销当前号)。']));
+        if (_ig === 'unknown') return Promise.resolve(_mk('unknown', 'unknown', [
+          '⚠️  接入闸:**判定不了** —— 这不等于「没问题」。',
+          '     ❔ model_provider 块:~/.codex/config.toml 存在但读不到(权限?)']));
+        return Promise.resolve(_mk('ready', 'ok', ['  ✅ 接入闸:已接入账号池(9 个号)']));
+      }
       case 'read_state':
         return Promise.resolve(STATE);
       // `slotToAccount(aid, slot, tokens)` 会直接索引 tokens[aid] —— 返回 null 会抛

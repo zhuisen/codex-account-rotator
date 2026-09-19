@@ -20,7 +20,7 @@
 | 单实例守卫 | ✅ 已实现 | 命名互斥体（`Local\` 命名空间） |
 | 托盘 | ⚠️ **降级** | 见下「已知差异」 |
 | **账号池 + 轮换代理** | ⚠️ **未经真机验证** | 代码路径已补齐，但 OAuth 登录、代理转发、轮换都没在 Windows 上跑过 |
-| 定时服务 | ⚠️ **已实现，未真机验证** | `scripts/install-windows.ps1` 用任务计划程序注册同样的 3 个服务。★ 与 macOS **两处真实差异**：autosync 从「文件变化即触发」降级为**每分钟轮询**（Task Scheduler 没有文件监视触发器），新号入池最慢延迟 1 分钟；崩溃恢复靠 `RestartOnFailure`（只认非零退出码）+ 每 5 分钟补拉触发器，不是 launchd 那种立刻重启 |
+| 定时服务 | ⚠️ **已实现，未真机验证** | `scripts/install-windows.ps1` 用任务计划程序注册同样的 4 个服务(autosync / quotad / proxy / dawnprobe)。★ 与 macOS **两处真实差异**：autosync 从「文件变化即触发」降级为**每分钟轮询**（Task Scheduler 没有文件监视触发器），新号入池最慢延迟 1 分钟；崩溃恢复靠 `RestartOnFailure`（只认非零退出码）+ 每 5 分钟补拉触发器，不是 launchd 那种立刻重启 |
 | 开机自启 | ✅ 应可用 | `tauri-plugin-autostart` 在 Windows 上走注册表 Run 键 |
 
 ---

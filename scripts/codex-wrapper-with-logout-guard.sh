@@ -128,7 +128,34 @@ guard_automatic_session_resume "$@" || exit $?
 #    改守卫用 `codex_is_credential_command` 时我把 `. "$_scope"` 留在了下面 ——
 #    函数未定义 ⇒ `if` 恒假 ⇒ **logout 直接放行**，比原来那个只看 `$1` 的版本更糟。
 #    一道"看起来更严"的闸如果跑在它依赖的定义之前，就是零。
-CODEX_ROTATE_STORE="${CODEX_ROTATE_STORE:-${HOME}/Projects/tools/codex-account-rotator}"
+# ★★ **仓库根：先按「这个脚本自己在哪」推，猜死路径只是最后兜底。**（2026-09-19）
+#    原来只有 `${HOME}/Projects/tools/codex-account-rotator` 这一个默认值 —— 那是**作者
+#    自己的 clone 路径**。于是这个 wrapper 在作者机器上完美工作，而任何把仓库 clone 到
+#    别处的人装上它之后，`codex` 会直接 exit 78。它从来没被分发过，所以这件事一直没暴露：
+#    用户 2026-09-19 报「敲 codex 没走 rotateproxy」，根因正是这个 wrapper 不在任何安装步骤里。
+#
+#    ⚠️ 不能用 `readlink -f` —— macOS 的 BSD readlink 长期没有 `-f`。手动解引用。
+_cw_resolve() {
+  local p="$1" d
+  while [ -L "$p" ]; do
+    d="$(cd -P "$(dirname "$p")" 2>/dev/null && pwd)" || break
+    p="$(readlink "$p")"
+    case "$p" in /*) ;; *) p="${d}/${p}" ;; esac
+  done
+  d="$(cd -P "$(dirname "$p")" 2>/dev/null && pwd)" || return 1
+  printf '%s/%s\n' "$d" "$(basename "$p")"
+}
+
+if [ -z "${CODEX_ROTATE_STORE:-}" ]; then
+  _cw_self="$(_cw_resolve "${BASH_SOURCE[0]}" 2>/dev/null || true)"
+  # 仓库里它住在 `<root>/scripts/`，所以上跳两级就是仓库根。
+  _cw_guess="$(dirname "$(dirname "${_cw_self:-/nonexistent}")")"
+  if [ -f "${_cw_guess}/proxy/codex-profile-scope.sh" ]; then
+    CODEX_ROTATE_STORE="$_cw_guess"
+  else
+    CODEX_ROTATE_STORE="${HOME}/Projects/tools/codex-account-rotator"
+  fi
+fi
 export CODEX_ROTATE_STORE
 _scope="${CODEX_ROTATE_STORE}/proxy/codex-profile-scope.sh"
 if [ -f "$_scope" ]; then
@@ -218,4 +245,36 @@ else
   exit 78
 fi
 
-exec "${CODEX_NATIVE_BIN:-${HOME}/.local/npm-global/bin/codex}" "${_profile[@]}" "$@"
+# ★★ **真二进制：在 PATH 上找，且跳过 wrapper 自己。**（2026-09-19）
+#    原来硬编码 `${HOME}/.local/npm-global/bin/codex` —— 又一个「在我机器上是好的」：
+#    用 brew / volta / 别的 npm prefix 装 codex 的人拿到的是 `No such file or directory`。
+#    与上面那个仓库根默认值同族，都是这个 wrapper 从未被分发过才没暴露。
+#
+#    ⚠️ **必须跳过自己**，否则 `~/.local/bin` 在 PATH 里排在前面时会 exec 回自身 ⇒ 无限递归。
+#       用 `-ef` 比 inode（同一个文件的不同路径也能认出来），不是比字符串。
+_cw_real_codex() {
+  local d c self
+  self="$(_cw_resolve "${BASH_SOURCE[0]}" 2>/dev/null || true)"
+  while IFS= read -r d; do
+    [ -n "$d" ] || continue
+    c="${d}/codex"
+    [ -x "$c" ] && [ ! -d "$c" ] || continue
+    # 同一个文件（含经由 symlink 指向自己的那些）一律跳过
+    [ -n "$self" ] && [ "$c" -ef "$self" ] && continue
+    c="$(_cw_resolve "$c" 2>/dev/null || printf '%s' "$c")"
+    [ -n "$self" ] && [ "$c" -ef "$self" ] && continue
+    printf '%s\n' "$c"
+    return 0
+  done <<< "$(printf '%s' "$PATH" | tr ':' '\n')"
+  return 1
+}
+
+_cw_bin="${CODEX_NATIVE_BIN:-$(_cw_real_codex || true)}"
+if [ -z "$_cw_bin" ] || [ ! -x "$_cw_bin" ]; then
+  printf '%s\n' \
+    "⛔ codex: 找不到官方 codex 二进制。" \
+    "   PATH 上除了这个 wrapper 之外没有别的 \`codex\`。" \
+    "   修:装官方 CLI(\`npm i -g @openai/codex\`),或用 CODEX_NATIVE_BIN 指到它。" >&2
+  exit 78
+fi
+exec "$_cw_bin" "${_profile[@]}" "$@"

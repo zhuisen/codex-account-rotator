@@ -55,18 +55,40 @@ clone 到**哪个目录都行**：`install-launchd.sh` 与 `quota_daemon.py` 自
 
 ```bash
 mkdir -p ~/.local/bin
+ln -sf "$PWD/scripts/codex-wrapper-with-logout-guard.sh" ~/.local/bin/codex   # ★ 见下
+ln -sf "$PWD/proxy/cxd"    ~/.local/bin/cxd            # 单号直连(唯一的逃生口)
+ln -sf "$PWD/proxy/cxp"    ~/.local/bin/cxp            # 显式走代理,等价于 codex
 ln -sf "$PWD/codex-rotate" ~/.local/bin/codex-rotate   # 池管理 CLI
-ln -sf "$PWD/cx"           ~/.local/bin/cx             # 单号 wrapper
-ln -sf "$PWD/proxy/cxp"    ~/.local/bin/cxp            # 日常入口:经代理多号轮换
 ln -sf "$PWD/agy-rotate"   ~/.local/bin/agy-rotate     # agy(Antigravity)账号池 CLI
-chmod +x codex-rotate cx proxy/cxp proxy/auth-token agy-rotate
+chmod +x codex-rotate proxy/cxp proxy/cxd proxy/auth-token agy-rotate scripts/codex-wrapper-with-logout-guard.sh
 ```
 
-把 `~/.local/bin` 放进 `PATH`。
+把 `~/.local/bin` 放进 `PATH`，且**排在官方 codex 之前**（`which -a codex` 第一行应是它）。
+
+### ★★ 设计：`codex` 走轮换，`cxd` 直连 —— 只有一个逃生口
+
+| 入口 | 走哪 | 什么时候用 |
+|---|---|---|
+| **`codex`**（上面那个 wrapper） | **轮换代理** | 日常全部。它给运行时子命令注入 `--profile rotateproxy`，`doctor`/`update` 这类本地工具子命令原样透传 |
+| `cxp` | 轮换代理 | 与 `codex` 等价，保留给想显式表达"走代理"的场合 |
+| **`cxd`** | **单号直连** | **唯一**绕过代理的入口。跑 `/usage` 看重置卡必须用它 —— 走代理时每个请求可能落在不同号上，那个数就没意义了 |
+
+> ★★ **这个 wrapper 不装，`codex` 就不走轮换。** 它一直躺在 `scripts/` 里而**没有出现在这一节**，
+> 是 v1.6.4 之前「装完了敲 `codex` 还是单号直连」的根因（2026-09-19 由用户报出）。
+> 它同时还是 `codex logout` / `codex login` 的**杀号守卫** —— 那两条命令会把当时躺在
+> `~/.codex/auth.json` 里的号在**服务端** revoke（见 §4）。
+> ⚠️ 守卫必须放在 **PATH wrapper**：`\codex logout` 的反斜杠只绕 alias，绕不过 PATH。
+
+> ★ wrapper 会**自己**推仓库根（按它自身所在位置上跳两级）并在 PATH 上找官方二进制，
+> clone 到哪儿都行。要覆盖用 `CODEX_ROTATE_STORE` / `CODEX_NATIVE_BIN`。
+> 找不到官方 codex 时它**报错退出**，不会静默变成直连。
 
 > ★ `agy-rotate` 与 §5「数据源」那个 **`bin/agy` wrapper 是两件事**，别混：
 > 前者是账号池 CLI（`login` / `switch` / `auto` / `quota`），**名字不与 agy 自身冲突**，
 > 放 `~/.local/bin` 安全；后者必须放在 `~/.local/bin` **之前**，否则被 agy 的自动更新抹掉。
+
+> ⓘ 仓库里还有一个早期的 `cx`（2026-06 的额度感知启动器），已被 `cxp` / `cxd` 取代，
+> 不再需要建 symlink。文件保留，未删除。
 
 ---
 
@@ -84,6 +106,27 @@ wire_api = "responses"
 command = "/path/to/codex-account-rotator/proxy/auth-token"
 ```
 
+### ★★ 还要建 profile overlay —— 漏了这一步会**静默**退回单号直连
+
+`codex` / `cxp` 用的是 `--profile rotateproxy`，它读的是**另一个文件**：
+
+```bash
+cat >> ~/.codex/rotateproxy.config.toml <<'TOML'
+model_provider = "rotateproxy"
+supports_websockets = false
+TOML
+```
+
+> ★★ **这两行都是必须的，且漏了都不报错。**
+> · 文件不存在 ⇒ **codex 不报错**，直接退回 base 配置（直连单号、不轮换），
+>   和正常运行**长得一模一样**。`codex` wrapper 与 `cxp` 会替它硬失败（exit 78），
+>   但只有这两个入口会。
+> · `supports_websockets = false` 漏了 ⇒ codex 的 `responses_websocket` 端点**硬编码**
+>   `wss://chatgpt.com/...`、**不认 `base_url`** ⇒ 交互式会话完全绕过代理、只烧
+>   `auth.json` 里那一个号，而**代理日志里一条记录都没有**。
+>
+> 装完跑一次 `codex-rotate integration` 核对（见 [§7](#7-一眼自检)）。
+
 > ★★ **如果你在用系统代理（Clash / Surge 等），必读。**
 > 开着系统代理时，Codex 的 reqwest 会把发往 `http://127.0.0.1:8011` 的请求也送进代理，
 > 而多数代理对 loopback 目标**连接受理、永不响应** ⇒ Codex **永久挂死、零输出**，
@@ -100,8 +143,8 @@ command = "/path/to/codex-account-rotator/proxy/auth-token"
 **macOS**：
 
 ```bash
-bash scripts/install-launchd.sh     # 生成 + 加载 3 个服务
-launchctl list | grep codex-rotate  # 应有 3 行
+bash scripts/install-launchd.sh     # 生成 + 加载 4 个服务
+launchctl list | grep codex-rotate  # 应有 4 行
 ```
 
 **Windows**（v1.0.4 起）：
@@ -124,6 +167,7 @@ schtasks /Query /TN "com.doushutangmu.codex-rotate.proxy"
 | `…proxy` | KeepAlive 常驻 | 轮换代理，听 `127.0.0.1:8011` |
 | `…autosync` | WatchPaths `~/.codex/auth.json` | `codex login` 新号秒级入池 |
 | `…quotad` | RunAtLoad + KeepAlive | 活动驱动读官方 usage API 刷额度（零消耗）+ 300s 全池扫描兜底 |
+| `…dawnprobe` | 每日 06:00 | 清晨计费探针，让 Plus 的 5h 窗口走动。⚠️ **本仓唯一会自动花钱的东西，默认关闭**（`dawn_probe.enabled` 缺省假），装了也不会自己跑 |
 
 两个平台注册的是**同一组服务**（名字、入口脚本、端口都一致），由 `tests/test_installers_agree.py` 守着 —— 只改一边会让某个平台**静默少一个常驻进程**，而症状是「额度不更新」这类看起来跟安装器无关的现象。
 
@@ -145,7 +189,8 @@ codex-rotate rename <id> main
 > ★ 每个号必须用**独立无痕窗**打开授权 URL，否则同浏览器会话链里两个号会反复互顶
 > （"signed in to another account"）。
 
-日常用 `cxp` 代替 `codex` 即可。
+日常**直接敲 `codex`** 即可 —— §2 装的 wrapper 会把它送进轮换代理。
+要单号直连（比如跑 `/usage` 看重置卡）用 **`cxd`**。
 
 ---
 
@@ -213,17 +258,17 @@ bash codexbar/scripts/deploy.sh          # 构建 + 部署 + 启动
 
 ```bash
 # 服务
-for s in proxy autosync quotad; do
+for s in proxy autosync quotad dawnprobe; do
   launchctl bootout gui/$(id -u)/com.doushutangmu.codex-rotate.$s 2>/dev/null
   rm -f ~/Library/LaunchAgents/com.doushutangmu.codex-rotate.$s.plist
 done
 # 应用
 rm -rf /Applications/CodexBar.app
 # 入口
-rm -f ~/.local/bin/{codex-rotate,cx,cxp}
+rm -f ~/.local/bin/{codex,codex-rotate,cxp,cxd,agy-rotate}
 ```
 
-再移除 `~/.codex/config.toml` 里的 `rotateproxy` 块。
+再移除 `~/.codex/config.toml` 里的 `rotateproxy` 块，以及 `~/.codex/rotateproxy.config.toml`。
 
 `auth/` 与 `state.json` 含凭证，删掉即清空本机账号池。
 
@@ -232,10 +277,23 @@ rm -f ~/.local/bin/{codex-rotate,cx,cxp}
 ## 7. 一眼自检
 
 ```bash
-codex-rotate health      # 每号 access token 寿命 + 是否失效 + 环境闸
+codex-rotate integration # ★ 先跑这条:这台机器到底接没接上轮换
+codex-rotate health      # 每号 access token 寿命 + 是否失效 + 各道环境闸
 codex-rotate list        # 池子与各号额度
-curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8011/  # 代理在不在听
+which -a codex           # 第一行应是 ~/.local/bin/codex(wrapper),不是官方二进制
 ```
+
+`integration` 一条就把整条链路查完并**说明该做什么**，五种结果：
+
+| 结果 | 含义 | 下一步 |
+|---|---|---|
+| ✅ 已接入账号池 | 全通 | 无 |
+| ℹ️ 未接入轮换 | 只装了看板那一半（比如只下载了 `.dmg`） | 按 §2~§4 装账号池那一半 |
+| ⚠️ 接线断了 | 装了但某一环断了 —— **codex 对此不报错** | 照它列出的每一项修 |
+| ⚠️ 池子为空 | 接线齐全，只差登录 | `codex-rotate login` |
+| ⚠️ 判定不了 | 配置读不到等 —— **这不等于没问题** | 按它说的查 |
+
+CodexBar 的「总览」页与菜单栏用的是**同一道闸**，接线不通时会直接在界面上变色。
 
 > ★ **验健康用只读的 `health`，不要用 `refresh` 代替** —— `refresh` 会轮换 refresh_token，
 > 它是一次性的，本身具破坏性。
