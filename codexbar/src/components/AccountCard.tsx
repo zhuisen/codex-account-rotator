@@ -113,8 +113,15 @@ export default function AccountCard({ a, isCurrent, isBest, isSelected, shortcut
         opacity: isDead ? 0.55 : 1,
         zIndex: drag?.isDragging ? 5 : undefined,
         boxShadow: drag?.isDragging ? "0 8px 24px rgba(0,0,0,.45)" : undefined,
-        transform: drag?.isDragging ? "scale(1.03)" : undefined,
-        transition: "background .2s ease, border-color .2s ease, box-shadow .15s ease, transform .15s ease",
+        // ★★★ **`transform` 归拖拽 hook 独占，React 一个字都不许写。**
+        //   两边都写同一个属性时，React 的每次重渲染都会把 hook 直接写进 DOM 的
+        //   位移**整个抹掉** —— 实测症状：卡片只剩 `scale(1.03)`，完全不跟手。
+        //   浮起的缩放也一并交给 hook（它在 `paint()` 里和位移合成一条 transform）。
+        // ★★★ **`transform` 不许出现在 transition 里。** 它归拖拽 hook 独占，
+        //   而留着过渡会让「清空 transform 后立刻量位置」量到**过渡中间值** ——
+        //   实测症状：量到 1437 而真实槽位是 685，跟手补偿整个算错、卡片离指针 600px。
+        //   让位动画由 hook 用 Web Animations API 显式播放，不靠 CSS 过渡。
+        transition: "background .2s ease, border-color .2s ease, box-shadow .15s ease",
       }}>
 
       {shortcut && <span style={{ position: "absolute", top: 6, left: 10, fontSize: Z.shortcut, color: t.muted, fontFamily: "'JetBrains Mono'" }}>⌘{shortcut}</span>}

@@ -43,11 +43,20 @@ export default function AgyCard({ t, color, snap, busy, err, disabled, winSlots,
                                  isSelected, reserveActions, shortcut, isBest, bestPct, partialWins,
                                  onSelect, onRename, onRemove, onProbe, probing,
                                  rotates, onToggleRotate,
-                                  label, email, isCurrent, onSwitch, switching, drag }: {
+                                  label, email, isCurrent, onSwitch, switching, drag, aid }: {
   t: Theme;
   /** 拖拽排序接线。与账号卡**同一份** `DragWiring` —— 两处各写一份迟早分叉。
    *  不传时这张卡行为与以前完全一致。 */
   drag?: DragWiring;
+  /**
+   * 这张卡的**排序身份**（agy 的 `sub`）。
+   *
+   * ★★★ 必须与调用方传给 `makeDrag` 的键**完全一致**。原来 `data-aid` 写的是 `label`、
+   *   而 `makeDrag` 用的是 `sub` —— label 是可改的昵称、sub 是 ID，两者从不相等 ⇒
+   *   命中测试 `indexOf(over)` 永远找不到目标，**Gemini 档的拖拽整个不工作**。
+   *   2026-09-20 由 codex 评审读代码抓出来，闸在 `TheGeminiLaneFollowsTheSameRule`。
+   */
+  aid?: string;
   /** 与账号卡**同一份**窗口槽位表。agy 没有的窗口画一行隐藏等高行 —— 不占槽的话
    *  它的「5h」会和别人的「周」画在同一条线上。 */
   winSlots: string[];
@@ -148,7 +157,7 @@ export default function AgyCard({ t, color, snap, busy, err, disabled, winSlots,
 
   return (
     <div ref={cardRef}
-         data-aid={label}
+         data-aid={aid ?? label}
          onClick={onSelect ?? onOpen}
          style={{
       position: "relative", background: isSelected ? t.heroBg : t.cardBg,
@@ -159,8 +168,15 @@ export default function AgyCard({ t, color, snap, busy, err, disabled, winSlots,
       cursor: (onSelect ?? onOpen) ? "pointer" : "default", userSelect: "none",
       zIndex: drag?.isDragging ? 5 : undefined,
       boxShadow: drag?.isDragging ? "0 8px 24px rgba(0,0,0,.45)" : undefined,
-      transform: drag?.isDragging ? "scale(1.03)" : undefined,
-      transition: "background .2s ease, border-color .2s ease, box-shadow .15s ease, transform .15s ease",
+      // ★★★ **`transform` 归拖拽 hook 独占，React 一个字都不许写。**
+        //   两边都写同一个属性时，React 的每次重渲染都会把 hook 直接写进 DOM 的
+        //   位移**整个抹掉** —— 实测症状：卡片只剩 `scale(1.03)`，完全不跟手。
+        //   浮起的缩放也一并交给 hook（它在 `paint()` 里和位移合成一条 transform）。
+      // ★★★ **`transform` 不许出现在 transition 里。** 它归拖拽 hook 独占，
+        //   而留着过渡会让「清空 transform 后立刻量位置」量到**过渡中间值** ——
+        //   实测症状：量到 1437 而真实槽位是 685，跟手补偿整个算错、卡片离指针 600px。
+        //   让位动画由 hook 用 Web Animations API 显式播放，不靠 CSS 过渡。
+        transition: "background .2s ease, border-color .2s ease, box-shadow .15s ease",
     }}>
       {drag && <DragHandle t={t} dragging={drag.isDragging} hint={drag.hint}
                            onStart={drag.onStart} onMove={drag.onMove} onEnd={drag.onEnd} />}

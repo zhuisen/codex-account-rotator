@@ -1,3 +1,4 @@
+import { useRef } from "react";
 import { CARD_TYPE as Z, type Theme } from "../theme";
 
 /**
@@ -37,6 +38,13 @@ export default function DragHandle({ t, dragging, hint, onStart, onMove, onEnd }
   onMove: (x: number, y: number) => void;
   onEnd: (commit: boolean) => void;
 }) {
+  /**
+   * ★★ 「指针按下了没」必须记在**本地**，不能拿 `dragging` 门控 `onMove`。
+   *   `dragging` 要等位移超过阈值才为真（防手抖把点击变成排序），而那个阈值正是靠
+   *   `onMove` 送进去的坐标算出来的 —— 用它门控就成了死锁：永远动不起来。
+   *   2026-09-20 改成「按下即记」之后才解开。
+   */
+  const down = useRef(false);
   return (
     <span
       data-drag-handle
@@ -46,18 +54,20 @@ export default function DragHandle({ t, dragging, hint, onStart, onMove, onEnd }
         // ★★ 捕获指针：之后所有 move/up 都送到这个元素，哪怕鼠标早已移出它。
         //   不捕获的话鼠标一离开这 12px 就断线 —— 而拖拽本来就是要离开它。
         e.currentTarget.setPointerCapture(e.pointerId);
+        down.current = true;
         onStart(e.clientX, e.clientY);
       }}
-      onPointerMove={(e) => { if (dragging) onMove(e.clientX, e.clientY); }}
+      onPointerMove={(e) => { if (down.current) onMove(e.clientX, e.clientY); }}
       onPointerUp={(e) => {
-        if (!dragging) return;
+        if (!down.current) return;
+        down.current = false;
         e.stopPropagation();
         try { e.currentTarget.releasePointerCapture(e.pointerId); } catch { /* 已释放 */ }
         onEnd(true);
       }}
       // ★ 取消（Esc、系统手势打断）必须**放弃**这次排序，不能当成落点 ——
       //   否则一次误操作就改掉顺序，而 codex 档的顺序就是计费顺序。
-      onPointerCancel={() => { if (dragging) onEnd(false); }}
+      onPointerCancel={() => { if (down.current) { down.current = false; onEnd(false); } }}
       onClick={(e) => e.stopPropagation()}
       title={hint}
       style={{

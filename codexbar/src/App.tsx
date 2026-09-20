@@ -30,7 +30,8 @@ import { useAgyQuota } from "./hooks/useAgyQuota";
 import AgyCard from "./components/AgyCard";
 import IntegrationBanner from "./components/IntegrationBanner";
 import { useIntegration } from "./hooks/useIntegration";
-import { useCardOrder, applyOrder, moveItem } from "./hooks/useCardOrder";
+import { useCardOrder, applyOrder } from "./hooks/useCardOrder";
+import { useCardDrag } from "./hooks/useCardDrag";
 import ProviderTabs from "./components/ProviderTabs";
 import { POOL_PLATFORMS, loadPoolKey, savePoolKey, type PoolKey } from "./platforms";
 import { useAgyPool } from "./hooks/useAgyPool";
@@ -84,13 +85,8 @@ export default function App() {
   const { integration } = useIntegration();
   // 卡片自定义顺序（拖拽排序）。★ 走 localStorage + Tauri 广播，主窗与菜单栏不分叉。
   const { order: cardOrder, setOrderFor } = useCardOrder();
-  /**
-   * 拖拽中的状态。`preview` 是**实时让位**用的：拖到哪儿就把数组当场重排，
-   * 其余卡片立刻移开 —— 就是手机拖图标那种手感（用户 2026-09-20 要的）。
-   * 松手才落盘；`null` 表示没在拖。
-   */
-  const [dragAid, setDragAid] = useState<string | null>(null);
-  const [preview, setPreview] = useState<string[] | null>(null);
+  // 拖拽手感层（跟手 / FLIP 让位 / rAF 节流）全在这个 hook 里，见其 docstring。
+  const { preview, makeDrag } = useCardDrag();
   // ⚠️ 原来这里还有一个 `armedAid`：按下手柄→setState→打开卡片根节点的 `draggable`。
   //    **在 WKWebView 上根本起不来**（WebKit 在 mousedown 那一刻就判定能不能拖，
   //    React 的 setState 追不上）。现在手柄自己恒为 draggable，这个状态随之删除。
@@ -215,68 +211,6 @@ export default function App() {
   //   接线按档分流，角标也只在真的接了线的那一档出现。
   //   ⚠️ agy **仍然不进 `alive`/`accounts`** —— 那两个数组还驱动着计数徽章、探针全池的号数、
   //     自动切号；这里只是把**键盘事件**按档分流，不是把 agy 塞进那条数组。
-  /**
-   * 把 `from` 这张卡放到 `to` 这张卡的位置，并把新顺序落盘 + 广播。
-   *
-   * ★ 落盘**完整清单**而不是「谁排第几」的增量 —— 增量在有号新增/删除时无法解释，
-   *   完整清单天然自洽（`applyOrder` 会把没记录过的追加到末尾，不会丢号）。
-   *
-   * ★★★ **codex 档的顺序 = 轮换优先级，写进 `state.json`，不是 localStorage。**
-   *   用户 2026-09-19 定的策略：排序键 `(套餐档, 优先级, 已用%)` —— **优先级压过额度**，
-   *   排第一的号会一直用到 429 撞限、冷却后才轮到下一个。
-   *   既然它决定钱花在哪个号上，真源就必须是代理也能读到的那一份 ——
-   *   代理在 app 没开时照样在挑号。走 `codex-rotate priority --set`（CLI 是唯一写入口）。
-   *   ⚠️ 所以这一档**拖一下就改变了计费顺序**，不只是换个摆放位置。
-   */
-  /**
-   * 命中测试：指针落在哪张卡上。
-   *
-   * ★ 用**卡片矩形**而不是 `elementFromPoint`：拖起来的那张已经 `scale(1.03)` 且
-   *   压在上层，`elementFromPoint` 会一直命中它自己。
-   * ★ 只认同一个网格里的卡（`data-cards-grid`），否则会命中别档的卡片。
-   */
-  const hitAid = (x: number, y: number): string | null => {
-    const els = document.querySelectorAll<HTMLElement>("[data-cards-grid] > div[data-aid]");
-    for (const el of els) {
-      const r = el.getBoundingClientRect();
-      if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) {
-        return el.dataset.aid ?? null;
-      }
-    }
-    return null;
-  };
-
-  /**
-   * 造一套 pointer 拖拽接线。
-   *
-   * ★★ `ids` 必须是**已保存**的顺序，不是当前显示的顺序。拖动中显示的就是 `preview`，
-   *   拿它当基线的话 `next === ids` 恒成立 ⇒ **永远判定"没变"、永不落盘**。
-   *   实测于 2026-09-20：让位动效正常、松手却什么都没发生，而日志里一切正常。
-   */
-  const makeDrag = (aid: string, ids: string[], hint: string,
-                    commit: (next: string[]) => void) => ({
-    hint,
-    isDragging: dragAid === aid,
-    onStart: () => { setDragAid(aid); setPreview(ids); },
-    onMove: (x: number, y: number) => {
-      const over = hitAid(x, y);
-      if (!over || over === aid) return;
-      setPreview((cur) => {
-        const base = cur ?? ids;
-        const from = base.indexOf(aid);
-        const to = base.indexOf(over);
-        if (from < 0 || to < 0 || from === to) return base;
-        return moveItem(base, from, to);       // ★ 实时让位:当场重排,不等松手
-      });
-    },
-    onEnd: (ok: boolean) => {
-      const next = preview;
-      setDragAid(null); setPreview(null);
-      // ★ 取消(Esc/系统打断)要**放弃**这次排序 —— codex 档的顺序就是计费顺序,
-      //   一次误操作改掉它的代价不对称。
-      if (ok && next && next.join() !== ids.join()) commit(next);
-    },
-  });
 
   useKeyboard(win, refresh, setPage as (p: string) => void, (idx) => {
     if (page === "overview" && provider === "gemini") {
@@ -909,6 +843,7 @@ export default function App() {
                       {orderedAgy.length > 0
                         ? orderedAgy.map((a, i) => (
                             <AgyCard key={a.sub} t={t} color={colorOf(traffic, "agy")}
+                                     aid={a.sub}
                                      snap={agyPool.snapshotOf(a, agySnap)}
                                      label={a.label} email={a.email ?? undefined}
                                      isCurrent={a.sub === agyPool.liveSub}
