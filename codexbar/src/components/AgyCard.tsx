@@ -10,7 +10,7 @@ import {
 import { fmtAgo, fmtResetDate, winNumColor } from "../helpers";
 import { IconBtn, IcPen, IcTrash, IcRotate } from "./CardIcons";
 import ProbeButton from "./ProbeButton";
-import { useState } from "react";
+import { useRef, useState } from "react";
 
 const MONO = "'JetBrains Mono'";
 
@@ -144,11 +144,12 @@ export default function AgyCard({ t, color, snap, busy, err, disabled, winSlots,
     + `（2026-09-15 起每个号都按账号直接读完整摘要，含周窗口；`
     + `所以这里为空**不再是"非当值号"那种结构性缺失**，就是这一次没取到。）`;
 
+  const cardRef = useRef<HTMLDivElement | null>(null);   // 拖拽影像要用整张卡
+
   return (
-    <div onClick={onSelect ?? onOpen}
-         draggable={drag?.draggable ?? false}
-         onDragStart={drag?.onDragStart}
-         onDragEnd={drag?.onDragEnd}
+    <div ref={cardRef}
+         onClick={onSelect ?? onOpen}
+         /* 根节点只当落点，拖拽由手柄发起（见 DragHandle） */
          onDragOver={drag?.onDragOver}
          onDrop={drag?.onDrop}
          style={{
@@ -161,7 +162,8 @@ export default function AgyCard({ t, color, snap, busy, err, disabled, winSlots,
       opacity: drag?.isDragging ? 0.4 : 1,
       transition: "background .2s ease, border-color .2s ease, opacity .15s ease",
     }}>
-      {drag && <DragHandle t={t} dragging={drag.isDragging} onDown={drag.onHandleDown} />}
+      {drag && <DragHandle t={t} dragging={drag.isDragging} dragId={drag.dragId}
+                           cardRef={cardRef} onStart={drag.onDragStart} onEnd={drag.onDragEnd} />}
       {/* ★ 有快捷键就画 `⌘N`（与账号卡同位同字号），没有就退回 `CLI` ——
           那个角标本来就是"这张卡怎么来的"，两种写法都在回答同一个问题。 */}
       <span style={{ position: "absolute", top: 6, left: 10, color,

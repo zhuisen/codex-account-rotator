@@ -174,16 +174,38 @@ class DraggingDoesNotBreakClickToSelect(unittest.TestCase):
         `onClick={(e) => e.stopPropagation()}` 落在同一个窗口里 —— 于是把 `onMouseDown`
         的那处整个删掉，闸**照样绿**（变异实测）。本仓空守卫形态③：同一个词、不同的用途。
         """
-        self.assertIn("onMouseDown={(e) => { e.stopPropagation(); onDown(); }}", self.handle,
+        self.assertIn("onMouseDown={(e) => { e.stopPropagation(); }}", self.handle,
                       "★ 按手柄会连带触发「点一下=选中」—— onMouseDown 必须自己拦")
 
     def test_the_handle_also_stops_the_click(self):
         """松手时的 click 是**另一件事**，也要拦，否则点击仍会穿透成「选中」。"""
         self.assertIn("onClick={(e) => e.stopPropagation()}", self.handle)
 
-    def test_the_card_is_only_draggable_once_the_handle_is_pressed(self):
-        self.assertIn("draggable={drag?.draggable ?? false}", self.card,
-                      "★ draggable 常开的话整张卡随手一拖就走 —— 选手柄就是为了避免这个")
+    def test_the_handle_carries_draggable_itself(self):
+        """★★★ **前提已被取代**（2026-09-20）。
+
+        旧判据是「卡片根节点按下手柄后才 `draggable`」。那个设计在 **WKWebView 上根本
+        起不来** —— WebKit 在 `mousedown` 那一刻就判定能不能拖，而 React 的 `setState`
+        是异步的。用户报的「能拖拽，但改变不了位置」就是它。
+        现在手柄**自己恒为 `draggable`**，不需要任何异步 arming。
+        """
+        i = self.handle.index("<span")
+        head = self.handle[i:i + 200]
+        self.assertIn("draggable", head,
+                      "★★★ 手柄自己不 draggable —— WKWebView 上拖不起来")
+        self.assertNotIn("armed", self.handle, "★ 异步 arming 已废弃，别再回去")
+
+    def test_the_card_root_is_drop_target_only(self):
+        """卡片根节点只接 `onDragOver`/`onDrop`，**不再自己 draggable**。"""
+        self.assertNotIn("draggable=", self.card,
+                         "★ 卡片根节点又挂上 draggable 了 —— 整张卡会随手拖走")
+        self.assertIn("onDragOver={drag?.onDragOver}", self.card)
+        self.assertIn("onDrop={drag?.onDrop}", self.card)
+
+    def test_dragstart_sets_data_on_the_transfer(self):
+        """★★★ WebKit 没有 `setData` 就不派发 `drop` —— 症状是「能拖但位置不变」。"""
+        self.assertIn('setData("text/plain"', self.handle,
+                      "★★★ 少了 setData，WKWebView 上 drop 永远不会发生")
 
     def test_without_the_drag_prop_no_handle_is_rendered(self):
         """不传 `drag` 的调用方（菜单栏等）行为必须零变化。"""
@@ -211,6 +233,113 @@ class TheOrderIsBroadcastAcrossWebviews(unittest.TestCase):
         self.assertNotIn("run_rotate", code)
         self.assertNotIn("state.json", code)
         self.assertNotIn("invoke(", code, "★ 展示偏好不该走 IPC")
+
+
+HARNESS = "http://127.0.0.1:3304"
+APP_DIR = ROOT / "codexbar" / "uishot" / "app"
+CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+
+#: 在真页面上跑一次完整拖拽，回报三件事。
+#: ★★ 这是**之前缺的那一环**：`applyOrder`/`moveItem` 有行为闸、接线有静态闸，
+#:    而「真拖一次到底有没有生效」从没跑过 —— 用户 2026-09-20 报的就是这个缺口
+#:    （能拖，但位置不变）。
+_PROBE_JS = r"""
+const out = {};
+const ids = () => [...document.querySelectorAll('[data-cards-grid] > div')]
+  .map(d => (d.textContent.match(/demo\d+@/) || ['?'])[0]).slice(0, 5);
+const cards = () => [...document.querySelectorAll('[data-cards-grid] > div')];
+const wait = ms => new Promise(r => setTimeout(r, ms));
+(async () => {
+  try {
+    const before = ids();
+    const a = cards()[0], b = cards()[2];
+    const h = a.querySelector('span[title*="拖动"]');
+    out.handleFound = !!h;
+    out.handleDraggableAtRest = h && h.getAttribute('draggable');
+    const dt = new DataTransfer();
+    h.dispatchEvent(new DragEvent('dragstart', {bubbles:true, dataTransfer:dt}));
+    await wait(120);
+    out.dataWritten = dt.getData('text/plain');
+    b.dispatchEvent(new DragEvent('dragover', {bubbles:true, dataTransfer:dt, cancelable:true}));
+    await wait(120);
+    b.dispatchEvent(new DragEvent('drop', {bubbles:true, dataTransfer:dt, cancelable:true}));
+    await wait(500);
+    out.before = before; out.after = ids();
+    out.reordered = JSON.stringify(before) !== JSON.stringify(out.after);
+  } catch (e) { out.error = String(e); }
+  document.title = '__DRAG__' + JSON.stringify(out);
+})();
+"""
+
+
+def _run_drag_probe():
+    """生成探针页、跑一次 headless、把结果取回来。拿不到环境就返回 None（调用方 skip）。"""
+    import re as _re
+    import urllib.request
+    src = APP_DIR / "harness.html"
+    if not Path(CHROME).exists() or not src.exists():
+        return None
+    try:
+        urllib.request.urlopen(HARNESS, timeout=2).read(1)
+    except Exception:
+        return None
+    page = APP_DIR / "dragprobe.html"
+    page.write_text(src.read_text(encoding="utf-8").replace(
+        "</body>", f"<script>setTimeout(() => {{{_PROBE_JS}}}, 2600);</script></body>", 1),
+        encoding="utf-8")
+    try:
+        r = subprocess.run([CHROME, "--headless=new", "--disable-gpu",
+                            "--window-size=1000,900", "--virtual-time-budget=11000",
+                            "--dump-dom", f"{HARNESS}/dragprobe.html?nav=home"],
+                           capture_output=True, text=True, timeout=120)
+        m = _re.search(r"__DRAG__(\{.*\})\s*</title>", r.stdout, _re.S)
+        return json.loads(m.group(1)) if m else None
+    finally:
+        page.unlink(missing_ok=True)
+
+
+class DraggingOneCardActuallyMovesIt(unittest.TestCase):
+    """★★★ 端到端：真派发一次拖拽，看卡片顺序有没有变。
+
+    用户 2026-09-20 报「能拖拽，但是改变不了卡片的位置」。当时**所有闸都是绿的** ——
+    因为它们只测了纯函数与接线文本，**没有一条真的拖过一次**。
+
+    真因是两条 **WebKit 特有**的要求，Chrome 都宽容，所以更难发现：
+
+      ① `dragstart` 必须往 `dataTransfer` 写点东西，否则拖拽数据仓为空、
+         **WebKit 根本不派发 `drop`**；
+      ② `draggable` 必须在 `mousedown` **之前**就为真 —— WebKit 在按下那一刻判定，
+         而原来的写法是「按下手柄 → `setState` 打开卡片的 `draggable`」，React 追不上。
+
+    ⚠️ **这条闸跑在 Chrome，不是 WKWebView**（TCC 挡着抓屏，本仓结构性缺口）。
+       所以它能守住「逻辑链通不通」与上面两条硬要求，**不能**替代真机点一次。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.out = _run_drag_probe()
+        if cls.out is None:
+            raise unittest.SkipTest(
+                "需要 Chrome + 跑着的 harness（127.0.0.1:3304）。"
+                "★ skip 不是绿 —— 要验这条请先 `python3 codexbar/uishot/make_harness.py` 并起静态服务")
+
+    def test_the_probe_found_a_handle(self):
+        self.assertTrue(self.out.get("handleFound"), f"卡片上没有手柄：{self.out}")
+
+    def test_the_handle_is_draggable_without_any_arming(self):
+        """★★ WebKit 在 `mousedown` 那一刻判定能不能拖，异步 `setState` 追不上。"""
+        self.assertEqual(self.out.get("handleDraggableAtRest"), "true",
+                         "★★ 手柄静止时不可拖 —— WKWebView 上拖拽根本起不来")
+
+    def test_dragstart_writes_to_the_data_transfer(self):
+        """★★★ 没有 `setData`，WebKit 不派发 `drop` —— 症状正是「能拖但位置不变」。"""
+        self.assertTrue(self.out.get("dataWritten"),
+                        "★★★ dragstart 没往 dataTransfer 写东西 —— WebKit 不会派发 drop")
+
+    def test_the_card_actually_moves(self):
+        self.assertIsNone(self.out.get("error"), self.out.get("error"))
+        self.assertTrue(self.out.get("reordered"),
+                        f"★★★ 拖完顺序没变：{self.out.get('before')} → {self.out.get('after')}")
 
 
 if __name__ == "__main__":

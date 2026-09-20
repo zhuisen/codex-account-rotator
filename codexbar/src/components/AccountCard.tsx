@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { STATUS_COLORS, STATUS_TEXT, CARD_TYPE as Z, type Theme } from "../theme";
 import StaleMark from "./StaleMark";
 import DragHandle, { type DragWiring } from "./DragHandle";
@@ -65,6 +65,7 @@ export default function AccountCard({ a, isCurrent, isBest, isSelected, shortcut
    *  查找的 switch/probe 静默操作到错的号上。这里只挡「没改」。 */
   onRename: (next: string) => void;
 }) {
+  const cardRef = useRef<HTMLDivElement | null>(null);   // 拖拽影像要用整张卡
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [editing, setEditing] = useState<string | null>(null);   // null = 不在改名
   // 卡片一取消选中就退出改名:否则输入框会留在收起的卡片上,看不见却仍持有焦点
@@ -99,10 +100,10 @@ export default function AccountCard({ a, isCurrent, isBest, isSelected, shortcut
 
   return (
     <div
+      ref={cardRef}
       onClick={onSelect}
-      draggable={drag?.draggable ?? false}
-      onDragStart={drag?.onDragStart}
-      onDragEnd={drag?.onDragEnd}
+      /* ★ 根节点**只当落点**。拖拽由手柄自己发起（它恒为 draggable）——
+         原来在这里异步打开 `draggable` 的写法在 WKWebView 上根本起不来，见 DragHandle。 */
       onDragOver={drag?.onDragOver}
       onDrop={drag?.onDrop}
       style={{
@@ -121,7 +122,8 @@ export default function AccountCard({ a, isCurrent, isBest, isSelected, shortcut
 
       {/* 拖拽手柄（⠿）。`onMouseDown` 才把根节点的 `draggable` 打开 —— HTML5 DnD 只认
           根节点上的 `draggable`，常开的话整张卡随手一拖就走，正是选「专用手柄」要避免的。 */}
-      {drag && <DragHandle t={t} dragging={drag.isDragging} onDown={drag.onHandleDown} />}
+      {drag && <DragHandle t={t} dragging={drag.isDragging} dragId={drag.dragId}
+                           cardRef={cardRef} onStart={drag.onDragStart} onEnd={drag.onDragEnd} />}
 
       {/* ★★ `flex:1` + 内容列 `alignSelf:stretch`：卡片在网格里本来就等高（`stretch`），
           这里把多出来的高度交给内容列，好让下方区块**吊在卡片底边**（见下方 spacer）。

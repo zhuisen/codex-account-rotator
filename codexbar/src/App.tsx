@@ -87,8 +87,9 @@ export default function App() {
   /** 正在拖的那张卡的 aid；`overAid` 是当前悬停的落点。都只在拖拽期间有值。 */
   const [dragAid, setDragAid] = useState<string | null>(null);
   const [overAid, setOverAid] = useState<string | null>(null);
-  /** 只有按下 ⠿ 手柄才把根节点的 `draggable` 打开 —— 否则整张卡随手一拖就走。 */
-  const [armedAid, setArmedAid] = useState<string | null>(null);
+  // ⚠️ 原来这里还有一个 `armedAid`：按下手柄→setState→打开卡片根节点的 `draggable`。
+  //    **在 WKWebView 上根本起不来**（WebKit 在 mousedown 那一刻就判定能不能拖，
+  //    React 的 setState 追不上）。现在手柄自己恒为 draggable，这个状态随之删除。
   /** 时间范围（交接稿 §7 的 `RangeState`）。★ **默认 30d**（v1.5 是 14d）。
    *  总览与平台详情**共用这一份** —— 钻进详情再返回不该把档位重置。 */
   const [trafficSt, setTrafficSt] = useState<RangeState>(DEFAULT_RANGE);
@@ -220,7 +221,7 @@ export default function App() {
     if (from >= 0 && to >= 0 && from !== to) {
       setOrderFor("codex", moveItem(orderedAlive, from, to).map((x) => x.aid));
     }
-    setDragAid(null); setOverAid(null); setArmedAid(null);
+    setDragAid(null); setOverAid(null);
   };
 
   useKeyboard(win, refresh, setPage as (p: string) => void, (idx) => {
@@ -263,7 +264,7 @@ export default function App() {
     if (from >= 0 && to >= 0 && from !== to) {
       setOrderFor("gemini", moveItem(orderedAgy, from, to).map((x) => x.sub));
     }
-    setDragAid(null); setOverAid(null); setArmedAid(null);
+    setDragAid(null); setOverAid(null);
   };
   const trafficDays = daysNeeded(trafficSt, todayOf(null));
   const { data: traffic, raw: trafficRaw, cacheMode, prefs: platPrefs, busy: trafficBusy,
@@ -743,15 +744,19 @@ export default function App() {
                         return (
                         <AccountCard key={a.aid} a={a} isCurrent={a.aid === currentNode} isBest={hero?.aid === a.aid} isSelected={selectedCard === a.aid} reserveActions={selectedCard !== null} shortcut={shortcutIdx >= 0 && shortcutIdx < 9 ? shortcutIdx + 1 : undefined} bestPct={bestPct} winSlots={winSlots} probing={loadingAction === `probe-${a.aid}`} privacy={privacy} t={t}
                           drag={{
-                            draggable: armedAid === a.aid,
+                            dragId: a.aid,
                             isDragging: dragAid === a.aid,
                             isOver: overAid === a.aid && dragAid !== a.aid,
-                            onHandleDown: () => setArmedAid(a.aid),
                             onDragStart: () => setDragAid(a.aid),
-                            onDragEnd: () => { setDragAid(null); setOverAid(null); setArmedAid(null); },
-                            // ★ `preventDefault` 是必须的:不调用它浏览器根本不允许 drop。
-                            onDragOver: (e) => { e.preventDefault(); setOverAid(a.aid); },
-                            onDrop: () => dropCardOnto(a.aid),
+                            onDragEnd: () => { setDragAid(null); setOverAid(null); },
+                            // ★ `preventDefault` + `dropEffect` 都是必须的:
+                            //   不调用 preventDefault 浏览器根本不允许在这里 drop。
+                            onDragOver: (e) => {
+                              e.preventDefault();
+                              e.dataTransfer.dropEffect = "move";
+                              setOverAid(a.aid);
+                            },
+                            onDrop: (e) => { e.preventDefault(); dropCardOnto(a.aid); },
                           }}
                           onSelect={() => setSelectedCard(selectedCard === a.aid ? null : a.aid)}
                           onSwitch={() => run(`switch-${a.aid}`, ["switch", a.node], `当前号 → ${a.node}`)}
@@ -870,14 +875,17 @@ export default function App() {
                                      disabled={!!platPrefs.by?.agy?.off} winSlots={winSlots}
                                      busy={agyPool.busy} err={agyPool.err}
                                      drag={{
-                                       draggable: armedAid === a.sub,
+                                       dragId: a.sub,
                                        isDragging: dragAid === a.sub,
                                        isOver: overAid === a.sub && dragAid !== a.sub,
-                                       onHandleDown: () => setArmedAid(a.sub),
                                        onDragStart: () => setDragAid(a.sub),
-                                       onDragEnd: () => { setDragAid(null); setOverAid(null); setArmedAid(null); },
-                                       onDragOver: (e) => { e.preventDefault(); setOverAid(a.sub); },
-                                       onDrop: () => dropAgyOnto(a.sub),
+                                       onDragEnd: () => { setDragAid(null); setOverAid(null); },
+                                       onDragOver: (e) => {
+                                         e.preventDefault();
+                                         e.dataTransfer.dropEffect = "move";
+                                         setOverAid(a.sub);
+                                       },
+                                       onDrop: (e) => { e.preventDefault(); dropAgyOnto(a.sub); },
                                      }}
                                      onRefresh={agyPool.refresh}
                                      /* ── 与 codex 账号卡对齐（用户 2026-09-13）── */
