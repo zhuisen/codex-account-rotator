@@ -3,75 +3,71 @@ import { CARD_TYPE as Z, type Theme } from "../theme";
 /**
  * 卡片右上角的拖拽手柄（⠿）。
  *
- * ★ 抽成一个件是因为 `AccountCard` 与 `AgyCard` 都要用 —— 同一条交互规则的两份实现
- *   必然分叉（本仓铁律）。
+ * ## ★★★ 为什么**不用** HTML5 drag-and-drop（2026-09-20 重做）
  *
- * ## ★★★ 为什么 `draggable` 在**手柄自己**身上，而不是在卡片根节点上
+ * 用户连报两次「能拖拽，但是改变不了卡片的位置」。真因是 **Tauri 窗口的
+ * `dragDropEnabled` 默认为 `true`**，它的**原生拖放处理器会吞掉 webview 里的
+ * HTML5 拖拽事件** —— `drop` 根本到不了页面。而 harness 跑在 Chrome，没有那层拦截，
+ * 所以端到端闸一路绿、真机从第一步就不成立。
  *
- * 第一版是「按下手柄 → `setState` 打开卡片根节点的 `draggable`」。**在 WKWebView 上不工作**
- * （用户 2026-09-20 实测：能拖，但位置不变）：
+ * ⚠️ 在此之前我还修了两条**真实但不是拦路的** WebKit 要求（`dragstart` 必须
+ *   `setData`、`draggable` 不能异步打开）。它们都成立，只是上面还压着 Tauri 那一层。
+ *   **「找到一个真原因」不等于「找到那个原因」** —— 这一轮的教训。
  *
- *   · **WebKit 在 `mousedown` 那一刻就判定这个元素能不能拖**，而 React 的 `setState` 是异步的
- *     —— 等重渲染把 `draggable` 打开时，拖拽手势早已按「不可拖」处理掉了。
- *     Chrome 判定得晚，所以 harness 里一路绿，真机上从第一步就没起来。
+ * 现在改用 **pointer 事件**：不依赖任何 DnD 语义、不会被任何原生层拦截，
+ * 而且能做到用户要的**实时让位**（拖到哪儿其余卡片当场移开）——
+ * 那是 HTML5 DnD 做不到的，它的拖拽影像是一张静态快照。
  *
- * 现在手柄**恒为 `draggable`**，不需要任何异步 arming：按住它就能拖，而卡片其余部分
- * 照旧「点一下 = 选中」。拖拽影像用 `setDragImage` 换成整张卡，手感与拖卡片一致。
+ * ## 两处拦截都要
  *
- * ## ★★★ `setData` 不是可选的
- *
- * WebKit 要求 `dragstart` 里往 dataTransfer 写点东西，否则**拖拽数据仓为空、`drop` 根本不派发**。
- * Chrome 宽容，所以同样的代码在 harness 里能跑通 —— 这正是「Chrome headless ≠ WKWebView」
- * 那条本仓铁律的又一个实例（上次是 `zoom`）。
- *
- * ## 两处 `stopPropagation` 都要
- *
- * `onMouseDown` 拦的是「按下就选中」，`onClick` 拦的是「松手后的点击」。缺一个都会让
- * 点击穿透成「选中并展开动作条」。
+ * `onPointerDown` 拦的是「按下就选中」，`onClick` 拦的是「松手后的点击」。
+ * 缺一个都会让点击穿透成「选中并展开动作条」。
  */
-export default function DragHandle({ t, dragging, dragId, cardRef, onStart, onEnd, hint }: {
+export default function DragHandle({ t, dragging, hint, onStart, onMove, onEnd }: {
   t: Theme;
   dragging: boolean;
-  /** 写进 dataTransfer 的身份。★ 内容本身不重要，**有没有写**才重要（见上）。 */
-  dragId: string;
-  /** 卡片根节点 —— 用它当拖拽影像，否则拖起来的是这个 12px 的小手柄。 */
-  cardRef: React.RefObject<HTMLDivElement | null>;
-  onStart: () => void;
-  onEnd: () => void;
   /**
    * 悬浮说明。**两档含义不同，所以文案必须由调用方给**：
    *   · codex 档 —— 顺序**就是轮换优先级**，一拖就改变钱花在哪个号上；
    *   · gemini 档 —— 纯摆放顺序，不影响任何东西。
-   * ★ 写死一句「调整卡片顺序」会在 codex 档变成**一句关于事实的假陈述** ——
-   *   本仓铁律「换了数据源，页面上的话必须跟着换」。
+   * ★ 写死一句「调整卡片顺序」会在 codex 档变成**一句关于事实的假陈述**。
    */
   hint: string;
+  onStart: (x: number, y: number) => void;
+  onMove: (x: number, y: number) => void;
+  onEnd: (commit: boolean) => void;
 }) {
   return (
     <span
-      draggable
-      onDragStart={(e) => {
-        // ★★★ WebKit 没有这一句就不派发 drop。`effectAllowed` 同理要显式给。
-        e.dataTransfer.effectAllowed = "move";
-        e.dataTransfer.setData("text/plain", dragId);
-        const el = cardRef.current;
-        if (el) {
-          const r = el.getBoundingClientRect();
-          // 拖整张卡的影像，而不是这个小手柄
-          e.dataTransfer.setDragImage(el, r.width - 20, 16);
-        }
-        onStart();
+      data-drag-handle
+      onPointerDown={(e) => {
+        e.stopPropagation();
+        e.preventDefault();
+        // ★★ 捕获指针：之后所有 move/up 都送到这个元素，哪怕鼠标早已移出它。
+        //   不捕获的话鼠标一离开这 12px 就断线 —— 而拖拽本来就是要离开它。
+        e.currentTarget.setPointerCapture(e.pointerId);
+        onStart(e.clientX, e.clientY);
       }}
-      onDragEnd={onEnd}
-      onMouseDown={(e) => { e.stopPropagation(); }}
+      onPointerMove={(e) => { if (dragging) onMove(e.clientX, e.clientY); }}
+      onPointerUp={(e) => {
+        if (!dragging) return;
+        e.stopPropagation();
+        try { e.currentTarget.releasePointerCapture(e.pointerId); } catch { /* 已释放 */ }
+        onEnd(true);
+      }}
+      // ★ 取消（Esc、系统手势打断）必须**放弃**这次排序，不能当成落点 ——
+      //   否则一次误操作就改掉顺序，而 codex 档的顺序就是计费顺序。
+      onPointerCancel={() => { if (dragging) onEnd(false); }}
       onClick={(e) => e.stopPropagation()}
       title={hint}
       style={{
         position: "absolute", top: 4, right: 8, padding: "2px 4px",
-        fontSize: Z.shortcut, lineHeight: 1, cursor: "grab",
+        fontSize: Z.shortcut, lineHeight: 1,
+        cursor: dragging ? "grabbing" : "grab",
         color: dragging ? t.accent : t.muted,
         opacity: dragging ? 1 : 0.55,
         fontFamily: "'JetBrains Mono'", userSelect: "none",
+        touchAction: "none",          // 别让系统先把它解释成滚动
       }}
     >⠿</span>
   );
@@ -79,13 +75,9 @@ export default function DragHandle({ t, dragging, dragId, cardRef, onStart, onEn
 
 /** 拖拽接线的形状。两张卡片共用，省得各写一份 props。 */
 export interface DragWiring {
-  /** 这张卡的身份，写进 dataTransfer（WebKit 要求非空）。 */
-  dragId: string;
-  onDragStart: () => void;
-  onDragEnd: () => void;
-  /** ★ 必须 `preventDefault()`，否则浏览器不允许在这里 drop。 */
-  onDragOver: (e: React.DragEvent) => void;
-  onDrop: (e: React.DragEvent) => void;
+  hint: string;
   isDragging: boolean;
-  isOver: boolean;
+  onStart: (x: number, y: number) => void;
+  onMove: (x: number, y: number) => void;
+  onEnd: (commit: boolean) => void;
 }

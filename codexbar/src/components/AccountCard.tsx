@@ -101,30 +101,27 @@ export default function AccountCard({ a, isCurrent, isBest, isSelected, shortcut
   return (
     <div
       ref={cardRef}
+      data-aid={a.aid}
       onClick={onSelect}
-      /* ★ 根节点**只当落点**。拖拽由手柄自己发起（它恒为 draggable）——
-         原来在这里异步打开 `draggable` 的写法在 WKWebView 上根本起不来，见 DragHandle。 */
-      onDragOver={drag?.onDragOver}
-      onDrop={drag?.onDrop}
       style={{
         position: "relative", background: isCurrent ? t.curCardBg : t.cardBg,
-        // ★ 落点用**描边**而不是插入一条占位线:网格是三列的,插线会让整排卡片跳位,
-        //   而跳位期间鼠标下方的落点就变了 —— 拖到一半目标自己跑掉是最难用的一种。
-        border: `1px solid ${drag?.isOver ? t.accent : border}`, borderRadius: 12,
+        border: `1px solid ${drag?.isDragging ? t.accent : border}`, borderRadius: 12,
         padding: "16px 14px 12px", display: "flex", flexDirection: "column",
         cursor: "pointer", userSelect: "none",
-        // 被拖起的那张变淡,让下方的落点看得见
-        opacity: drag?.isDragging ? 0.4 : (isDead ? 0.55 : 1),
-        transition: "background .2s ease, border-color .2s ease, opacity .15s ease",
+        // ★ 被拖的那张**浮起来**(不是变淡):其余卡片实时让位,让位本身就是落点反馈,
+        //   所以这里要的是"它被拿在手上"的观感 —— 与手机拖图标一致。
+        opacity: isDead ? 0.55 : 1,
+        zIndex: drag?.isDragging ? 5 : undefined,
+        boxShadow: drag?.isDragging ? "0 8px 24px rgba(0,0,0,.45)" : undefined,
+        transform: drag?.isDragging ? "scale(1.03)" : undefined,
+        transition: "background .2s ease, border-color .2s ease, box-shadow .15s ease, transform .15s ease",
       }}>
 
       {shortcut && <span style={{ position: "absolute", top: 6, left: 10, fontSize: Z.shortcut, color: t.muted, fontFamily: "'JetBrains Mono'" }}>⌘{shortcut}</span>}
 
-      {/* 拖拽手柄（⠿）。`onMouseDown` 才把根节点的 `draggable` 打开 —— HTML5 DnD 只认
-          根节点上的 `draggable`，常开的话整张卡随手一拖就走，正是选「专用手柄」要避免的。 */}
-      {drag && <DragHandle t={t} dragging={drag.isDragging} dragId={drag.dragId}
-                           cardRef={cardRef} onStart={drag.onDragStart} onEnd={drag.onDragEnd}
-                           hint={"按住拖动排序。★ 这个顺序**就是轮换优先级**：排在前面的号会先被用，且**优先级压过额度** —— 第一个号会一直用到撞限、冷却后才轮到下一个。⌘N 也跟着新顺序走。"} />}
+      {/* 拖拽手柄（⠿）。走 pointer 事件，不走 HTML5 DnD —— 理由见 DragHandle。 */}
+      {drag && <DragHandle t={t} dragging={drag.isDragging} hint={drag.hint}
+                           onStart={drag.onStart} onMove={drag.onMove} onEnd={drag.onEnd} />}
 
       {/* ★★ `flex:1` + 内容列 `alignSelf:stretch`：卡片在网格里本来就等高（`stretch`），
           这里把多出来的高度交给内容列，好让下方区块**吊在卡片底边**（见下方 spacer）。

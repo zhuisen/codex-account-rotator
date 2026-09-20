@@ -169,61 +169,106 @@ class TheGeminiLaneFollowsTheSameRule(unittest.TestCase):
 
 
 class DraggingDoesNotBreakClickToSelect(unittest.TestCase):
-    """★ 卡片现在「点一下 = 选中并展开动作条」。手柄必须把两件事分开。
-
-    ⚠️ 手柄 2026-09-19 抽成了 `components/DragHandle.tsx`（`AccountCard` 与 `AgyCard`
-    都要用，同一条交互规则的两份实现必然分叉）。判据跟着搬到新家 —— **规则没变，家变了**。
-    """
+    """★ 卡片「点一下 = 选中并展开动作条」。手柄必须把两件事分开。"""
 
     @classmethod
     def setUpClass(cls):
         cls.handle = (SRC / "components" / "DragHandle.tsx").read_text(encoding="utf-8")
         cls.card = (SRC / "components" / "AccountCard.tsx").read_text(encoding="utf-8")
 
-    def test_the_handle_stops_propagation_on_mousedown(self):
-        """★ 断言打在 **`onMouseDown` 这一个 handler** 上，不是「附近出现过这个词」。
+    def test_pointer_down_stops_propagation(self):
+        self.assertIn("onPointerDown={(e) => {\n        e.stopPropagation();", self.handle,
+                      "★ 按手柄会连带触发「点一下=选中」")
 
-        ⚠️ 第一版取 `[i-260 : i+80]` 的窗口，而手柄上还有**另一个**
-        `onClick={(e) => e.stopPropagation()}` 落在同一个窗口里 —— 于是把 `onMouseDown`
-        的那处整个删掉，闸**照样绿**（变异实测）。本仓空守卫形态③：同一个词、不同的用途。
-        """
-        self.assertIn("onMouseDown={(e) => { e.stopPropagation(); }}", self.handle,
-                      "★ 按手柄会连带触发「点一下=选中」—— onMouseDown 必须自己拦")
-
-    def test_the_handle_also_stops_the_click(self):
-        """松手时的 click 是**另一件事**，也要拦，否则点击仍会穿透成「选中」。"""
+    def test_the_click_is_stopped_too(self):
+        """松手时的 click 是**另一件事**，也要拦。"""
         self.assertIn("onClick={(e) => e.stopPropagation()}", self.handle)
 
-    def test_the_handle_carries_draggable_itself(self):
-        """★★★ **前提已被取代**（2026-09-20）。
-
-        旧判据是「卡片根节点按下手柄后才 `draggable`」。那个设计在 **WKWebView 上根本
-        起不来** —— WebKit 在 `mousedown` 那一刻就判定能不能拖，而 React 的 `setState`
-        是异步的。用户报的「能拖拽，但改变不了位置」就是它。
-        现在手柄**自己恒为 `draggable`**，不需要任何异步 arming。
-        """
-        i = self.handle.index("<span")
-        head = self.handle[i:i + 200]
-        self.assertIn("draggable", head,
-                      "★★★ 手柄自己不 draggable —— WKWebView 上拖不起来")
-        self.assertNotIn("armed", self.handle, "★ 异步 arming 已废弃，别再回去")
-
-    def test_the_card_root_is_drop_target_only(self):
-        """卡片根节点只接 `onDragOver`/`onDrop`，**不再自己 draggable**。"""
-        self.assertNotIn("draggable=", self.card,
-                         "★ 卡片根节点又挂上 draggable 了 —— 整张卡会随手拖走")
-        self.assertIn("onDragOver={drag?.onDragOver}", self.card)
-        self.assertIn("onDrop={drag?.onDrop}", self.card)
-
-    def test_dragstart_sets_data_on_the_transfer(self):
-        """★★★ WebKit 没有 `setData` 就不派发 `drop` —— 症状是「能拖但位置不变」。"""
-        self.assertIn('setData("text/plain"', self.handle,
-                      "★★★ 少了 setData，WKWebView 上 drop 永远不会发生")
-
     def test_without_the_drag_prop_no_handle_is_rendered(self):
-        """不传 `drag` 的调用方（菜单栏等）行为必须零变化。"""
         self.assertIn("drag?: DragWiring", self.card, "drag 必须是可选 prop")
         self.assertIn("{drag && <DragHandle", self.card, "没有 drag 时不该渲染手柄")
+
+
+class ItUsesPointerEventsNotHtml5Dnd(unittest.TestCase):
+    """★★★ **前提已被取代两次，这是定稿**（2026-09-20）。
+
+    HTML5 drag-and-drop 在这个 app 里**不可用**：Tauri 窗口的 `dragDropEnabled` 默认为
+    `true`，它的**原生拖放处理器会吞掉 webview 里的拖拽事件** —— `drop` 根本到不了页面。
+    而 harness 跑在 Chrome、没有那层拦截，所以端到端闸一路绿、真机从第一步就不成立
+    （用户连报两次「能拖拽，但是改变不了卡片的位置」）。
+
+    ⚠️ 在此之前我还修过两条**真实但不是拦路的** WebKit 要求（`setData`、异步 `draggable`）。
+       **「找到一个真原因」不等于「找到那个原因」。**
+
+    pointer 事件不依赖任何 DnD 语义，也做得到用户要的**实时让位**。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.handle = (SRC / "components" / "DragHandle.tsx").read_text(encoding="utf-8")
+        cls.app = (SRC / "App.tsx").read_text(encoding="utf-8")
+        cls.card = (SRC / "components" / "AccountCard.tsx").read_text(encoding="utf-8")
+
+    @staticmethod
+    def _code(txt):
+        """剥掉注释 —— 这两个文件的注释里正解释着「为什么不用 HTML5 DnD」，
+        直接断言会撞上那段说明而假红。本仓空守卫形态④，本轮已踩第三次。"""
+        return "\n".join(l for l in txt.splitlines()
+                          if not l.strip().startswith(("//", "*", "/*", "{/*")))
+
+    def test_no_html5_dnd_anywhere_in_the_drag_path(self):
+        h, cd = self._code(self.handle), self._code(self.card)
+        for name in ("onDragStart", "onDragOver", "onDrop", "dataTransfer", "draggable"):
+            self.assertNotIn(name, h, f"★★★ 手柄又回到 HTML5 DnD 了（{name}）")
+            self.assertNotIn(name, cd, f"★★★ 卡片又挂上 HTML5 DnD 了（{name}）")
+
+    def test_it_captures_the_pointer(self):
+        """★ 不捕获的话鼠标一离开这 12px 就断线 —— 而拖拽本来就是要离开它。"""
+        self.assertIn("setPointerCapture", self.handle,
+                      "★ 没捕获指针 —— 拖出手柄范围就断")
+
+    def test_cancel_abandons_instead_of_committing(self):
+        """★★ Esc / 系统打断必须**放弃**排序 —— codex 档的顺序就是计费顺序。"""
+        self.assertIn("onPointerCancel", self.handle)
+        self.assertIn("onEnd(false)", self.handle, "★★ 取消被当成了落点")
+        self.assertIn("if (ok && next", self.app, "★★ App 侧没有区分 commit/取消")
+
+    def test_cards_expose_an_aid_for_hit_testing(self):
+        self.assertIn("data-aid={a.aid}", self.card,
+                      "★ 没有 data-aid，命中测试找不到落点")
+
+
+class OtherCardsMoveOutOfTheWayWhileDragging(unittest.TestCase):
+    """★★ 用户 2026-09-20 点名要的手感：「像手机拖拽应用程序图标那种，
+    放在一个位置后其他卡片要后移让位置」。
+
+    做法是拖动过程中**当场重排预览数组**（`preview`），而不是等松手才动 ——
+    让位本身就是落点反馈，所以不再需要"落点描边"那套。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        raw = (SRC / "App.tsx").read_text(encoding="utf-8")
+        cls.code = "\n".join(l for l in raw.splitlines()
+                              if not l.strip().startswith(("//", "*", "/*")))
+
+    def test_there_is_a_live_preview_order(self):
+        self.assertIn("const [preview, setPreview]", self.code,
+                      "★★ 没有预览顺序 —— 只能等松手才动，不是要的手感")
+
+    def test_the_preview_is_reordered_during_move(self):
+        i = self.code.index("onMove:")
+        self.assertIn("moveItem(base, from, to)", self.code[i:i + 600],
+                      "★★ 拖动中没有重排 —— 其余卡片不会让位")
+
+    def test_the_rendered_order_follows_the_preview(self):
+        self.assertIn("preview ? applyOrder(savedAlive, preview", self.code,
+                      "★★ 渲染没跟着预览走，让位看不见")
+
+    def test_the_dragged_card_lifts(self):
+        card = (SRC / "components" / "AccountCard.tsx").read_text(encoding="utf-8")
+        self.assertIn("boxShadow: drag?.isDragging", card, "★ 被拖的卡片没有浮起观感")
+        self.assertIn('transform: drag?.isDragging ? "scale(', card)
 
 
 class TheOrderIsBroadcastAcrossWebviews(unittest.TestCase):
@@ -258,24 +303,31 @@ CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 #:    （能拖，但位置不变）。
 _PROBE_JS = r"""
 const out = {};
-const ids = () => [...document.querySelectorAll('[data-cards-grid] > div')]
-  .map(d => (d.textContent.match(/demo\d+@/) || ['?'])[0]).slice(0, 5);
-const cards = () => [...document.querySelectorAll('[data-cards-grid] > div')];
+const ids = () => [...document.querySelectorAll('[data-cards-grid] > div[data-aid]')]
+  .map(d => d.dataset.aid).slice(0, 6);
+const cards = () => [...document.querySelectorAll('[data-cards-grid] > div[data-aid]')];
 const wait = ms => new Promise(r => setTimeout(r, ms));
+const pe = (type, el, x, y) => el.dispatchEvent(new PointerEvent(type, {
+  bubbles: true, cancelable: true, pointerId: 1, clientX: x, clientY: y,
+}));
 (async () => {
   try {
     const before = ids();
     const a = cards()[0], b = cards()[2];
-    const h = a.querySelector('span[title*="拖动"]');
+    const h = a.querySelector('[data-drag-handle]');
     out.handleFound = !!h;
-    out.handleDraggableAtRest = h && h.getAttribute('draggable');
-    const dt = new DataTransfer();
-    h.dispatchEvent(new DragEvent('dragstart', {bubbles:true, dataTransfer:dt}));
+    // setPointerCapture 在合成事件里未必可用 —— 打桩掉，不让它抛断整条链
+    h.setPointerCapture = () => {}; h.releasePointerCapture = () => {};
+    const ra = a.getBoundingClientRect(), rb = b.getBoundingClientRect();
+    pe('pointerdown', h, ra.left + 5, ra.top + 5);
     await wait(120);
-    out.dataWritten = dt.getData('text/plain');
-    b.dispatchEvent(new DragEvent('dragover', {bubbles:true, dataTransfer:dt, cancelable:true}));
-    await wait(120);
-    b.dispatchEvent(new DragEvent('drop', {bubbles:true, dataTransfer:dt, cancelable:true}));
+    out.draggingStarted = !!document.querySelector('[data-cards-grid] > div[data-aid] [data-drag-handle]');
+    pe('pointermove', h, rb.left + rb.width / 2, rb.top + rb.height / 2);
+    await wait(200);
+    // ★ 关键:**松手之前**顺序就该变了(实时让位)
+    out.duringDrag = ids();
+    out.reflowedWhileDragging = JSON.stringify(before) !== JSON.stringify(out.duringDrag);
+    pe('pointerup', h, rb.left + rb.width / 2, rb.top + rb.height / 2);
     await wait(500);
     out.before = before; out.after = ids();
     out.reordered = JSON.stringify(before) !== JSON.stringify(out.after);
@@ -339,15 +391,15 @@ class DraggingOneCardActuallyMovesIt(unittest.TestCase):
     def test_the_probe_found_a_handle(self):
         self.assertTrue(self.out.get("handleFound"), f"卡片上没有手柄：{self.out}")
 
-    def test_the_handle_is_draggable_without_any_arming(self):
-        """★★ WebKit 在 `mousedown` 那一刻判定能不能拖，异步 `setState` 追不上。"""
-        self.assertEqual(self.out.get("handleDraggableAtRest"), "true",
-                         "★★ 手柄静止时不可拖 —— WKWebView 上拖拽根本起不来")
+    def test_other_cards_move_out_of_the_way_before_you_let_go(self):
+        """★★ 用户 2026-09-20 点名要的：「放在一个位置后其他卡片要后移让位置」。
 
-    def test_dragstart_writes_to_the_data_transfer(self):
-        """★★★ 没有 `setData`，WebKit 不派发 `drop` —— 症状正是「能拖但位置不变」。"""
-        self.assertTrue(self.out.get("dataWritten"),
-                        "★★★ dragstart 没往 dataTransfer 写东西 —— WebKit 不会派发 drop")
+        判据刻意打在**松手之前** —— 松手后才变的话那只是"排序生效"，不是"让位"。
+        """
+        self.assertIsNone(self.out.get("error"), self.out.get("error"))
+        self.assertTrue(self.out.get("reflowedWhileDragging"),
+                        f"★★ 拖动中其余卡片没有让位：{self.out.get('before')} "
+                        f"→ {self.out.get('duringDrag')}")
 
     def test_the_card_actually_moves(self):
         self.assertIsNone(self.out.get("error"), self.out.get("error"))

@@ -148,23 +148,22 @@ export default function AgyCard({ t, color, snap, busy, err, disabled, winSlots,
 
   return (
     <div ref={cardRef}
+         data-aid={label}
          onClick={onSelect ?? onOpen}
-         /* 根节点只当落点，拖拽由手柄发起（见 DragHandle） */
-         onDragOver={drag?.onDragOver}
-         onDrop={drag?.onDrop}
          style={{
       position: "relative", background: isSelected ? t.heroBg : t.cardBg,
       // 落点用描边、被拖的变淡 —— 与账号卡同一套反馈（理由见 AccountCard 那处注释）
-      border: `1px solid ${drag?.isOver ? t.accent : (isSelected ? t.accent : hexA(color, .30))}`,
+      border: `1px solid ${drag?.isDragging ? t.accent : (isSelected ? t.accent : hexA(color, .30))}`,
       borderRadius: 12,
       padding: "16px 14px 12px", display: "flex", flexDirection: "column",
       cursor: (onSelect ?? onOpen) ? "pointer" : "default", userSelect: "none",
-      opacity: drag?.isDragging ? 0.4 : 1,
-      transition: "background .2s ease, border-color .2s ease, opacity .15s ease",
+      zIndex: drag?.isDragging ? 5 : undefined,
+      boxShadow: drag?.isDragging ? "0 8px 24px rgba(0,0,0,.45)" : undefined,
+      transform: drag?.isDragging ? "scale(1.03)" : undefined,
+      transition: "background .2s ease, border-color .2s ease, box-shadow .15s ease, transform .15s ease",
     }}>
-      {drag && <DragHandle t={t} dragging={drag.isDragging} dragId={drag.dragId}
-                           cardRef={cardRef} onStart={drag.onDragStart} onEnd={drag.onDragEnd}
-                           hint={"按住拖动可调整卡片摆放顺序（⌘N 会跟着新顺序走）。只影响显示，不影响切号策略。"} />}
+      {drag && <DragHandle t={t} dragging={drag.isDragging} hint={drag.hint}
+                           onStart={drag.onStart} onMove={drag.onMove} onEnd={drag.onEnd} />}
       {/* ★ 有快捷键就画 `⌘N`（与账号卡同位同字号），没有就退回 `CLI` ——
           那个角标本来就是"这张卡怎么来的"，两种写法都在回答同一个问题。 */}
       <span style={{ position: "absolute", top: 6, left: 10, color,

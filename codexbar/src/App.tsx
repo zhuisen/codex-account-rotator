@@ -84,9 +84,13 @@ export default function App() {
   const { integration } = useIntegration();
   // 卡片自定义顺序（拖拽排序）。★ 走 localStorage + Tauri 广播，主窗与菜单栏不分叉。
   const { order: cardOrder, setOrderFor } = useCardOrder();
-  /** 正在拖的那张卡的 aid；`overAid` 是当前悬停的落点。都只在拖拽期间有值。 */
+  /**
+   * 拖拽中的状态。`preview` 是**实时让位**用的：拖到哪儿就把数组当场重排，
+   * 其余卡片立刻移开 —— 就是手机拖图标那种手感（用户 2026-09-20 要的）。
+   * 松手才落盘；`null` 表示没在拖。
+   */
   const [dragAid, setDragAid] = useState<string | null>(null);
-  const [overAid, setOverAid] = useState<string | null>(null);
+  const [preview, setPreview] = useState<string[] | null>(null);
   // ⚠️ 原来这里还有一个 `armedAid`：按下手柄→setState→打开卡片根节点的 `draggable`。
   //    **在 WKWebView 上根本起不来**（WebKit 在 mousedown 那一刻就判定能不能拖，
   //    React 的 setState 追不上）。现在手柄自己恒为 draggable，这个状态随之删除。
@@ -197,7 +201,9 @@ export default function App() {
    * ⚠️ 已知代价（用户知情）：重排之后旧的肌肉记忆会切到别的号。
    * ★ 没被排过的号**追加在末尾**，绝不丢（见 `applyOrder`）。
    */
-  const orderedAlive = applyOrder(aliveByLabel, state.pick_order, (a) => a.aid);
+  const savedAlive = applyOrder(aliveByLabel, state.pick_order, (a) => a.aid);
+  /** 拖拽中显示 `preview`（实时让位），否则显示已保存的顺序。 */
+  const orderedAlive = preview ? applyOrder(savedAlive, preview, (a) => a.aid) : savedAlive;
   useExpiryWatch(accounts, tokens);
   // Dead-account alerts live in the MAIN window only — the menubar popover renders the same store, so
   // running the watcher in both would double-notify.
@@ -222,16 +228,55 @@ export default function App() {
    *   代理在 app 没开时照样在挑号。走 `codex-rotate priority --set`（CLI 是唯一写入口）。
    *   ⚠️ 所以这一档**拖一下就改变了计费顺序**，不只是换个摆放位置。
    */
-  const dropCardOnto = (toAid: string) => {
-    const from = orderedAlive.findIndex((x) => x.aid === dragAid);
-    const to = orderedAlive.findIndex((x) => x.aid === toAid);
-    if (from >= 0 && to >= 0 && from !== to) {
-      const next = moveItem(orderedAlive, from, to);
-      void run("priority", ["priority", "--set", ...next.map((x) => x.node)],
-               `优先级：${next.map((x) => x.node).slice(0, 3).join(" → ")}…`);
+  /**
+   * 命中测试：指针落在哪张卡上。
+   *
+   * ★ 用**卡片矩形**而不是 `elementFromPoint`：拖起来的那张已经 `scale(1.03)` 且
+   *   压在上层，`elementFromPoint` 会一直命中它自己。
+   * ★ 只认同一个网格里的卡（`data-cards-grid`），否则会命中别档的卡片。
+   */
+  const hitAid = (x: number, y: number): string | null => {
+    const els = document.querySelectorAll<HTMLElement>("[data-cards-grid] > div[data-aid]");
+    for (const el of els) {
+      const r = el.getBoundingClientRect();
+      if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) {
+        return el.dataset.aid ?? null;
+      }
     }
-    setDragAid(null); setOverAid(null);
+    return null;
   };
+
+  /**
+   * 造一套 pointer 拖拽接线。
+   *
+   * ★★ `ids` 必须是**已保存**的顺序，不是当前显示的顺序。拖动中显示的就是 `preview`，
+   *   拿它当基线的话 `next === ids` 恒成立 ⇒ **永远判定"没变"、永不落盘**。
+   *   实测于 2026-09-20：让位动效正常、松手却什么都没发生，而日志里一切正常。
+   */
+  const makeDrag = (aid: string, ids: string[], hint: string,
+                    commit: (next: string[]) => void) => ({
+    hint,
+    isDragging: dragAid === aid,
+    onStart: () => { setDragAid(aid); setPreview(ids); },
+    onMove: (x: number, y: number) => {
+      const over = hitAid(x, y);
+      if (!over || over === aid) return;
+      setPreview((cur) => {
+        const base = cur ?? ids;
+        const from = base.indexOf(aid);
+        const to = base.indexOf(over);
+        if (from < 0 || to < 0 || from === to) return base;
+        return moveItem(base, from, to);       // ★ 实时让位:当场重排,不等松手
+      });
+    },
+    onEnd: (ok: boolean) => {
+      const next = preview;
+      setDragAid(null); setPreview(null);
+      // ★ 取消(Esc/系统打断)要**放弃**这次排序 —— codex 档的顺序就是计费顺序,
+      //   一次误操作改掉它的代价不对称。
+      if (ok && next && next.join() !== ids.join()) commit(next);
+    },
+  });
 
   useKeyboard(win, refresh, setPage as (p: string) => void, (idx) => {
     if (page === "overview" && provider === "gemini") {
@@ -265,16 +310,9 @@ export default function App() {
    * ⚠️ grok 档**刻意不接**：它是单号只读、永远只有一张卡，给它画一个拖不出效果的手柄
    *   就是「画一个点了没反应的东西」—— 本仓判过死刑的形态。
    */
-  const orderedAgy = applyOrder(agyPool.accounts, cardOrder["gemini"], (a) => a.sub);
+  const savedAgy = applyOrder(agyPool.accounts, cardOrder["gemini"], (a) => a.sub);
+  const orderedAgy = preview ? applyOrder(savedAgy, preview, (a) => a.sub) : savedAgy;
 
-  const dropAgyOnto = (toSub: string) => {
-    const from = orderedAgy.findIndex((x) => x.sub === dragAid);
-    const to = orderedAgy.findIndex((x) => x.sub === toSub);
-    if (from >= 0 && to >= 0 && from !== to) {
-      setOrderFor("gemini", moveItem(orderedAgy, from, to).map((x) => x.sub));
-    }
-    setDragAid(null); setOverAid(null);
-  };
   const trafficDays = daysNeeded(trafficSt, todayOf(null));
   const { data: traffic, raw: trafficRaw, cacheMode, prefs: platPrefs, busy: trafficBusy,
           err: trafficErr, refresh: refreshTraffic, requestHoursFor } = useTraffic({
@@ -752,21 +790,17 @@ export default function App() {
                         // 改名按 aid 不按 label:cmd_rename 两者都认,而 aid 唯一 —— 重名时不会改到别的号上
                         return (
                         <AccountCard key={a.aid} a={a} isCurrent={a.aid === currentNode} isBest={hero?.aid === a.aid} isSelected={selectedCard === a.aid} reserveActions={selectedCard !== null} shortcut={shortcutIdx >= 0 && shortcutIdx < 9 ? shortcutIdx + 1 : undefined} bestPct={bestPct} winSlots={winSlots} probing={loadingAction === `probe-${a.aid}`} privacy={privacy} t={t}
-                          drag={{
-                            dragId: a.aid,
-                            isDragging: dragAid === a.aid,
-                            isOver: overAid === a.aid && dragAid !== a.aid,
-                            onDragStart: () => setDragAid(a.aid),
-                            onDragEnd: () => { setDragAid(null); setOverAid(null); },
-                            // ★ `preventDefault` + `dropEffect` 都是必须的:
-                            //   不调用 preventDefault 浏览器根本不允许在这里 drop。
-                            onDragOver: (e) => {
-                              e.preventDefault();
-                              e.dataTransfer.dropEffect = "move";
-                              setOverAid(a.aid);
-                            },
-                            onDrop: (e) => { e.preventDefault(); dropCardOnto(a.aid); },
-                          }}
+                          drag={makeDrag(a.aid, savedAlive.map((x) => x.aid),
+                            "按住拖动排序。★ 这个顺序就是**轮换优先级**：排在前面的号先被用，"
+                            + "且优先级压过额度 —— 第一个号会一直用到撞限、冷却后才轮到下一个。⌘N 跟随。",
+                            (next) => {
+                              // ★★ codex 档写进 state.json（它就是计费顺序），CLI 是唯一写入口
+                              const byAid = new Map(alive.map((x) => [x.aid, x.node]));
+                              void run("priority",
+                                       ["priority", "--set",
+                                        ...next.map((id) => byAid.get(id) as string)],
+                                       "已更新轮换优先级");
+                            })}
                           onSelect={() => setSelectedCard(selectedCard === a.aid ? null : a.aid)}
                           onSwitch={() => run(`switch-${a.aid}`, ["switch", a.node], `当前号 → ${a.node}`)}
                           onShowDetail={(aid) => { invoke<AccountDetail>("read_account_detail", { aid }).then(d => setDetailModal(d)).catch(() => {}); }}
@@ -883,19 +917,9 @@ export default function App() {
                                      switching={agyPool.switching === a.label}
                                      disabled={!!platPrefs.by?.agy?.off} winSlots={winSlots}
                                      busy={agyPool.busy} err={agyPool.err}
-                                     drag={{
-                                       dragId: a.sub,
-                                       isDragging: dragAid === a.sub,
-                                       isOver: overAid === a.sub && dragAid !== a.sub,
-                                       onDragStart: () => setDragAid(a.sub),
-                                       onDragEnd: () => { setDragAid(null); setOverAid(null); },
-                                       onDragOver: (e) => {
-                                         e.preventDefault();
-                                         e.dataTransfer.dropEffect = "move";
-                                         setOverAid(a.sub);
-                                       },
-                                       onDrop: (e) => { e.preventDefault(); dropAgyOnto(a.sub); },
-                                     }}
+                                     drag={makeDrag(a.sub, savedAgy.map((x) => x.sub),
+                                       "按住拖动调整摆放顺序（⌘N 跟随）。只影响显示，不影响切号策略。",
+                                       (next) => setOrderFor("gemini", next))}
                                      onRefresh={agyPool.refresh}
                                      /* ── 与 codex 账号卡对齐（用户 2026-09-13）── */
                                      // ★ 角标只在**真的接了线**的那一档画：⌘1~⌘9 在 Gemini 档
