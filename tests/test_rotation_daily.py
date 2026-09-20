@@ -223,6 +223,40 @@ class TheTableIsFoldedIntoAHoverBadge(unittest.TestCase):
         self.assertIn('className="cb-hoverwrap"', seg, "★ 没走既有的悬浮范式")
         self.assertIn('className="cb-hoverpop"', seg, "★ 浮层没用 .cb-hoverpop")
 
+    def test_it_sits_in_the_lane_header_next_to_the_account_column(self):
+        """★ 用户 2026-09-21 定的落点：下面泳道列的就是这批号，眼睛本来就在这一列。
+
+        旧位置（两张卡之间独占一行）既白占版面、又夹在空档里。
+        """
+        i = self.code.index("{dailyPop}")
+        self.assertIn("账号", self.code[max(0, i - 260):i],
+                      "★ 角标不在泳道表头「账号」旁了")
+
+    def test_inherited_uppercase_is_reset_on_the_popup(self):
+        """★★ 浮层是**表头单元格的后代**，而表头整行是 `uppercase` + 带字距。
+
+        不重置的话账号名会渲染成 `PLUS5`、小时数变成 `1.5H`（2026-09-21 像素实测）。
+        ★ 这类**继承来的**样式缺陷在源码里一个字都看不出来，只有截图能抓 ——
+          它是本仓「UI 改动必须看像素」那条规则最直接的一个实例。
+        """
+        i = self.code.index('className="cb-hoverpop"')
+        seg = self.code[i:i + 420]
+        self.assertIn('textTransform: "none"', seg,
+                      "★★ 浮层没重置 textTransform —— 账号名会被渲染成大写")
+        self.assertIn("letterSpacing: 0", seg,
+                      "★★ 浮层没重置 letterSpacing —— 继承表头的字距")
+
+    def test_the_overflow_probe_skips_the_whole_ancestor_chain(self):
+        """★★ 探针的排除判据必须看**整棵子树**，不是 `:scope >`。
+
+        角标一挂到别的元素里，浮层就成了祖先的孙节点，`:scope >` 够不到 ⇒
+        祖先被报成横向溢出（实测 477/152）。而那仍然只是浮层的宽度。
+        """
+        h = (ROOT / "codexbar" / "uishot" / "make_harness.py").read_text(encoding="utf-8")
+        self.assertIn("e.querySelector('.cb-hoverpop')", h,
+                      "★★ 溢出探针只排除直接子节点 —— 挂进别的元素就会假报溢出")
+        self.assertNotIn("':scope > .cb-hoverpop'", h)
+
     def test_the_badge_is_the_only_thing_always_visible(self):
         """★ 收起态只许留一枚角标 —— 表本身不再常驻占版面。"""
         i = self.code.index("data-daily-badge")

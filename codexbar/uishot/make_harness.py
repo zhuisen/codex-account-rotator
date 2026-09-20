@@ -1292,7 +1292,13 @@ function relayEntry() {
           //   它会计进父元素的 scrollWidth，但那不是"内容装不下"——是这个设计的定义。
           //   不排掉的话，每个带悬浮浮层的角标都会被报一次，真溢出淹在噪音里
           //   （同上面省略号那条：**刻意的取舍不是缺陷**）。
-          if (e.querySelector && e.querySelector(':scope > .cb-hoverpop')) continue;
+          //   ⚠️ 判据必须是**整棵子树**，不是 `:scope >`（2026-09-21 修）。角标一旦被挂到
+          //     别的元素里（这次是泳道表头的「账号」旁），浮层就成了祖先的**孙节点**，
+          //     原写法够不到 ⇒ 祖先被报成横向溢出 477/152。而那仍然只是浮层的宽度。
+          //   ★ 代价说清楚：带浮层的那条祖先链**整条**不再被溢出探针覆盖。可以接受的原因是
+          //     浮层本身尺寸受 `maxWidth: min(…, 92vw)` 约束（另有闸盯着），而祖先链上真正
+          //     会溢出的内容仍会被**它们自己那一层之外**的兄弟节点暴露出来。
+          if (e.querySelector && e.querySelector('.cb-hoverpop')) continue;
           over.push((e.className || e.tagName) + ' ' + e.scrollWidth + '/' + e.clientWidth
                     + ' 「' + (e.textContent || '').trim().slice(0, 22) + '」');
         }
