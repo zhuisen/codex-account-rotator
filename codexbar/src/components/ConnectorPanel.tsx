@@ -74,8 +74,12 @@ export default function ConnectorPanel({ t }: { t: Theme }) {
   const [picks, setPicks] = useState<Record<string, boolean>>({});
   const [open, setOpen] = useState<string | null>(null);
   const [busy, setBusy] = useState<"" | "apply" | "remove">("");
+  /** 哪个按钮正在跑 —— 三个入口共用一条 `apply` 链路，只有它能把「接入中…」显示对地方。 */
+  const [running, setRunning] = useState("");
   const [msg, setMsg] = useState<string | null>(null);
   const [confirmRemove, setConfirmRemove] = useState(false);
+  /** 逐项明细默认**收起**（用户 2026-09-21：「接入内容太复杂了」）。 */
+  const [advanced, setAdvanced] = useState(false);
 
   const load = useCallback(() => {
     void (async () => {
@@ -101,16 +105,32 @@ export default function ConnectorPanel({ t }: { t: Theme }) {
   const chosen = plan ? plan.steps.filter((s) => picks[s.id]).map((s) => s.id) : [];
   const extCount = plan ? plan.steps.filter((s) => s.state === "external").length : 0;
 
-  const apply = async () => {
+  /**
+   * 一键要做的那几步。
+   *
+   * ★★ 判据是 `state === "todo"`，**不是**"全部步骤" —— `done` / `external` 重跑一遍
+   *   没有意义，而 `external` 那几项是用户自己装的，Connector 的既定契约就是不碰。
+   * ★ `withWrapper` 决定带不带那个改变裸 `codex` 行为的可选步 —— 界面上是**两个按钮**，
+   *   所以"要不要接管 codex"这个决定仍然由用户做，只是不必先读懂六步再做。
+   */
+  const todoIds = (withWrapper: boolean) => plan
+    ? plan.steps.filter((s) => s.state === "todo" && (withWrapper || !s.optional)).map((s) => s.id)
+    : [];
+  const needCount = todoIds(false).length;
+  const wrapperStep = plan?.steps.find((s) => s.optional) ?? null;
+  const wrapperTodo = wrapperStep?.state === "todo";
+
+  const runApply = async (ids: string[], tag: string) => {
     // ★ `blocked` 也要挡在这里，不能只靠按钮变灰 —— 变灰只是样式，点击照样会跑。
     //   像素验证抓到的那次，红条说「装不了」而按钮仍可点。
-    if (!chosen.length || busy || plan?.blocked) return;
+    if (!ids.length || busy || plan?.blocked) return;
     setBusy("apply");
+    setRunning(tag);
     setMsg(null);
     try {
       // ★ `runtime` 是其它步骤的前提（symlink 与服务都指向它）。用户没勾也要带上，
       //   否则会建出一堆指向不存在目录的入口 —— 悬空 symlink 是静默失败。
-      const steps = chosen.includes("runtime") ? chosen : ["runtime", ...chosen];
+      const steps = ids.includes("runtime") ? ids : ["runtime", ...ids];
       const raw = await invoke<string>("connector_apply", { steps });
       const r = JSON.parse(raw) as { ok: boolean; done: string[]; notes: string[]; error: string | null };
       setMsg(r.ok
@@ -120,9 +140,12 @@ export default function ConnectorPanel({ t }: { t: Theme }) {
       setMsg(`✗ ${String(e).slice(0, 200)}`);
     } finally {
       setBusy("");
+      setRunning("");
       load();
     }
   };
+
+  const apply = () => void runApply(chosen, "advanced");
 
   const remove = async () => {
     if (busy) return;
@@ -178,6 +201,58 @@ export default function ConnectorPanel({ t }: { t: Theme }) {
             </div>
           )}
 
+          {/* ★★ 一键区（用户 2026-09-21：「接入内容太复杂了，有没有一键无脑的操作」）。
+              在这之前六步连同长解释一起摊开，读起来像要做六个决定 —— 而其中五步
+              **根本没得选**（不装就是不能用），只有最后一步是真的取舍。
+              所以：把"没得选的五步"合成一个主按钮，把"真的取舍"单独做成第二个按钮。
+              ★ 用户在三个方案里选的就是**两个按钮并排**，不是让一键默默接管 `codex`。 */}
+          {!plan.blocked && (needCount > 0 || wrapperTodo) && (
+            <div style={{ display: "flex", gap: 10, alignItems: "center",
+                          flexWrap: "wrap", marginBottom: 12 }}>
+              {needCount > 0 && (
+                <div>
+                  <span data-connector-oneclick onClick={() => void runApply(todoIds(false), "one")}
+                        style={{ display: "inline-block", fontSize: 13, fontWeight: 700,
+                                 padding: "9px 20px", borderRadius: 9, cursor: busy ? "default" : "pointer",
+                                 color: t.accentText, background: t.accent,
+                                 border: `1px solid ${t.accent}`, opacity: busy ? .6 : 1 }}>
+                    {running === "one" ? "接入中…" : "一键接入"}
+                  </span>
+                  <div style={{ fontSize: 9.5, color: t.muted, marginTop: 4, textAlign: "center" }}>
+                    {needCount} 项 · 可撤销
+                  </div>
+                </div>
+              )}
+              {wrapperTodo && (
+                <div>
+                  <span onClick={() => void runApply(todoIds(true), "all")}
+                        title={wrapperStep?.detail}
+                        style={{ display: "inline-block", fontSize: 11.5, fontWeight: 600,
+                                 padding: "9px 14px", borderRadius: 9, cursor: busy ? "default" : "pointer",
+                                 color: t.text2, background: "transparent",
+                                 border: `1px solid ${t.divider}`, opacity: busy ? .6 : 1 }}>
+                    {running === "all" ? "接入中…" : "连 codex 一起接管"}
+                  </span>
+                  <div style={{ fontSize: 9.5, color: t.muted, marginTop: 4, textAlign: "center" }}>
+                    {/* ★ 代价写在按钮底下，不藏进 title —— 只写进悬浮等于没写（本仓 §5d）。 */}
+                    敲 <code style={{ fontFamily: mono }}>codex</code> 也走轮换 ·{" "}
+                    <code style={{ fontFamily: mono }}>cxd</code> 保持直连
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* ★★ 折叠用 **CSS 控制可见性**，不用条件渲染（本仓 §5c）：条件渲染会让内容
+              离开 DOM，而接入面板的行为闸都在 `--dump-dom` 的静态 DOM 上断言 ——
+              一改就全部静默失效（"测试还在、但什么也没验"）。 */}
+          <div onClick={() => setAdvanced(!advanced)}
+               style={{ fontSize: 11, color: t.accent, cursor: "pointer", userSelect: "none",
+                        marginBottom: advanced ? 4 : 0 }}>
+            {advanced ? "▾" : "▸"} 逐项选择（高级）—— 看每一步会写什么、单独装或跳过
+          </div>
+
+          <div data-connector-steps style={{ display: advanced ? "block" : "none" }}>
           {plan.steps.map((s) => {
             const tone = TONE[s.state];
             const fixed = s.state !== "todo";
@@ -224,16 +299,20 @@ export default function ConnectorPanel({ t }: { t: Theme }) {
             );
           })}
 
+            <div style={{ marginTop: 11 }}>
+              <span onClick={() => apply()}
+                    style={{ fontSize: 11.5, fontWeight: 700, padding: "7px 14px", borderRadius: 8,
+                             cursor: chosen.length && !busy && !plan.blocked ? "pointer" : "default",
+                             color: chosen.length && !plan.blocked ? t.accentText : t.muted,
+                             background: chosen.length && !plan.blocked ? t.accent : "transparent",
+                             border: `1px solid ${chosen.length && !plan.blocked ? t.accent : t.divider}`,
+                             opacity: running === "advanced" ? .6 : 1 }}>
+                {running === "advanced" ? "接入中…" : chosen.length ? `接入（${chosen.length} 项）` : "没有要做的"}
+              </span>
+            </div>
+          </div>
+
           <div style={{ display: "flex", gap: 9, alignItems: "center", marginTop: 13, flexWrap: "wrap" }}>
-            <span onClick={() => void apply()}
-                  style={{ fontSize: 11.5, fontWeight: 700, padding: "7px 14px", borderRadius: 8,
-                           cursor: chosen.length && !busy && !plan.blocked ? "pointer" : "default",
-                           color: chosen.length && !plan.blocked ? t.accentText : t.muted,
-                           background: chosen.length && !plan.blocked ? t.accent : "transparent",
-                           border: `1px solid ${chosen.length && !plan.blocked ? t.accent : t.divider}`,
-                           opacity: busy === "apply" ? .6 : 1 }}>
-              {busy === "apply" ? "接入中…" : chosen.length ? `接入（${chosen.length} 项）` : "没有要做的"}
-            </span>
             <span onClick={() => void remove()}
                   title="移除我们装的入口、服务与托管配置区。你自己放的东西一律不动。"
                   style={{ fontSize: 11, padding: "7px 12px", borderRadius: 8, cursor: "pointer",

@@ -124,7 +124,23 @@ export default function AccountCard({ a, isCurrent, isBest, isSelected, shortcut
         transition: "background .2s ease, border-color .2s ease, box-shadow .15s ease",
       }}>
 
-      {shortcut && <span style={{ position: "absolute", top: 6, left: 10, fontSize: Z.shortcut, color: t.muted, fontFamily: "'JetBrains Mono'" }}>⌘{shortcut}</span>}
+      {/* ★★ `⊘` = 这个号被**手动停用了自动轮换**（`state.json` 的 `rotate_off`）。
+          它必须在**总览一眼能看到**的地方，而不是只在展开卡片的动作条里：
+          拖拽顺序在界面上叫「轮换优先级」，但 `rotate_off` 是**另一个开关**，
+          `ok()` 在排序**之前**就把它滤掉了。实测 2026-09-21：用户优先级 #1/#2/#3
+          （5530 / mou / qq55）三个全是 `rotate_off`，界面上却看着是最优先的 ——
+          「排第一但根本不参与」在旧界面上完全看不出来。
+          ★ 琥珀而不是红：这是**主动停用**，不是坏了。红留给凭证失效。
+          ★ 没有快捷键时也要画（⌘N 只给前 9 张，停用状态与它无关）。 */}
+      <span style={{ position: "absolute", top: 6, left: 10, fontSize: Z.shortcut,
+                     color: t.muted, fontFamily: "'JetBrains Mono'",
+                     display: "flex", alignItems: "center", gap: 4 }}>
+        {shortcut ? `⌘${shortcut}` : ""}
+        {!a.rotates && (
+          <span data-rotate-off title="已停用自动轮换 —— 不参与轮换池，轮换优先级对它无效。展开卡片点循环图标可放回"
+                style={{ color: "#E0901C", fontWeight: 700 }}>⊘</span>
+        )}
+      </span>
 
       {/* 拖拽手柄（⠿）。走 pointer 事件，不走 HTML5 DnD —— 理由见 DragHandle。 */}
       {drag && <DragHandle t={t} dragging={drag.isDragging} hint={drag.hint}
