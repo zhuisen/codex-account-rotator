@@ -202,8 +202,12 @@ class ButtonsNeverBreakMidWord(unittest.TestCase):
         """
         self.assertNotRegex(self.app, r'gridTemplateColumns:\s*"1fr 1fr 1fr"',
                             "九宫格用了裸 1fr —— 列压不下去,内容一变宽就整体溢出")
-        self.assertRegex(self.app, r"gridTemplateColumns:[^\n]*minmax\(0",
+        # ★ 2026-09-20 起列数与模板收进 `CARD_GRID_COLS` 一个常量（三档网格 + 「同排预留」
+        #   的行算式共用它）。性质不变，锚点跟着搬 —— 判据仍是"模板里有 minmax(0"。
+        self.assertRegex(self.app, r"CARD_GRID_COLS\s*=\s*`repeat\(\$\{CARD_COLS\},[^`]*minmax\(0",
                          "九宫格没有用 minmax(0, ...) —— 列的最小值仍是 min-content")
+        self.assertIn("gridTemplateColumns: CARD_GRID_COLS", self.app,
+                      "九宫格没走那个常量 —— 常量对了也没用")
 
     def test_account_name_can_never_vanish(self):
         """★★ 只给 `minWidth: 0` 会让 flex 把名字压到 **0px 直接消失**。

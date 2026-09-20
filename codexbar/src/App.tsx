@@ -73,6 +73,31 @@ const IconEye = () => <svg width="13" height="13" viewBox="0 0 24 24" fill="none
 const IconEyeOff = () => <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9"><path d="M9.9 5.8A9.6 9.6 0 0 1 12 5.5c6.7 0 10.4 6.5 10.4 6.5a18 18 0 0 1-3.4 4.2M6.2 7.8A18 18 0 0 0 1.6 12S5.3 18.5 12 18.5c1.6 0 3-.4 4.3-.9M3 3l18 18"/></svg>;
 const IconMoon = () => <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>;
 
+/**
+ * 总览卡片网格的列数。★ **布局与「同排预留」共用这一个数** —— 三档的
+ * `gridTemplateColumns` 由它生成，下面 `sameRow()` 也靠它算「第几排」。
+ * 拆成两处写的话，改了网格却没改行算式，预留会静默地留到错误的一排上。
+ */
+const CARD_COLS = 3;
+const CARD_GRID_COLS = `repeat(${CARD_COLS}, minmax(0, 1fr))`;
+
+/**
+ * 这张卡要不要给动作条预留高度？
+ *
+ * ★ 为什么需要预留：同排的卡在网格里本来就**等高**，所以选中卡一展开，同排兄弟会被拉高；
+ *   而卡内的环是垂直居中、条形区靠 `flex:1` 吊在底边 —— 不预留的话多出来的高度摊在
+ *   **中间**，邮箱与环之间裂开一道洞（用户 2026-08-24 截图圈过的就是它）。
+ *   预留等于把那段高度按到卡片底部去。
+ *
+ * ★★ **但只有同排需要。** 原来写的是 `selectedCard !== null` 一刀切，于是选中第 1 排的
+ *   一张卡，第 2、3 排也跟着各空出一截 —— 那几排根本没被拉高，留的是纯浪费。
+ *   实测（2026-09-20 harness）：每张卡 156→203px、底部死空间 13→60px，
+ *   正是用户报的「卡片的底部留白的地方多了」。
+ */
+function sameRow(i: number, selectedIdx: number): boolean {
+  return selectedIdx >= 0 && Math.floor(i / CARD_COLS) === Math.floor(selectedIdx / CARD_COLS);
+}
+
 export default function App() {
   const { state, accounts, hero, currentNode, counts, tokens, lastRefreshAt, freshness, loadingAction, toast, refresh, run, showToast } = useStore();
   const [theme, setTheme] = useState<"dark" | "light">("dark");
@@ -286,7 +311,9 @@ export default function App() {
    *   ⚠️ 总览是默认页,启动仍可能打一次(token 已过期时本地短路、不发请求)。
    *   这个端点不计费、不消耗额度。
    */
-  const { snap: grokSnap, busy: grokBusy, err: grokErr, refresh: refreshGrok } =
+  // ★ 不取 `refresh`：grok 卡的右上角 ↻ 已删（2026-09-20「卡片统一」），而 grok 是只读卡、
+  //   没有动作条可以放它。取数仍是自动的 —— 采样器推送 + 10min 兜底轮询。
+  const { snap: grokSnap, busy: grokBusy, err: grokErr } =
     useGrokQuota({ enabled: page === "overview" });
   /**
    * ★ agy 额度。**与上面那条最大的区别:它不联网。**
@@ -719,12 +746,12 @@ export default function App() {
                         ★ 每档各自一张 `data-cards-grid`：uishot 的对齐闸按排比较，
                           这样它只在同一档内比，不会拿 grok 卡去跟 codex 卡比高度。 */}
                     {provider === "codex" && (<>
-                    <div data-cards-grid style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 12, alignContent: "start" }}>
-                      {alive.map((a) => {
+                    <div data-cards-grid style={{ display: "grid", gridTemplateColumns: CARD_GRID_COLS, gap: 12, alignContent: "start" }}>
+                      {alive.map((a, i) => {
                         const shortcutIdx = alive.findIndex(x => x.aid === a.aid);   // ★ 就是「第几张」
                         // 改名按 aid 不按 label:cmd_rename 两者都认,而 aid 唯一 —— 重名时不会改到别的号上
                         return (
-                        <AccountCard key={a.aid} a={a} isCurrent={a.aid === currentNode} isBest={hero?.aid === a.aid} isSelected={selectedCard === a.aid} reserveActions={selectedCard !== null} shortcut={shortcutIdx >= 0 && shortcutIdx < 9 ? shortcutIdx + 1 : undefined} bestPct={bestPct} winSlots={winSlots} probing={loadingAction === `probe-${a.aid}`} privacy={privacy} t={t}
+                        <AccountCard key={a.aid} a={a} isCurrent={a.aid === currentNode} isBest={hero?.aid === a.aid} isSelected={selectedCard === a.aid} reserveActions={sameRow(i, alive.findIndex(x => x.aid === selectedCard))} shortcut={shortcutIdx >= 0 && shortcutIdx < 9 ? shortcutIdx + 1 : undefined} bestPct={bestPct} winSlots={winSlots} probing={loadingAction === `probe-${a.aid}`} privacy={privacy} t={t}
                           drag={makeDrag(a.aid, savedAlive.map((x) => x.aid),
                             "按住拖动排序。★ 这个顺序就是**轮换优先级**：排在前面的号先被用，"
                             + "且优先级压过额度 —— 第一个号会一直用到撞限、冷却后才轮到下一个。⌘N 跟随。",
@@ -836,7 +863,7 @@ export default function App() {
                         </div>
                       );
                     })()}
-                    <div data-cards-grid style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 12, alignContent: "start" }}>
+                    <div data-cards-grid style={{ display: "grid", gridTemplateColumns: CARD_GRID_COLS, gap: 12, alignContent: "start" }}>
                       {/* ★★ 池里**有号就一号一卡**；一个都没有时退回原来那张只读卡
                           （`agy-rotate login --current` 之前就是这个状态，它仍然成立）。
                           ★ 当值号的卡用**本机 RPC** 那份快照 —— 只有它带周窗口；
@@ -856,13 +883,15 @@ export default function App() {
                                      drag={makeDrag(a.sub, savedAgy.map((x) => x.sub),
                                        "按住拖动调整摆放顺序（⌘N 跟随）。只影响显示，不影响切号策略。",
                                        (next) => setOrderFor("gemini", next))}
+                                     /* ★ 只喂给动作条里的 ↻（与 codex 卡的动作条同排）；
+                                        右上角那个已删 —— 它和拖拽手柄是同一个坐标。 */
                                      onRefresh={agyPool.refresh}
                                      /* ── 与 codex 账号卡对齐（用户 2026-09-13）── */
                                      // ★ 角标只在**真的接了线**的那一档画：⌘1~⌘9 在 Gemini 档
                                      //   切的就是这一列（见上面 useKeyboard 的分流）。超过 9 个不画。
                                      shortcut={i < 9 ? i + 1 : undefined}
                                      isSelected={selectedCard === a.sub}
-                                     reserveActions={selectedCard !== null}
+                                     reserveActions={sameRow(i, orderedAgy.findIndex(x => x.sub === selectedCard))}
                                      isBest={agyBest?.sub === a.sub} bestPct={agyBestPct ?? undefined}
                                      partialWins={agyPartial}
                                      onSelect={() => setSelectedCard(selectedCard === a.sub ? null : a.sub)}
@@ -902,7 +931,7 @@ export default function App() {
                     )}
                     </>)}
                     {provider === "grok" && (<>
-                    <div data-cards-grid style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 12, alignContent: "start" }}>
+                    <div data-cards-grid style={{ display: "grid", gridTemplateColumns: CARD_GRID_COLS, gap: 12, alignContent: "start" }}>
                       {/* ★ grok 卡。**渲染在格子里,但绝不进 `alive` 数组** —— 那个数组同时驱动
                           ⌘1~⌘9 切号(`aliveByLabel[idx]` 直接 switch)、计数徽章、探针全池的号数、
                           自动切号。混进去 ⌘4 会"切"到一个切不了的东西上,而且不报错。
@@ -910,7 +939,6 @@ export default function App() {
                       <GrokCard t={t} color={colorOf(traffic, "grok")} snap={grokSnap}
                                 disabled={!!platPrefs.by?.grok?.off}
                                 privacy={privacy} busy={grokBusy} err={grokErr}
-                                onRefresh={refreshGrok}
                                 onOpen={() => { setDrill("grok"); setPage("traffic"); }} />
                     </div>
                     </>)}

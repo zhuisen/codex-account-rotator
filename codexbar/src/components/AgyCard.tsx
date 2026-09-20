@@ -149,7 +149,9 @@ export default function AgyCard({ t, color, snap, busy, err, disabled, winSlots,
    */
   /** 这一格为什么读不到。★ 说清**原因**和**下一步**，不是只说"没有"。 */
   const missTitle = (label: string, _cur?: boolean) =>
-    `${label} 窗口这次没读到 —— 点右上角 ↻ 重取一次。`
+    // ⚠️ 这句话在 2026-09-20 之前写的是「点右上角 ↻ 重取一次」，而那个按钮当天被删了 ——
+    //    披露层说旧事实就是一句关于事实的假陈述，且正好会让人去点一个不存在的东西。
+    `${label} 窗口这次没读到 —— 点档头的「刷新全池」重取一次。`
     + `（2026-09-15 起每个号都按账号直接读完整摘要，含周窗口；`
     + `所以这里为空**不再是"非当值号"那种结构性缺失**，就是这一次没取到。）`;
 
@@ -185,14 +187,10 @@ export default function AgyCard({ t, color, snap, busy, err, disabled, winSlots,
       <span style={{ position: "absolute", top: 6, left: 10, color,
                      fontFamily: MONO, letterSpacing: ".04em", fontSize: Z.shortcut }}>
         {shortcut ? `⌘${shortcut}` : "CLI"}</span>
-      {onRefresh && (
-        // stopPropagation：点卡片是"进详情"，点 ↻ 是"重取额度"，两个动作叠在同一块区域上。
-        <button onClick={(e) => { e.stopPropagation(); if (!busy) onRefresh(); }} disabled={busy}
-                title="重新取一次 agy 额度（本机 loopback，不联网、不消耗额度）"
-                style={{ position: "absolute", top: 4, right: 8, background: "transparent",
-                         border: "none", color: t.muted, fontFamily: MONO, fontSize: 11,
-                         cursor: busy ? "default" : "pointer", opacity: busy ? .4 : 1 }}>↻</button>
-      )}
+      {/* ★ 右上角**只许有拖拽手柄**（用户 2026-09-20：「卡片统一一下」）。
+          原来这里还有一个 ↻ 手动重取，坐标 `top:4 right:8` —— 与上面那个 `DragHandle`
+          **字面上同一个位置**，两个控件叠在同一个角上。手动重取的能力没丢：
+          档头的「刷新全池」做同一件事，而且一次刷完整池而不是一张卡。 */}
 
       <div style={{ display: "flex", gap: 11, alignItems: "center", flex: 1, minHeight: 0 }}>
         {/* ★ 降级时环与条走状态色,与菜单栏行同口径 —— 同一个状态两种画法正是这套闸在防的。

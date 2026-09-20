@@ -33,7 +33,7 @@ const GROK_WIN = "周";
  * ★ 颜色**由调用方传入**（`colorOf(traffic, "grok")`），不在这里写死 `#8b7cf6`：
  * 用户在设置页能给平台改色，写死就跟不上（`.claude/rules/ui.md` 的既有铁律）。
  */
-export default function GrokCard({ t, color, snap, privacy, busy, err, disabled, onOpen, onRefresh }: {
+export default function GrokCard({ t, color, snap, privacy, busy, err, disabled, onOpen }: {
   t: Theme;
   /** grok 的平台识别色，来自 `colorOf(data, "grok")`（已折进用户偏好）。 */
   color: string;
@@ -47,7 +47,6 @@ export default function GrokCard({ t, color, snap, privacy, busy, err, disabled,
   /** 用户在设置页停用了 grok。停用 = 一个像素都不画。 */
   disabled?: boolean;
   onOpen?: () => void;
-  onRefresh?: () => void;
 }) {
   // ★ 没装 grok / 已停用 ⇒ **零像素**。见 `grokQuotaVisible` 的注释。
   //   `err` 也在这之后判:取不到快照时我们分不清"这机器有没有 grok",
@@ -79,15 +78,13 @@ export default function GrokCard({ t, color, snap, privacy, busy, err, disabled,
           见 tests/test_grok_not_in_pool_ui.py),所以这里放的是"它是什么"而不是"怎么切它"。 */}
       <span style={{ position: "absolute", top: 6, left: 10, color,
                      fontFamily: MONO, letterSpacing: ".04em", fontSize: Z.shortcut }}>CLI</span>
-      {onRefresh && (
-        // ★ stopPropagation:点卡片是"进 Grok 详情",点 ↻ 是"重取额度",两个动作叠在同一块区域上。
-        //   不拦的话点 ↻ 会顺带跳页 —— 而这个按钮存在的意义正是"不离开总览就刷新"。
-        <button onClick={(e) => { e.stopPropagation(); if (!busy) onRefresh(); }} disabled={busy}
-                title="重新取一次 grok 额度（不消耗额度）"
-                style={{ position: "absolute", top: 4, right: 8, background: "transparent",
-                         border: "none", color: t.muted, fontFamily: MONO, fontSize: 11,
-                         cursor: busy ? "default" : "pointer", opacity: busy ? .4 : 1 }}>↻</button>
-      )}
+      {/* ★ 右上角**不放任何控件**（用户 2026-09-20：「卡片统一一下」）。
+          原来这里是一个 ↻ 手动重取，坐标 `top:4 right:8` —— 与账号卡/Gemini 卡的拖拽手柄
+          `DragHandle` **完全同一个位置**，三档卡的同一个角落长出三种不同的东西。
+          ★ 删得起的理由是取数本来就是自动的，不是"手动才会刷"：
+            grok CLI 活着时 `grok-quota-sampler` 约 15s 取一次并推送；没在跑时
+            `useGrokQuota` 有 10min 兜底轮询（周窗口每 1% ≈ 100 分钟，够密）。
+          ⚠️ 代价说清楚：**失去了手动催一次的能力**，最坏情况下读数会旧至多 10 分钟。 */}
 
       {/* `flex:1` + 内容列 `alignSelf:stretch`：与账号卡同款底吊布局，环仍垂直居中。
           理由与那条「别改回顶对齐」的警告见 AccountCard 同处注释。 */}
