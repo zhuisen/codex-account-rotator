@@ -22,9 +22,16 @@ import Seg from "../components/Seg";
  *    因为代理是**逐请求**挑号的，本来就不存在长时间"驻留"。这是数据的真相不是渲染问题。
  */
 
-const WINDOWS = [1, 6, 24, 168] as const;
+/**
+ * ★ 2026-09-21 加了 14d / 30d（用户：界面最长只能看 7 天，而日志里有 44 天）。
+ *   上界实测：30d 读 ~4MB / 约 5s，在 `TAIL_BYTES`(6MB) 之内；**60d 会撞上限并截断**
+ *   （读满 6MB、约 10s），所以刻意停在 30d。真要看更长的趋势，正确做法是落盘日聚合
+ *   而不是每次重扫日志 —— 那是另一件事，不该靠把上限越调越大来假装解决。
+ */
+const WINDOWS = [1, 6, 24, 168, 336, 720] as const;
 type WinH = (typeof WINDOWS)[number];
-const winLabel = (h: WinH): string => (h === 168 ? "7d" : `${h}h`);
+/** ★ `24` 仍写作 `24h`（既有标签，这轮没人让我改它）；只有 ≥7 天的新档位用 `Nd`。 */
+const winLabel = (h: WinH): string => (h >= 168 ? `${h / 24}d` : `${h}h`);
 
 /** 时间窗选择要**记住**（用户 2026-09-07：「我选 6h，下次打开也是 6h」）。
  *  ★ 用 localStorage 而不是 `state.json`：这是**纯展示偏好**，代理与后台任务都不读它，
@@ -76,6 +83,19 @@ interface Rotation {
   markers: Marker[];
   events: Ev[];
   log: { t: number; text: string }[];
+  /**
+   * 每号 × 每天的在岗时长（用户 2026-09-21 选的口径：「优先级到底生效没」）。
+   * ★★ 格子**三态**，绝不合并：对象=这天用了它 · `null`=这天没选中它（确实是 0）
+   *    · `"unknown"`=这天我们没读到（在 `covers_from` 之前）。
+   *    把第三种画成 0 就是拿「没看到」冒充「没用过」，而那正是这张表要回答的问题。
+   */
+  daily: {
+    days: string[];
+    rows: { acc: string; rank: number | null; rotate_off: boolean;
+            cells: ({ secs: number; requests: number; tokens: number } | null | "unknown")[] }[];
+    /** 每天走**中转站**的 POST 数 —— 不进账号池，所以泳道里看不到。 */
+    relay: number[];
+  };
   kpi: {
     tokens: number; requests: number; avg_tokens: number;
     rotations: number; avg_dwell: number; cool_429: number; stream_err: number;
@@ -689,6 +709,88 @@ export default function LogsPage({ t }: { t: Theme }): React.ReactElement {
             它改挂到 KPI 的「合计 token（已归属）」标签上（见下方 `covNote`），
             **不占一行、也不用把下界说成总量**。 */}
       </div>
+
+      {/* ── 每号 × 每天：优先级到底生效没（用户 2026-09-21 从三个口径里选的）────── */}
+      {/* ★★ 这张表存在的理由只有一个：总览把拖拽顺序标成「轮换优先级」，而**它到底有没有
+              被执行**在任何既有视图上都看不出来。实测当天：排 #1/#2 的号被 rotate_off
+              挡在池外，8 天一次都没跑过，而界面上它们看着是最优先的。
+          ★★ 三态各画各的，绝不合并：`—` 这天没选中它（确实是 0）· `?` 这天我们没读到
+              · 数字 = 真用了。把 `?` 画成 `—` 就是拿"没看到"冒充"没用过"。
+          ★ 末行的「中转站」不是装饰：09-19 那天 40 次 POST 里 39 次走了中转站，
+            账号池只用了 1 次 —— 没有这一行，整列的 `—` 会被读成「这天没用 codex」。 */}
+      {rot?.daily && rot.daily.rows.length > 0 && (
+        <div style={{ ...card, padding: "13px 15px", marginTop: 12 }}>
+          <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 9 }}>
+            <span style={{ fontSize: 12.5, fontWeight: 700, color: t.text }}>每号 · 每天在岗</span>
+            <span style={{ fontSize: 10, color: t.muted }}>
+              左列 <span style={{ fontFamily: MONO }}>#N</span> 是你在总览拖出来的轮换优先级 ——
+              这张表是它有没有被执行的证据
+            </span>
+          </div>
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ borderCollapse: "collapse", fontSize: 10.5, whiteSpace: "nowrap" }}>
+              <thead>
+                <tr>
+                  <th style={{ textAlign: "left", padding: "3px 8px 5px 0", color: t.muted, fontWeight: 600 }}>号</th>
+                  {rot.daily.days.map(d => (
+                    <th key={d} style={{ padding: "3px 7px 5px", color: t.muted, fontWeight: 600,
+                                         fontFamily: MONO, fontVariantNumeric: "tabular-nums" }}>{d}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {rot.daily.rows.map(r => (
+                  <tr key={r.acc} style={{ borderTop: `1px solid ${t.divider}` }}>
+                    <td style={{ padding: "4px 8px 4px 0", display: "flex", alignItems: "center", gap: 5 }}>
+                      <span style={{ fontFamily: MONO, fontSize: 9.5, color: t.muted, minWidth: 18 }}>
+                        {r.rank ? `#${r.rank}` : ""}
+                      </span>
+                      <span style={{ color: t.text, fontWeight: 600 }}>{r.acc}</span>
+                      {r.rotate_off && (
+                        <span title="已停用自动轮换 —— 不参与轮换池，优先级对它无效"
+                              style={{ color: "#E0901C", fontWeight: 700 }}>⊘</span>
+                      )}
+                    </td>
+                    {r.cells.map((c, i) => (
+                      <td key={i} style={{ padding: "4px 7px", textAlign: "right", fontFamily: MONO,
+                                           fontVariantNumeric: "tabular-nums",
+                                           color: c === "unknown" ? "#E0901C"
+                                             : c === null ? t.muted : t.text }}>
+                        {c === "unknown"
+                          ? <span title="这天的日志没读到 —— 不是没用过">?</span>
+                          : c === null
+                            ? <span title="这天没被选中">—</span>
+                            : <span title={`${c.requests} 次请求 · ${fmtTok(c.tokens)} token`}>
+                                {(c.secs / 3600).toFixed(1)}h
+                              </span>}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+                {rot.daily.relay.some(n => n > 0) && (
+                  <tr style={{ borderTop: `1px solid ${t.divider}` }}>
+                    <td style={{ padding: "4px 8px 4px 0", color: t.muted }}>
+                      中转站
+                      <span title="走第三方中转站的请求不进账号池，所以泳道与上面的格子里都看不到它们"
+                            style={{ marginLeft: 4, color: t.accent, cursor: "help" }}>ⓘ</span>
+                    </td>
+                    {rot.daily.relay.map((n, i) => (
+                      <td key={i} style={{ padding: "4px 7px", textAlign: "right", fontFamily: MONO,
+                                           fontVariantNumeric: "tabular-nums",
+                                           color: n ? t.text2 : t.muted }}>{n || "—"}</td>
+                    ))}
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+          <div style={{ fontSize: 9.5, color: t.muted, marginTop: 7, lineHeight: 1.6 }}>
+            <span style={{ fontFamily: MONO }}>—</span> 这天没被选中 ·{" "}
+            <span style={{ fontFamily: MONO, color: "#E0901C" }}>?</span> 这天的日志没读到（不是没用过） ·{" "}
+            <span style={{ color: "#E0901C" }}>⊘</span> 已停用自动轮换，优先级对它无效
+          </div>
+        </div>
+      )}
 
       {/* ── 下半区双栏（稿子 §4）─────────────────────── */}
       {/* ★★ 两栏**等高 + 各自滚动**（用户 2026-09-07：「等长…信息过多就改成滚动滑块」）。

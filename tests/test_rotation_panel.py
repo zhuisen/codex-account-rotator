@@ -472,9 +472,19 @@ class SummaryStripIsCompact(unittest.TestCase):
         self.assertIn("minWidth: 0", head)
 
     def test_duplicate_subtitle_is_gone(self):
-        """★ 标题后面那句副标（`… token · … 次请求 · … 个号`）与汇总条逐字重复,已删。"""
+        """★ 标题后面那句副标（`… token · … 次请求 · … 个号`）与汇总条逐字重复,已删。
+
+        ⚠️ 2026-09-21 收窄：原来对**整个文件**断言 `"次请求" not in src`，于是新加的
+          「每号·每天在岗」表里一句格子悬浮提示（`N 次请求 · M token`）把它撞红了 ——
+          而那和"标题旁的副标"是两回事。**一条会假红的闸，用户学会的是忽略它**（本仓铁律）。
+          现在只看标题那一段：判据是「`代理轮换` 标题到第一个 `<Stat` 之间」，
+          副标要复活必然出现在这里。
+        """
         src = strip_js_comments(PAGE.read_text(encoding="utf-8"))
-        self.assertNotIn("次请求", src, "副标还在 —— 同一组数字在同一行说了两遍")
+        i = src.index("代理轮换")
+        head = src[i:src.index("<Stat", i)]
+        self.assertNotIn("次请求", head, "副标还在 —— 同一组数字在同一行说了两遍")
+        self.assertNotIn("个号", head)
 
 
 class LaneNameIsNeverTruncated(unittest.TestCase):

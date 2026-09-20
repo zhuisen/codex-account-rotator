@@ -653,6 +653,118 @@ def _quota_pct(slot):
     return worst
 
 
+def _day_bounds(start, end):
+    """窗口切成**连续的自然日**（本地时区），返回 `[(label, day_start, day_end), …]`。
+
+    ★ 必须按自然日算术生成、空白天显式补上 —— 不能只列「有数据的那几天」。
+      后者会让同一个窗口在不同机器/时区下天数都不一样，而图表看不出区别
+      （与 `scan.py` 那条同源教训）。
+    """
+    out = []
+    t = time.localtime(start)
+    cur = time.mktime((t.tm_year, t.tm_mon, t.tm_mday, 0, 0, 0, 0, 0, -1))
+    while cur < end:
+        lt = time.localtime(cur)
+        nxt = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday + 1, 0, 0, 0, 0, 0, -1))
+        out.append((f"{lt.tm_mon:02d}-{lt.tm_mday:02d}", cur, nxt))
+        cur = nxt
+    return out
+
+
+#: 中转站 POST 行。★ 标签形态 `name@relay` 由 `proxy.py::_relay_tag` 写出。
+_RELAY_POST_RE = re.compile(r"→ POST /responses \[[^\]]+@relay\]")
+
+
+def _relay_by_day(text, days, now):
+    """每天有多少次 POST **走了中转站**（不进账号池，所以泳道里看不到）。
+
+    ★★ 没有这个数，整天全是「—」的那一列会被读成「这天没用 codex」——
+      而实测 2026-09-21：09-19 那天 40 次 POST 里 **39 次走了中转站**，账号池只用了 1 次。
+      「没走账号池」和「没用」是两件事，合并就是本仓头号铁律的又一次形态。
+    """
+    hits = [0] * len(days)
+    for line in text.splitlines():
+        if not _RELAY_POST_RE.search(line):
+            continue
+        m = _TS_RE.match(line)
+        if not m:
+            continue
+        t = parse_proxy_ts(*(int(x) for x in m.groups()[:5]), now=now)
+        if t is None:
+            continue
+        for i, (_lab, d0, d1) in enumerate(days):
+            if d0 <= t < d1:
+                hits[i] += 1
+                break
+    return hits
+
+
+def _daily(segs, start, end, by_aid, tail, text=None, now=None):
+    """**每号 × 每天**的在岗时长（用户 2026-09-21 选的口径：「优先级到底生效没」）。
+
+    总览把拖拽顺序标成「轮换优先级」，而这张表是**它到底有没有被执行**的唯一证据。
+    实测 2026-09-21：用户排在 #1/#2/#3 的号全被 `rotate_off` 挡在池外，实际跑的是 #6 ——
+    那件事在任何一个既有视图上都看不出来。
+
+    每格三态，**绝不合并**（本仓头号铁律在这张表上的形态）：
+      · `{secs, requests, tokens}` —— 这天用了它，用了多久
+      · `null`                     —— 这天**没选中它**（我们有这天的完整数据，确实是 0）
+      · `"unknown"`                —— 这天**我们没看到**（在 `covers_from` 之前，日志没读到）
+    把第三种画成 0 就是拿「没看到」冒充「没用过」，而那正是这张表要回答的问题本身。
+    """
+    days = _day_bounds(start, end)
+    # 哪些天落在"我们实际读到的范围"之外 —— 那是"没看到"，不是"没用过"
+    seen_from = tail.get("covers_from") if tail else None
+    rank_of, off = {}, {}
+    order = []
+    try:
+        order = list(_load_json(os.path.join(store_dir(), "state.json"), {}).get("pick_order") or [])
+    except Exception:                                     # noqa: BLE001 — 读不到顺序不该拖垮整张表
+        order = []
+    for aid, sl in (by_aid or {}).items():
+        lab = sl.get("label")
+        if not lab:
+            continue
+        rank_of[lab] = order.index(aid) + 1 if aid in order else None
+        off[lab] = bool(sl.get("rotate_off"))
+
+    cells = {}
+    for s in segs:
+        for i, (_lab, d0, d1) in enumerate(days):
+            lo, hi = max(s["start"], d0), min(s["end"], d1)
+            if hi <= lo:
+                continue
+            c = cells.setdefault((s["acc"], i), {"secs": 0.0, "requests": 0, "tokens": 0})
+            c["secs"] += hi - lo
+            # ★ 请求数与 token 按**时长占比**分摊到跨天的那两侧 —— 整段记在起始日
+            #   会让跨午夜的长段把第二天说成"没用过"。
+            frac = (hi - lo) / max(1e-9, s["end"] - s["start"])
+            c["requests"] += s["requests"] * frac
+            c["tokens"] += s["tokens"] * frac
+
+    accs = sorted({s["acc"] for s in segs} | set(rank_of),
+                  key=lambda a: (rank_of.get(a) is None, rank_of.get(a) or 0, a))
+    rows = []
+    for a in accs:
+        cs = []
+        for i, (_lab, d0, _d1) in enumerate(days):
+            if seen_from is not None and d0 < seen_from and (a, i) not in cells:
+                cs.append("unknown")          # 这天我们没读到，别说成"没用过"
+                continue
+            c = cells.get((a, i))
+            cs.append(None if c is None else
+                      {"secs": round(c["secs"]), "requests": round(c["requests"]),
+                       "tokens": round(c["tokens"])})
+        # 整行都没数据、又不在池里 ⇒ 不画（退役号的空行是噪音）
+        if all(x is None for x in cs) and a not in rank_of:
+            continue
+        rows.append({"acc": a, "rank": rank_of.get(a), "rotate_off": off.get(a, False),
+                     "cells": cs})
+    return {"days": [d[0] for d in days], "rows": rows,
+            # ★ 每天走中转站的 POST 数 —— 没有它，全「—」的那一列会被读成「这天没用 codex」。
+            "relay": _relay_by_day(text, days, now) if text else [0] * len(days)}
+
+
 def collect(hours=24.0, now=None, store=None, use_cache=True):
     now = time.time() if now is None else now
     hours = max(0.1, float(hours))
@@ -749,6 +861,7 @@ def collect(hours=24.0, now=None, store=None, use_cache=True):
     tot_req = sum(a["requests"] for a in accounts)
     dwell = [s["end"] - s["start"] for s in segs]
     out = {
+        "daily": _daily(segs, start, end, by_aid, tail, text, now),
         "ok": True,
         "generated_at": now,
         "window": {"start": start, "end": end, "hours": hours},

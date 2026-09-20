@@ -371,7 +371,37 @@ STUB = """
              pro_segs: 2, pro_secs: 260 * 60 },
       coverage: { responses_seen: 371, responses_with_tokens: 346, responses_unplaced: 0,
                   attributed_pct: 0.933, undated_lines: 0, in_window_lines: 4200,
-                  tail_truncated: false },
+                  tail_truncated: false, window_covered: true, tail_bytes: 540672,
+                  covers_from: _NOW - 30 * 3600,
+                  log_begins_at: null, log_begins_reason: 'undated_head' },
+      // ★★ 「每号 · 每天在岗」表。夹具必须**每一种格子都真的出现过**，否则那一态
+      //    一个像素都验不到，而截图会正常渲染、缺陷探针报干净（本仓记过多次）：
+      //      · 数字   —— 真用了
+      //      · null   —— 这天没选中它（确实是 0）
+      //      · 'unknown' —— 这天没读到（在 covers_from 之前）
+      //      · rotate_off 的行（排第一却一次没跑）—— 这张表存在的理由本身
+      //      · relay 那一行 —— 整列 `—` 却其实有流量的那种日子
+      daily: {
+        days: ['09-15', '09-16', '09-17', '09-18', '09-19', '09-20', '09-21'],
+        rows: [
+          { acc: 'plus5', rank: 1, rotate_off: true,
+            cells: ['unknown', null, null, null, null, null, null] },
+          { acc: 'plus4', rank: 2, rotate_off: false,
+            cells: ['unknown', { secs: 5400, requests: 61, tokens: 92e6 },
+                    { secs: 2160, requests: 24, tokens: 31e6 }, null,
+                    { secs: 900, requests: 9, tokens: 12e6 },
+                    { secs: 7200, requests: 80, tokens: 130e6 },
+                    { secs: 1800, requests: 20, tokens: 26e6 }] },
+          { acc: 'plus7', rank: 3, rotate_off: false,
+            cells: ['unknown', { secs: 1800, requests: 20, tokens: 28e6 }, null, null, null,
+                    { secs: 3600, requests: 52, tokens: 106e6 },
+                    { secs: 600, requests: 7, tokens: 9e6 }] },
+          { acc: 'Pro1', rank: null, rotate_off: false,
+            cells: ['unknown', null, null, { secs: 15600, requests: 67, tokens: 158e6 },
+                    null, null, null] },
+        ],
+        relay: [0, 0, 486, 42, 39, 0, 0],
+      },
     };
     for (var k in o) base[k] = o[k];
     return base;
