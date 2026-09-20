@@ -85,7 +85,8 @@ export default function App() {
   const { integration } = useIntegration();
   // 卡片自定义顺序（拖拽排序）。★ 走 localStorage + Tauri 广播，主窗与菜单栏不分叉。
   const { order: cardOrder, setOrderFor } = useCardOrder();
-  // 拖拽手感层（跟手 / FLIP 让位 / rAF 节流）全在这个 hook 里，见其 docstring。
+  // 拖拽手感层全在这个 hook 里，见其 docstring。★ 这里**没有** rAF 节流、也没有 FLIP：
+  // 拖拽期间 DOM 顺序不动，让位交给 CSS `transition: transform`，每次 pointermove 直接写样式。
   const { preview, makeDrag } = useCardDrag();
   // ⚠️ 原来这里还有一个 `armedAid`：按下手柄→setState→打开卡片根节点的 `draggable`。
   //    **在 WKWebView 上根本起不来**（WebKit 在 mousedown 那一刻就判定能不能拖，

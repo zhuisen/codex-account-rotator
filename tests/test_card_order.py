@@ -278,11 +278,23 @@ class TheDragIsSmooth(unittest.TestCase):
                       "★★ 跟手算式不对 —— 这一版应当就是 Pt − P0")
 
     def test_hit_testing_uses_the_slots_measured_at_press_time(self):
-        i = self.code.index("for (const sl of s.slots) {\n          if (sl.aid === s.aid) continue;")
-        loop = self.code[i:self.code.index("if (over)", i)]
-        self.assertIn("x >= sl.left", loop, "★★★ 命中没用按下时量的固定槽位")
-        self.assertNotIn("getBoundingClientRect", loop,
+        """★★★ 命中只许吃按下时量的固定槽位，绝不读实时矩形（会形成反馈回路）。
+
+        2026-09-20：命中测试搬进 `cardOrder.ts::reorderByHit`（纯函数，可直接跑），
+        所以这条闸跟着搬 —— hook 这边只验**喂给它的是冻结的 `s.slots`**，
+        落点判定本身的行为闸在 `TheHitTestIsIdempotent`。
+        """
+        i = self.code.index("onMove: (x, y) => {")
+        seg = self.code[i:self.code.index("onEnd: finish", i)]
+        self.assertIn("reorderByHit(s.ids, s.aid, s.slots, cx, cy)", seg,
+                      "★★★ 命中没用按下时量的固定槽位")
+        self.assertIn("const cx = s.c0x + (x - s.p0x);", seg,
+                      "★★★ 命中又按指针判了 —— 手柄在右上角，指针比卡片超前大半格")
+        self.assertNotIn("getBoundingClientRect", seg,
                          "★★★ 命中读了实时矩形 —— 会形成反馈回路")
+        pure = PURE.read_text(encoding="utf-8")
+        self.assertNotIn("getBoundingClientRect", pure,
+                         "★★★ 纯函数里读了 DOM —— 它必须保持可直接跑")
 
     def test_transform_is_owned_by_the_hook_alone(self):
         """★★★ React 与 hook 都写 `transform` 时，重渲染会**抹掉**位移。"""
@@ -521,6 +533,198 @@ class DraggingOneCardActuallyMovesIt(unittest.TestCase):
         cols, rows = self.out.get("cols") or [], self.out.get("rows") or []
         self.assertLessEqual(len(cols), 3, f"★★★ 卡片没落回网格列：{cols}")
         self.assertLessEqual(len(rows), 3, f"★★★ 卡片没落回网格行：{rows}")
+
+
+_THRESHOLD_JS = r"""
+const out = {};
+const wait = ms => new Promise(r => setTimeout(r, ms));
+const cards = () => [...document.querySelectorAll('[data-cards-grid] > div[data-aid]')];
+const pe = (t, el, x, y) => el.dispatchEvent(new PointerEvent(t, {
+  bubbles: true, cancelable: true, pointerId: 1, isPrimary: true,
+  button: 0, buttons: 1, clientX: x, clientY: y }));
+
+/** 把 0 号卡沿 x 正方向拖 `dx`，返回「有没有别的卡让位」。 */
+async function travel(dx) {
+  const cs = cards();
+  const a = cs[0];
+  const h = a.querySelector('[data-drag-handle]');
+  h.setPointerCapture = () => {}; h.releasePointerCapture = () => {};
+  const r = h.getBoundingClientRect();
+  const x0 = r.left + r.width / 2, y0 = r.top + r.height / 2;
+  pe('pointerdown', h, x0, y0);
+  await wait(30);
+  pe('pointermove', h, x0 + dx, y0);          // 一步到位：不靠中途帧
+  await wait(30);
+  const moved = cards().some(c => c !== a && (c.style.transform || '') !== '');
+  pe('pointerup', h, x0, y0);                  // 回到原点 ⇒ 不提交
+  await wait(400);                             // 等 clearStyles(FLIP_MS + 40)
+  return moved;
+}
+
+(async () => {
+  try {
+    const cs = cards();
+    const r0 = cs[0].getBoundingClientRect(), r1 = cs[1].getBoundingClientRect();
+    const pitch = r1.left - r0.left;           // 一列的步距 = 卡宽 + 间距
+    out.pitch = Math.round(pitch);
+    out.at30 = await travel(pitch * 0.30);     // 卡片才走了 30% ⇒ 不该让位
+    out.at80 = await travel(pitch * 0.80);     // 走过 80% ⇒ 必须让位
+  } catch (e) { out.error = String(e && e.stack || e); }
+  document.title = '__TH__' + JSON.stringify(out);
+})();
+"""
+
+
+def _run_threshold_probe():
+    """量「让位从卡片走到百分之几开始触发」。拿不到环境返回 None（调用方 skip）。"""
+    import re as _re
+    import urllib.request
+    src = APP_DIR / "harness.html"
+    if not Path(CHROME).exists() or not src.exists():
+        return None
+    try:
+        urllib.request.urlopen(HARNESS, timeout=2).read(1)
+    except Exception:
+        return None
+    page = APP_DIR / "threshprobe.html"
+    page.write_text(src.read_text(encoding="utf-8").replace(
+        "</body>", f"<script>setTimeout(() => {{{_THRESHOLD_JS}}}, 2600);</script></body>", 1),
+        encoding="utf-8")
+    try:
+        r = subprocess.run([CHROME, "--headless=new", "--disable-gpu",
+                            "--window-size=1000,900", "--virtual-time-budget=13000",
+                            "--dump-dom", f"{HARNESS}/threshprobe.html?nav=home"],
+                           capture_output=True, text=True, timeout=120)
+        m = _re.search(r"__TH__(\{.*\})\s*</title>", r.stdout, _re.S)
+        return json.loads(m.group(1)) if m else None
+    finally:
+        page.unlink(missing_ok=True)
+
+
+class OthersMakeWayWhenTheCardIsHalfwayOver(unittest.TestCase):
+    """★★★ 让位的触发点要跟着**卡片**走，不跟着指针走。
+
+    用户 2026-09-20 截图报：「卡片去到第二个位置的一半了，第二个卡片仍然占着位置不动」。
+    真因是命中测试吃的是**指针坐标**，而手柄在卡片右上角 —— 指针天然比卡片超前大半格。
+    同一个错误有两个方向，取决于你从哪儿抓的：从右上角抓，指针早早越界，卡片只挪一点
+    邻居就让位；反过来从左边抓，卡片过半了指针还在原格，邻居纹丝不动。用户看到的是后者。
+
+    ★ 判据用**列步距的百分比**，不用绝对像素 —— 窗口宽度一变，绝对值就失效了。
+      30% / 80% 这两档分别落在「中心跨格」阈值（≈52%）的两侧，而按指针判时
+      触发点只有 ≈8%，所以 30% 那一档正是唯一能把两种实现分开的输入。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.r = _run_threshold_probe()
+        if cls.r is None:
+            raise unittest.SkipTest("没有 Chrome 或 harness 静态服务（3304）没在跑")
+        if cls.r.get("error"):
+            raise AssertionError("探针自己报错了：" + cls.r["error"])
+
+    def test_the_probe_actually_measured_a_real_grid(self):
+        """★★ 先正面证明量到了东西 —— 零渲染的页面看起来和「通过」一模一样。"""
+        self.assertGreater(self.r.get("pitch") or 0, 100,
+                           f"★★ 没量到真实网格步距：{self.r}")
+
+    def test_nothing_moves_while_the_card_is_only_30_percent_across(self):
+        self.assertFalse(self.r["at30"],
+                         "★★★ 卡片才走 30% 邻居就让位了 —— 命中又按指针判了")
+
+    def test_the_neighbour_makes_way_once_the_card_is_80_percent_across(self):
+        self.assertTrue(self.r["at80"],
+                        "★★★ 卡片都走了 80%，邻居还杵着不动 —— 用户 2026-09-20 报的正是这个")
+
+
+#: 3×1 的槽位，列在 x=[0,100] / [110,210] / [220,320]，行 y=[0,100]。
+_SLOTS = ("[{left:0,top:0,right:100,bottom:100},"
+          "{left:110,top:0,right:210,bottom:100},"
+          "{left:220,top:0,right:320,bottom:100}]")
+
+
+@unittest.skipIf(shutil.which("node") is None, "没有 node")
+class TheHitTestIsIdempotent(unittest.TestCase):
+    """★★★ 指针不动 ⇒ 顺序不许变。四轮「不流畅」的真正根因。
+
+    2026-09-20 实测：命中测试原来拿**按下时冻结的槽位身份**去 `ids.indexOf(...)` 求落点，
+    而 `ids` 每帧在变 —— 操作因此不幂等。harness 同坐标连发 8 次 `pointermove`，
+    布局在两个状态间反复横跳，170ms 的让位过渡每 ~8ms 被重启、**永远播不完**。
+
+    这条闸守两件事，缺一不可：
+      ① 同一坐标重复调用**只生效一次**；
+      ② 最终结果**与调用次数的奇偶无关** —— 旧实现下落盘顺序取决于 pointermove 的次数，
+         这是它唯一一个能被外部观测到的症状，也是最容易被漏掉的那一半。
+    """
+
+    def _repeat(self, n, x=250, y=50, ids="['a','b','c']", aid="'a'"):
+        return _node(
+            "(() => { let ids = %s;"
+            "  for (let i = 0; i < %d; i++) ids = m.reorderByHit(ids, %s, %s, %d, %d);"
+            "  return ids; })()" % (ids, n, aid, _SLOTS, x, y))
+
+    def test_repeating_the_same_move_changes_the_order_exactly_once(self):
+        steps = _node(
+            "(() => { let ids = ['a','b','c']; const seen = [];"
+            "  for (let i = 0; i < 8; i++) {"
+            "    ids = m.reorderByHit(ids, 'a', %s, 250, 50); seen.push(ids.join('')); }"
+            "  return seen; })()" % _SLOTS)
+        self.assertEqual(
+            sorted(set(steps)), ["bca"],
+            "★★★ 指针停在同一点，顺序却在变 —— 让位过渡会被每帧重启、永远播不完。"
+            f"实际逐次结果：{steps}")
+
+    def test_the_result_does_not_depend_on_how_many_moves_arrived(self):
+        """★★ 旧实现下这是对外可见的症状：落盘顺序取决于 pointermove 次数的奇偶。"""
+        got = {n: self._repeat(n) for n in range(1, 10)}
+        self.assertEqual(
+            list({tuple(v) for v in got.values()}), [("b", "c", "a")],
+            f"★★ 结果随 move 次数变化 —— 拖同一个位置，快慢不同会存出不同顺序：{got}")
+
+    def test_a_pointer_in_empty_space_leaves_the_order_alone(self):
+        """★ 落在网格空白处是「没命中」，不是「回到第 0 位」。
+
+        ⚠️ 必须拖**不在第 0 位**的那张（这里是 `c`）。第一版拖的是 `a`，而
+        「没命中 ⇒ 落点 0」这个变异对一张本来就在第 0 位的卡是空操作 —— 变异实测不红，
+        夹具自己把被测行为遮住了。本仓形态⑩：判据档位要挑只有被测那条能挡住的输入。
+        """
+        for x, y, where in ((105, 50, "列间隙"), (250, 400, "网格下方")):
+            self.assertEqual(self._repeat(3, x=x, y=y, aid="'c'"), ["a", "b", "c"],
+                             f"★ {where}的坐标把卡片挪走了")
+
+    def test_dragging_back_onto_its_own_slot_returns_it(self):
+        """★ 不跳过自己的槽位 —— 指针挪回原处，卡片要正确地回去。"""
+        self.assertEqual(
+            _node("(() => { let ids = ['a','b','c'];"
+                  "  ids = m.reorderByHit(ids, 'a', %s, 250, 50);"
+                  "  ids = m.reorderByHit(ids, 'a', %s, 50, 50);"
+                  "  return ids; })()" % (_SLOTS, _SLOTS)),
+            ["a", "b", "c"], "★ 拖回原位没有还原")
+
+    def test_a_no_op_returns_the_very_same_array(self):
+        """★ 幂等要做到**引用不变**，调用方才能便宜地跳过后续工作。"""
+        # ⚠️ 包成数组是因为 `_node` 只收 `[`/`{`/`"` 开头的行 —— 裸 `true` 会被过滤掉，
+        #   表现为「node 没有产出结果」。别改成裸布尔。
+        self.assertEqual(_node(
+            "(() => { const a = m.reorderByHit(['a','b','c'], 'a', %s, 250, 50);"
+            "  return [m.reorderByHit(a, 'a', %s, 250, 50) === a]; })()" % (_SLOTS, _SLOTS)),
+            [True], "★ 空操作仍然新建了数组")
+
+    def test_an_unknown_card_is_not_silently_moved(self):
+        self.assertEqual(self._repeat(2, aid="'不存在'"), ["a", "b", "c"])
+
+    def test_the_hook_actually_routes_through_it(self):
+        """★★ 纯函数再对，hook 不调它也等于没改。
+
+        断言打在**代码形态**上并先剥注释 —— 本仓形态⑫：注释里正解释着这条规则，
+        拿关键词去 `assertIn` 永远匹配得到。
+        """
+        src = (SRC / "hooks" / "useCardDrag.ts").read_text(encoding="utf-8")
+        code = "\n".join(l for l in src.splitlines()
+                         if not l.strip().startswith(("*", "/*", "//")))
+        self.assertIn("reorderByHit(s.ids, s.aid, s.slots, cx, cy)", code,
+                      "★★ onMove 没走那唯一一份命中测试")
+        self.assertNotIn("s.ids.indexOf(over)", code,
+                         "★★★ 又按「槽位原住户」求落点了 —— 那是不幂等的写法")
 
 
 if __name__ == "__main__":

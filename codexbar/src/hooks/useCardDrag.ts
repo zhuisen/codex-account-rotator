@@ -1,5 +1,5 @@
 import { useCallback, useLayoutEffect, useRef, useState } from "react";
-import { moveItem } from "../cardOrder";
+import { reorderByHit } from "../cardOrder";
 
 /**
  * 卡片拖拽排序的手感层。
@@ -49,8 +49,8 @@ interface Slot {
 interface Session {
   aid: string;
   p0x: number; p0y: number;
-  /** 按下时这张卡所在槽位的左上角。 */
-  l0x: number; l0y: number;
+  /** 按下时这张卡的**中心**（命中判定用它，不用指针 —— 见 onMove）。 */
+  c0x: number; c0y: number;
   /** 按下那一刻的槽位（整轮不变）。 */
   slots: Slot[];
   baseIds: string[];
@@ -184,7 +184,8 @@ export function useCardDrag(gridSelector = "[data-cards-grid]"): {
         if (!mine) return;
         ses.current = {
           aid, slots, baseIds: [...baseIds], ids: [...baseIds],
-          p0x: x, p0y: y, l0x: mine.left, l0y: mine.top, moved: false,
+          p0x: x, p0y: y, moved: false,
+          c0x: (mine.left + mine.right) / 2, c0y: (mine.top + mine.bottom) / 2,
         };
         escRef.current = () => finish(false);
       },
@@ -202,17 +203,18 @@ export function useCardDrag(gridSelector = "[data-cards-grid]"): {
             if (sl.aid === aid) sl.el.style.zIndex = "5";
           }
         }
-        // 命中：用**按下时量的固定槽位**，整轮不动 —— 结构上不可能有反馈回路
-        let over: string | null = null;
-        for (const sl of s.slots) {
-          if (sl.aid === s.aid) continue;
-          if (x >= sl.left && x <= sl.right && y >= sl.top && y <= sl.bottom) { over = sl.aid; break; }
-        }
-        if (over) {
-          const from = s.ids.indexOf(s.aid);
-          const to = s.ids.indexOf(over);
-          if (from >= 0 && to >= 0 && from !== to) s.ids = moveItem(s.ids, from, to);
-        }
+        // 命中：用**按下时量的固定槽位**，整轮不动 —— 结构上不可能有反馈回路。
+        // ★★★ 判定按**槽位序号**，不按「这个槽位原来住着谁」：后者不幂等，
+        //   会让顺序每帧来回翻、让位过渡永远播不完。整段推导与实测在 cardOrder.ts。
+        //
+        // ★★★ 喂进去的是**被拖卡片的中心**，不是指针。
+        //   手柄在卡片右上角，所以指针天然比卡片超前大半格：按指针判，卡片才挪
+        //   一点点、邻居就让位了；而用户看到的是「卡片都过去一半了，邻居还杵着不动」
+        //   —— 同一个错误的两个方向，取决于你从哪儿抓的。2026-09-20 用户截图报的就是它。
+        //   中心 = 原中心 + 指针位移（DOM 不动，所以位移就是 transform 的量）。
+        const cx = s.c0x + (x - s.p0x);
+        const cy = s.c0y + (y - s.p0y);
+        s.ids = reorderByHit(s.ids, s.aid, s.slots, cx, cy);
         layout(x, y);          // 纯写样式，零重渲染
       },
       onEnd: finish,
