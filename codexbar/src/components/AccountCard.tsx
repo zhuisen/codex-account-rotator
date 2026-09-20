@@ -123,7 +123,8 @@ export default function AccountCard({ a, isCurrent, isBest, isSelected, shortcut
       {/* 拖拽手柄（⠿）。`onMouseDown` 才把根节点的 `draggable` 打开 —— HTML5 DnD 只认
           根节点上的 `draggable`，常开的话整张卡随手一拖就走，正是选「专用手柄」要避免的。 */}
       {drag && <DragHandle t={t} dragging={drag.isDragging} dragId={drag.dragId}
-                           cardRef={cardRef} onStart={drag.onDragStart} onEnd={drag.onDragEnd} />}
+                           cardRef={cardRef} onStart={drag.onDragStart} onEnd={drag.onDragEnd}
+                           hint={"按住拖动排序。★ 这个顺序**就是轮换优先级**：排在前面的号会先被用，且**优先级压过额度** —— 第一个号会一直用到撞限、冷却后才轮到下一个。⌘N 也跟着新顺序走。"} />}
 
       {/* ★★ `flex:1` + 内容列 `alignSelf:stretch`：卡片在网格里本来就等高（`stretch`），
           这里把多出来的高度交给内容列，好让下方区块**吊在卡片底边**（见下方 spacer）。

@@ -136,12 +136,14 @@ class PickerActuallyUsesThem(unittest.TestCase):
     """★ 判据打在 `_pick` 的真实排序调用上 —— 定义了函数不等于接上了。"""
 
     def test_sort_key_is_wired_in(self):
+        """★ 2026-09-19 起排序抽成了 `_sort_avail`（唯一一份实现），`_pick` 调它。
+
+        判据跟着真源走：**规则没变**（档 > … > 最紧窗口已用%），只是不再内联在 `_pick` 里。
+        抽出来的理由本身也是一条教训：内联时测试只能抄一份同样的 key，于是改真排序行
+        对闸毫无影响（变异实测两条都没红）。
+        """
         src = (ROOT / "proxy" / "proxy.py").read_text(encoding="utf-8")
-        i = src.index("def _pick(")
-        body = src[i:src.index("\ndef ", i + 10)]
-        self.assertIn("_plan_tier(kv[1]), _tightest_used(kv[1])", body,
-                      "排序键没接进 _pick —— 策略只存在于注释里")
-
-
-if __name__ == "__main__":
-    unittest.main()
+        code = "\n".join(l for l in src.splitlines() if not l.strip().startswith("#"))
+        self.assertIn("_sort_avail(avail, s)", code, "★ _pick 没走那唯一一份排序")
+        self.assertIn("_tightest_used(kv[1])", code, "★ 排序里没有「最紧窗口已用%」")
+        self.assertIn("_plan_tier(kv[1])", code, "★ 排序里没有套餐档")

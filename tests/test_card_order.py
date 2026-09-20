@@ -149,10 +149,23 @@ class TheGeminiLaneFollowsTheSameRule(unittest.TestCase):
         self.assertNotIn("drag={", self.code[i:i + 700],
                          "★ grok 只有一张卡，手柄拖不出任何效果")
 
-    def test_the_two_lanes_keep_separate_orders(self):
-        """codex 与 gemini 是两组不同的卡，顺序必须各存各的。"""
-        self.assertIn('setOrderFor("codex"', self.code)
-        self.assertIn('setOrderFor("gemini"', self.code)
+    def test_the_two_lanes_store_their_order_in_different_places(self):
+        """★★★ 两档的顺序**含义不同，家也不同**（2026-09-19 用户定）。
+
+        · **codex** —— 顺序**就是轮换优先级**，决定钱花在哪个号上 ⇒ 真源必须是
+          `state.json`（代理在 app 没开时也要读它），写入走 `codex-rotate priority --set`。
+          放 localStorage 会分叉成「界面上排第一、代理却在用别的号」。
+        · **gemini** —— agy 是启动前换凭证，没有逐请求的挑号器 ⇒ 顺序纯属摆放，
+          留在 localStorage 即可。
+        """
+        self.assertIn('"priority", "--set"', self.code,
+                      "★★★ codex 档没把顺序写进 state.json —— 拖了不影响轮换")
+        self.assertIn('applyOrder(aliveByLabel, state.pick_order', self.code,
+                      "★★★ codex 档没从 state.json 读顺序 —— 会与代理分叉")
+        self.assertIn('setOrderFor("gemini"', self.code,
+                      "★ gemini 档仍该留在 localStorage")
+        self.assertNotIn('setOrderFor("codex"', self.code,
+                         "★★ codex 档不该再写 localStorage —— 那会变成第二个真源")
 
 
 class DraggingDoesNotBreakClickToSelect(unittest.TestCase):

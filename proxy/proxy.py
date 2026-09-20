@@ -288,6 +288,48 @@ def _plan_tier(slot):
     return 1 if plan == "pro" else 0
 
 
+def _pick_rank(aid, state):
+    """手工优先级:`state["pick_order"]` 里的位次。没排过的排在**所有排过的之后**。
+
+    ★★ **用户 2026-09-19 定的策略:优先级压过额度**(排序键 `(套餐档, 优先级, 已用%)`)。
+      含义是字面的 —— 你排第一的号会**一直用到 429 撞限**,冷却了才轮到第二个。
+      这与本仓原有的「最少使用者 + 迟滞」取向相反,是**刻意的**:
+      用户要的是「先用哪个就先用哪个」,不是"自动摊平"。
+      ⚠️ 代价说在前面:每个号都会被烧到撞限,而不是大家各用一点。
+
+    ★ **没排过的号绝不丢、也绝不排到"负无穷"** —— 追加在末尾(同 UI 的 `applyOrder`)。
+      新加的号、刚复活的号本来就不在顺序里;把它们当"优先级最高"会让一个刚进池、
+      还没被安排的号抢走全部流量,当"永不使用"则是静默饿死。追加在末尾是唯一
+      既不抢也不饿的位置 —— 前面的号撞限冷却后它照样会被挑中。
+
+    ★ 按 **aid** 存不按 label:label 是可以改的昵称(`rename`),改个名字就重排顺序
+      是一个没人预期得到的副作用。
+    """
+    order = state.get("pick_order") or []
+    try:
+        return order.index(aid)
+    except ValueError:
+        return len(order)          # 没排过 ⇒ 末尾,不是 ±inf
+
+
+def _sort_avail(avail, state):
+    """按生产排序键就地排序候选号。**唯一的排序实现。**
+
+    ★★ 抽成函数是为了让闸能调**这一份**。原来排序键直接内联在 `_pick` 里，
+      `tests/test_pick_priority.py` 只好在测试里抄一份同样的 key —— 于是改真排序行
+      对它毫无影响（变异实测：去掉优先级、把优先级提到套餐档之前，**两条都没被抓到**）。
+      本仓铁律:闸的期望值要从**真源**推导,不能测一份抄过来的副本。
+
+    排序键三段:**套餐档 > 手工优先级 > 最紧窗口已用%**。
+      · 套餐档 —— Plus 优先、Pro 保底(用户 2026-09-07 策略 C,保留不变);
+      · 手工优先级 —— 用户拖出来的顺序(2026-09-19),**只在档内生效**,但**压过额度**;
+      · 已用% —— 原来的档内排序,现在降到第三位。
+    """
+    avail.sort(key=lambda kv: (_plan_tier(kv[1]), _pick_rank(kv[0], state),
+                               _tightest_used(kv[1])))
+    return avail
+
+
 def _tightest_used(slot):
     """这个号**最紧**窗口的已用百分比;读不到返回 `(1, 0.0)` 排在有读数的之后。
 
@@ -463,7 +505,7 @@ def _pick(prev_id, exclude=None, conv=None):
             avail = relaxed
     if not avail:
         return None, None, "exhausted"
-    avail.sort(key=lambda kv: (_plan_tier(kv[1]), _tightest_used(kv[1])))
+    _sort_avail(avail, s)
 
     # ★ 迟滞:上一次真正服务过的号(`last_aid` 由 _record_quota 在成功响应后写入 —— 用它而不是
     # 「上次被挑中的号」,因为挑中但 401/429 失败的那个不该被粘住)如果仍可用、且没比最省的号贵出
@@ -478,9 +520,16 @@ def _pick(prev_id, exclude=None, conv=None):
             #    于是一个粘在 Pro 上的会话会因为"Pro 没比最省的 Plus 贵多少"而**一直粘在 Pro 上**,
             #    把「Pro 保底」直接绕过去。档位不同就不粘,让它回到上面那个 Plus 优先的排序。
             # ★ 口径同样换成**最紧窗口**:拿 Pro 的周% 和 Plus 的 5h% 比大小本就不成立。
+            # ★★★ **迟滞同样不得跨优先级**(2026-09-19 加)。
+            #    只比「档 + 已用%」的话,一个粘在**低优先级**号上的会话会因为
+            #    "没比最省的贵多少"而一直粘着 —— 把用户刚设的优先级**静默绕过去**,
+            #    而界面上顺序明明是对的。这与上面那条「迟滞不得跨套餐档」是同一个形状,
+            #    只是这次被绕过的是用户手动排的顺序,更难察觉:额度数字看着也合理。
             lt, lu = _plan_tier(slots[last]), _tightest_used(slots[last])
             bt, bu = _plan_tier(avail[0][1]), _tightest_used(avail[0][1])
-            if lt == bt and lu[0] == 0 and bu[0] == 0 and lu[1] <= bu[1] + PICK_HYSTERESIS:
+            lp, bp = _pick_rank(last, s), _pick_rank(avail[0][0], s)
+            if (lt == bt and lp == bp
+                    and lu[0] == 0 and bu[0] == 0 and lu[1] <= bu[1] + PICK_HYSTERESIS):
                 return last, slots[last], "sticky"
 
     return avail[0][0], avail[0][1], "new"

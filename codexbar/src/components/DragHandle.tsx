@@ -29,7 +29,7 @@ import { CARD_TYPE as Z, type Theme } from "../theme";
  * `onMouseDown` 拦的是「按下就选中」，`onClick` 拦的是「松手后的点击」。缺一个都会让
  * 点击穿透成「选中并展开动作条」。
  */
-export default function DragHandle({ t, dragging, dragId, cardRef, onStart, onEnd }: {
+export default function DragHandle({ t, dragging, dragId, cardRef, onStart, onEnd, hint }: {
   t: Theme;
   dragging: boolean;
   /** 写进 dataTransfer 的身份。★ 内容本身不重要，**有没有写**才重要（见上）。 */
@@ -38,6 +38,14 @@ export default function DragHandle({ t, dragging, dragId, cardRef, onStart, onEn
   cardRef: React.RefObject<HTMLDivElement | null>;
   onStart: () => void;
   onEnd: () => void;
+  /**
+   * 悬浮说明。**两档含义不同，所以文案必须由调用方给**：
+   *   · codex 档 —— 顺序**就是轮换优先级**，一拖就改变钱花在哪个号上；
+   *   · gemini 档 —— 纯摆放顺序，不影响任何东西。
+   * ★ 写死一句「调整卡片顺序」会在 codex 档变成**一句关于事实的假陈述** ——
+   *   本仓铁律「换了数据源，页面上的话必须跟着换」。
+   */
+  hint: string;
 }) {
   return (
     <span
@@ -57,7 +65,7 @@ export default function DragHandle({ t, dragging, dragId, cardRef, onStart, onEn
       onDragEnd={onEnd}
       onMouseDown={(e) => { e.stopPropagation(); }}
       onClick={(e) => e.stopPropagation()}
-      title="按住拖动可调整卡片顺序（⌘N 会跟着新顺序走）"
+      title={hint}
       style={{
         position: "absolute", top: 4, right: 8, padding: "2px 4px",
         fontSize: Z.shortcut, lineHeight: 1, cursor: "grab",

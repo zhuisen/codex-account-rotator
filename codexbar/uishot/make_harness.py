@@ -814,6 +814,22 @@ function relayEntry() {
           '     ❔ model_provider 块:~/.codex/config.toml 存在但读不到(权限?)']));
         return Promise.resolve(_mk('ready', 'ok', ['  ✅ 接入闸:已接入账号池(9 个号)']));
       }
+      // run_rotate 的桩。默认什么都不做(返回 null),只有 `priority --set` 要真的改 STATE ——
+      // 否则总览拖完顺序、`read_state` 回来的还是旧的,端到端闸验的就不是真链路了。
+      // ★ 2026-09-19 加:codex 档的拖拽顺序改写进 state.json(它就是轮换优先级)。
+      case 'run_rotate': {
+        var _a = (args && args.args) || [];
+        if (_a[0] === 'priority' && _a[1] === '--set') {
+          var want = _a.slice(2);
+          var byLabel = {};
+          Object.keys(STATE.slots || {}).forEach(function (k) {
+            byLabel[(STATE.slots[k] || {}).label] = k;
+          });
+          STATE.pick_order = want.map(function (n) { return byLabel[n]; })
+                                 .filter(function (x) { return !!x; });
+        }
+        return Promise.resolve('');
+      }
       case 'read_state':
         return Promise.resolve(STATE);
       // `slotToAccount(aid, slot, tokens)` 会直接索引 tokens[aid] —— 返回 null 会抛

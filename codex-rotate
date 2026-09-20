@@ -3381,6 +3381,67 @@ def codex_integration_gate():
             "port": port, "accounts": nacc}
 
 
+def cmd_priority(args):
+    """`codex-rotate priority [--set <label…>|--clear|--json]` —— 轮换优先级。
+
+    ★★ **真源是 `state.json` 的 `pick_order`（aid 列表），不是 localStorage。**
+      代理在 app 没开时也要读它 —— 展示偏好可以存前端，而这个**决定钱花在哪个号上**，
+      两个真源迟早分叉成「界面上排第一、代理却在用别的号」。同 `rotate_off` / `dawn_probe`
+      的理由，那两个也是为此从 localStorage 搬进 state.json 的。
+
+    ★ 存 **aid** 不存 label：label 是可改的昵称（`rename`），改个名字就重排轮换顺序
+      是没人预期得到的副作用。
+
+    ★ 语义（用户 2026-09-19 定）：排序键 `(套餐档, 优先级, 已用%)` —— **优先级压过额度**。
+      排第一的号会一直用到 429 撞限、冷却后才轮到第二个。没排过的号追加在末尾，
+      **不丢也不饿死**（前面的号冷却时它照样会被挑中）。
+    """
+    s = _state()
+    slots = s.get("slots", {})
+    by_label = {(sl.get("label") or ""): aid for aid, sl in slots.items()}
+
+    if "--clear" in args:
+        _mutate_state(lambda st: st.pop("pick_order", None))
+        print("✅ 已清除手工优先级 —— 回到「同档内按额度最省者优先」")
+        return
+
+    if "--set" in args:
+        names = [a for a in args[args.index("--set") + 1:] if not a.startswith("--")]
+        if not names:
+            print("用法: codex-rotate priority --set <label> [<label> …]", file=sys.stderr)
+            sys.exit(2)
+        unknown = [n for n in names if n not in by_label]
+        if unknown:
+            # ★ 打错一个字母就该看见 —— 静默忽略会让用户以为排好了
+            print(f"⛔ 不认识这些号: {', '.join(unknown)}", file=sys.stderr)
+            print(f"   池里有: {', '.join(sorted(by_label)) or '(空)'}", file=sys.stderr)
+            sys.exit(2)
+        order = [by_label[n] for n in names]
+        _mutate_state(lambda st: st.__setitem__("pick_order", order))
+        print("✅ 优先级已设置: " + " → ".join(names))
+        print("   ⚠️ 优先级**压过额度**: 排第一的号会一直用到撞限,冷却后才轮到下一个。")
+        return
+
+    order = s.get("pick_order") or []
+    ranked = [(i, aid) for i, aid in enumerate(order) if aid in slots]
+    rest = [aid for aid in slots if aid not in order]
+    if "--json" in args:
+        print(json.dumps({"pick_order": order,
+                          "ranked": [slots[a].get("label") for _, a in ranked],
+                          "unranked": [slots[a].get("label") for a in rest]},
+                         ensure_ascii=False))
+        return
+    if not ranked:
+        print("未设置手工优先级 —— 同档内按「最紧窗口已用% 最少」挑号。")
+    else:
+        print("轮换优先级（越靠前越先用，**压过额度**）:")
+        for i, aid in ranked:
+            print(f"  {i + 1}. {slots[aid].get('label')}")
+    if rest:
+        print("  未排序（追加在末尾，前面的号冷却时仍会被挑中）: "
+              + ", ".join(sorted(slots[a].get("label") or a for a in rest)))
+
+
 def cmd_integration(args):
     """`codex-rotate integration [--json]` —— 装机链路总闸的独立入口。
 
@@ -3535,7 +3596,8 @@ CMDS = {"add": cmd_add, "login": cmd_login, "list": cmd_list, "switch": cmd_swit
         "refresh-all": cmd_refresh_all, "health": cmd_health, "remove": cmd_remove,
         "ensure-live": cmd_ensure_live, "credits": cmd_credits, "probe": cmd_probe,
         "dawn-probe": cmd_dawn_probe, "rotate": cmd_rotate,
-        "tokens": cmd_tokens, "integration": cmd_integration}
+        "tokens": cmd_tokens, "integration": cmd_integration,
+        "priority": cmd_priority}
 
 
 # Disk-only commands run their whole load→mutate→save under the cross-process state mutex (lost-update

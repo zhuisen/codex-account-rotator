@@ -223,7 +223,7 @@ fn store_dir() -> String {
 // ★ `dawn-probe` 加进来是给「app 内补跑」用的:本项目的 launchd 日历定时有前科
 //   (keepalive/refreshquota 的 StartCalendarInterval 被外力改写丢掉,runs = 0、从未运行过),
 //   所以 06:00 那个 plist **不能是唯一触发路径**。命令侧当天幂等 + 先占天,重复调用不会双重计费。
-const ALLOWED_CMDS: &[&str] = &["switch", "cool", "uncool", "refresh-all", "health", "list", "quota", "remove", "credits", "probe", "dawn-probe", "tokens", "rename", "rotate"];
+const ALLOWED_CMDS: &[&str] = &["switch", "cool", "uncool", "refresh-all", "health", "list", "quota", "remove", "credits", "probe", "dawn-probe", "tokens", "rename", "rotate", "priority"];
 
 /// Interpreter for codex-rotate. NOT a bare `python3`: Cloudflare fingerprints the TLS ClientHello,
 /// and macOS's `/usr/bin/python3` (LibreSSL 2.8.3) gets a hard 403 from /backend-api/codex/usage while

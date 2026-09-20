@@ -48,6 +48,10 @@ export interface Slot {
 }
 export interface AppState {
   slots?: Record<string, Slot>; active?: string; last_proxy_ts?: number;
+  /** 轮换优先级（aid 列表，越靠前越先用）。★★ **真源在 `state.json`,不在 localStorage** ——
+   *  代理在 app 没开时也要读它。它**决定钱花在哪个号上**,两个真源迟早分叉成
+   *  「界面上排第一、代理却在用别的号」。写入走 `codex-rotate priority --set`。 */
+  pick_order?: string[];
 }
 export interface TokenInfo { exp?: number }
 

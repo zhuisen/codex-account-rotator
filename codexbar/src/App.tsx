@@ -73,7 +73,7 @@ const IconEyeOff = () => <svg width="13" height="13" viewBox="0 0 24 24" fill="n
 const IconMoon = () => <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>;
 
 export default function App() {
-  const { accounts, hero, currentNode, counts, tokens, lastRefreshAt, freshness, loadingAction, toast, refresh, run, showToast } = useStore();
+  const { state, accounts, hero, currentNode, counts, tokens, lastRefreshAt, freshness, loadingAction, toast, refresh, run, showToast } = useStore();
   const [theme, setTheme] = useState<"dark" | "light">("dark");
   // 版本号运行期从 tauri 取,别再写死(发版时漏改前端字符串是老毛病)
   const [ver, setVer] = useState("");
@@ -197,7 +197,7 @@ export default function App() {
    * ⚠️ 已知代价（用户知情）：重排之后旧的肌肉记忆会切到别的号。
    * ★ 没被排过的号**追加在末尾**，绝不丢（见 `applyOrder`）。
    */
-  const orderedAlive = applyOrder(aliveByLabel, cardOrder["codex"], (a) => a.aid);
+  const orderedAlive = applyOrder(aliveByLabel, state.pick_order, (a) => a.aid);
   useExpiryWatch(accounts, tokens);
   // Dead-account alerts live in the MAIN window only — the menubar popover renders the same store, so
   // running the watcher in both would double-notify.
@@ -212,14 +212,23 @@ export default function App() {
   /**
    * 把 `from` 这张卡放到 `to` 这张卡的位置，并把新顺序落盘 + 广播。
    *
-   * ★ 落盘**完整 id 列表**而不是「谁排第几」的增量 —— 增量在有号新增/删除时无法解释，
-   *   完整列表天然自洽（`applyOrder` 会把没记录过的追加到末尾，不会丢号）。
+   * ★ 落盘**完整清单**而不是「谁排第几」的增量 —— 增量在有号新增/删除时无法解释，
+   *   完整清单天然自洽（`applyOrder` 会把没记录过的追加到末尾，不会丢号）。
+   *
+   * ★★★ **codex 档的顺序 = 轮换优先级，写进 `state.json`，不是 localStorage。**
+   *   用户 2026-09-19 定的策略：排序键 `(套餐档, 优先级, 已用%)` —— **优先级压过额度**，
+   *   排第一的号会一直用到 429 撞限、冷却后才轮到下一个。
+   *   既然它决定钱花在哪个号上，真源就必须是代理也能读到的那一份 ——
+   *   代理在 app 没开时照样在挑号。走 `codex-rotate priority --set`（CLI 是唯一写入口）。
+   *   ⚠️ 所以这一档**拖一下就改变了计费顺序**，不只是换个摆放位置。
    */
   const dropCardOnto = (toAid: string) => {
     const from = orderedAlive.findIndex((x) => x.aid === dragAid);
     const to = orderedAlive.findIndex((x) => x.aid === toAid);
     if (from >= 0 && to >= 0 && from !== to) {
-      setOrderFor("codex", moveItem(orderedAlive, from, to).map((x) => x.aid));
+      const next = moveItem(orderedAlive, from, to);
+      void run("priority", ["priority", "--set", ...next.map((x) => x.node)],
+               `优先级：${next.map((x) => x.node).slice(0, 3).join(" → ")}…`);
     }
     setDragAid(null); setOverAid(null);
   };

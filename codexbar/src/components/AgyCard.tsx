@@ -163,7 +163,8 @@ export default function AgyCard({ t, color, snap, busy, err, disabled, winSlots,
       transition: "background .2s ease, border-color .2s ease, opacity .15s ease",
     }}>
       {drag && <DragHandle t={t} dragging={drag.isDragging} dragId={drag.dragId}
-                           cardRef={cardRef} onStart={drag.onDragStart} onEnd={drag.onDragEnd} />}
+                           cardRef={cardRef} onStart={drag.onDragStart} onEnd={drag.onDragEnd}
+                           hint={"按住拖动可调整卡片摆放顺序（⌘N 会跟着新顺序走）。只影响显示，不影响切号策略。"} />}
       {/* ★ 有快捷键就画 `⌘N`（与账号卡同位同字号），没有就退回 `CLI` ——
           那个角标本来就是"这张卡怎么来的"，两种写法都在回答同一个问题。 */}
       <span style={{ position: "absolute", top: 6, left: 10, color,
