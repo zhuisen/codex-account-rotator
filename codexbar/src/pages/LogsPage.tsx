@@ -710,7 +710,7 @@ export default function LogsPage({ t }: { t: Theme }): React.ReactElement {
             **不占一行、也不用把下界说成总量**。 */}
       </div>
 
-      {/* ── 每号 × 每天：优先级到底生效没（用户 2026-09-21 从三个口径里选的）────── */}
+      {/* ── 每号 × 每天：优先级到底生效没 —— **收进悬浮角标**（用户 2026-09-21）────── */}
       {/* ★★ 这张表存在的理由只有一个：总览把拖拽顺序标成「轮换优先级」，而**它到底有没有
               被执行**在任何既有视图上都看不出来。实测当天：排 #1/#2 的号被 rotate_off
               挡在池外，8 天一次都没跑过，而界面上它们看着是最优先的。
@@ -719,14 +719,26 @@ export default function LogsPage({ t }: { t: Theme }): React.ReactElement {
           ★ 末行的「中转站」不是装饰：09-19 那天 40 次 POST 里 39 次走了中转站，
             账号池只用了 1 次 —— 没有这一行，整列的 `—` 会被读成「这天没用 codex」。 */}
       {rot?.daily && rot.daily.rows.length > 0 && (
-        <div style={{ ...card, padding: "13px 15px", marginTop: 12 }}>
-          <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 9 }}>
-            <span style={{ fontSize: 12.5, fontWeight: 700, color: t.text }}>每号 · 每天在岗</span>
-            <span style={{ fontSize: 10, color: t.muted }}>
+        <div data-daily className="cb-hoverwrap" style={{ marginTop: 10, fontSize: 11.5 }}>
+          {/* ★ 角标**紧挨它解释的东西**（汇总条下方），不单独占一行 —— 单独占行会把
+              泳道往下推，且看着像一条告警（本仓 §5d）。 */}
+          <span data-daily-badge title="每号 · 每天在岗 —— 悬浮展开。左列 #N 是你在总览拖出来的轮换优先级"
+                style={{ display: "inline-flex", alignItems: "center", gap: 5,
+                         padding: "2px 8px", borderRadius: 7, cursor: "help", userSelect: "none",
+                         border: `1px solid ${t.ghostBorder}`, color: t.muted }}>
+            ⓘ<span style={{ fontWeight: 600 }}>每号 · 每天在岗</span>
+          </span>
+          {/* ★★ 浮层**内容仍在 DOM 里**，靠 CSS 控制可见性（`.cb-hoverpop`）——
+              条件渲染会让本仓所有基于 `--dump-dom` 的行为闸静默失效（§5c）。
+              ★ `maxWidth` 按窗口收：30d 档有 30 列，写死宽度会顶出容器（本仓：溢出算 bug）。 */}
+          <div className="cb-hoverpop"
+               style={{ maxWidth: "min(1100px, 92vw)", padding: "11px 13px", borderRadius: 10,
+                        background: t.cardBg, border: `1px solid ${t.cardBorder}`,
+                        boxShadow: t.shadow }}>
+            <div style={{ fontSize: 10, color: t.muted, marginBottom: 7 }}>
               左列 <span style={{ fontFamily: MONO }}>#N</span> 是你在总览拖出来的轮换优先级 ——
               这张表是它有没有被执行的证据
-            </span>
-          </div>
+            </div>
           <div style={{ overflowX: "auto" }}>
             <table style={{ borderCollapse: "collapse", fontSize: 10.5, whiteSpace: "nowrap" }}>
               <thead>
@@ -784,10 +796,11 @@ export default function LogsPage({ t }: { t: Theme }): React.ReactElement {
               </tbody>
             </table>
           </div>
-          <div style={{ fontSize: 9.5, color: t.muted, marginTop: 7, lineHeight: 1.6 }}>
-            <span style={{ fontFamily: MONO }}>—</span> 这天没被选中 ·{" "}
-            <span style={{ fontFamily: MONO, color: "#E0901C" }}>?</span> 这天的日志没读到（不是没用过） ·{" "}
-            <span style={{ color: "#E0901C" }}>⊘</span> 已停用自动轮换，优先级对它无效
+            <div style={{ fontSize: 9.5, color: t.muted, marginTop: 7, lineHeight: 1.6 }}>
+              <span style={{ fontFamily: MONO }}>—</span> 这天没被选中 ·{" "}
+              <span style={{ fontFamily: MONO, color: "#E0901C" }}>?</span> 这天的日志没读到（不是没用过） ·{" "}
+              <span style={{ color: "#E0901C" }}>⊘</span> 已停用自动轮换，优先级对它无效
+            </div>
           </div>
         </div>
       )}

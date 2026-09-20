@@ -131,7 +131,13 @@ STUB = """
   // 注意:这只验证按钮的排版,不验证 `:hover` 这条触发本身。
   if (p.get('hover')) {
     var sh = document.createElement('style');
-    sh.textContent = '.mb-row-switch-wrap{opacity:1 !important;pointer-events:auto !important}';
+    // ★ `.cb-hoverpop` 也要强开（2026-09-21 补）。在这之前它够不到，于是**整个
+    //   悬浮浮层族（路由分账 / 每号每天在岗）在 harness 里一个像素都验不到** ——
+    //   而截图会正常渲染、缺陷探针报干净，正是本仓最怕的那种"沉默"。
+    //   ⚠️ 溢出探针已单独排除 `:scope > .cb-hoverpop`（绝对定位层本来就在盒子外），
+    //     所以强开它不会造出假的横向溢出。
+    sh.textContent = '.mb-row-switch-wrap{opacity:1 !important;pointer-events:auto !important}'
+      + '.cb-hoverpop{opacity:1 !important;visibility:visible !important}';
     document.head.appendChild(sh);
   }
   // ★★★ `read_logs` 的夹具。**在 2026-09-14 之前 `LOGS_TXT` 是个从未定义过的名字** ——

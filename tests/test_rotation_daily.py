@@ -201,5 +201,51 @@ class TheUiOffersTheLongerWindowsAndKeepsTheOldLabels(unittest.TestCase):
                       "★ winLabel 把 24h 也改成了 Nd")
 
 
+class TheTableIsFoldedIntoAHoverBadge(unittest.TestCase):
+    """★★ 用户 2026-09-21：「作为一个鼠标悬浮的功能，隐藏在一个地方就好了」。
+
+    这类「一天看一次」的信息在本仓的既定处理就是**折叠进角标、悬浮才展开**
+    （`.cb-hoverwrap` / `.cb-hoverpop`，与 codex 详情页的「路由分账」同形）。
+
+    ★★★ 折叠必须用 **CSS 控制可见性**，不能条件渲染 —— 条件渲染会让内容离开 DOM，
+      而本仓的行为闸都在 `--dump-dom` 的静态 DOM 上断言，一改就**全部静默失效**
+      （"测试还在、但什么也没验"，§5c）。
+    """
+
+    def setUp(self):
+        import re
+        raw = (ROOT / "codexbar" / "src" / "pages" / "LogsPage.tsx").read_text(encoding="utf-8")
+        self.code = re.sub(r"(?<![:/])//.*", "", re.sub(r"\{?/\*[\s\S]*?\*/\}?", "", raw))
+
+    def test_it_uses_the_repos_existing_hover_pattern(self):
+        i = self.code.index("data-daily")
+        seg = self.code[i:i + 1400]
+        self.assertIn('className="cb-hoverwrap"', seg, "★ 没走既有的悬浮范式")
+        self.assertIn('className="cb-hoverpop"', seg, "★ 浮层没用 .cb-hoverpop")
+
+    def test_the_badge_is_the_only_thing_always_visible(self):
+        """★ 收起态只许留一枚角标 —— 表本身不再常驻占版面。"""
+        i = self.code.index("data-daily-badge")
+        self.assertLess(self.code.index('className="cb-hoverpop"'), i + 1200)
+        self.assertIn("每号 · 每天在岗", self.code[i:i + 400], "★ 角标没有可读的标题")
+
+    def test_the_popup_width_is_bounded(self):
+        """★ 30d 档有 30 列 —— 写死宽度会顶出容器（本仓：横向溢出算 bug）。"""
+        i = self.code.index('className="cb-hoverpop"')
+        self.assertIn("min(", self.code[i:i + 300], "★ 浮层宽度没有按视口收")
+
+    def test_the_harness_can_actually_open_it(self):
+        """★★★ 仪器闸：`?hover=1` 必须够得到 `.cb-hoverpop`。
+
+        2026-09-21 实测：在这之前它只强开 `.mb-row-switch-wrap`，于是**整个悬浮浮层族
+        （路由分账 / 每号每天在岗）在 harness 里一个像素都验不到** —— 而截图会正常渲染、
+        缺陷探针报干净。没有这一条，上面那几条断言验的只是源码文本，不是用户看得见的东西。
+        """
+        h = (ROOT / "codexbar" / "uishot" / "make_harness.py").read_text(encoding="utf-8")
+        i = h.index("if (p.get('hover'))")
+        self.assertIn(".cb-hoverpop{opacity:1", h[i:i + 700],
+                      "★★★ ?hover=1 够不到 .cb-hoverpop —— 这族浮层等于没有像素验证")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
