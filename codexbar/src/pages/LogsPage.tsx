@@ -83,7 +83,11 @@ interface Rotation {
   };
   coverage: {
     responses_seen: number; responses_with_tokens: number; responses_unplaced: number;
-    attributed_pct: number | null; undated_lines: number; in_window_lines: number; tail_truncated: boolean;
+    attributed_pct: number | null; undated_lines: number; in_window_lines: number;
+    /** ★ 三态，不是一个 bool：见 `windowNote()` 与 `rotation.py::_tail_covering`。 */
+    tail_truncated: boolean; window_covered: boolean; tail_bytes: number;
+    covers_from: number | null;
+    log_begins_at: number | null; log_begins_reason: "ok" | "undated_head" | "unreadable";
   };
 }
 
@@ -357,13 +361,70 @@ export default function LogsPage({ t }: { t: Theme }): React.ReactElement {
   }, [rot, svc, filter]);
 
   const cov = rot?.coverage;
+  /**
+   * 窗口完整性的一句话。★★ **三态各说各的，不许共用一句**（2026-09-21）。
+   *
+   * 在这之前这里写死一句「仅统计日志尾部」，由 `tail_truncated` 驱动，而那个标志的旧判据是
+   * **`文件大小 > 上限`** —— 与你选的窗口毫无关系。实测：proxy.log 长到 9.1MB 之后它
+   * **恒为真**，而 7d 窗口实际只需要 1.04MB、一条数据都没少。于是这句话天天挂着，
+   * **真被截断的那天反而看不出来** —— 一盏长亮的灯等于没有灯，用户学会的是忽略它。
+   *
+   * 现在三种结局分开说，而且每一句都说**下一步做什么**（本仓 §5d：别只说"坏了"）：
+   *   · 完整          → 一个字都不说（这是常态，说了就是噪音）
+   *   · 上限切进窗口  → 可补救，告诉用户换小一点的窗口
+   *   · 日志没那么早  → 不可补救，告诉用户数据从哪天开始才有
+   */
+  const windowNote = (c: NonNullable<typeof cov>): string => {
+    if (c.window_covered) return "";
+    if (c.tail_truncated) {
+      return ` ⚠️ 这个窗口超出了日志读取上限（本次读了 ${(c.tail_bytes / 1e6).toFixed(1)}MB）`
+        + `，更早的部分没统计进来 —— 换一个更短的窗口可以看到完整数据。`;
+    }
+    if (c.log_begins_at) {
+      const d = new Date(c.log_begins_at * 1000);
+      return ` 日志从 ${d.getMonth() + 1}-${String(d.getDate()).padStart(2, "0")} 才开始记录，`
+        + `更早的时间段**确实没有数据**（不是没统计）。`;
+    }
+    // ★ `log_begins_at` 为空还要分两种：读不到 vs 那段行本来就没时间戳。合并就又犯一次。
+    return c.log_begins_reason === "unreadable"
+      ? " ⚠️ 读不到日志头部，窗口是否完整**无法判断** —— 这不等于数据完整。"
+      : " 日志最早那批行是旧格式、没有时间戳，所以更早的时间段无法定位。";
+  };
   // 覆盖率说明。★ 去掉的是那**一行字**,不是那个**事实** —— 它改挂到 KPI 标签与 title 上。
+  /**
+   * ★★ 这段文案 2026-09-21 重写，因为它**用错误的原因解释了一个正确的数字**。
+   *
+   * 旧文案把 `501/558` 这个比例解释成「直连 codex 的请求不经过代理」—— 而那两件事
+   * 根本不相干：直连请求**连分母都进不去**（分母只数走过代理的响应），所以它影响的是
+   * 「合计是下界」，**不影响这个比例**。比例真正在说的是另一件事：走过代理、拿到了
+   * response_id，却在 rollout 里找不到 usage 记录。
+   *
+   * 2026-09-21 实测（24h 窗口）把它查清了：
+   *   · 缺的 57 个 response_id，去 `~/.codex/sessions` 逐个找 —— **57/57 根本没有记录**。
+   *     不是我们解析漏了，也不是窗口剪枝剪掉了：codex 压根没写。
+   *   · 按账号看缺失率与 `stream err` 率高度一致（Huo 39%/41% · Egan 19%/24% ·
+   *     Asen 3%/5%），**r = 0.98（n=6 个账号）**；窗口内 61 次 stream err vs 57 个缺失。
+   *   · 日志里能直接看到完整时序：`→ POST` → `← 200` → `affinity resp_…` →
+   *     40 秒后 `stream err … Broken pipe`。流断了，turn 没完成，codex 就不写 usage。
+   *
+   * ⚠️ **仍是相关不是逐请求对上**：proxy.log 给 affinity 行打的是 `#resp_…`、给 stream err
+   *   打的是代理自己的请求号，**两套 id 没有任何一行把它们连起来**。所以文案说「多数」
+   *   而不是「全部」—— 把 0.98 的相关写成因果，正是本仓禁止的那种"把推断写成实测"。
+   *   要坐实它，得让 proxy 在 stream err 行里也带上 response_id（未做，属改代理的活）。
+   *
+   * ★ 而这部分**是花了钱的**：按本仓的计费相位，`stream err` = 已送达上游 = **已计费**。
+   *   所以它不只是"统计不全"，是"这些钱看不见"。
+   */
   const covNote = cov
-    ? `只统计走过代理的响应：${cov.responses_with_tokens}/${cov.responses_seen} 次`
+    ? `已归属 ${cov.responses_with_tokens}/${cov.responses_seen} 次响应`
       + `（${cov.attributed_pct === null ? "—" : Math.round(cov.attributed_pct * 100) + "%"}）。`
-      + `直连 codex 的请求不经过代理，永远不会被算进来，所以这是**下界**不是总量。`
+      + (cov.responses_seen > cov.responses_with_tokens
+        ? `未归属的 ${cov.responses_seen - cov.responses_with_tokens} 次里多数是**流式中断**：`
+          + `流断了 codex 就不写用量记录，而这部分**已经计费** —— 花了钱但看不到明细。`
+        : "")
+      + `另外，直连 codex 的请求不经过代理、连分母都不在，所以合计是**下界**不是总量。`
       + (cov.undated_lines > 0 ? ` 另有 ${cov.undated_lines} 行旧格式日志无时间戳、未计入。` : "")
-      + (cov.tail_truncated ? " 仅统计日志尾部。" : "")
+      + windowNote(cov)
     : undefined;
   const card: React.CSSProperties = {
     background: t.cardBg, border: `1px solid ${t.cardBorder}`, borderRadius: 13,

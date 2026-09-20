@@ -112,6 +112,109 @@ def _iso_utc_epoch(s):
 
 
 # ── 第一段:proxy.log → 在岗时间线 + 事件 + response_id→账号 ─────────────
+def _first_ts_in(text, now):
+    """这段文本里**第一条**能解析出的时间戳。解析不出任何一条 ⇒ None。"""
+    for line in text.splitlines():
+        m = _TS_RE.match(line)
+        if m:
+            t = parse_proxy_ts(*(int(x) for x in m.groups()[:5]), now=now)
+            if t is not None:
+                return t
+    return None
+
+
+def _log_begins_at(path, now, nbytes=64 * 1024):
+    """日志**本身**最早到哪一刻（读头部，恒定 64KB）→ `(epoch|None, reason)`。
+
+    ★ 它回答的是「早于这一刻的事情**确实没有记录**」，与「我们选择少读了」是两件事。
+      合并成一个值就等于把"没打中"和"确实没有"叠在一起 —— 本仓头号铁律。
+
+    ★★ 所以 `None` 也必须带原因，否则它自己又把两件事合并了一次：
+      · `ok`            —— 真读到了最早时刻
+      · `undated_head`  —— 读到了，但**那段行本来就没有时间戳**。实测本机：proxy.log
+                           最早那批是 `[proxy] → POST /responses …`，带日期的
+                           `[proxy MM-DD HH:MM:SS]` 格式是后来才加的。这是"确实没有"。
+      · `unreadable`    —— 打不开。这是"没打中"，与上一条**必须分开**。
+    """
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(nbytes).decode("utf-8", "replace")
+    except OSError:
+        return None, "unreadable"
+    t = _first_ts_in(head, now)
+    return (t, "ok") if t is not None else (None, "undated_head")
+
+
+#: 尾读的起步块与倍增上限。★ 起步 512KB：实测 7d 窗口只需 1.04MB，24h 只要 0.27MB，
+#  而旧实现**每次都读 6MB** 并全量正则扫一遍。倍增最多 4 次就够到 TAIL_BYTES。
+_TAIL_CHUNK = 512 * 1024
+
+
+def _tail_covering(path, start, now, cap=None):
+    """从文件尾往回读，**直到读到的第一条时间戳早于 `start`**（窗口被完整覆盖）为止。
+
+    ## 为什么不是「固定读 N 字节」
+
+    旧实现是 `_tail(path, 6MB)`，`truncated = size > max_bytes` —— 判据只看**文件大小**，
+    与你要的窗口毫无关系。2026-09-21 实测：文件长到 9.1MB 之后这个标志**恒为真**，
+    而 7d 窗口实际只需要 1.04MB、数据一点没少。于是界面天天挂着「仅统计日志尾部」，
+    **真被截断的那天反而看不出来** —— 一个曾经准确的标志退化成了恒真的噪音。
+    （同族：本仓「读不到 ≠ 没有」。这里是它的变体：**「我少读了」≠「文件很大」**。）
+
+    ## 三种结局必须分开，不能合并成一个 bool
+
+    | covered | truncated | 含义 | 可补救吗 |
+    |---|---|---|---|
+    | True | False | 窗口完整 | —— |
+    | False | True | **上限切进了窗口**，本可以多读 | 能：调大 cap |
+    | False | False | 日志本身就没那么早（`log_begins_at` 之后才有记录） | 不能：确实没有 |
+
+    返回 `(text, info)`，`info` 带上面三个判据 + `read_bytes` + `covers_from`。
+    """
+    cap = TAIL_BYTES if cap is None else cap
+    info = {"truncated": False, "covered": False, "read_bytes": 0,
+            "covers_from": None, "log_begins_at": None, "log_begins_reason": "unreadable"}
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        return None, info
+    info["log_begins_at"], info["log_begins_reason"] = _log_begins_at(path, now)
+
+    # ★ 上限必须**在读之前**夹住。第一版把 `want >= cap` 的判断放在读之后，于是
+    #   倍增到 8MB 时先读了 8.39MB 才发现超过 6MB 上限 —— 上限形同虚设（实测）。
+    want = max(1, min(_TAIL_CHUNK, size, cap))
+    text = ""
+    while True:
+        try:
+            with open(path, "rb") as fh:
+                fh.seek(max(0, size - want))
+                raw = fh.read()
+        except OSError:
+            return None, info
+        text = raw.decode("utf-8", "replace")
+        if want < size:
+            # 从中间切进去必然切断一行,而半行会解析出一条形状怪异却看着像真的记录。
+            i = text.find("\n")
+            text = text[i + 1:] if i >= 0 else ""
+        info["read_bytes"] = len(raw)
+        first = _first_ts_in(text, now)
+        info["covers_from"] = first
+        if first is not None and first <= start:
+            info["covered"] = True
+            return text, info
+        if want >= size:
+            # 整个文件都读完了还没够到 `start` ⇒ **日志本身就没那么早**，不是我们少读了。
+            info["covered"] = False
+            info["truncated"] = False
+            return text, info
+        if want >= cap:
+            # 上限切进了窗口 —— 这才是真正的"截断"，而且是**可补救**的那一种。
+            info["covered"] = False
+            info["truncated"] = True
+            return text, info
+        want = min(size, cap, max(want * 2, _TAIL_CHUNK))
+
+
 def _tail(path, max_bytes):
     try:
         size = os.path.getsize(path)
@@ -560,7 +663,7 @@ def collect(hours=24.0, now=None, store=None, use_cache=True):
     if cache.get("v") != CACHE_V:
         cache = {"v": CACHE_V, "files": {}}
 
-    text, truncated = _tail(os.path.join(store, "proxy", "proxy.log"), TAIL_BYTES)
+    text, tail = _tail_covering(os.path.join(store, "proxy", "proxy.log"), start, now)
     if text is None:
         return {"ok": False, "reason": "no_log", "detail": "读不到 proxy/proxy.log"}
 
@@ -677,7 +780,20 @@ def collect(hours=24.0, now=None, store=None, use_cache=True):
             "attributed_pct": (matched / len(resp_owner)) if resp_owner else None,
             "undated_lines": undated,
             "in_window_lines": in_window,
-            "tail_truncated": truncated,
+            # ★★ 窗口完整性**三态**，不许压成一个 bool（2026-09-21）：
+            #    `tail_truncated` 旧判据是 `文件大小 > 上限`，与窗口无关 —— 文件长到
+            #    9.1MB 之后它恒为真，而 7d 窗口实际只要 1.04MB、数据一点没少。
+            #    现在它只表示「**上限切进了这个窗口**」，是可补救的那一种。
+            "tail_truncated": tail["truncated"],
+            #    日志本身最早到哪。窗口起点早于它 ⇒ 是「确实没有记录」不是「我们少读了」。
+            #    ★ `None` 自带原因：`undated_head`（那段行本来就没时间戳，确实没有）
+            #      vs `unreadable`（打不开，没打中）—— 两者不可合并。
+            "log_begins_at": tail["log_begins_at"],
+            "log_begins_reason": tail["log_begins_reason"],
+            #    这次实际覆盖到的最早时刻 + 读了多少字节（用来判"是不是白读了 6MB"）。
+            "covers_from": tail["covers_from"],
+            "tail_bytes": tail["read_bytes"],
+            "window_covered": tail["covered"],
         },
     }
     if use_cache:
