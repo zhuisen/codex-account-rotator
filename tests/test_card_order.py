@@ -233,9 +233,9 @@ class ItUsesPointerEventsNotHtml5Dnd(unittest.TestCase):
         self.assertIn("onPointerCancel", self.handle)
         self.assertIn("onEnd(false)", self.handle, "★★ 取消被当成了落点")
         hook = (SRC / "hooks" / "useCardDrag.ts").read_text(encoding="utf-8")
-        self.assertIn("if (!ok || next.join() === baseIds.join())", hook,
+        self.assertIn("if (!ok || !changed)", hook,
                       "★★ hook 侧没有区分 commit/取消")
-        self.assertIn("escRef.current = () => finish(false", hook,
+        self.assertIn("escRef.current = () => finish(false)", hook,
                       "★★ Esc 没接通 —— 自定义 pointer 拖拽不会自动收到 pointercancel")
 
     def test_cards_expose_an_aid_for_hit_testing(self):
@@ -243,49 +243,12 @@ class ItUsesPointerEventsNotHtml5Dnd(unittest.TestCase):
                       "★ 没有 data-aid，命中测试找不到落点")
 
 
-class OtherCardsMoveOutOfTheWayWhileDragging(unittest.TestCase):
-    """★★ 用户 2026-09-20 点名要的手感：「像手机拖拽应用程序图标那种，
-    放在一个位置后其他卡片要后移让位置」。
-
-    ⚠️ 逻辑 2026-09-20 从 `App.tsx` 搬进 `hooks/useCardDrag.ts` —— **规则没变，家变了**。
-    搬家的理由本身就是手感：内联在 `App.tsx` 里时每次 `pointermove` 都 `setState`，
-    而那是个管着总览/用量/日志/设置全部状态的大组件，每帧重渲染必然掉帧。
-    """
-
-    @classmethod
-    def setUpClass(cls):
-        raw = (SRC / "hooks" / "useCardDrag.ts").read_text(encoding="utf-8")
-        cls.code = "\n".join(l for l in raw.splitlines()
-                              if not l.strip().startswith(("//", "*", "/*")))
-        cls.app = (SRC / "App.tsx").read_text(encoding="utf-8")
-
-    def test_there_is_a_live_preview_order(self):
-        self.assertIn("const [preview, setPreview]", self.code,
-                      "★★ 没有预览顺序 —— 只能等松手才动，不是要的手感")
-
-    def test_the_preview_is_reordered_during_move(self):
-        """⚠️ 锚点取 **实现**（`onMove: (x, y) => {`）不是 `onMove:` ——
-        后者会先命中 `CardDragWiring` 接口里的类型声明，窗口整个偏掉。
-        本仓记过：断言要打在被测的那一处。"""
-        i = self.code.index("const onPointerMoved")
-        self.assertIn("moveItem(s.ids, from, to)", self.code[i:i + 1200],
-                      "★★ 拖动中没有重排 —— 其余卡片不会让位")
-
-    def test_the_rendered_order_follows_the_preview(self):
-        self.assertIn("preview ? applyOrder(savedAlive, preview", self.app,
-                      "★★ 渲染没跟着预览走，让位看不见")
-
-
 class TheDragIsSmooth(unittest.TestCase):
-    """★★★ 用户 2026-09-20 反馈「拖拽的流畅性和 ui 交互性，不好」。
+    """★★★ 手感层的结构不变量（第四版，2026-09-20）。
 
-    三条独立原因，每条一个闸 —— 其中两条是 **codex 评审读代码抓出来的**，
-    我自己的判断只对了两条：
-
-      ① 被拖的卡片不跟手（确认）；
-      ② 其余卡片瞬移不是滑动（确认，CSS 对 grid 位置变化不做 transition）；
-      ③ 「每帧 setState 导致掉帧」—— **证据不足**，评审指出组件大 ≠ 渲染贵。
-         真正要紧的是只在**落点变了**时才 setState，而不是把一切塞进 rAF。
+    前三版反复出问题的根子是**同一个**：拖动中让 React 重排 DOM，于是 React、
+    我写的内联样式、和动画三方踩同一批节点。这一版把那个交叉点拆掉 ——
+    **拖拽全程 DOM 顺序不变**，所以下面几条大多是在守「别再把它加回去」。
     """
 
     @classmethod
@@ -295,63 +258,51 @@ class TheDragIsSmooth(unittest.TestCase):
                               if not l.strip().startswith(("//", "*", "/*")))
         cls.card = (SRC / "components" / "AccountCard.tsx").read_text(encoding="utf-8")
 
-    def test_the_follow_formula_compensates_the_layout_shift(self):
-        """★★★ 重排后卡片自己的槽位也变了。只算指针位移的话每换一格就多跳一格。
+    def test_the_dom_order_is_not_touched_during_the_drag(self):
+        """★★★ 这一版的核心。`preview` 只在**提交**时才置非空。"""
+        i = self.code.index("onMove: (x, y) => {")
+        seg = self.code[i:self.code.index("onEnd: finish", i)]
+        self.assertNotIn("setPreview", seg,
+                         "★★★ 拖动中又去重排 DOM 了 —— 那正是「卡片停在半空」的根因")
 
-            translate = (Pt - P0) + (L0 - Lt)
-        """
-        self.assertIn("(s.px - s.p0x) + (s.l0x - s.ltx)", self.code,
-                      "★★★ 跟手没补偿布局基准变化 —— 每换一格就跳一格")
+    def test_positions_are_expressed_as_transforms(self):
+        i = self.code.index("const layout =")
+        seg = self.code[i:i + 1100]
+        self.assertIn("style.transform =", seg, "★ 位置不是用 transform 表达的")
+        self.assertNotIn("getBoundingClientRect", seg,
+                         "★★★ layout 里读了 DOM —— 纯写样式才不会形成反馈回路")
 
-    def test_hit_testing_uses_cached_layout_rects(self):
-        """★★★ `getBoundingClientRect()` **包含 transform**：跟手后被拖的卡永远盖着指针，
-        FLIP 后其余卡的命中区还在动 —— 拿它排序会形成反馈回路。"""
-        i = self.code.index("for (const sl of s.slots)")
-        # ⚠️ 窗口只取**命中循环本身**。取大一点会框进 FLIP 的 First 捕获 ——
-        #   那一处读视觉矩形是**对的**（它要的就是动画中间位置），断言会假红。
-        loop = self.code[i:self.code.index("if (!over) return;", i)]
-        self.assertIn("s.px >= sl.left", loop, "★★★ 命中测试没用缓存的槽位矩形")
+    def test_the_follow_formula_is_the_simple_one(self):
+        """★★ DOM 不动 ⇒ 不需要补偿。照搬旧补偿会偏出一整格（实测 623px）。"""
+        self.assertIn("const tx = px - s.p0x;", self.code,
+                      "★★ 跟手算式不对 —— 这一版应当就是 Pt − P0")
+
+    def test_hit_testing_uses_the_slots_measured_at_press_time(self):
+        i = self.code.index("for (const sl of s.slots) {\n          if (sl.aid === s.aid) continue;")
+        loop = self.code[i:self.code.index("if (over)", i)]
+        self.assertIn("x >= sl.left", loop, "★★★ 命中没用按下时量的固定槽位")
         self.assertNotIn("getBoundingClientRect", loop,
-                         "★★★ 命中测试读了实时矩形 —— 会形成反馈回路")
+                         "★★★ 命中读了实时矩形 —— 会形成反馈回路")
 
     def test_transform_is_owned_by_the_hook_alone(self):
-        """★★★ React 与 hook 都写 `transform` 时，每次重渲染都会**抹掉**位移。
-
-        实测症状：卡片只剩 `scale(1.03)`，完全不跟手。
-        """
+        """★★★ React 与 hook 都写 `transform` 时，重渲染会**抹掉**位移。"""
         self.assertNotIn("transform: drag?", self.card,
-                         "★★★ React 又在写 transform —— 会抹掉 hook 的位移")
+                         "★★★ React 又在写 transform")
 
-    def test_transform_is_not_in_the_css_transition(self):
-        """★★★ 留着 `transform` 过渡，「清空后立刻量位置」会量到**过渡中间值**。
-
-        实测：量到 1437 而真实槽位是 685，跟手补偿整个算错、卡片离指针 600px。
-        """
+    def test_transform_is_not_in_the_css_transition_of_the_card(self):
+        """★★★ 留着它，「清空后立刻量位置」会量到过渡中间值（实测 1437 vs 685）。"""
         i = self.card.index("transition: \"background")
         self.assertNotIn("transform", self.card[i:i + 160],
-                         "★★★ transform 回到了 CSS transition 里")
+                         "★★★ transform 回到了卡片的 CSS transition 里")
 
-    def test_it_cancels_old_animations_so_drags_can_chain(self):
-        """★★ WAAPI 能 `cancel()` 并让元素立刻回到自然位置，所以连续拖动能**接续**
-        而不是从旧起点重播。
+    def test_the_shift_animation_is_a_css_transition(self):
+        self.assertIn("transform ${FLIP_MS}ms ${EASING}", self.code,
+                      "★ 让位没有过渡 —— 会变成瞬移")
 
-        ⚠️ 「有没有动画」这件事**不在这里**断言 —— 文本断言证不了动画
-        （变异实测：把 `el.animate(` 留在字符串里、实际不播，闸照样绿）。
-        真判据在 `TheDisplacedCardsReallyAnimate`，它观察**应用实际创建的动画对象**。
-        """
-        self.assertIn("a.cancel()", self.code, "★★ 旧动画没取消 —— 连续拖动会从旧起点重播")
-
-    def test_it_reads_all_then_writes_all(self):
-        """★ 逐卡交替读写会反复触发同步布局。"""
-        i = self.code.index("const last = new Map<string, DOMRect>();")
-        j = self.code.index("el.animate(")
-        self.assertLess(i, j, "★ 写在读之前了")
-
-    def test_state_only_changes_when_the_slot_changes(self):
-        i = self.code.index("const onPointerMoved")
-        seg = self.code[i:i + 900]
-        self.assertIn("if (from < 0 || to < 0 || from === to) return;", seg,
-                      "★ 落点没变也 setState —— 每个事件一次重渲染")
+    def test_styles_are_cleaned_up_on_every_exit_path(self):
+        """★★ 残留的内联 transform 正是用户截图里那个坏状态。"""
+        self.assertIn("window.setTimeout(clearStyles", self.code, "★ 取消路径没清样式")
+        self.assertIn("needsClear.current = true;", self.code, "★ 提交路径没清样式")
 
     def test_the_drag_state_lives_in_refs(self):
         self.assertIn("useRef<Session | null>(null)", self.code,
@@ -376,8 +327,13 @@ class TheSaveHandoffDoesNotFlashBack(unittest.TestCase):
         raw = (SRC / "hooks" / "useCardDrag.ts").read_text(encoding="utf-8")
         code = "\n".join(l for l in raw.splitlines()
                           if not l.strip().startswith(("//", "*", "/*")))
-        self.assertIn("Promise.resolve(commit(next)).finally(() => setPreview(null))", code,
-                      "★★ 落盘没完成就清了 preview —— 会闪回旧序")
+        # ⚠️ 第四版不再需要「等落盘再清 preview」：拖拽期间 `preview` 恒为 null，
+        #   提交时一次性置成新顺序，之后**不再清回 null** —— 结构上就不存在闪回窗口。
+        i = code.index("const finish = (ok: boolean)")
+        seg = code[i:code.index("return {", i)]
+        self.assertIn("setPreview(next);", seg, "★★ 提交没落到 preview")
+        self.assertNotIn("setPreview(null)", seg,
+                         "★★ 提交后又把 preview 清回 null —— 会闪回旧序")
 
 
 class TheOrderIsBroadcastAcrossWebviews(unittest.TestCase):
@@ -412,52 +368,52 @@ CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 #:    （能拖，但位置不变）。
 _PROBE_JS = r"""
 const out = {};
-const ids = () => [...document.querySelectorAll('[data-cards-grid] > div[data-aid]')]
-  .map(d => d.dataset.aid).slice(0, 6);
 const cards = () => [...document.querySelectorAll('[data-cards-grid] > div[data-aid]')];
+const ids = () => cards().map(d => d.dataset.aid);
 const wait = ms => new Promise(r => setTimeout(r, ms));
-const pe = (type, el, x, y) => el.dispatchEvent(new PointerEvent(type, {
-  bubbles: true, cancelable: true, pointerId: 1, clientX: x, clientY: y,
-}));
+const pe = (t, el, x, y) => el.dispatchEvent(new PointerEvent(t, {
+  bubbles:true, cancelable:true, pointerId:1, isPrimary:true, button:0, buttons:1,
+  clientX:x, clientY:y }));
 (async () => {
   try {
     const before = ids();
     const a = cards()[0], b = cards()[2];
     const h = a.querySelector('[data-drag-handle]');
     out.handleFound = !!h;
-    const rb0 = b.getBoundingClientRect();
-    const px = rb0.left + rb0.width / 2, py = rb0.top + rb0.height / 2;
-    // setPointerCapture 在合成事件里未必可用 —— 打桩掉，不让它抛断整条链
     h.setPointerCapture = () => {}; h.releasePointerCapture = () => {};
-    const ra = a.getBoundingClientRect(), rb = rb0;
+    const ra = a.getBoundingClientRect(), rb = b.getBoundingClientRect();
+    const px = rb.left + rb.width / 2, py = rb.top + rb.height / 2;
+
     pe('pointerdown', h, ra.left + 5, ra.top + 5);
-    await wait(120);
-    out.draggingStarted = !!document.querySelector('[data-cards-grid] > div[data-aid] [data-drag-handle]');
-    pe('pointermove', h, rb.left + rb.width / 2, rb.top + rb.height / 2);
-    await wait(200);
-    // ★ 关键:**松手之前**顺序就该变了(实时让位)
-    out.duringDrag = ids();
-    out.reflowedWhileDragging = JSON.stringify(before) !== JSON.stringify(out.duringDrag);
-    // ★★ 跟手的**真不变量**：被拖卡片的视觉矩形应当包住指针，
-    //   且指针相对卡片左上角的偏移≈抓取点。只看 transform 字符串证不了这个。
+    await wait(80);
+    pe('pointermove', h, px, py);
+    await wait(180);
+
+    // ★ 跟手：指针必须落在被拖卡片的**视觉矩形**内，偏移≈抓取点 (5,5)
     const vr = a.getBoundingClientRect();
     out.follows = px >= vr.left && px <= vr.right && py >= vr.top && py <= vr.bottom;
     out.grabGap = [Math.round(px - vr.left), Math.round(py - vr.top)];
-    // ★★★ 让位**动画**的真判据：拿到应用实际创建的动画对象，
-    //   断言它存在、时长非零、且位移关键帧非零。文本断言证不了这个。
-    out.anims = [];
-    for (const el of cards()) {
-      if (el === a) continue;
-      for (const an of el.getAnimations()) {
-        const kf = (an.effect && an.effect.getKeyframes) ? an.effect.getKeyframes() : [];
-        const t0 = (kf[0] && kf[0].transform) || '';
-        out.anims.push({ dur: an.effect ? an.effect.getTiming().duration : 0, from: t0 });
-      }
-    }
-    pe('pointerup', h, rb.left + rb.width / 2, rb.top + rb.height / 2);
-    await wait(500);
-    out.before = before; out.after = ids();
+
+    // ★ 让位：**DOM 顺序不变**（这一版刻意如此），靠 transform 表达 ——
+    //   所以判据是「有非拖动卡片带上了非零位移」，不是「DOM 顺序变了」。
+    out.domOrderDuringDrag = ids();
+    out.shifted = cards().filter(c => c !== a && /translate3d\(-?\d/.test(c.style.transform || ''))
+                         .map(c => c.style.transform);
+    // 让位必须是**动画**：非拖动卡片要有 transform 过渡
+    out.transitions = cards().filter(c => c !== a)
+      .map(c => c.style.transition).filter(t => /transform/.test(t || ''));
+
+    pe('pointerup', h, px, py);
+    await wait(700);
+    out.after = ids();
+    out.before = before;
     out.reordered = JSON.stringify(before) !== JSON.stringify(out.after);
+    // ★★ 无残留：所有卡片必须精确落回网格，且没有内联 transform
+    out.leftover = cards().map(c => c.style.transform).filter(t => t && t !== 'none');
+    const rects = cards().map(c => { const r = c.getBoundingClientRect();
+                                     return [Math.round(r.left), Math.round(r.top)]; });
+    out.cols = [...new Set(rects.map(r => r[0]))].sort((x, y) => x - y);
+    out.rows = [...new Set(rects.map(r => r[1]))].sort((x, y) => x - y);
   } catch (e) { out.error = String(e); }
   document.title = '__DRAG__' + JSON.stringify(out);
 })();
@@ -518,54 +474,53 @@ class DraggingOneCardActuallyMovesIt(unittest.TestCase):
     def test_the_probe_found_a_handle(self):
         self.assertTrue(self.out.get("handleFound"), f"卡片上没有手柄：{self.out}")
 
-    def test_other_cards_move_out_of_the_way_before_you_let_go(self):
-        """★★ 用户 2026-09-20 点名要的：「放在一个位置后其他卡片要后移让位置」。
-
-        判据刻意打在**松手之前** —— 松手后才变的话那只是"排序生效"，不是"让位"。
-        """
-        self.assertIsNone(self.out.get("error"), self.out.get("error"))
-        self.assertTrue(self.out.get("reflowedWhileDragging"),
-                        f"★★ 拖动中其余卡片没有让位：{self.out.get('before')} "
-                        f"→ {self.out.get('duringDrag')}")
-
     def test_the_dragged_card_follows_the_pointer(self):
-        """★★★ 跟手的**真不变量**：指针必须落在被拖卡片的视觉矩形内，
-        且相对左上角的偏移≈按下时的抓取点。
+        """★★★ 跟手的**真不变量**：指针落在被拖卡片的视觉矩形内，偏移≈抓取点。
 
-        ⚠️ 只断言 `transform` 字符串非空**证不了**这个 —— 2026-09-20 实测：
-        transform 明明有 `translate3d(-608px…)`，而卡片离指针 604px（补偿算反了）。
+        ⚠️ 只断言 `transform` 字符串非空证不了这个 —— 实测踩过：transform 明明有
+        `translate3d(-608px…)`，而卡片离指针 604px（补偿算反了）。
         """
         self.assertIsNone(self.out.get("error"), self.out.get("error"))
         self.assertTrue(self.out.get("follows"),
-                        f"★★★ 被拖的卡片不跟手：指针相对它左上角 {self.out.get('grabGap')}，"
-                        f"而抓取点是 (5, 5)")
+                        f"★★★ 不跟手：指针相对卡片左上角 {self.out.get('grabGap')}，抓取点是 (5,5)")
         gx, gy = self.out.get("grabGap") or (999, 999)
         self.assertLess(abs(gx - 5), 8, "★★ 横向跟手偏差过大（布局基准补偿？）")
         self.assertLess(abs(gy - 5), 8, "★★ 纵向跟手偏差过大")
 
-    def test_the_displaced_cards_really_animate(self):
-        """★★★ 让位必须是**动画**不是瞬移。判据是**应用实际创建的动画对象**：
-        存在、时长非零、起始关键帧带非零位移。
+    def test_other_cards_shift_out_of_the_way_before_you_let_go(self):
+        """★★ 用户要的「其他卡片后移让位置」。
 
-        ⚠️ 文本断言（源码里有没有 `el.animate(`）证不了这个 —— 变异实测：
-        把那个字符串留着、实际不播，闸照样绿。这是本仓「空守卫」的又一种形态。
+        ⚠️ **判据 2026-09-20 改过**：这一版拖拽期间 **DOM 顺序刻意不变**
+        （前三版让 React 边拖边重排，结果是卡片停在半空的那个 bug）。
+        让位现在用 `transform` 表达，所以断言改成「有非拖动卡片带上了非零位移」。
         """
         self.assertIsNone(self.out.get("error"), self.out.get("error"))
-        anims = self.out.get("anims") or []
-        self.assertTrue(anims, "★★★ 让位是瞬移 —— 一个动画对象都没有")
-        def moved(a):
-            # ⚠️ 别用 `"0px, 0px" not in from` 判非零 —— `translate3d(306px, 0px, 0px)`
-            #   的 y/z 分量正好长这样，会把**正确的**动画判成零位移（实测假红一次）。
-            nums = [float(x) for x in re.findall(r"-?\d+(?:\.\d+)?", a.get("from") or "")]
-            return (a.get("dur") or 0) > 0 and any(abs(n) > 0.5 for n in nums)
+        self.assertEqual(self.out.get("domOrderDuringDrag"), self.out.get("before"),
+                         "★★ 拖拽期间 DOM 顺序变了 —— 那正是「卡片停在半空」的根因")
+        self.assertTrue(self.out.get("shifted"),
+                        "★★ 没有任何卡片让位 —— 拖到别人身上时它该移开")
 
-        good = [a for a in anims if moved(a)]
-        self.assertTrue(good, f"★★★ 有动画但位移为零或时长为零：{anims[:3]}")
+    def test_the_shift_is_animated_not_instant(self):
+        """★ 让位必须是**滑动**不是瞬移 —— 非拖动卡片要挂上 transform 过渡。"""
+        self.assertTrue(self.out.get("transitions"),
+                        "★ 让位是瞬移：非拖动卡片没有 transform 过渡")
 
     def test_the_card_actually_moves(self):
         self.assertIsNone(self.out.get("error"), self.out.get("error"))
         self.assertTrue(self.out.get("reordered"),
                         f"★★★ 拖完顺序没变：{self.out.get('before')} → {self.out.get('after')}")
+
+    def test_no_card_is_left_stranded_off_the_grid(self):
+        """★★★ 用户 2026-09-20 截图里的 bug：拖完之后卡片停在半空、互相重叠。
+
+        实测那一版：有卡片落在 `(517, 313)`，而网格列在 72/379/687。
+        判据是**全部卡片必须落回同一套列/行坐标**，且没有内联 transform 残留。
+        """
+        self.assertEqual(self.out.get("leftover"), [],
+                         f"★★★ 拖完还有残留的内联 transform：{self.out.get('leftover')}")
+        cols, rows = self.out.get("cols") or [], self.out.get("rows") or []
+        self.assertLessEqual(len(cols), 3, f"★★★ 卡片没落回网格列：{cols}")
+        self.assertLessEqual(len(rows), 3, f"★★★ 卡片没落回网格行：{rows}")
 
 
 if __name__ == "__main__":
