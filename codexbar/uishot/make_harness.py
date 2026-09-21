@@ -626,6 +626,16 @@ function relayEntry() {
   // ★ `disabled` 是**用户的选择**,不是故障 —— `collect()` 对它返回的 payload 没有 `ok`,
   //   页面原来把它渲染成"用量读不到（disabled）：undefined"。这个态必须有夹具。
   if (m === 'disabled') return { id: 'tokendun', label: 'TokenDun', state: 'disabled' };
+  // ★★★ `stale` = **这次没取到，但保留了上一次的 `data`**（`monitor.py::collect` 的
+  //   失败分支就是这么写的：`res = {**res, "data": old, "stale": True, "stale_since": …}`）。
+  //   在这之前**没有这一档夹具** —— 而它恰恰是生产里最常见的失败形态：
+  //   `unreachable`/`auth` 那两档根本没有 `data`，走的是"读不到"那条路，
+  //   而这一档是"读到的是旧的"，两者在页面上必须长得不一样。
+  //   没有它，「余额旁的旧读数标记」一个像素都验不到（而截图会正常渲染、探针报干净）。
+  if (m === 'stale') return Object.assign(base, {
+    ok: false, state: 'unreachable', detail: 'URLError: no route to host',
+    stale: true, stale_since: Math.floor(Date.now() / 1000) - 137 * 60,
+    data: RELAY_USAGE_OK });
   if (m === 'unreachable') return Object.assign(base, { ok: false, state: 'unreachable', detail: 'URLError: no route to host' });
   if (m === 'auth') return Object.assign(base, { ok: false, state: 'auth', http: 401, detail: '{"code":"INVALID_API_KEY"}' });
   if (m === 'nobill') return Object.assign(base, { ok: false, state: 'no_billing_endpoint',

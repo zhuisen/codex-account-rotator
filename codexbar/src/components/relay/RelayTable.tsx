@@ -127,10 +127,18 @@ export default function RelayTable({ t, rows, usage, activeId, acting, onPick, o
                 <span data-key-fp>{(r.key_fp ?? "").split(" (")[0]}</span>
               </div>
 
+              {/* ★ 同一个事实在同一屏的两处要说同一句话（本仓 §5c 页面统一性）：
+                  上面「当前出口」卡的余额旁有旧读数标记，这一列**也要有** ——
+                  否则同一个中转站在卡上标着"旧的"、在表里却看着是现值。 */}
               <span style={{ textAlign: "right", fontSize: 16, fontWeight: 700,
                              color: "#E0A21C", fontFamily: MONO,
                              fontVariantNumeric: "tabular-nums" }}>
                 {money(d?.balance ?? null, d?.unit)}
+                {u?.stale && (
+                  <span data-relay-balance-stale
+                        title={`这次没取到，显示的是上一次的读数${u.detail ? ` —— ${u.detail}` : ""}`}
+                        style={{ fontSize: 11, marginLeft: 2, cursor: "help" }}>*</span>
+                )}
               </span>
 
               <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>

@@ -32,7 +32,7 @@ import type { RelayRow } from "../relay";
  */
 export default function RelaySection({ t }: { t: Theme }): React.ReactElement {
   const { cfg, note, setNote, acting, act } = useRelayConfig();
-  const { snap } = useRelayUsage();
+  const { snap, busy: usageBusy, refresh: refreshUsage } = useRelayUsage();
   const store = useStore();
   const [editing, setEditing] = useState<Partial<RelayRow> | null>(null);
   const [toast, setToast] = useState<string | null>(null);
@@ -90,6 +90,10 @@ export default function RelaySection({ t }: { t: Theme }): React.ReactElement {
 
       <OutletCards
         route={route} cur={cur} curUsage={curUsage}
+        /* ★ 余额刷新（用户 2026-09-21）。**复用同一份快照的 `force` 重取** ——
+           余额与用量本来就来自同一次 `/usage`，另起一条取数路径会造出第二个真源。
+           `/usage` 只读账单、**不计费**（实测一次往返 2.34s）。 */
+        usageBusy={usageBusy} onRefreshUsage={() => void refreshUsage()}
         poolAccounts={store.counts.total}
         poolPct={store.hero?.tightestWin ? store.hero.tightestWin.pct / 100 : null}
         onPool={() => void pick("pool", "已切换到账号池 · 逐请求轮换")}

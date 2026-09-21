@@ -111,7 +111,8 @@ function Card({ active, onPick, ring, title, pill, sub, btn, id }: {
   );
 }
 
-export default function OutletCards({ route, cur, curUsage, poolAccounts, poolPct, onPool, onRelay }: {
+export default function OutletCards({ route, cur, curUsage, poolAccounts, poolPct,
+                                      onPool, onRelay, usageBusy, onRefreshUsage }: {
   route: RouteStatus | undefined;
   /** 当前（或将要切到的）中转站。没有任何中转站时为 undefined。 */
   cur: RelayRow | undefined;
@@ -121,6 +122,9 @@ export default function OutletCards({ route, cur, curUsage, poolAccounts, poolPc
   poolPct: number | null;
   onPool: () => void;
   onRelay: () => void;
+  /** 余额/用量正在重取。★ 与用量块共用同一个 `useRelayUsage`，所以两处的转圈是同步的。 */
+  usageBusy?: boolean;
+  onRefreshUsage?: () => void;
 }): React.ReactElement {
   const relayOn = route?.state === "relay";
   // ★ 六态的文案是**真源**（`relay.ts::relayRouteNote`），三方一致的那份 ——
@@ -129,6 +133,18 @@ export default function OutletCards({ route, cur, curUsage, poolAccounts, poolPc
   const n0 = route ? relayRouteNote(route) : null;
   const note = route && route.state !== "pool" && route.state !== "relay" ? n0 : null;
   const d = curUsage?.data;
+  /**
+   * 这次没取到、显示的是上一次的余额。
+   *
+   * ★★ 判据取 `curUsage.stale`，**不是**自己拿 `fetched_at` 算岁数：后者分不出
+   *   「这次取到了，只是数本来就没变」和「这次根本没取到」。前者由 `monitor.py`
+   *   在**失败那一刻**写下（`res = {**res, "data": old, "stale": True, …}`），
+   *   是一条事实，不是一个推断。
+   */
+  const stale = !!curUsage?.stale;
+  const staleAgo = curUsage?.stale_since
+    ? `${Math.max(1, Math.round((Date.now() / 1000 - curUsage.stale_since) / 60))} 分钟前`
+    : "上一次";
   const days = d?.runway?.days ?? null;
   const dc = dayColor(days);
   // ★ 环上的字：`23d`。样本不足时写 `?d` —— 不写 `0d`，那是个具体的假数。
@@ -162,7 +178,35 @@ export default function OutletCards({ route, cur, curUsage, poolAccounts, poolPc
           pill={<Pill color="#E0A21C" bg="rgba(224,162,28,.14)">按量 · 真扣余额</Pill>}
           sub={
             <>
+              {/* ★ 金额色**不随 stale 变**。我第一版写成 `#E0901C`(警告琥珀) vs
+                  `#E0A21C`(金额琥珀) —— 两者肉眼分不出（本仓已记过这对的 ΔE 只有 2.6），
+                  等于加了一个无效区分，还多造一个琥珀。旧读数靠下面那个 `*` 说。 */}
               余额 <b style={{ color: "#E0A21C" }}>{money(d?.balance ?? null, d?.unit)}</b>
+              {/* ★★★ **余额是钱，所以"这是什么时候读的"必须跟着它走。**
+                  在这之前这里只画一个数字：取数失败时 `monitor.py` 会保留旧 `data` 并标
+                  `stale`（那是对的，"读不到"不能清空成 0），而这张卡**一个字都没说** ——
+                  于是一个几小时前的余额和刚读到的余额长得一模一样。
+                  ★ 琥珀不是红：数据是真的，只是旧的。红留给"确实没钱了"。 */}
+              {stale && (
+                <span data-relay-balance-stale
+                      title={`这次没取到，显示的是${staleAgo}的读数${
+                        curUsage?.detail ? ` —— ${curUsage.detail}` : ""}。点 ↻ 重取一次。`}
+                      style={{ color: "#E0901C", fontWeight: 700, marginLeft: 3,
+                               cursor: "help" }}>*</span>
+              )}
+              {/* ★ 刷新放在**余额旁边**，不是只放在下面那块用量里（本仓 §5d：
+                  告警与操作要在眼睛已经在的地方）。两处走同一个 `useRelayUsage`，
+                  所以点哪个都一样、转圈也同步。`/usage` 只读账单、**不计费**。 */}
+              {onRefreshUsage && (
+                <span data-act="relay-balance-refresh"
+                      onClick={(e) => { e.stopPropagation(); if (!usageBusy) onRefreshUsage(); }}
+                      title={usageBusy ? "正在重取…" : "重新取一次余额与用量（只读账单，不计费）"}
+                      style={{ marginLeft: 5, fontFamily: MONO, fontSize: 10.5,
+                               color: usageBusy ? "#5b6470" : "#8b93a1",
+                               cursor: usageBusy ? "default" : "pointer", userSelect: "none" }}>
+                  ↻
+                </span>
+              )}
               {" · 今日实扣 "}{money(d?.today?.actual_cost ?? null, d?.unit)}
               {" · "}<span style={{ color: dc }}>{hint}</span>
             </>
