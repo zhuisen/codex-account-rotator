@@ -223,7 +223,11 @@ fn store_dir() -> String {
 // ★ `dawn-probe` 加进来是给「app 内补跑」用的:本项目的 launchd 日历定时有前科
 //   (keepalive/refreshquota 的 StartCalendarInterval 被外力改写丢掉,runs = 0、从未运行过),
 //   所以 06:00 那个 plist **不能是唯一触发路径**。命令侧当天幂等 + 先占天,重复调用不会双重计费。
-const ALLOWED_CMDS: &[&str] = &["switch", "cool", "uncool", "refresh-all", "health", "list", "quota", "remove", "credits", "probe", "dawn-probe", "tokens", "rename", "rotate", "priority", "pin", "next"];
+const ALLOWED_CMDS: &[&str] = &["switch", "cool", "uncool", "refresh-all", "health", "list", "quota", "remove", "credits", "probe", "dawn-probe", "tokens", "rename", "rotate", "priority", "pin"];
+// ★★ 2026-09-21 从这张表里**摘掉了 `next`**（agy 评审点名）。
+//    `next` 是纯只读查询，已由专用的 `read_rotation_board` 接管；留在这张表里
+//    等于给那条自激回环留一条**复活路径** —— 下一个人照样能 `run_rotate(["next"])`
+//    把它原样造回来。闸挡得住新写法，但把旧入口一起拆掉才是根治。
 
 /// Interpreter for codex-rotate. NOT a bare `python3`: Cloudflare fingerprints the TLS ClientHello,
 /// and macOS's `/usr/bin/python3` (LibreSSL 2.8.3) gets a hard 403 from /backend-api/codex/usage while
@@ -489,6 +493,71 @@ async fn read_integration() -> Result<String, String> {
     } else {
         // ⚠️ 这里**不能**把失败折成一个「看起来正常」的默认值 —— 前端会把 Err 渲染成
         //    `unknown`(琥珀),而不是绿。本仓铁律:读不到 ≠ 没问题。
+        Err(String::from_utf8_lossy(&out.stderr).to_string())
+    }
+}
+
+/// 续航条的数据 —— 「下一个请求会用谁 / 全池还能撑多久」。
+///
+/// ★★★ **这条专用 IPC 的存在理由就是"不许发 `state-changed`"，别再合并回 `run_rotate`。**
+///
+/// 2026-09-21 的事故：`useRotationBoard` 复用了 `run_rotate`（`next --json`），而
+/// `run_rotate` **无条件** `emit("state-changed")`。那个 hook 又 `listen("state-changed")`
+/// 来刷新自己 ⇒ 自激回环：
+///
+/// ```text
+///   load() ──invoke run_rotate──▶ emit("state-changed") ──▶ listener ──▶ load() ──▶ …
+/// ```
+///
+/// 实测（v1.8.0+23，主窗停在总览页）：**12 秒 789 个 python 子进程（≈66 个/秒）**，
+/// 两个 webview 连同 `useStore` / `useIntegration` / `useBusyMirror` 一起被拖进去反复重拉，
+/// 用户看到的是「一直在闪来闪去」。
+///
+/// ⚠️ 这条规则当时**已经写在正上方 `read_integration` 的注释里**（"只读查询会被 UI 定期调，
+/// 复用 `run_rotate` 是纯浪费"），而我照样违反了 —— 所以现在它有闸：
+/// `tests/test_no_event_feedback_loop.py`。本仓铁律：**写下来但没有闸的规则一定会被违反，
+/// 包括被写它的人。**
+///
+/// ★ 与 `read_integration` 同形：不 `emit`、不 `refresh_tray()`、失败如实返回 `Err`
+///   （前端保留上一份板子并记下原因 —— 「读不到」不等于「没有」）。
+#[tauri::command]
+async fn read_rotation_board() -> Result<String, String> {
+    let rot = format!("{}/codex-rotate", script_dir());
+    let out = tauri::async_runtime::spawn_blocking(move || {
+        py_cmd().arg(&rot).arg("next").arg("--json").output()
+    })
+    .await
+    .map_err(|e| format!("join: {}", e))?
+    .map_err(|e| format!("exec: {}", e))?;
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).to_string())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).to_string())
+    }
+}
+
+/// dawn-probe 的开关与上次运行时间 —— **只读**。
+///
+/// ★★ 2026-09-21 从 `run_rotate` 挪出来（agy 评审发现）。`dawn-probe --status` 是纯查询，
+///   却走着会 `emit("state-changed")` + `refresh_tray()` 的写通道，而菜单栏 webview
+///   **每 10 分钟**调它一次 ⇒ 每 10 分钟平白让两个 webview 连同托盘整体重拉一遍。
+///   它不成环（调用方没监听那个事件），所以不像续航条那样把机器打死 —— 但它是**同一个病**：
+///   **只读查询污染事件总线**。同一轮一起治，别等它哪天被接上某个监听者。
+///
+/// ⚠️ 只有 `--status` 搬过来。`dawn-probe`（真跑，**花钱**）与 `--enable/--disable`（写开关）
+///   仍然走 `run_rotate` —— 它们确实改状态，那个广播是它们该发的。
+#[tauri::command]
+async fn read_dawn_status() -> Result<String, String> {
+    let rot = format!("{}/codex-rotate", script_dir());
+    let out = tauri::async_runtime::spawn_blocking(move || {
+        py_cmd().arg(&rot).arg("dawn-probe").arg("--status").output()
+    })
+    .await
+    .map_err(|e| format!("join: {}", e))?
+    .map_err(|e| format!("exec: {}", e))?;
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).to_string())
+    } else {
         Err(String::from_utf8_lossy(&out.stderr).to_string())
     }
 }
@@ -2332,6 +2401,8 @@ pub fn run() {
             run_traffic,
             run_discover,
             read_integration,
+            read_rotation_board,
+            read_dawn_status,
             connector_plan,
             connector_apply,
             connector_remove,

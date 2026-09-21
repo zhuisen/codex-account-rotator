@@ -863,12 +863,16 @@ function relayEntry() {
       // run_rotate 的桩。默认什么都不做(返回 null),只有 `priority --set` 要真的改 STATE ——
       // 否则总览拖完顺序、`read_state` 回来的还是旧的,端到端闸验的就不是真链路了。
       // ★ 2026-09-19 加:codex 档的拖拽顺序改写进 state.json(它就是轮换优先级)。
-      case 'run_rotate': {
-        var _a = (args && args.args) || [];
-        // ★★ `next --json` 的桩。**必须真的按 STATE 算**，不能返回一份写死的样本 ——
-        //   闸要验的正是「置顶排最前、停用不进队列、取不到写 —」，写死的话这些
-        //   一条都验不到，而截图会正常渲染、探针报干净。
-        if (_a[0] === 'next') {
+      // ★★★ 续航条的桩挂在 **`read_rotation_board`** 上，不是 `run_rotate`。
+      //   2026-09-21 事故：它原来复用 `run_rotate`，而那条命令无条件
+      //   `emit("state-changed")`，hook 又监听同一个事件 ⇒ 自激回环
+      //   （实测 12 秒 789 个 python 子进程）。真实链路已改走专用只读 IPC，
+      //   **桩必须跟着改** —— 否则 harness 验的是一条产品里已经不存在的路。
+      case 'read_rotation_board': {
+        {
+          // ★★ **必须真的按 STATE 算**，不能返回一份写死的样本 —— 闸要验的正是
+          //   「置顶排最前、停用不进队列、取不到写 —」，写死的话这些一条都验不到，
+          //   而截图会正常渲染、探针报干净。
           var _pin = STATE.pinned || [];
           var _rem = function (sl, k) {
             var w = (sl.quota || {})[k] || {};
@@ -911,6 +915,11 @@ function relayEntry() {
             runway_active_hours: _none ? null : Math.round(_wk / 39.3 * 10) / 10,
             samples: _none ? 3 : 226, last_sample_min: _none ? null : 181 }));
         }
+      }
+      // run_rotate 的桩。默认什么都不做(返回 null),只有 `priority --set` 要真的改 STATE ——
+      // 否则总览拖完顺序、`read_state` 回来的还是旧的,端到端闸验的就不是真链路了。
+      case 'run_rotate': {
+        var _a = (args && args.args) || [];
         if (_a[0] === 'priority' && _a[1] === '--set') {
           var want = _a.slice(2);
           var byLabel = {};

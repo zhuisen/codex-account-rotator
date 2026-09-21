@@ -265,7 +265,19 @@ class TheOrderComesFromTheOneImplementation(unittest.TestCase):
     def test_the_frontend_does_not_reimplement_it(self):
         hook = (SRC / "hooks" / "useRotationBoard.ts").read_text(encoding="utf-8")
         code = re.sub(r"(?<![:/])//.*", "", re.sub(r"/\*[\s\S]*?\*/", "", hook))
-        self.assertIn('["next", "--json"]', code, "★★ 前端没走 CLI")
+        # ⚠️ 2026-09-21：链路改道后这条断言**跟着延长一段**，不变量一个字没变。
+        #   前端不再直接点名 `next --json`（那走的是会广播的 `run_rotate`，造出了自激回环），
+        #   改走只读 IPC `read_rotation_board`；而那条 Rust 命令里跑的**仍然是**
+        #   `codex-rotate next --json`。所以判据从「前端提到 next」变成
+        #   **「前端 → 只读 IPC → 真 CLI」三段都在**，比原来更强：
+        #   它同时挡住「前端自己算」和「Rust 桩里返回假数据」两种退化。
+        self.assertIn('invoke<string>("read_rotation_board")', code,
+                      "★★ 前端没走那条只读 IPC")
+        rs = (ROOT / "codexbar" / "src-tauri" / "src" / "lib.rs").read_text(encoding="utf-8")
+        i = rs.index("async fn read_rotation_board")
+        seg = rs[i:rs.index("\n}", i)]
+        self.assertIn('arg("next").arg("--json")', seg,
+                      "★★★ 那条只读 IPC 没去跑真的 `codex-rotate next --json`")
         for banned in ("sort(", "_pin_rank", "plan === \"pro\""):
             self.assertNotIn(banned, code,
                              f"★★★ 前端自己排序了（`{banned}`）—— 那是第二份实现")

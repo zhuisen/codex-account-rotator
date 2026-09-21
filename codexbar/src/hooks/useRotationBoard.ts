@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
@@ -51,18 +51,40 @@ export interface Board {
 export function useRotationBoard(enabled: boolean): { board: Board | null; err: string | null } {
   const [board, setBoard] = useState<Board | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  /** 在途请求数（只许 1 个）+ 期间来过新事件吗。见下面 `load` 的注释。 */
+  const inflight = useRef(false);
+  const pending = useRef(false);
 
   const load = useCallback(() => {
     if (!enabled) return;
+    // ★★ **在途只许一个，期间的事件合并成一次尾随刷新。**
+    //   每次读都要 spawn 一个 python（≈200ms），而 `state-changed` 是会**成串**来的
+    //   （代理换号 + quotad 刷额度 + 用户点一下，能在一秒内连发好几条）。
+    //   没有这道合流，N 条事件就是 N 个子进程 —— 2026-09-21 那次回环之所以能烧到
+    //   66 个/秒，回环是点火，**没有合流是助燃**。codex 评审实测：注入连续 20 条外部
+    //   事件，只改 IPC 之后仍会产生 21 次读取。
+    //   ★ 合流不是 debounce：尾随那一次**保证会跑**，所以期间发生的变更最终一定被读到
+    //     （丢掉末次刷新 = 界面停在旧数字，那正是本仓最不能容忍的那类静默过期）。
+    if (inflight.current) { pending.current = true; return; }
+    inflight.current = true;
     void (async () => {
       try {
-        const raw = await invoke<string>("run_rotate", { args: ["next", "--json"] });
+        // ★★★ **必须走专用的只读 IPC，绝不能复用 `run_rotate`。**
+        //   `run_rotate` 无条件 `emit("state-changed")`，而下面那个 effect 正是
+        //   监听同一个事件来刷新自己 ⇒ 自激回环（实测 12 秒 789 个 python 子进程，
+        //   两个 webview 一起闪）。闸：`tests/test_no_event_feedback_loop.py`。
+        const raw = await invoke<string>("read_rotation_board");
         setBoard(JSON.parse(raw) as Board);
         setErr(null);
       } catch (e: unknown) {
         // ★ 读不到**不清空**已有的板子：保留上一次 + 记下原因，
         //   与本仓「失败不覆盖已读到的」同一条规矩。
         setErr(String(e).slice(0, 160));
+      } finally {
+        // ★ 必须在 `finally` —— 抛错那条路也要放行，否则一次失败就把后面**所有**刷新
+        //   永久堵死，而症状是「数字从某一刻起再也不动」，不报任何错。
+        inflight.current = false;
+        if (pending.current) { pending.current = false; load(); }
       }
     })();
   }, [enabled]);

@@ -59,6 +59,34 @@ fi
 echo "==> launching"
 open "$APP"
 
+# ★★★ **核实跑起来的真的是刚装的这一份**（2026-09-21 补，事故驱动）。
+#
+#   本机有 **3 个 bundle 共用 `com.doushutangmu.codexbar`**：/Applications、构建树
+#   `src-tauri/target/release/bundle/macos/`、以及 `~/archive/...` 里的快照备份。
+#   单实例闸是 flock（CLAUDE.md §5 / .claude/rules/ui.md），谁先抢到锁谁活，
+#   **后来者判 `HeldByOther` 后静默退出** —— 那是设计，不是缺陷。
+#
+#   ⚠️ 但两件事叠在一起就成了陷阱：archive 里那份 **v1.4.1（2026-09-08）** 抢着锁，
+#   于是 `open /Applications/CodexBar.app` **每次都无声无息地什么都没发生**，
+#   用户对着一个 13 天前的构建看了很久，症状是「菜单栏 AI 用量变成全量展示」
+#   ——那恰好是 v1.4.1 之后三个 commit 才修的东西。
+#   deploy 全程报「✓ deployed」，因为它只管装、从不看**谁在跑**。
+#
+#   ★ 同族判据：本仓已有的「常驻服务代码 ✓ 均为最新」比的是进程启动时刻 vs 源码 mtime。
+#     这里比的是**可执行文件路径** —— 同一个问题的另一面：装好了 ≠ 跑起来了。
+sleep 3
+_running="$(ps -Ao pid=,comm= | awk '$2 ~ /codexbar$/ {print $1; exit}')"
+if [ -z "$_running" ]; then
+    echo "⚠️  启动后没看到 codexbar 进程 —— 它可能被单实例闸挡住了，或者崩了。"
+elif [ "$(ps -o comm= -p "$_running")" != "$APP/Contents/MacOS/codexbar" ]; then
+    echo "🛑 **跑起来的不是刚装的那一份！**"
+    echo "   期望: $APP/Contents/MacOS/codexbar"
+    echo "   实际: $(ps -o comm= -p "$_running")  (pid $_running)"
+    echo "   原因：同 bundle id 的另一个副本先抢到了单实例锁，新装的这份静默退出了。"
+    echo "   处理：先退掉上面那个进程（osascript -e 'tell application \"CodexBar\" to quit'），"
+    echo "        再重新 open '$APP'；并考虑把那个陈旧副本移走/改名。"
+fi
+
 # ★★★ 把这次烤进产物的版本号**当场打出来**（2026-09-17 补）。
 #
 #   起因：v1.6.1 发版后用户在界面上看到 `v1.6.1+10`。产物没错 —— 它确实是在

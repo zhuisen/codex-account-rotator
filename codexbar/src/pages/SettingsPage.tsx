@@ -163,7 +163,8 @@ export default function SettingsPage({ t }: { t: Theme }) {
   const [dawn, setDawn] = useState<DawnStatus | null>(null);
   const loadDawn = useCallback(async () => {
     try {
-      const raw = await invoke<string>("run_rotate", { args: ["dawn-probe", "--status"] });
+      // ★ 同 useDawnProbe：只读查询不走会广播的写通道。
+      const raw = await invoke<string>("read_dawn_status");
       setDawn(JSON.parse(raw.trim().split("\n").pop() || "{}") as DawnStatus);
     } catch { setDawn({}); }   // 读不到就当"未开启"，不编造一个"已开启"
   }, []);

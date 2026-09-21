@@ -58,7 +58,9 @@ export function useDawnProbe(): void {
       if (running.current) return;
       if (new Date().getHours() < DAWN_HOUR) return;
       try {
-        const raw = await invoke<string>("run_rotate", { args: ["dawn-probe", "--status"] });
+        // ★ 只读查询走只读 IPC：`run_rotate` 会 emit + refresh_tray，而这里每 10 分钟调一次
+        //   ⇒ 每 10 分钟平白让两个 webview 和托盘整体重拉（2026-09-21 agy 评审）。
+        const raw = await invoke<string>("read_dawn_status");
         const rec = JSON.parse(raw.trim().split("\n").pop() || "{}") as DawnRec;
         // ★ 关掉了就什么都不做 —— 这是用户对一个**会花钱**的功能的显式选择，
         //   补跑路径没有资格绕过它。

@@ -111,7 +111,6 @@ export default function App() {
   // 拖拽期间 DOM 顺序不动，让位交给 CSS `transition: transform`，每次 pointermove 直接写样式。
   const { preview, makeDrag } = useCardDrag();
   // ★ 只在总览页取：它读的是本机文件，但没必要在别的页上跟着 state 变化重算。
-  const { board } = useRotationBoard(page === "overview");
   // ⚠️ 原来这里还有一个 `armedAid`：按下手柄→setState→打开卡片根节点的 `draggable`。
   //    **在 WKWebView 上根本起不来**（WebKit 在 mousedown 那一刻就判定能不能拖，
   //    React 的 setState 追不上）。现在手柄自己恒为 draggable，这个状态随之删除。
@@ -124,6 +123,11 @@ export default function App() {
    *  这一档是"我在管哪一家账号"，不是一次性的筛选。
    *  ★ 平台清单与菜单栏芯片行**同一份** `POOL_PLATFORMS`（v4 稿 §9.1）。 */
   const [provider, setProvider] = useState<PoolKey>(loadPoolKey);
+
+  // ★ 启用条件必须与**渲染条件**一致（`provider === "codex"`）。此前只看 page ⇒
+  //   停在总览的 Gemini/Grok 档时，这条 codex 专属查询照样每次事件都 spawn 一个 python，
+  //   而画面上一个像素都不会用到它（codex 评审 2026-09-21 指出）。
+  const { board, err: boardErr } = useRotationBoard(page === "overview" && provider === "codex");
   useEffect(() => { savePoolKey(provider); }, [provider]);
 
   const [drill, setDrill] = useState<string | null>(null);   // 平台详情:null = 停在总览
@@ -659,6 +663,24 @@ export default function App() {
                     闸量**渲染后的真实高度**，见 tests/test_runway_hero.py。 */}
               {provider === "codex" && board && (
                 <RunwayHero t={t} board={board} privacy={privacy} />
+              )}
+              {/* ★★ **读不到就要说出来。** hook 里 `setErr` 了不等于用户看得见 ——
+                  「后端有字段 ≠ 已披露」在错误上的形态（codex 评审 2026-09-21 指出：
+                  调用方只解构了 `board`，`err` 直接被丢掉）。
+                  ⚠️ 已经有板子时**不覆盖**它，只在旁边挂一句「这份是上次读到的」——
+                  「这次没读到」与「确实没有」是两件事，本仓头号铁律。 */}
+              {provider === "codex" && boardErr && (
+                <div data-runway-err style={{
+                  display: "flex", alignItems: "center", gap: 8, marginBottom: 13,
+                  padding: "7px 12px", borderRadius: 10, fontSize: 11,
+                  fontFamily: "'JetBrains Mono'", color: "#E0901C",
+                  background: t.ghostBg, border: `1px solid ${t.cardBorder}` }}>
+                  <span style={{ fontWeight: 700 }}>⚠️ 续航数据没读到</span>
+                  <span style={{ color: t.text2, minWidth: 0, overflow: "hidden",
+                                 textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {board ? "下面这条是上次读到的 · " : ""}{boardErr}
+                  </span>
+                </div>
               )}
 
               {(() => {
