@@ -462,7 +462,8 @@ export default function LogsPage({ t }: { t: Theme }): React.ReactElement {
         <div data-daily className="cb-hoverwrap" style={{ marginLeft: 6 }}>
           {/* ★ 字号 / 字距 / 大小写**显式写回**：表头整行是 9.5px + `uppercase` + 带字距，
               继承过来会把「每天在岗」缩成读不动的一小条（本仓：表头是要读的内容不是装饰）。 */}
-          <span data-daily-badge title="每号 · 每天在岗 —— 悬浮展开。左列 #N 是你在总览拖出来的轮换优先级"
+          {/* ★ 同上：不挂 `title`。这句话浮层第一行已经逐字写着了。 */}
+          <span data-daily-badge
                 style={{ display: "inline-flex", alignItems: "center", gap: 3,
                          padding: "1px 6px", borderRadius: 6, cursor: "help", userSelect: "none",
                          fontSize: 10, letterSpacing: 0, textTransform: "none",
@@ -504,9 +505,10 @@ export default function LogsPage({ t }: { t: Theme }): React.ReactElement {
                         {r.rank ? `#${r.rank}` : ""}
                       </span>
                       <span style={{ color: t.text, fontWeight: 600 }}>{r.acc}</span>
+                      {/* ★ `⊘` 不挂 `title`：浮层底部的图例里逐字写着同一句，
+                          在**已经展开的浮层上**再弹一层原生提示就是第二个说法。 */}
                       {r.rotate_off && (
-                        <span title="已停用自动轮换 —— 不参与轮换池，优先级对它无效"
-                              style={{ color: "#E0901C", fontWeight: 700 }}>⊘</span>
+                        <span style={{ color: "#E0901C", fontWeight: 700 }}>⊘</span>
                       )}
                     </td>
                     {r.cells.map((c, i) => (
@@ -515,9 +517,11 @@ export default function LogsPage({ t }: { t: Theme }): React.ReactElement {
                                            color: c === "unknown" ? "#E0901C"
                                              : c === null ? t.muted : t.text }}>
                         {c === "unknown"
-                          ? <span title="这天的日志没读到 —— 不是没用过">?</span>
+                          /* ★ `?` 与 `—` 不挂 `title`：底部图例里逐字写着同一句，
+                             而在**已经展开的浮层上**再弹一层原生提示就是第二个说法。 */
+                          ? "?"
                           : c === null
-                            ? <span title="这天没被选中">—</span>
+                            ? "—"
                             : <span title={`${c.requests} 次请求 · ${fmtTok(c.tokens)} token`}>
                                 {(c.secs / 3600).toFixed(1)}h
                               </span>}

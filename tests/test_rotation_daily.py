@@ -258,10 +258,20 @@ class TheTableIsFoldedIntoAHoverBadge(unittest.TestCase):
         self.assertNotIn("':scope > .cb-hoverpop'", h)
 
     def test_the_badge_is_the_only_thing_always_visible(self):
-        """★ 收起态只许留一枚角标 —— 表本身不再常驻占版面。"""
+        """★ 收起态只许留一枚角标 —— 表本身不再常驻占版面。
+
+        ⚠️ 2026-09-21：这条原来断言的是「每号 · 每天在岗」，而那串字**只存在于角标的
+          `title` 里** —— 当天为了消掉「悬浮弹两层」把 title 删了，它当场变红。
+          角标可读的**标签**一直是「每天在岗」（`title` 从来不是标签，是第二层提示）。
+        """
         i = self.code.index("data-daily-badge")
         self.assertLess(self.code.index('className="cb-hoverpop"'), i + 1200)
-        self.assertIn("每号 · 每天在岗", self.code[i:i + 400], "★ 角标没有可读的标题")
+        # ⚠️ 取窗 400 字符**不够**：删掉 title 之后标签被那串样式推到了 480 字符之外。
+        #   本仓记过：定长切片找结构边界是危险的。取到角标那个 `</span>` 为止。
+        seg = self.code[i:self.code.index("</span>", i)]
+        self.assertIn("每天在岗", seg, "★ 角标没有可读的标签")
+        self.assertNotIn("title=", self.code[i:i + 200],
+                         "★★ 角标又挂了 `title` —— 悬浮会与浮层同时弹出两层")
 
     def test_the_popup_width_is_bounded(self):
         """★ 30d 档有 30 列 —— 写死宽度会顶出容器（本仓：横向溢出算 bug）。"""

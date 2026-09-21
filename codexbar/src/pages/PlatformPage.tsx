@@ -164,7 +164,12 @@ function RouteSplit({ t, p, labels, rangeTxt }: {
     //    条件渲染会让本仓所有基于 `--dump-dom` 的行为闸静默失效。
     <div data-route-split className="cb-hoverwrap"
          style={{ margin: "2px 0 10px", fontSize: 11.5 }}>
-      <span data-route-badge title="路由分账（近 90 天）· 悬浮展开"
+      {/* ★★ **触发浮层的元素不许再挂 `title`**（用户 2026-09-21）：悬浮时原生提示与
+          自定义浮层**同时弹出两层**，而它们说的是同一件事。
+          ⚠️ 顺带删掉一句假话 —— 那个 title 写着「近 90 天」，而浮层里的窗口
+            2026-09-10 起就跟着页面档位走（现在是 30d）。**披露层说旧事实**
+            比不说更糟，它正好会让人按错误的窗口去读这几个数。 */}
+      <span data-route-badge
             style={{ display: "inline-flex", alignItems: "center", gap: 5,
                      padding: "2px 8px", borderRadius: 7, cursor: "help", userSelect: "none",
                      border: `1px solid ${relayTok > 0 ? "#E0A21C" : t.ghostBorder}`,
