@@ -424,6 +424,7 @@ const pe = (t, el, x, y) => el.dispatchEvent(new PointerEvent(t, {
     out.leftover = cards().map(c => c.style.transform).filter(t => t && t !== 'none');
     const rects = cards().map(c => { const r = c.getBoundingClientRect();
                                      return [Math.round(r.left), Math.round(r.top)]; });
+    out.cards = rects.length;
     out.cols = [...new Set(rects.map(r => r[0]))].sort((x, y) => x - y);
     out.rows = [...new Set(rects.map(r => r[1]))].sort((x, y) => x - y);
   } catch (e) { out.error = String(e); }
@@ -531,8 +532,17 @@ class DraggingOneCardActuallyMovesIt(unittest.TestCase):
         self.assertEqual(self.out.get("leftover"), [],
                          f"★★★ 拖完还有残留的内联 transform：{self.out.get('leftover')}")
         cols, rows = self.out.get("cols") or [], self.out.get("rows") or []
-        self.assertLessEqual(len(cols), 3, f"★★★ 卡片没落回网格列：{cols}")
-        self.assertLessEqual(len(rows), 3, f"★★★ 卡片没落回网格行：{rows}")
+        # ⚠️ 2026-09-21 起网格是 `repeat(auto-fill, minmax(320px,1fr))` —— 列数随窗口变，
+        #   **不再恒为 3**。判据跟着改成「落回**一套整齐的**列/行坐标」：
+        #   坏状态的特征不是"超过 3 列"，是**每张卡各有一个 x**（实测那次 517 vs 72/379/687）。
+        #   用「不同坐标数 < 卡片数」表达，与列数无关。
+        n = self.out.get("cards")
+        self.assertIsNotNone(n, "★★ 探针没报卡片数 —— 判据会退化成「列数 < 列数」")
+        self.assertGreater(n, 2, f"★★ 没量到足够多的卡：{self.out}")
+        # ★ 坏状态的特征是**每张卡各有一个 x**（实测那次 517 vs 网格列 72/379/687），
+        #   而不是"超过 3 列" —— 网格 2026-09-21 起是 auto-fill，列数随窗口变。
+        self.assertLess(len(cols), n, f"★★★ 每张卡各占一个 x —— 没落回网格列：{cols}")
+        self.assertLess(len(rows), n, f"★★★ 每张卡各占一个 y —— 没落回网格行：{rows}")
 
 
 _THRESHOLD_JS = r"""

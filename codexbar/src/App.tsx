@@ -81,8 +81,19 @@ const IconMoon = () => <svg width="13" height="13" viewBox="0 0 24 24" fill="cur
  * `gridTemplateColumns` 由它生成，下面 `sameRow()` 也靠它算「第几排」。
  * 拆成两处写的话，改了网格却没改行算式，预留会静默地留到错误的一排上。
  */
-const CARD_COLS = 3;
-const CARD_GRID_COLS = `repeat(${CARD_COLS}, minmax(0, 1fr))`;
+/**
+ * 卡片的**最小可用宽**。列数由它推出来，不再写死 3 列（用户 2026-09-21：
+ * 「不要出现换行」）。
+ *
+ * ★★★ 量出来的根因：动作条那 7 个控件**最紧也要 ~234px**（切换 + 探针 + 5 个图标钮
+ *   + 6 道间隙），而浮层比卡片窄 20、自己还有 16 的内边距 ⇒ **卡片至少要 320px**。
+ *   写死 3 列时窗口一窄卡片被压到 **211px**（实测 880 窗口），7 个控件在里面
+ *   怎么排都放不下 —— 那才是换行的源头，只调按钮是治标。
+ * ★ `auto-fill` 而不是固定列数：宽屏仍是 3 列（1300 窗口下内容区 ~1180，放得下 3×320），
+ *   窄屏自动退到 2 列、每张反而更宽。**卡片永远不会窄到装不下自己的动作条。**
+ */
+const CARD_MIN_W = 320;
+const CARD_GRID_COLS = `repeat(auto-fill, minmax(${CARD_MIN_W}px, 1fr))`;
 
 export default function App() {
   const { state, accounts, hero, currentNode, counts, tokens, lastRefreshAt, freshness, loadingAction, toast, refresh, run, showToast } = useStore();

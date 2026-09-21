@@ -101,6 +101,14 @@ const click = i => cards()[i].dispatchEvent(new MouseEvent('click', { bubbles: t
     await wait(600); measure('codex-selected');
     out.heights['选中第 1 张'] = heights();
     out.actions = document.querySelectorAll('[data-actions]').length;
+    // ★ 「换行」的判据是**按钮的 y 坐标出现了两种**，不是 `flexWrap` 写了什么 ——
+    //   写 nowrap 却让内容溢出，同样是坏的，而只看属性看不出来。
+    const bar = document.querySelector('[data-actions]');
+    if (bar) { const br = bar.getBoundingClientRect(), cs = getComputedStyle(bar);
+      const kids = [...bar.children].map(e => e.getBoundingClientRect());
+      out.bar = { 行数: new Set(kids.map(r => Math.round(r.top))).size,
+                  溢出: Math.round(Math.max(0, Math.max(...kids.map(r => r.right))
+                                              - (br.right - parseFloat(cs.paddingRight)))) }; }
     const ov = document.querySelector('[data-actions]');
     if (ov) { const r = ov.getBoundingClientRect(), c = cards()[0].getBoundingClientRect();
       out.overlay = { '超出卡片底边': Math.round(r.bottom - c.bottom),
@@ -120,7 +128,7 @@ const click = i => cards()[i].dispatchEvent(new MouseEvent('click', { bubbles: t
 """.replace("__CORNER__", _CORNER)
 
 
-def _run_probe():
+def _run_probe(width=1200):
     import urllib.request
     src = APP_DIR / "harness.html"
     if not Path(CHROME).exists() or not src.exists():
@@ -135,7 +143,7 @@ def _run_probe():
         encoding="utf-8")
     try:
         r = subprocess.run([CHROME, "--headless=new", "--disable-gpu",
-                            "--window-size=1200,1000", "--virtual-time-budget=16000",
+                            f"--window-size={width},1000", "--virtual-time-budget=16000",
                             "--dump-dom", f"{HARNESS}/uniprobe.html?nav=home"],
                            capture_output=True, text=True, timeout=180)
         m = re.search(r"__UNI__(\{.*\})\s*</title>", r.stdout, re.S)
@@ -148,6 +156,11 @@ class _Probed(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.r = _run_probe()
+        # ★★★ **第二次量在最窄窗口**（860 是 `tauri.conf.json` 的 `minWidth`，加 20 余量）。
+        #   1200 下卡片有 ~349px，动作条怎么排都放得下 ⇒ 「不换行」这条在那儿**没有判别力**
+        #   （变异实测：放开 `flexWrap: wrap`、把图标钮改回不可收缩，两条都照样绿）。
+        #   真正的压力在用户能拖到的最窄处。本仓形态⑩：判据档位挑错会被上游兜住。
+        cls.narrow = _run_probe(880)
         if cls.r is None:
             raise unittest.SkipTest("没有 Chrome 或 harness 静态服务（3304）没在跑")
         if cls.r.get("error"):
@@ -234,6 +247,63 @@ class SelectingACardNeverChangesAnyHeight(_Probed):
         """★ 它是**覆盖在卡片底部**，不是吊在卡外（那是 demo 里的 B 案，用户没选）。"""
         self.assertLessEqual(self.r["overlay"]["超出卡片底边"], 0,
                              "★ 浮层探出了卡片底边 —— 用户选的是 A（覆盖在卡内）")
+
+    def test_the_action_bar_never_wraps(self):
+        """★★★ 用户 2026-09-21：「我不要出现换行的。自适应不断去压缩按钮」。
+
+        实测（修前）：1300 窗口下卡内宽 351 / 按钮需要 347 —— **只差 4px**，
+        窗口再窄一点就折行，最后那个删除钮掉到第二行。而折行不只是难看：
+        第二行把浮层撑高、盖掉更多卡片内容，且「最后一个按钮掉下去」看着像它坏了。
+
+        ★★ 判据是**按钮的 y 坐标只有一种**，不是"源码里写了 nowrap" ——
+          写 nowrap 却横向溢出同样是坏的，而只看属性看不出来。所以两条一起断言。
+        """
+        for tag, res in (("1200", self.r), ("880（最窄窗口）", self.narrow)):
+            with self.subTest(width=tag):
+                self.assertIsNotNone(res, f"{tag} 没量到")
+                self.assertEqual(res["bar"]["行数"], 1,
+                                 f"★★★ {tag} 下动作条折行了：{res['bar']}")
+                self.assertEqual(res["bar"]["溢出"], 0,
+                                 f"★★★ {tag} 下动作条横向溢出（比折行更糟）：{res['bar']}")
+
+    def test_the_no_wrap_insurance_is_in_place(self):
+        """★ `nowrap` + 全员可收缩是**纵深防御**，不是当前生效的东西 —— 如实说。
+
+        ⚠️ 变异实测 2026-09-21：把 `flexWrap` 放回 `wrap`、把图标钮/探针钮改回
+          不可收缩，上面那条行为闸**在 880 与 1200 两个档位都照样绿** ——
+          因为 `CARD_MIN_W = 320` 之后卡内宽恒 ≥342，而按钮合计 338，**永远放得下**。
+
+        ★ 也就是说：**真正修好这件事的是网格那一条**，`nowrap` 只是保险。
+          所以这里用的是**静态断言**，并且明说它的判别力来自哪 ——
+          假装上面那条行为闸覆盖了它，才是本仓最不能容忍的那种"测了个寂寞"。
+        ★ 保险仍然要留：字号档位、更长的按钮文案、以后多加一个控件，
+          任何一条都会让那 4px 余量消失，而那时 `nowrap` 就是最后一道。
+        """
+        for name in ("AccountCard.tsx", "AgyCard.tsx"):
+            raw = (SRC / "components" / name).read_text(encoding="utf-8")
+            code = re.sub(r"(?<![:/])//.*", "", re.sub(r"\{?/\*[\s\S]*?\*/\}?", "", raw))
+            i = code.index("data-actions")
+            with self.subTest(card=name):
+                self.assertIn('flexWrap: "nowrap"', code[i:i + 900],
+                              f"★ {name} 的动作条允许换行了 —— 保险没了")
+        icons = (SRC / "components" / "CardIcons.tsx").read_text(encoding="utf-8")
+        self.assertIn("flexShrink: 1", icons,
+                      "★ 图标钮压不动 —— nowrap 下只能横向溢出")
+
+    def test_the_card_can_never_get_too_narrow_for_its_own_action_bar(self):
+        """★★★ 这才是**根因的闸**：按钮再怎么压，卡片窄过某个宽度就是装不下。
+
+        实测 2026-09-21：写死 3 列时 880 窗口把卡压到 **211px**，而 7 个控件最紧
+        也要 ~234px 内宽 ⇒ 怎么排都要折行。只调按钮是治标。
+        现在网格按 `CARD_MIN_W` auto-fill：宽屏仍 3 列，窄屏退到 2 列、卡片反而更宽。
+        """
+        app = (SRC / "App.tsx").read_text(encoding="utf-8")
+        m = re.search(r"const CARD_MIN_W = (\d+);", app)
+        self.assertIsNotNone(m, "★★ 找不到 CARD_MIN_W —— 列数又被写死了？")
+        self.assertGreaterEqual(int(m.group(1)), 300,
+                                "★★★ 卡片最小宽低于 300 —— 动作条会重新折行")
+        self.assertIn("repeat(auto-fill, minmax(${CARD_MIN_W}px, 1fr))", app,
+                      "★★★ 网格不是按最小宽自适应 —— 窄窗会把卡压到装不下动作条")
 
     def test_the_entrance_animation_is_the_repos_own(self):
         """★ 用户 2026-09-21：「弹出动态效果要好看自然贴切 codexbar 风格」。

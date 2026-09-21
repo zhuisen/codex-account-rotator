@@ -331,10 +331,15 @@ export default function AccountCard({ a, isCurrent, isBest, isSelected, shortcut
                       background: t.isDark ? "rgba(20,26,34,.97)" : "rgba(255,255,255,.97)",
                       backdropFilter: "blur(6px)",
                       border: `1px solid ${t.accent}`, boxShadow: t.shadow,
+                      // ★★★ **绝不换行**（用户 2026-09-21：「我不要出现换行的」）。
+                      //   换行的动作条不只是难看：第二行会把浮层撑高、盖掉更多卡片内容，
+                      //   而且「最后一个按钮掉下去」看起来像它坏了。
+                      //   ★ 空间不够时**一起压缩**，不是折行 —— 所以下面每个控件都可收缩，
+                      //     而卡片本身有 `CARD_MIN_W` 兜底，保证压到极限仍装得下。
                      // ★ 6 个按钮塞在三列网格的一张 ~300px 卡里放不下。不换行时 flex 会把每个
                      //   压到 ~20px ⇒「切换到此号」变成一列竖排的单字(用户 2026-08-24 截图)。
                      //   探针实测:内容高 80px / 行高 13px = 六行。
-                     flexWrap: "wrap", rowGap: 6 }}>
+                     flexWrap: "nowrap" }}>
           {/* ★★ 压成**一行**(用户 2026-09-07:「都是出现换行问题」)。
               两行动作条不只是难看:卡片高度差 ~80px,而同排兄弟卡的环是**垂直居中**的,
               于是邻卡一展开,兄弟卡的邮箱与环之间就裂开一道大洞(用户截图圈出的正是它)。
@@ -343,7 +348,7 @@ export default function AccountCard({ a, isCurrent, isBest, isSelected, shortcut
                 其余全部图标 + `title` 悬浮出全名。 */}
           {!isCurrent && !isDead && (
             <span onClick={onSwitch} title={`把当前号切到 ${a.node}`}
-                  style={{ flex: "1 1 auto", minWidth: 62, textAlign: "center", fontSize: 11, fontWeight: 700, whiteSpace: "nowrap", color: t.accentText, background: t.accent, padding: "5px 8px", borderRadius: 6, cursor: "pointer" }}>切换</span>
+                  style={{ flex: "1 1 auto", minWidth: 44, textAlign: "center", fontSize: 11, fontWeight: 700, whiteSpace: "nowrap", color: t.accentText, background: t.accent, padding: "5px 8px", borderRadius: 6, cursor: "pointer" }}>切换</span>
           )}
           {isCurrent && (
             <span style={{ flex: "1 1 auto", minWidth: 62, textAlign: "center", fontSize: 11, fontWeight: 600, whiteSpace: "nowrap", color: t.accent, padding: "5px 0" }}>✓ 当前</span>

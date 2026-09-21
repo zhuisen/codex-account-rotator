@@ -417,7 +417,12 @@ export default function AgyCard({ t, color, snap, busy, err, disabled, winSlots,
                       background: t.isDark ? "rgba(20,26,34,.97)" : "rgba(255,255,255,.97)",
                       backdropFilter: "blur(6px)",
                       border: `1px solid ${t.accent}`, boxShadow: t.shadow,
-                      flexWrap: "wrap", rowGap: 6 }}>
+                      // ★★★ **绝不换行**（用户 2026-09-21：「我不要出现换行的」）。
+                      //   换行的动作条不只是难看：第二行会把浮层撑高、盖掉更多卡片内容，
+                      //   而且「最后一个按钮掉下去」看起来像它坏了。
+                      //   ★ 空间不够时**一起压缩**，不是折行 —— 所以下面每个控件都可收缩，
+                      //     而卡片本身有 `CARD_MIN_W` 兜底，保证压到极限仍装得下。
+                      flexWrap: "nowrap" }}>
           {isCurrent ? (
             <span style={{ flex: "1 1 auto", minWidth: 62, textAlign: "center", fontSize: 11,
                            fontWeight: 600, whiteSpace: "nowrap", color: t.accent, padding: "5px 0" }}>✓ 当前</span>

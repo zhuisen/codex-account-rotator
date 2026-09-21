@@ -62,14 +62,29 @@ class ButtonsNeverBreakMidWord(unittest.TestCase):
         i = src.index('display: "inline-flex"')
         return src[i:i + 400]
 
-    def test_shared_buttons_declare_nowrap_and_no_shrink(self):
+    def test_shared_buttons_never_break_mid_word(self):
+        """★ 两个按钮都不许**在按钮内部折行**（那是这一族闸的本意）。"""
         for name, src in (("GhostButton", self.ghost), ("ProbeButton", self.probe)):
-            block = self._button_style_block(src)
             with self.subTest(f=name):
-                self.assertRegex(block, r'whiteSpace:\s*"nowrap"',
-                                 "{}:按钮样式块里没有 nowrap —— 窄窗下文字会在按钮内部折行".format(name))
-                self.assertRegex(block, r"flexShrink:\s*0",
-                                 "{}:按钮样式块里没有 flexShrink:0 —— flex 会压缩它的宽度".format(name))
+                self.assertRegex(self._button_style_block(src), r'whiteSpace:\s*"nowrap"',
+                                 "{}:样式块里没有 nowrap —— 窄窗下文字会在按钮内部折行".format(name))
+
+    def test_toolbar_buttons_hold_their_width_but_the_card_one_compresses(self):
+        """★★ 2026-09-21：**两个按钮的要求从此相反**，别再统一断言。
+
+        · `GhostButton` 在工具行里 —— 旁边是可省略的说明文字，**该退让的是文字**，
+          所以它保持 `flexShrink: 0`。
+        · `ProbeButton` 在**卡片动作条**里 —— 那一行 7 个控件、且用户要求「绝不换行」。
+          不可收缩 + 不换行 = **横向溢出**（本仓算 bug）。所以它改成可收缩 +
+          `minWidth` 兜底：最窄时文字自己被裁，而不是整块顶出去。
+        """
+        self.assertRegex(self._button_style_block(self.ghost), r"flexShrink:\s*0",
+                         "GhostButton 不该被压缩 —— 工具行里该退让的是说明文字")
+        probe = self._button_style_block(self.probe)
+        self.assertRegex(probe, r"flexShrink:\s*1",
+                         "★★ ProbeButton 压不动 —— 动作条会横向溢出或折行")
+        self.assertRegex(probe, r"minWidth:\s*\d+",
+                         "★ ProbeButton 可收缩却没有下限 —— 会被压成一条缝")
 
     def test_page_title_never_breaks(self):
         """「总览」被劈成「总 / 览」是用户报的第一个症状。"""
@@ -202,10 +217,17 @@ class ButtonsNeverBreakMidWord(unittest.TestCase):
         """
         self.assertNotRegex(self.app, r'gridTemplateColumns:\s*"1fr 1fr 1fr"',
                             "九宫格用了裸 1fr —— 列压不下去,内容一变宽就整体溢出")
-        # ★ 2026-09-20 起列数与模板收进 `CARD_GRID_COLS` 一个常量（三档网格 + 「同排预留」
-        #   的行算式共用它）。性质不变，锚点跟着搬 —— 判据仍是"模板里有 minmax(0"。
-        self.assertRegex(self.app, r"CARD_GRID_COLS\s*=\s*`repeat\(\$\{CARD_COLS\},[^`]*minmax\(0",
-                         "九宫格没有用 minmax(0, ...) —— 列的最小值仍是 min-content")
+        # ⚠️ 2026-09-21 **机制换了，性质没换**：从「固定 3 列 + 列可缩到 0」改成
+        #   「按最小宽 auto-fill」。两者都保证内容永不撑爆布局，但走的是相反的路 ——
+        #   前者让列缩、内部省略号接手；后者**让列数减少**，卡片反而更宽。
+        #   换路的理由是实测：3 列在 880 窗口下把卡压到 211px，而卡里的动作条最紧要 ~234px
+        #   ⇒ 无论怎么缩都装不下，只能折行（用户 2026-09-21 报的就是它）。
+        self.assertRegex(self.app, r"CARD_GRID_COLS\s*=\s*`repeat\(auto-fill,\s*minmax\(\$\{CARD_MIN_W\}px",
+                         "九宫格不是按最小宽自适应 —— 窄窗下卡片会被压到装不下动作条")
+        m = __import__("re").search(r"const CARD_MIN_W = (\d+);", self.app)
+        self.assertIsNotNone(m, "找不到 CARD_MIN_W")
+        self.assertGreaterEqual(int(m.group(1)), 300,
+                                "★★ 最小宽低于 300 —— 动作条会重新折行（实测最紧需要 ~234 内宽）")
         self.assertIn("gridTemplateColumns: CARD_GRID_COLS", self.app,
                       "九宫格没走那个常量 —— 常量对了也没用")
 

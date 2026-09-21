@@ -65,7 +65,10 @@ export function IconBtn({ title, onClick, color, border, bg, children }: {
 }): React.ReactElement {
   return (
     <span onClick={onClick} title={title} aria-label={title}
-          style={{ width: 34, height: 26, flexShrink: 0, display: "grid", placeItems: "center",
+          /* ★★ 2026-09-21：从 `width:34 + flexShrink:0` 改成**可收缩**。
+             固定宽 + 不收缩 = 空间不够时只能折行，而用户明确要「不换行、一起压缩」。
+             28 是实测下限：再窄图标（13px）两侧就只剩 7px，按钮看着像被裁了。 */
+          style={{ width: 34, minWidth: 28, flexShrink: 1, height: 26, display: "grid", placeItems: "center",
                    borderRadius: 6, cursor: "pointer", color,
                    border: `1px solid ${border}`, background: bg ?? "transparent",
                    transition: "background .15s, color .15s" }}>{children}</span>

@@ -56,7 +56,10 @@ export default function ProbeButton({ t, label, hint, onConfirm, loading, loadin
     // ★ 同 GhostButton:按钮**永不断字**。「探针 全池」被劈成「探针 全 / 池」是窄窗实测缺陷
     //   (用户 2026-08-24 截图)。这个按钮尤其不能挤 —— 它是全 app 唯一花钱的控件,
     //   琥珀 + ⚡ + 「计费」角标那一整套警示语言,靠的就是它一眼可辨的完整外形。
-    whiteSpace: "nowrap" as const, flexShrink: 0,
+    // ★ 2026-09-21：从 `flexShrink: 0` 改成可收缩。它和 `IconBtn` 是动作条里仅有的
+    //   两块"压不动"的东西，而不可压缩 + 不换行 = 横向溢出（本仓算 bug）。
+    //   `minWidth: 30` 保证 ⚡ 图标与内边距还在，最窄时文字自己被裁而不是整块溢出。
+    whiteSpace: "nowrap" as const, flexShrink: 1, minWidth: 30, overflow: "hidden" as const,
     alignItems: "center" as const,
     gap: 6,
     opacity: loading ? 0.6 : 1,
