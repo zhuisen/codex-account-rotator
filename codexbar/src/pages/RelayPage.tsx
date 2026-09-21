@@ -3,6 +3,9 @@ import type { Theme } from "../theme";
 import Seg from "../components/Seg";
 import RelaySection from "../components/RelaySection";
 import RelayUsage from "../components/RelayUsage";
+import GhostButton from "../components/GhostButton";
+import { IcRefresh } from "../components/CardIcons";
+import { useRelayUsage } from "../hooks/useRelayUsage";
 
 /**
  * 中转站 —— **独立版块**，页内再分「账号 / 用量」两块（用户 2026-09-09 定稿）。
@@ -33,6 +36,7 @@ const TAB_LABEL = (v: Tab): string => (v === "accounts" ? "账号" : "用量");
 
 export default function RelayPage({ t }: { t: Theme }): React.ReactElement {
   const [tab, setTab] = useState<Tab>("accounts");
+  const { busy: usageBusy, refresh: refreshUsage } = useRelayUsage();
   return (
     <div data-page-body="relay" style={{ padding: 16, overflowY: "auto", height: "100%" }}>
       <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12,
@@ -48,8 +52,25 @@ export default function RelayPage({ t }: { t: Theme }): React.ReactElement {
             用户要多认一种结构却什么也没多得到。 */}
         {/* ★ `flexShrink: 0`：同 `PlatformPage` 那条 —— 同排的说明文字自带省略号，
             该退让的是它不是控件。不加的话这组 Tab 会在窄窗里折成两行（同一类缺陷）。 */}
-        <div style={{ marginLeft: "auto", flexShrink: 0 }} data-relay-tabs>
-          <Seg opts={TABS} cur={tab} on={setTab} label={TAB_LABEL} t={t} />
+        {/* ★★ 「刷新余额」放在页头（用户 2026-09-21：「没看到刷新，或者刷新不显眼」）。
+            在这之前刷新只有余额旁那个 **6×14px 的裸 ↻ 字形**（实测），无边框无底色、
+            还坐在一行本来就发灰的小字里 —— 对比度不是问题（5.88），**它不像个控件、
+            也几乎点不中**（可点目标通常要 ≥24px）。
+            ★ 用与总览「刷新全池」**同一个 GhostButton + 同一个图标**：找刷新时眼睛先去的
+              就是页头，而全 app 只该有一种「刷新」长相。余额旁那个小 ↻ 保留（就近可点）。
+            ★ 三处共用同一个 `useRelayUsage`：`useQuotaSidecar` 有模块级 `_inflight`
+              按 `runCmd` 去重 + `_subs` 广播，所以多挂一个消费者**不会**多发一次外网请求。 */}
+        <div style={{ marginLeft: "auto", flexShrink: 0, display: "flex",
+                      alignItems: "center", gap: 9 }}>
+          <span data-act="relay-refresh-header">
+            <GhostButton t={t} onClick={() => void refreshUsage()} loading={usageBusy}
+                         loadingText="取余额中…">
+              <IcRefresh spin={usageBusy} />刷新余额
+            </GhostButton>
+          </span>
+          <span data-relay-tabs>
+            <Seg opts={TABS} cur={tab} on={setTab} label={TAB_LABEL} t={t} />
+          </span>
         </div>
       </div>
 

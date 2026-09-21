@@ -21,6 +21,19 @@ export const IcRotate = ({ off }: { off: boolean }): React.ReactElement => (
     {off && <path d="M4 20 20 4" stroke="currentColor" strokeWidth="2.2"/>}
   </svg>
 );
+/**
+ * 刷新。★ **搬到这里是为了不抄第二份** —— 它原来是 `App.tsx` 里的模块局部 `IconRefresh`，
+ * 而中转站页也要一个长得一模一样的「↻ 刷新余额」。两处各写一份 SVG，下次调尺寸/线宽
+ * 必然只改一边，而那**不会报任何错**（本仓已因此漂过两次，正是这个文件头上写的理由）。
+ * ⚠️ `App.tsx` 不能反过来 import 页面里的东西（它 import 了 `RelayPage`，会成环），
+ *   所以公共件只能落在这种两边都依赖的叶子模块里。
+ */
+export const IcRefresh = ({ spin }: { spin?: boolean }): React.ReactElement => (
+  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
+       style={{ animation: spin ? "cbSpin .7s linear" : "none", transformOrigin: "center" }}>
+    <path d="M21 12a9 9 0 1 1-3-6.7M21 4v4h-4"/>
+  </svg>
+);
 export const IcPen = (): React.ReactElement => (
   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M4 20h4L19 9a2.1 2.1 0 0 0-3-3L5 17v3z"/></svg>
 );
