@@ -48,9 +48,16 @@ export interface Slot {
 }
 export interface AppState {
   slots?: Record<string, Slot>; active?: string; last_proxy_ts?: number;
-  /** 轮换优先级（aid 列表，越靠前越先用）。★★ **真源在 `state.json`,不在 localStorage** ——
-   *  代理在 app 没开时也要读它。它**决定钱花在哪个号上**,两个真源迟早分叉成
-   *  「界面上排第一、代理却在用别的号」。写入走 `codex-rotate priority --set`。 */
+  /** ★★ **置顶队列**（aid 列表，按点击先后）—— 用户 2026-09-21 定的轮换语义：
+   *  默认容量最高优先，点亮哪个才优先用哪个；可置顶多个，先点的先用。
+   *  ⚠️ 它是**顶层键**不是 slot 上的字段（要保留"第几个被点"的次序），
+   *    所以 `Account.pinRank` 是派生出来的，见 `slotToAccount` 的第 4 个参数。 */
+  pinned?: string[];
+  /** 卡片摆放顺序（⌘N 跟随）。★ 2026-09-21 起它**只管摆放，不影响轮换** ——
+   *  旧装机存在 `pick_order` 下，读时兼容、写只写新键。 */
+  card_order?: string[];
+  /** 旧键（2026-09-21 之前叫「轮换优先级」）。★ 现在**只读不写**，仅为兼容旧装机的
+   *  卡片摆放顺序。★★ 它已经**完全不影响轮换** —— 轮换看 `pinned`。 */
   pick_order?: string[];
 }
 export interface TokenInfo { exp?: number }
@@ -96,6 +103,8 @@ export interface Account {
   /** 是否参与自动轮换（用户可在总览页逐号关闭）。★ `true` 是默认值 —— 后端存的是
    *  反向的 `rotate_off`，这里翻成正向是因为 UI 上「开关打开 = 参与」才符合直觉。 */
   rotates: boolean;
+  /** 置顶队列里的位次（0 起）；`null` = 没置顶 —— **不是 0**，两者语义相反。 */
+  pinRank: number | null;
   /** 这份额度快照的年龄（秒）；`null` = 没有 `captured_at`（未知，不是 0）。 */
   quotaAgeSec: number | null;
   /** 快照是否已陈旧（> `QUOTA_STALE_SEC`）。★ 陈旧**不等于**额度是错的，
@@ -495,7 +504,8 @@ function buildWindow(w: Win | undefined, capturedAt?: number, anchor?: QuotaAnch
   };
 }
 
-export function slotToAccount(aid: string, slot: Slot, tokens: Record<string, TokenInfo>): Account {
+export function slotToAccount(aid: string, slot: Slot, tokens: Record<string, TokenInfo>,
+                              pinned?: string[]): Account {
   const q = slot.quota;
   const n = now();
   const coolSec = (slot.cooling_until ?? 0) > n ? Math.max(0, (slot.cooling_until ?? 0) - n) : 0;
@@ -545,6 +555,9 @@ export function slotToAccount(aid: string, slot: Slot, tokens: Record<string, To
     aid, node: slot.label ?? "?", email: slot.email ?? "",
     status, windows, tightest, tightestWin, deadAt: slot.auth_dead_at,
     rotates: !slot.rotate_off,
+    // ★ `indexOf` 返回 -1 表示"没置顶"，**必须翻成 `null`** —— 让 -1 流下去，
+    //   任何 `rank + 1` 的显示都会算出 0，而 0 看起来像"排第一"。
+    pinRank: (() => { const i = (pinned ?? []).indexOf(aid); return i < 0 ? null : i; })(),
     exp: slot.sub_until?.slice(0, 10) ?? "—",
     /**
      * 这个到期日**是否已经不可信**。判据:到期日已过 **且** OpenAI 上次复核订阅早于该到期日 ——

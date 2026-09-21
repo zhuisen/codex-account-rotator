@@ -3381,28 +3381,109 @@ def codex_integration_gate():
             "port": port, "accounts": nacc}
 
 
+def cmd_pin(args):
+    """`codex-rotate pin [<label…>|--add <l>|--remove <l>|--clear|--json]` —— 置顶。
+
+    ## ★★★ 语义（用户 2026-09-21 反转了 09-19 的那一版）
+
+    **默认按容量最高优先；点亮哪个号才优先用哪个。** 可以置顶多个，
+    **按点击先后排队**：先点的先用，它撞限冷却后轮到第二个，全部置顶号都不可用时
+    回到容量最高优先。
+
+    ★ 与被它取代的 `pick_order`（拖拽顺序）差别只有一处，但那是全部：
+      旧的给**每一个号**都排了名 ⇒ 排序键里的「已用%」永远说不上话。
+      现在未置顶的号**全部并列**，容量立刻接管。判据在 `proxy.py::_pin_rank`。
+
+    ★★ 真源是 `state.json` 的 `pinned`，不是 localStorage —— 代理在 app 没开时也要读它。
+      它**决定钱花在哪个号上**，两个真源迟早分叉成「界面点亮了、代理却在用别的号」。
+
+    ★ 存 **aid** 不存 label：label 是可改的昵称，改个名字就改轮换是没人预期的副作用。
+    ★ 置顶号冷却结束会**自动变回置顶** —— `ok()` 只在排序前滤掉冷却中的，不改 `pinned`。
+    """
+    s = _state()
+    slots = s.get("slots", {})
+    by_label = {(sl.get("label") or ""): aid for aid, sl in slots.items()}
+    pinned = list(s.get("pinned") or [])
+
+    def _resolve(names):
+        unknown = [n for n in names if n not in by_label]
+        if unknown:
+            # ★ 打错一个字母就该看见 —— 静默忽略会让用户以为点亮了
+            print(f"⛔ 不认识这些号: {', '.join(unknown)}", file=sys.stderr)
+            print(f"   池里有: {', '.join(sorted(by_label)) or '(空)'}", file=sys.stderr)
+            sys.exit(2)
+        return [by_label[n] for n in names]
+
+    if "--clear" in args:
+        _mutate_state(lambda st: st.pop("pinned", None))
+        print("✅ 已清除全部置顶 —— 回到「同档内容量最高优先」")
+        return
+
+    for flag, act in (("--add", "add"), ("--remove", "remove"), ("--toggle", "toggle")):
+        if flag in args:
+            names = [a for a in args[args.index(flag) + 1:] if not a.startswith("--")]
+            if not names:
+                print(f"用法: codex-rotate pin {flag} <label> [<label> …]", file=sys.stderr)
+                sys.exit(2)
+            aids = _resolve(names)
+            nxt = list(pinned)
+            for aid in aids:
+                if act == "add" or (act == "toggle" and aid not in nxt):
+                    # ★ 重复点击**不改排队位次** —— 否则「再点一下」会把它挪到队尾，
+                    #   而用户的预期是「再点一下是取消」。取消走 --remove / --toggle。
+                    if aid not in nxt:
+                        nxt.append(aid)
+                else:
+                    nxt = [x for x in nxt if x != aid]
+            _mutate_state(lambda st: st.__setitem__("pinned", nxt) if nxt
+                          else st.pop("pinned", None))
+            lab = [slots[a].get("label") for a in nxt]
+            print("✅ 置顶: " + (" → ".join(lab) if lab else "(无)"))
+            return
+
+    names = [a for a in args if not a.startswith("--")]
+    if names:                                   # `pin A B C` = 整份覆盖，按给定顺序排队
+        aids = _resolve(names)
+        _mutate_state(lambda st: st.__setitem__("pinned", aids))
+        print("✅ 置顶: " + " → ".join(names))
+        print("   排第一的号一直用到撞限,冷却后轮到下一个;全部不可用时回到容量最高优先。")
+        return
+
+    live = [a for a in pinned if a in slots]
+    if "--json" in args:
+        print(json.dumps({"pinned": live,
+                          "labels": [slots[a].get("label") for a in live]},
+                         ensure_ascii=False))
+        return
+    if not live:
+        print("没有置顶的号 —— 同档内按「最紧窗口已用% 最少」挑号（容量最高优先）。")
+        return
+    print("置顶（按点击先后）:")
+    for i, a in enumerate(live, 1):
+        print(f"  {i}. {slots[a].get('label')}")
+    print("  其余按容量最高优先。")
+
+
 def cmd_priority(args):
-    """`codex-rotate priority [--set <label…>|--clear|--json]` —— 轮换优先级。
+    """`codex-rotate priority [--set <label…>|--clear|--json]` —— **卡片摆放顺序**。
 
-    ★★ **真源是 `state.json` 的 `pick_order`（aid 列表），不是 localStorage。**
-      代理在 app 没开时也要读它 —— 展示偏好可以存前端，而这个**决定钱花在哪个号上**，
-      两个真源迟早分叉成「界面上排第一、代理却在用别的号」。同 `rotate_off` / `dawn_probe`
-      的理由，那两个也是为此从 localStorage 搬进 state.json 的。
+    ## ★★★ 2026-09-21 起它**不再影响轮换**
 
-    ★ 存 **aid** 不存 label：label 是可改的昵称（`rename`），改个名字就重排轮换顺序
-      是没人预期得到的副作用。
+    用户当天反转了 09-19 的「优先级压过额度」：轮换回到**默认容量最高优先**，
+    要优先用某个号请**点亮**它（`codex-rotate pin`，真源 `state.json` 的 `pinned`）。
+    这条命令退化成纯展示：决定总览卡片的摆放与 ⌘1~⌘9 的对应，**代理一眼都不看它**。
 
-    ★ 语义（用户 2026-09-19 定）：排序键 `(套餐档, 优先级, 已用%)` —— **优先级压过额度**。
-      排第一的号会一直用到 429 撞限、冷却后才轮到第二个。没排过的号追加在末尾，
-      **不丢也不饿死**（前面的号冷却时它照样会被挑中）。
+    ⚠️ 名字保留是为了不动调用方（总览拖拽提交走它），但**语义已变** ——
+      所以键也从 `pick_order` 改成 `card_order`：一个叫「挑号顺序」却不挑号的键，
+      正是本仓最反感的那种会骗下一个人的命名。旧键仍被读取一次做兼容。
     """
     s = _state()
     slots = s.get("slots", {})
     by_label = {(sl.get("label") or ""): aid for aid, sl in slots.items()}
 
     if "--clear" in args:
-        _mutate_state(lambda st: st.pop("pick_order", None))
-        print("✅ 已清除手工优先级 —— 回到「同档内按额度最省者优先」")
+        _mutate_state(lambda st: st.pop("card_order", None))
+        print("✅ 已清除卡片摆放顺序 —— 回到默认排列（轮换不受影响）")
         return
 
     if "--set" in args:
@@ -3417,16 +3498,17 @@ def cmd_priority(args):
             print(f"   池里有: {', '.join(sorted(by_label)) or '(空)'}", file=sys.stderr)
             sys.exit(2)
         order = [by_label[n] for n in names]
-        _mutate_state(lambda st: st.__setitem__("pick_order", order))
-        print("✅ 优先级已设置: " + " → ".join(names))
-        print("   ⚠️ 优先级**压过额度**: 排第一的号会一直用到撞限,冷却后才轮到下一个。")
+        _mutate_state(lambda st: st.__setitem__("card_order", order))
+        print("✅ 卡片摆放顺序已设置: " + " → ".join(names))
+        print("   ℹ️ 这**只影响卡片位置与 ⌘N**。要优先用某个号请 `codex-rotate pin <label>`。")
         return
 
-    order = s.get("pick_order") or []
+    # ★ 兼容：旧装机里这份顺序存在 `pick_order` 下。读一次旧键，写只写新键。
+    order = s.get("card_order") or s.get("pick_order") or []
     ranked = [(i, aid) for i, aid in enumerate(order) if aid in slots]
     rest = [aid for aid in slots if aid not in order]
     if "--json" in args:
-        print(json.dumps({"pick_order": order,
+        print(json.dumps({"card_order": order,
                           "ranked": [slots[a].get("label") for _, a in ranked],
                           "unranked": [slots[a].get("label") for a in rest]},
                          ensure_ascii=False))
@@ -3597,7 +3679,7 @@ CMDS = {"add": cmd_add, "login": cmd_login, "list": cmd_list, "switch": cmd_swit
         "ensure-live": cmd_ensure_live, "credits": cmd_credits, "probe": cmd_probe,
         "dawn-probe": cmd_dawn_probe, "rotate": cmd_rotate,
         "tokens": cmd_tokens, "integration": cmd_integration,
-        "priority": cmd_priority}
+        "priority": cmd_priority, "pin": cmd_pin}
 
 
 # Disk-only commands run their whole load→mutate→save under the cross-process state mutex (lost-update

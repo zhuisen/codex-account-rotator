@@ -8,7 +8,7 @@ import Ring from "./Ring";
 import PlanBadge from "./PlanBadge";
 import CardBadge, { isCardExpiring } from "./CardBadge";
 import ProbeButton from "./ProbeButton";
-import { IconBtn, IcRotate, IcPen, IcInfo, IcTrash } from "./CardIcons";
+import { IconBtn, IcRotate, IcPin, IcPen, IcInfo, IcTrash } from "./CardIcons";
 
 /** Delta vs the best account in the pool — "最优" / "-19%". ≤-50 is amber (handoff §5.0). */
 function DeltaChip({ delta, t }: { delta: number; t: Theme }) {
@@ -26,7 +26,7 @@ function DeltaChip({ delta, t }: { delta: number; t: Theme }) {
 }
 
 
-export default function AccountCard({ a, isCurrent, isBest, isSelected, shortcut, bestPct, probing, privacy, t, onSelect, onSwitch, onShowDetail, onRemove, onProbe, onRename, onToggleRotate, reserveActions, winSlots, drag }: {
+export default function AccountCard({ a, isCurrent, isBest, isSelected, shortcut, bestPct, probing, privacy, t, onSelect, onSwitch, onShowDetail, onRemove, onProbe, onRename, onToggleRotate, onTogglePin, reserveActions, winSlots, drag }: {
   a: Account; isCurrent: boolean; isBest: boolean; isSelected: boolean; shortcut?: number;
   /**
    * 拖拽排序的接线（用户 2026-09-19 从三个方案里选的**专用手柄**）。
@@ -60,6 +60,11 @@ export default function AccountCard({ a, isCurrent, isBest, isSelected, shortcut
    *  会比那张展开的卡低整整一个动作条的高度（sweep 实测 **79px**，三个宽度全中）。
    *  ★ 这不是"再加一个像素常量"：占位复用**同一份动作条外壳**，高度由构造保证一致 ——
    *    写死一个数字会在下次改按钮尺寸时静默失准（同 `CardBadgeGhost` 的理由）。 */
+  /** 置顶/取消置顶（用户 2026-09-21：「点击就是优先使用该账号」）。
+   *  真源是 `state.json` 的 `pinned`（aid 队列），走 `codex-rotate pin --toggle` ——
+   *  与 `rotate_off` 同一条理由：代理在 app 没开时也要读它，存 localStorage 会分叉成
+   *  「界面点亮了、代理却在用别的号」。 */
+  onTogglePin?: () => void;
   reserveActions?: boolean;
   /** 改名。空名/含空格/重名的校验在 `codex-rotate rename`(唯一真源)——那三种都会让按 label
    *  查找的 switch/probe 静默操作到错的号上。这里只挡「没改」。 */
@@ -136,6 +141,18 @@ export default function AccountCard({ a, isCurrent, isBest, isSelected, shortcut
                      color: t.muted, fontFamily: "'JetBrains Mono'",
                      display: "flex", alignItems: "center", gap: 4 }}>
         {shortcut ? `⌘${shortcut}` : ""}
+        {/* ★★ 置顶角标**必须在收起态就看得见** —— 它决定钱花在哪个号上。
+            「排第一但根本不参与」那次教训说的就是：判断优先用哪个号是在**总览一眼扫**
+            的时候，而不是展开某一张卡的时候。
+            ★ 带**队列位次**（`pinRank + 1`）：用户选的是「按点击先后排队」，
+              只画一个图标的话两个置顶号看着一样，而它们的先后是有意义的。 */}
+        {a.pinRank !== null && (
+          <span data-pin-badge
+                style={{ display: "inline-flex", alignItems: "center", gap: 1,
+                         color: t.accent, fontWeight: 700 }}>
+            <IcPin on />{a.pinRank + 1}
+          </span>
+        )}
         {!a.rotates && (
           <span data-rotate-off title="已停用自动轮换 —— 不参与轮换池，轮换优先级对它无效。展开卡片点循环图标可放回"
                 style={{ color: "#E0901C", fontWeight: 700 }}>⊘</span>
@@ -336,6 +353,19 @@ export default function AccountCard({ a, isCurrent, isBest, isSelected, shortcut
             <ProbeButton t={t} variant="inline" label="探针"
               hint={`对 ${a.node} 发一次真实补全,验它是否真能干活。⚠️ 消耗周额度(实测单次 <1%)`}
               loading={probing} onConfirm={() => onProbe(a.node)} loadingText="探测…" />
+          )}
+          {/* ★ 置顶排在「轮换开关」前面：它是你最常用的那个动作（「优先用这个号」），
+              而轮换开关是偶尔才碰的。 */}
+          {onTogglePin && !isDead && (
+            <IconBtn title={a.pinRank !== null
+                       ? `已置顶（第 ${a.pinRank + 1} 位）。点一下取消 —— 取消后回到「容量最高优先」`
+                       : "置顶：优先用这个号。可置顶多个,按点击先后排队;撞限冷却时自动用下一个"}
+                     onClick={onTogglePin}
+                     color={a.pinRank !== null ? t.accentText : t.muted}
+                     border={a.pinRank !== null ? t.accent : t.ghostBorder}
+                     bg={a.pinRank !== null ? t.accent : undefined}>
+              <IcPin on={a.pinRank !== null} />
+            </IconBtn>
           )}
           {!isDead && (
             <IconBtn title={a.rotates

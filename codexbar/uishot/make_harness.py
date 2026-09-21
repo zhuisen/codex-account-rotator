@@ -1652,7 +1652,12 @@ def redacted_state():
     if os.environ.get("CODEXBAR_UNPROBED"):
         fake = "user-demo990000000000000000000000"
         out_slots[fake] = {"label": "Newbie", "email": "newbie@example.com", "file": f"{fake}.json"}
+    # ★★ 置顶队列（2026-09-21）。**夹具必须真有两个** —— 只有一个的话「队列位次」
+    #   那半（角标上的 1 / 2）一个像素都验不到，而截图会正常渲染、探针报干净。
+    #   取前两个非 dead 的号，与 `pinned` 的真实形状一致（aid 列表，按点击先后）。
+    alive_ids = [a for a, sl in out_slots.items() if not sl.get("auth_dead")]
     return {"active": idmap.get(raw.get("active"), ""), "slots": out_slots,
+            "pinned": alive_ids[:2],
             "last_proxy_ts": raw.get("last_proxy_ts")}
 
 

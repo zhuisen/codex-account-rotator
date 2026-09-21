@@ -756,8 +756,11 @@ export default function App() {
                         return (
                         <AccountCard key={a.aid} a={a} isCurrent={a.aid === currentNode} isBest={hero?.aid === a.aid} isSelected={selectedCard === a.aid} reserveActions={sameRow(i, alive.findIndex(x => x.aid === selectedCard))} shortcut={shortcutIdx >= 0 && shortcutIdx < 9 ? shortcutIdx + 1 : undefined} bestPct={bestPct} winSlots={winSlots} probing={loadingAction === `probe-${a.aid}`} privacy={privacy} t={t}
                           drag={makeDrag(a.aid, savedAlive.map((x) => x.aid),
-                            "按住拖动排序。★ 这个顺序就是**轮换优先级**：排在前面的号先被用，"
-                            + "且优先级压过额度 —— 第一个号会一直用到撞限、冷却后才轮到下一个。⌘N 跟随。",
+                            // ★★ 2026-09-21：这句话原来写「这个顺序就是轮换优先级」——
+                            //   用户当天把轮换改回「默认容量最高优先 + 点亮才插队」之后，
+                            //   它就成了**一句假陈述**，而且正好会让人以为自己在调轮换。
+                            "按住拖动排序 —— **只影响卡片摆放与 ⌘N**，不影响轮换。"
+                            + "要优先用某个号，展开卡片点「置顶」图标。",
                             (next) => {
                               // ★★ codex 档写进 state.json（它就是计费顺序），CLI 是唯一写入口
                               const byAid = new Map(alive.map((x) => [x.aid, x.node]));
@@ -781,7 +784,15 @@ export default function App() {
                           //   前端再写一份迟早与 CLI 不一致,而 CLI 是所有入口的共同底座。
                           onToggleRotate={(_label, on) =>
                             run(`rotate-${a.aid}`, ["rotate", a.aid, on ? "--on" : "--off"],
-                                on ? `${a.node} 已恢复轮换` : `${a.node} 已停用轮换`)} />
+                                on ? `${a.node} 已恢复轮换` : `${a.node} 已停用轮换`)}
+                          /* ★★ 置顶（用户 2026-09-21：「点击就是优先使用该账号」）。
+                             走 CLI 是因为真源在 `state.json` 的 `pinned` —— 代理在 app
+                             没开时也要读它。`--toggle` 让「再点一下 = 取消」成立。 */
+                          onTogglePin={() =>
+                            run(`pin-${a.aid}`, ["pin", "--toggle", a.node],
+                                a.pinRank !== null
+                                  ? `${a.node} 已取消置顶 —— 回到容量最高优先`
+                                  : `${a.node} 已置顶 —— 优先用它，撞限冷却时自动换下一个`)} />
                       );})}
                     </div>
                     </>)}

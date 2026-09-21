@@ -101,7 +101,7 @@ export function useStore() {
   const slots: Record<string, Slot> = state.slots ?? {};
   const accounts: Account[] = Object.entries(slots)
     .map(([aid, sl]) => {
-      const a = slotToAccount(aid, sl, tokens);
+      const a = slotToAccount(aid, sl, tokens, state.pinned);
       if (cooldowns[aid] != null) a.cooldownSec = cooldowns[aid];
       if (a.cooldownSec > 0 && a.status !== "dead") a.status = "cool";
       return a;

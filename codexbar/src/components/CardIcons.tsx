@@ -34,6 +34,18 @@ export const IcRefresh = ({ spin }: { spin?: boolean }): React.ReactElement => (
     <path d="M21 12a9 9 0 1 1-3-6.7M21 4v4h-4"/>
   </svg>
 );
+/**
+ * 置顶（用户 2026-09-21：「点击就是优先使用该账号」）。
+ * ★ 与 `IcRotate` 同族：单色描边 SVG，不用 emoji（全局 `ui-design.md` 的禁忌）。
+ * ★ 两态**不只靠颜色区分**：未置顶是空心轮廓，已置顶整个填实 ——
+ *   红绿色盲下只换颜色等于没换（同 `IcRotate` 那道斜杠的理由）。
+ */
+export const IcPin = ({ on }: { on?: boolean }): React.ReactElement => (
+  <svg width="13" height="13" viewBox="0 0 24 24" fill={on ? "currentColor" : "none"}
+       stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M12 17v5"/><path d="M9 10.8V4h6v6.8l2.5 3.2h-11z"/>
+  </svg>
+);
 export const IcPen = (): React.ReactElement => (
   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M4 20h4L19 9a2.1 2.1 0 0 0-3-3L5 17v3z"/></svg>
 );
