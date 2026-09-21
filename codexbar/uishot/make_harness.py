@@ -897,6 +897,7 @@ function relayEntry() {
           //   「轮换失效了，禁用的账号也被使用了」。没有这个开关，那条告警
           //   **一个像素都验不到**，而截图会正常渲染、探针报干净。
           var _strand = p.get('pool') === 'stranded';
+          var _rec = p.get('pool') === 'recovered';
           var _ok = _strand ? [] : _ids.filter(function (a2) { var s2 = STATE.slots[a2];
             return !s2.auth_dead && !s2.rotate_off; });
           // 与 `proxy.py::_sort_avail` 同一把键：(套餐档, 置顶, 最紧已用%)
@@ -922,7 +923,15 @@ function relayEntry() {
           return Promise.resolve(JSON.stringify({
             // ★ 见底时 `cur` 必须是一个**不可用**的号 —— 那正是「临时借用」要说的事。
             //   给 `_q[0]`（空）会让左侧整块不渲染，那条分支就又验不到了。
-            cur: _q[0] || (_strand ? _rest[0] : null), cur_ago_min: 7, next: _q[0] || null,
+            // ★★★ `?pool=recovered` = **池子已恢复，但最近一次用的是个不可用的号**。
+            //   这正是用户 2026-09-21 截图那一幕：3 小时前池子空过、代理借了 qq55，
+            //   现在 4 个号可用、下一个是 wing，而顶部仍挂着红色的「临时借用」。
+            //   ⚠️ 没有这个夹具，「借用角标只在借用仍在发生时亮」这条**根本验不到** ——
+            //     默认夹具里 `cur` 本来就可用，改不改判据它都是绿的（本仓形态⑩：
+            //     判据档位要挑只有被测那条能挡住的输入）。
+            cur: _rec ? (_rest[0] || _q[0] || null)
+                      : (_q[0] || (_strand ? _rest[0] : null)),
+            cur_ago_min: _rec ? 180 : 7, next: _q[0] || null,
             queue: _q, rest: _rest, weekly_left_pp: _wk,
             burn_pp_per_active_hour: _none ? null : 39.3,
             runway_active_hours: _none ? null : Math.round(_wk / 39.3 * 10) / 10,
@@ -933,6 +942,11 @@ function relayEntry() {
       // 否则总览拖完顺序、`read_state` 回来的还是旧的,端到端闸验的就不是真链路了。
       case 'run_rotate': {
         var _a = (args && args.args) || [];
+        // ★ `borrow --on/--off` 真的改 STATE —— 否则设置页点完开关、`read_state`
+        //   回来的还是旧值，端到端闸验的就不是真链路了（同 `priority --set` 的理由）。
+        if (_a[0] === 'borrow') {
+          if (_a[1] === '--off') STATE.borrow_off = true; else delete STATE.borrow_off;
+        }
         if (_a[0] === 'priority' && _a[1] === '--set') {
           var want = _a.slice(2);
           var byLabel = {};

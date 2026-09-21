@@ -1208,6 +1208,51 @@ def cmd_alias(args):
     print(f"[{cur}] 认领旧名 {old_lbl} —— 代理轮换泳道会把这段历史并回来")
 
 
+def cmd_borrow(args):
+    """池子一个可用号都没有时，**允不允许临时借用一个已停用的号**。
+
+    用法：`codex-rotate borrow --on|--off` · `borrow --status [--json]`
+
+    ## 为什么有这个开关（用户 2026-09-21 拍板）
+
+    代理的最后一层兜底本来是硬编码的：一个能用的号都没有时，忽略 `rotate_off` 借一个，
+    理由是「codex 整个不能用」比「多用一个你不想用的号」更糟。
+
+    ⚠️ 2026-09-21 真实撞上：5 个号冷却 + 3 个手动停用 + 1 个凭证失效 ⇒ 代理借了一个
+    已停用的号。用户的原话是「**我明明停止轮换了，应该就不能去调用**」——
+    他要的是那个开关说话算数，宁可那段时间 codex 报错。两种都成立，所以做成开关。
+
+    ## 为什么**存反向**（`borrow_off` 而不是 `borrow_on`）
+
+    与 `rotate_off` / `auto_off` 同一条理由：**缺省（键不存在）必须等于既有行为**。
+    正向命名要写迁移，而漏迁移的机器会**静默改变行为**且零报错。
+    关回默认时**删键**，不写 `False` —— 否则"缺省"有两种表示。
+
+    ★ 真源在 `state.json`，不在 localStorage：代理在 app 没开时也要读它（同 `dawn_probe`）。
+      前端**读**它走已有的 `read_state`（值就在 state 里，不必再加一条只读 IPC）；
+      **写**才走 `run_rotate`。
+    """
+    st = _state()
+    on = not st.get("borrow_off")
+    if "--status" in args or not args:
+        if "--json" in args:
+            print(json.dumps({"borrow": on}, ensure_ascii=False))
+        else:
+            print(f"池子空时借用已停用的号：{'开' if on else '关'}"
+                  + ("" if on else "  —— 无号可用时代理将直接报错，不动你停用的号"))
+        return
+    if "--on" in args:
+        # ★ 恢复默认 = **删键**，不是写 False。
+        _mutate_state(lambda s: s.pop("borrow_off", None))
+        print("✓ 已开启：池子空时会临时借用一个已停用的号（并在界面与日志上标出来）")
+    elif "--off" in args:
+        _mutate_state(lambda s: s.__setitem__("borrow_off", True))
+        print("✓ 已关闭：池子空时代理直接报错，绝不动你停用的号")
+    else:
+        print("用法：codex-rotate borrow --on|--off|--status [--json]")
+        sys.exit(2)
+
+
 def cmd_rotate(args):
     """把某个号**移出/放回**自动轮换池(用户 2026-09-07:「A 账号我不想轮换,就禁掉」)。
 
@@ -3772,7 +3817,8 @@ CMDS = {"add": cmd_add, "login": cmd_login, "list": cmd_list, "switch": cmd_swit
         "ensure-live": cmd_ensure_live, "credits": cmd_credits, "probe": cmd_probe,
         "dawn-probe": cmd_dawn_probe, "rotate": cmd_rotate,
         "tokens": cmd_tokens, "integration": cmd_integration,
-        "priority": cmd_priority, "pin": cmd_pin, "next": cmd_next}
+        "priority": cmd_priority, "pin": cmd_pin, "next": cmd_next,
+        "borrow": cmd_borrow}
 
 
 # Disk-only commands run their whole load→mutate→save under the cross-process state mutex (lost-update

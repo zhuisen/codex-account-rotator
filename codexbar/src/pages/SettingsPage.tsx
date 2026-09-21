@@ -161,6 +161,25 @@ function NumInput({ value, onChange, min, max, suffix, t }: {
 
 export default function SettingsPage({ t }: { t: Theme }) {
   const [dawn, setDawn] = useState<DawnStatus | null>(null);
+  /** 池子空时允不允许借用已停用的号。★ **读**直接走 `read_state`（值就在 `state.json` 里，
+   *  不必再加一条只读 IPC）；**写**才走 `run_rotate` —— 那是真的改状态，该广播。
+   *  ⚠️ 存反向（`borrow_off`），所以「开」= 键不存在。 */
+  const [borrow, setBorrow] = useState<boolean | null>(null);
+  const loadBorrow = useCallback(async () => {
+    try {
+      const st = await invoke<{ borrow_off?: boolean }>("read_state");
+      setBorrow(!st.borrow_off);
+    } catch {
+      // ★ 读不到就保持 `null` —— 渲染成「—」而不是假装它是开着的。
+      setBorrow(null);
+    }
+  }, []);
+  const toggleBorrow = useCallback(async () => {
+    const next = !borrow;
+    try {
+      await invoke("run_rotate", { args: ["borrow", next ? "--on" : "--off"] });
+    } finally { void loadBorrow(); }
+  }, [borrow, loadBorrow]);
   const loadDawn = useCallback(async () => {
     try {
       // ★ 同 useDawnProbe：只读查询不走会广播的写通道。
@@ -175,6 +194,7 @@ export default function SettingsPage({ t }: { t: Theme }) {
       await invoke("run_rotate", { args: ["dawn-probe", next ? "--enable" : "--disable"] });
     } finally { void loadDawn(); }   // ★ 无论成败都回读：不拿"我打算设成什么"冒充"它现在是什么"
   }, [dawn, loadDawn]);
+  useEffect(() => { void loadBorrow(); }, [loadBorrow]);
   const [s, setS] = useState(load);
   const update = (patch: Partial<Settings>) => {
     const next = { ...s, ...patch }; setS(next); save(next);
@@ -323,6 +343,24 @@ export default function SettingsPage({ t }: { t: Theme }) {
           background: dawn?.enabled ? t.accent : t.barTrack, transition: "background .2s",
         }}>
           <div style={{ width: 18, height: 18, borderRadius: 9, background: "#fff", transform: dawn?.enabled ? "translateX(16px)" : "translateX(0)", transition: "transform .2s" }} />
+        </div>
+      </Row>
+      {/* ★★ 用户 2026-09-21 拍板加的开关，原话：「我明明停止轮换了，应该就不能去调用」。
+          代理的最后一层兜底本来是硬编码的：一个能用的号都没有时忽略 `rotate_off` 借一个
+          （理由是「codex 整个不能用」比「多用一个你不想用的号」更糟）。两种都成立，所以做成开关。
+          ★ 真源在 `state.json`（代理在 app 没开时也要读它），**不在 localStorage**。
+          ★ 存反向：缺省 = 允许借用 = 既有行为；关回默认时**删键**。 */}
+      <Row label="池子空时借用已停用的号"
+           desc={borrow == null
+             ? "读不到这项设置 —— 不是「已关闭」，是这次没读到"
+             : borrow
+             ? "一个可用的号都没有时，临时借一个你停用的号，并在总览顶部标红说明。关掉 = 宁可 codex 报错"
+             : "已关闭：无号可用时代理直接报错，绝不动你停用的号（那段时间 codex 会失败）"}>
+        <div onClick={() => void toggleBorrow()} style={{
+          width: 38, height: 22, borderRadius: 11, padding: 2, cursor: "pointer",
+          background: borrow ? t.accent : t.barTrack, transition: "background .2s",
+        }}>
+          <div style={{ width: 18, height: 18, borderRadius: 9, background: "#fff", transform: borrow ? "translateX(16px)" : "translateX(0)", transition: "transform .2s" }} />
         </div>
       </Row>
       <Row label="订阅到期预警" desc="订阅剩余天数 ≤ 此值时在卡片和通知中提醒">

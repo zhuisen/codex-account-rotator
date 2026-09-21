@@ -63,7 +63,15 @@ export default function RunwayHero({ t, board, privacy }: {
   const nOff = board.rest.filter((e) => e.off).length;
   const nDead = board.rest.filter((e) => e.dead).length;
   /** 正在用的这个号本身不可用 ⇒ 代理是**借**来的，必须说出来。 */
-  const borrowed = cur.off || cur.dead || cur.cool_min > 0;
+  /**
+   * ⚠️ **必须带上 `stranded`。** 第一版只判「这个号本身不可用」——
+   *   而 `cur` 是 `last_aid`（代理**最近一次**用了谁），可能是几小时前的事。
+   *   2026-09-21 用户截图：池子早已恢复（4 个号可用、下一个是 wing），
+   *   顶部却还挂着红色的「临时借用 qq55」，说的是 **3 小时前**那次借用。
+   *   一盏描述过去、却长得像现在的红灯，本仓判过死刑 ——
+   *   **披露的寿命跟着它描述的那个事实走**，事实结束它就该灭。
+   */
+  const borrowed = stranded && (cur.off || cur.dead || cur.cool_min > 0);
   const sc = cur.dead ? "#E0524D" : pct != null && pct <= 20 ? "#E0901C" : t.accent;
 
   /** 色带里每一段的宽度 = 该号周窗口余量。★ `flexGrow` 用余量本身，**不归一化** ——

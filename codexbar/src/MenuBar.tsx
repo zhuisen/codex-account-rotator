@@ -8,6 +8,7 @@ import AccountRow from "./components/AccountRow";
 import GrokRow from "./components/GrokRow";
 import AgyRow from "./components/AgyRow";
 import PlatformChips from "./components/PlatformChips";
+import { useRotationBoard } from "./hooks/useRotationBoard";
 import { useAgyPool } from "./hooks/useAgyPool";
 import { POOL_PLATFORMS, platformOf, type PoolKey } from "./platforms";
 import ProbeButton from "./components/ProbeButton";
@@ -106,7 +107,7 @@ const IconEyeOff = () => <svg width="15" height="15" viewBox="0 0 24 24" fill="n
 const IconWarn = () => <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2 1 21h22L12 2zm1 14h-2v2h2v-2zm0-7h-2v5h2V9z"/></svg>;
 
 export default function MenuBar() {
-  const { accounts, hero, currentNode, counts, lastRefreshAt, cardAlert, loadingAction, toast, refresh, run, showToast } = useStore();
+  const { accounts, currentNode, counts, lastRefreshAt, cardAlert, loadingAction, toast, refresh, run, showToast } = useStore();
   const { visible: bannerVisible, dismiss: bannerDismiss } = useCardBannerDismiss();
   const { integration } = useIntegration();
   const [theme, setTheme] = useState<"dark" | "light">(loadTheme);
@@ -270,6 +271,12 @@ export default function MenuBar() {
   //   与 grok 的差别:这条**不联网**(本机 loopback),所以菜单栏常开也不产生外部请求。
   const { snap: agySnap, busy: agyBusy } = useAgyQuota();
   // ★ agy 账号池。只在 gemini 档打开时才读盘 —— 菜单栏常开，无谓的 IPC 不该常驻。
+  // ★★ 与总览**同一个真源**。此前这里的 `USE` 与总览一样由 `recommended()`（剩余最多、
+  //   不看置顶不看停用）算 —— 两个界面各挂一份作废逻辑，说的还是同一句假话。
+  //   §5c 页面统一性：同一类信息在两个界面必须来自同一处。
+  // ★ 只在**账号 Tab + codex 档**时启用：每次查询要起一个 python 子进程，
+  //   而今日 Tab 与 Gemini 档一个像素都用不到它（同总览那条 `provider === "codex"` 的理由）。
+  const { board: mbBoard } = useRotationBoard(tab === "acc" && plat === "codex");
   const agyPool = useAgyPool(tab === "acc" && plat === "gemini");
   const alive = accounts.filter(a => a.status !== "dead");
   const dead = accounts.filter(a => a.status === "dead");
@@ -483,7 +490,7 @@ export default function MenuBar() {
         {/* ★★ 一档一份列表。三家的账号语义根本不同（逐请求换号 / 启动前换凭证 / 单号只读），
             堆在一起时读者会拿同一套直觉去理解它们 —— 这正是分档的理由（同主窗 ProviderTabs）。 */}
         {plat === "codex" && alive.map(a => (
-          <AccountRow key={a.aid} a={a} isCurrent={a.aid === currentNode} isBest={hero?.aid === a.aid}
+          <AccountRow key={a.aid} a={a} isCurrent={a.aid === currentNode} isBest={mbBoard?.next?.aid === a.aid}
             bestPct={bestPct} privacy={privacy} t={t} onSelect={() => void openMain("navigate-overview", "codex")}
             // 当前号不给按钮:切到自己是空操作,画出来只会让人以为点了没反应。
             // 失效号在下面那个折叠区,本来就不传。

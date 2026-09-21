@@ -26,8 +26,14 @@ function DeltaChip({ delta, t }: { delta: number; t: Theme }) {
 }
 
 
-export default function AccountCard({ a, isCurrent, isBest, isSelected, shortcut, bestPct, probing, privacy, t, onSelect, onSwitch, onShowDetail, onRemove, onProbe, onRename, onToggleRotate, onTogglePin, winSlots, drag }: {
+export default function AccountCard({ a, isCurrent, isBest, isSelected, shortcut,
+  bestLabel = "USE", bestTitle, curLabel = "当前", curTitle, bestPct, probing, privacy, t, onSelect, onSwitch, onShowDetail, onRemove, onProbe, onRename, onToggleRotate, onTogglePin, winSlots, drag }: {
   a: Account; isCurrent: boolean; isBest: boolean; isSelected: boolean; shortcut?: number;
+  /** 高亮角标的文案。★ codex 档传「下一个」（真挑号器的结果），agy 档保留 `USE`
+   *  —— agy **没有逐请求挑号器**，手动切号就是它的机制，「推荐切到谁」在那边仍成立。 */
+  bestLabel?: string; bestTitle?: string;
+  /** 「当前」角标的文案与解释。codex 档改叫「直连」，见下。 */
+  curLabel?: string; curTitle?: string;
   /**
    * 拖拽排序的接线（用户 2026-09-19 从三个方案里选的**专用手柄**）。
    *
@@ -228,9 +234,19 @@ export default function AccountCard({ a, isCurrent, isBest, isSelected, shortcut
                                + `条和百分比画的是那一刻的值，不是现在的值。`
                                + `这不代表额度有问题——只代表我们有一阵子没读到它了。`} />
             )}
-            {isBest && <span style={{ fontSize: Z.useBadge, fontWeight: 700, color: t.accentText, background: t.accent, padding: "1px 5px", borderRadius: 4, flexShrink: 0 }}>USE</span>}
+            {/* ★★ 这个角标以前恒是 `USE`，由 `recommended()` 算 —— **剩余最多者**，
+                **既不看置顶也不看停用**。2026-09-21 用户截图实证它在说谎：Yu 拿着 USE，
+                而真挑号器（`codex-rotate next`）说下一个是 wing。它与我同日从 banner 上
+                删掉的「建议切到 X」是**同一份作废逻辑**，只是换成了角标形态。
+                ★ codex 档现在传的是 `board.next` —— 与顶部续航条**同一个真源**，
+                  所以两处永远说同一件事；agy 档保留 `USE`（那边手动切号才是机制）。 */}
+            {isBest && <span title={bestTitle} style={{ fontSize: Z.useBadge, fontWeight: 700, color: t.accentText, background: t.accent, padding: "1px 5px", borderRadius: 4, flexShrink: 0, whiteSpace: "nowrap" }}>{bestLabel}</span>}
             {isCurrent
-              ? <span style={{ marginLeft: "auto", flexShrink: 0, fontSize: Z.curBadge, fontWeight: 700, color: t.accent, border: `1px solid ${t.accentBorder}`, padding: "1px 7px", borderRadius: 999 }}>当前</span>
+              /* ★★ 它读的是 `state.active` = **上次 CLI 切换**留下的号，也就是
+                 `~/.codex/auth.json` 里那个 —— 只有**不走代理直连**时才用得上。
+                 走代理时每个请求都可能换号，「当前」二字与顶部的「正在使用」撞名却说的是
+                 另一回事（用户 2026-09-21：「一个界面出现了三个使用」）。codex 档改叫「直连」。 */
+              ? <span title={curTitle} style={{ marginLeft: "auto", flexShrink: 0, fontSize: Z.curBadge, fontWeight: 700, color: t.accent, border: `1px solid ${t.accentBorder}`, padding: "1px 7px", borderRadius: 999, whiteSpace: "nowrap" }}>{curLabel}</span>
               : known && bestPct >= 0 && <DeltaChip delta={pct - bestPct} t={t} />}
           </div>
 

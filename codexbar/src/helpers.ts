@@ -53,6 +53,8 @@ export interface AppState {
    *  ⚠️ 它是**顶层键**不是 slot 上的字段（要保留"第几个被点"的次序），
    *    所以 `Account.pinRank` 是派生出来的，见 `slotToAccount` 的第 4 个参数。 */
   pinned?: string[];
+  /** 池子空时是否**禁止**借用已停用的号。★ 存反向：缺省(无键)=允许借用=既有行为。 */
+  borrow_off?: boolean;
   /** 卡片摆放顺序（⌘N 跟随）。★ 2026-09-21 起它**只管摆放，不影响轮换** ——
    *  旧装机存在 `pick_order` 下，读时兼容、写只写新键。 */
   card_order?: string[];

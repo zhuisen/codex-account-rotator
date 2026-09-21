@@ -96,7 +96,7 @@ const CARD_MIN_W = 320;
 const CARD_GRID_COLS = `repeat(auto-fill, minmax(${CARD_MIN_W}px, 1fr))`;
 
 export default function App() {
-  const { state, accounts, hero, currentNode, counts, tokens, lastRefreshAt, freshness, loadingAction, toast, refresh, run, showToast } = useStore();
+  const { state, accounts, currentNode, counts, tokens, lastRefreshAt, freshness, loadingAction, toast, refresh, run, showToast } = useStore();
   const [theme, setTheme] = useState<"dark" | "light">("dark");
   // 版本号运行期从 tauri 取,别再写死(发版时漏改前端字符串是老毛病)
   const [ver, setVer] = useState("");
@@ -729,7 +729,11 @@ export default function App() {
                         const shortcutIdx = alive.findIndex(x => x.aid === a.aid);   // ★ 就是「第几张」
                         // 改名按 aid 不按 label:cmd_rename 两者都认,而 aid 唯一 —— 重名时不会改到别的号上
                         return (
-                        <AccountCard key={a.aid} a={a} isCurrent={a.aid === currentNode} isBest={hero?.aid === a.aid} isSelected={selectedCard === a.aid} shortcut={shortcutIdx >= 0 && shortcutIdx < 9 ? shortcutIdx + 1 : undefined} bestPct={bestPct} winSlots={winSlots} probing={loadingAction === `probe-${a.aid}`} privacy={privacy} t={t}
+                        <AccountCard key={a.aid} a={a} isCurrent={a.aid === currentNode} isBest={board?.next?.aid === a.aid}
+                          bestLabel="下一个"
+                          bestTitle="代理下一个请求会挑这个号（与顶部续航条同一个真源：codex-rotate next）"
+                          curLabel="直连"
+                          curTitle="不走代理直接跑 codex 时用的就是这个号（auth.json 里是它）。走代理时每个请求都可能换号，以顶部「正在使用」为准。" isSelected={selectedCard === a.aid} shortcut={shortcutIdx >= 0 && shortcutIdx < 9 ? shortcutIdx + 1 : undefined} bestPct={bestPct} winSlots={winSlots} probing={loadingAction === `probe-${a.aid}`} privacy={privacy} t={t}
                           drag={makeDrag(a.aid, savedAlive.map((x) => x.aid),
                             // ★★ 2026-09-21：这句话原来写「这个顺序就是轮换优先级」——
                             //   用户当天把轮换改回「默认容量最高优先 + 点亮才插队」之后，

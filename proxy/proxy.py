@@ -523,19 +523,30 @@ def _pick(prev_id, exclude=None, conv=None):
                  #    日常永远碰不到，是个埋在兜底里的 NameError。
                  if aid not in exclude and not sl.get("auth_dead")
                  and not sl.get("rotate_off")]
-    if not avail:
-        # ★★ **最后一层兜底:全被停用时忽略这个开关,并把它记进日志。**
-        #    CLI 已经拒绝关掉最后一个,所以走到这里只可能是手改 state.json 或多进程竞态。
+    if not avail and not s.get("borrow_off"):
+        # ★★ **最后一层兜底:一个能用的号都没有时,忽略停用开关借一个,并把它记进日志。**
         #    在「codex 整个不能用」与「多用了一个用户不想用的号」之间选后者 ——
         #    前者会让每个请求都失败,而 502 实测会被 codex 重试 30 次,越修越糟。
-        #    ⚠️ 但**绝不能静默**:这一行是用户唯一能看出"设置被绕过了"的地方,
-        #    而日志页的轮换事件流会把它显示出来。
+        #    ⚠️ 但**绝不能静默**:这一行是用户唯一能看出"设置被绕过了"的地方。
+        #
+        # ★★★ 2026-09-21 起**可关**(`state["borrow_off"]`,用户拍板加的开关)。
+        #    他的原话:「我明明停止轮换了,应该就不能去调用」。
+        #    · **存反向**(`borrow_off` 而不是 `borrow_on`):缺省(键不存在)必须等于
+        #      **既有行为**=允许借用。正向命名要写迁移,而漏迁移的号会静默改变行为。
+        #    · 关掉之后走到下面的 `exhausted`,代理如实报错 —— 那是用户选的取舍:
+        #      宁可那段时间 codex 用不了,也不动他停用的号。
         relaxed = [(aid, sl) for aid, sl in slots.items()
                    if aid not in exclude and not sl.get("auth_dead")]
         if relaxed:
             _plog("⚠️ 所有号都被停用了自动轮换 —— 本次忽略该设置,否则无号可用。"
-                  "用 `codex-rotate rotate <label> --on` 恢复至少一个。")
+                  "用 `codex-rotate rotate <label> --on` 恢复至少一个;"
+                  "或 `codex-rotate borrow --off` 让它以后直接报错而不借用。")
             avail = relaxed
+    elif not avail:
+        # ★ 关掉借用时**同样不许静默** —— 用户要能看出"codex 报错是因为我自己关了它",
+        #   而不是以为轮换坏了。两条路各有一行日志,缺哪条都会变成一次无头排查。
+        _plog("⚠️ 一个可用的号都没有,且你已关闭「池子空时借用停用的号」"
+              "(`codex-rotate borrow --on` 可恢复) —— 本次直接失败。")
     if not avail:
         return None, None, "exhausted"
     _sort_avail(avail, s)

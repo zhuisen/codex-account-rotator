@@ -255,6 +255,26 @@ class ItSaysSoWhenThePoolRunsDry(unittest.TestCase):
         self.assertIn("分钟后回来", self.dry["text"],
                       "★★ 没说多久能恢复 —— 那是用户唯一想知道的数")
 
+    def test_the_borrow_tag_dies_with_the_borrow(self):
+        """★★★ 「临时借用」只在**借用仍在发生**时亮，不许描述几小时前那一次。
+
+        用户 2026-09-21 截图：池子早已恢复（4 个号可用、下一个是 wing），顶部却还挂着
+        红色的「临时借用 qq55」—— 那说的是 **3 小时前**的事。`cur` 是 `last_aid`
+        （代理最近一次用了谁），它天然会落后于现在。
+        ★ **一盏描述过去、却长得像现在的红灯**，本仓判过死刑：它训练用户忽略所有告警。
+          披露的寿命跟着它描述的那个事实走，事实结束它就该灭。
+
+        ⚠️ 这一条**必须用 `?pool=recovered`**：默认夹具里 `cur` 本来就可用，
+          改不改判据它都是绿的（形态⑩：判据档位要挑只有被测那条能挡住的输入）。
+        """
+        r = _probe(1300, "nav=home&pool=recovered")
+        if r is None:
+            self.skipTest("harness 静态服务（3304）没在跑")
+        self.assertGreaterEqual(r["segs"], 1, "★ 夹具没让池子恢复 —— 前提不成立，这条验不到")
+        self.assertEqual("", r["borrowed"],
+                         "★★★ 池子已恢复，却还挂着「临时借用」—— 那是几小时前的事")
+        self.assertEqual("", r["stranded"], "★★ 池子已恢复却还报见底")
+
     def test_the_alarm_is_absent_when_the_pool_is_fine(self):
         """★★ 反向：池子正常时**不许**挂着这条告警。
 
