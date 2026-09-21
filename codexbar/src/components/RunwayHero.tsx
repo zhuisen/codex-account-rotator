@@ -44,6 +44,26 @@ export default function RunwayHero({ t, board, privacy }: {
   /** 下一个与正在使用的**不是同一个号**时才多说一句 —— 相同就是噪音。 */
   const showNext = n && n.aid !== cur.aid;
   const pct = cur.tightest;
+  /**
+   * ★★★ **池子见底** —— `queue` 为空就是「一个能用的号都没有」。
+   *
+   * 这时代理走最后一层兜底：在「codex 整个不能用」与「多用一个你不想用的号」之间选后者，
+   * 并把 `⚠️ 所有号都被停用了自动轮换` 写进 `proxy.log`。
+   *
+   * ⚠️ **而用户不会去读 proxy.log。** 2026-09-21 实测发生过一次：九个号里 5 个冷却、
+   *   3 个被手动停用、1 个凭证失效 ⇒ 代理借用了一个**已停用**的号，用户看到的是
+   *   「轮换失效了，禁用轮换的账号也被使用了」—— 系统推翻了他的设置，而他无从知道为什么。
+   *   本仓规矩：**告警放在眼睛已经在的地方，且文本要说「做什么」**。这里就是那个地方。
+   */
+  const stranded = board.queue.length === 0;
+  /** 最早什么时候有号回来。只看冷却中的 —— 停用/失效不会自己恢复。 */
+  const backInMin = board.rest.reduce<number | null>(
+    (a, e) => (e.cool_min > 0 ? (a == null ? e.cool_min : Math.min(a, e.cool_min)) : a), null);
+  const nCool = board.rest.filter((e) => e.cool_min > 0 && !e.off && !e.dead).length;
+  const nOff = board.rest.filter((e) => e.off).length;
+  const nDead = board.rest.filter((e) => e.dead).length;
+  /** 正在用的这个号本身不可用 ⇒ 代理是**借**来的，必须说出来。 */
+  const borrowed = cur.off || cur.dead || cur.cool_min > 0;
   const sc = cur.dead ? "#E0524D" : pct != null && pct <= 20 ? "#E0901C" : t.accent;
 
   /** 色带里每一段的宽度 = 该号周窗口余量。★ `flexGrow` 用余量本身，**不归一化** ——
@@ -77,8 +97,10 @@ export default function RunwayHero({ t, board, privacy }: {
     return () => ro.disconnect();
   }, []);
   /** 9px JetBrains Mono 700 的字宽：ASCII 约 5.6px，CJK 是整个字身 9px。 */
+  /** ⚠️ 字宽随字号一起从 9px 抬到 10px（2026-09-21 色带加粗）——**这两个数必须一起改**，
+   *  否则「装不装得下名字」按错的字宽判，窄段上又会冒出被裁一半的名字。 */
   const textW = (s2: string) =>
-    [...s2].reduce((a, c) => a + (c.charCodeAt(0) > 255 ? 9 : 5.6), 0);
+    [...s2].reduce((a, c) => a + (c.charCodeAt(0) > 255 ? 10 : 6.2), 0);
   const fits = (w: number, label: string) =>
     barW > 0 && (w / total) * barW >= textW(label) + 8;
 
@@ -87,8 +109,8 @@ export default function RunwayHero({ t, board, privacy }: {
       ? `${e.label} —— ${e.off ? "已停用轮换" : e.dead ? "凭证失效" : `冷却中 ${e.cool_min}m`}，不计入续航`
       : `${e.label} 周窗口还剩 ${e.weekly ?? "—"}%${e.pin ? ` · 置顶 #${e.pin}` : ""}`}
       style={{ flexGrow: dim ? 5 : Math.max(e.weekly ?? 1, 5), flexBasis: 0, minWidth: 0,
-               height: 18, display: "grid", placeItems: "center", overflow: "hidden",
-               whiteSpace: "nowrap", fontFamily: MONO, fontSize: 9, fontWeight: 700,
+               height: 24, display: "grid", placeItems: "center", overflow: "hidden",
+               whiteSpace: "nowrap", fontFamily: MONO, fontSize: 10, fontWeight: 700,
                color: dim ? t.muted : "#06231f",
                background: dim ? t.ghostBg : SEG_COLORS[i % SEG_COLORS.length] }}>
       {fits(Math.max(e.weekly ?? 1, 5), e.label ?? "") ? e.label : ""}
@@ -97,9 +119,9 @@ export default function RunwayHero({ t, board, privacy }: {
 
   return (
     <div data-runway-hero style={{
-      display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap", rowGap: 8,
+      display: "flex", alignItems: "center", gap: 13, flexWrap: "wrap", rowGap: 8,
       background: t.heroBg, border: `1px solid ${t.heroBorder}`, borderRadius: 14,
-      padding: "12px 16px", marginBottom: 13, boxShadow: t.heroShadow,
+      padding: "10px 14px", marginBottom: 12, boxShadow: t.heroShadow,
       transition: "background-color .35s ease, border-color .35s ease",
     }}>
       <Ring pct={pct ?? 0} r={30} sw={5.5} color={pct == null ? t.ringTrack : sc}
@@ -110,7 +132,18 @@ export default function RunwayHero({ t, board, privacy }: {
         </span>
       </Ring>
 
-      <div style={{ minWidth: 180, flex: "1 1 200px" }}>
+      {/* ★ 左列**不再抢伸缩空间**（`flex: 0 1 auto`）—— 用户 2026-09-21：
+          「右侧的续航条可以加大加长」。左列是定长信息（号名 + 两条窗口），
+          伸得再宽也只是留白；而右侧那条色带越长，每个号的占比越读得出来。 */}
+      {/* ★ 左列给**明确的 flex-basis**（不是 `auto`）：flex 分行看的是 basis
+          （hypothetical main size），`auto` 取 max-content，号名一长基准就跟着涨，
+          而收缩只发生在**行内**、救不回已经换行的那一下。写死一个数更可预测。
+          ⚠️ **但别把这条当成某次故障的修复**：2026-09-21 曾连续两次量到 880 见底档
+          hero 被撑到 167px（右列掉到第二行），改完 basis 变回 94px —— 然而事后把
+          basis 改回 `auto` 也照样是 94px，四种组合 × 连跑 6 次全部 94。
+          **那次现象至今没复现，成因未定**，这里不假装已经定位。真正的防线是
+          `tests/test_runway_hero.py` 现在把**见底这一支也量进去了**（此前只量默认档）。 */}
+      <div style={{ minWidth: 168, flex: "0 1 220px" }}>
         {/* ★「正在使用」取 `last_aid`（代理最近一次真的用了谁），并**把时间写出来** ——
             逐请求轮换下"正在"是有时效的，3 小时前那次和 3 秒前那次意义完全不同。 */}
         <div style={{ fontSize: 9.5, fontWeight: 700, letterSpacing: ".12em",
@@ -125,6 +158,20 @@ export default function RunwayHero({ t, board, privacy }: {
           {cur.pin != null && (
             <span data-runway-pin style={{ fontSize: 10, fontWeight: 700, color: t.accent }}>
               ▲{cur.pin}
+            </span>
+          )}
+          {/* ★★ 「这个号本来不该被用」必须写在号名旁边 —— 那是眼睛第一个落点。
+              只写在下面那条告警里的话，用户仍然是先看到一个不该出现的名字。 */}
+          {borrowed && (
+            <span data-runway-borrowed title={
+              cur.off ? "你已停用它的自动轮换，但此刻没有别的号可用，代理临时借用了它"
+                      : cur.dead ? "这个号的凭证已失效" : `这个号在冷却中（还有 ${cur.cool_min} 分钟）`}
+              style={{ fontSize: 9, fontWeight: 700, color: "#E0524D", cursor: "help",
+                       border: "1px solid #E0524D", borderRadius: 5, padding: "0 4px",
+                       // ★ 左列收窄之后它会被劈成「临时借 / 用」—— 断字在本仓算 bug。
+                       //   角标是**原子**，永远不在内部断开；要让的是旁边的邮箱（它有省略号）。
+                       whiteSpace: "nowrap", flexShrink: 0 }}>
+              临时借用
             </span>
           )}
           <PlanBadge plan={cur.plan ?? ""} t={t} size={9} />
@@ -149,8 +196,31 @@ export default function RunwayHero({ t, board, privacy }: {
         </div>
       </div>
 
-      <div style={{ flex: "1 1 300px", minWidth: 260 }}>
+      <div style={{ flex: "1 1 360px", minWidth: 280 }}>
         <div style={{ display: "flex", alignItems: "baseline", gap: 7, flexWrap: "wrap" }}>
+          {/* ★★★ 见底时**不画续航数字**。此刻 `weekly_left_pp` 是 0（可用池为空），
+              算出来的「续航 ≈ 0 小时」是句假话 —— 冷却的号一小时内就会回来。
+              「撑不了多久」与「暂时被锁在外面」是两件相反的事，本仓头号铁律。 */}
+          {stranded ? (
+            <>
+              {/* ★★ **实心红底**，不是小号红字。这是整条里最重要的信号（系统正在推翻
+                  用户的设置），而 9.5px 的红字会被旁边 19px 的数字整个压住 ——
+                  本仓 §5d：选中/生效态用实心填充 + 反白文字，告警同理。 */}
+              <span style={{ fontSize: 10, color: "#fff", fontFamily: MONO, fontWeight: 700,
+                             letterSpacing: ".06em", background: "#E0524D",
+                             borderRadius: 5, padding: "2px 6px" }}>池子见底</span>
+              <span data-runway-stranded style={{ fontSize: 19, fontWeight: 700,
+                                                  fontFamily: MONO, lineHeight: 1.1 }}>
+                {board.rest.length} 个号全不可用
+              </span>
+              {backInMin != null && (
+                <span style={{ fontSize: 10.5, color: t.text2 }}>
+                  最快 <b style={{ color: t.accent }}>{backInMin}</b> 分钟后回来
+                </span>
+              )}
+            </>
+          ) : (
+          <>
           <span style={{ fontSize: 9.5, color: t.muted, fontFamily: MONO }}>全池续航</span>
           {/* ★★ 取不到写 `—` **绝不写 0** —— 0 会被读成「快没了」，与「算不出来」相反。 */}
           <span data-runway-hours style={{ fontSize: 19, fontWeight: 700, fontFamily: MONO,
@@ -166,9 +236,11 @@ export default function RunwayHero({ t, board, privacy }: {
             周窗共剩 {board.weekly_left_pp}pp
             {board.burn_pp_per_active_hour != null && ` · ${board.burn_pp_per_active_hour}pp/h`}
           </span>
+          </>
+          )}
         </div>
-        <div data-runway-bar ref={barRef} style={{ display: "flex", gap: 2, marginTop: 5,
-                                      borderRadius: 5, overflow: "hidden" }}>
+        <div data-runway-bar ref={barRef} style={{ display: "flex", gap: 2, marginTop: 4,
+                                      borderRadius: 6, overflow: "hidden" }}>
           {board.queue.map((e, i) => seg(e, i, false))}
           {/* ★★ 不可用的号合成**一段**，不是每号一段。实测：三个灰段各 11px 宽，
               而名字要 22px ⇒ 每一个都横向溢出（本仓算 bug），而且 11px 上的名字
@@ -180,9 +252,9 @@ export default function RunwayHero({ t, board, privacy }: {
                   title={board.rest.map((e) => `${e.label} —— ${
                     e.off ? "已停用轮换" : e.dead ? "凭证失效" : `冷却中 ${e.cool_min}m`}`).join("\n")}
                   style={{ flexGrow: restW, flexBasis: 0,
-                           minWidth: 0, height: 18, display: "grid", placeItems: "center",
+                           minWidth: 0, height: 24, display: "grid", placeItems: "center",
                            overflow: "hidden", whiteSpace: "nowrap", cursor: "help",
-                           fontFamily: MONO, fontSize: 9, fontWeight: 700,
+                           fontFamily: MONO, fontSize: 10, fontWeight: 700,
                            color: t.muted, background: t.ghostBg }}>
               {fits(restW, `不可用 ${board.rest.length}`)
                 ? `不可用 ${board.rest.length}` : board.rest.length}
@@ -190,7 +262,7 @@ export default function RunwayHero({ t, board, privacy }: {
           )}
         </div>
         {/* ★★★ 这一行是**披露不是装饰**：没有它，「5.9 小时」会被读成自然小时。 */}
-        <div data-runway-note style={{ fontSize: 9, color: t.muted, marginTop: 3,
+        <div data-runway-note style={{ fontSize: 9.5, color: t.muted, marginTop: 3,
                                        fontFamily: MONO, whiteSpace: "nowrap", overflow: "hidden",
                                        textOverflow: "ellipsis" }}>
           {/* ★★ 按 `runway_active_hours == null` 分支，**不是** `samples > 0`。
@@ -198,7 +270,12 @@ export default function RunwayHero({ t, board, privacy }: {
               旧写法此时显示「3 条样本 · 活跃小时不是自然小时」，而上面那个数是「—」，
               **用户看到一个破折号却拿不到任何原因**。变异验证时发现：
               「样本不足」那句任何夹具都渲染不到，是一条死分支（本仓形态⑩）。 */}
-          {board.runway_active_hours == null
+          {/* ★ 文本要说「做什么」，不是只说「坏了」。停用的号是**唯一**用户此刻能动的旋钮
+              （冷却要等、失效要重登），所以只在有停用号时才给那句操作提示。 */}
+          {stranded
+            ? `${nCool} 个冷却中 · ${nOff} 个你已停用 · ${nDead} 个凭证失效`
+              + (nOff > 0 ? " —— 想立刻继续用，把某个停用的号在它卡片上打开轮换" : "")
+            : board.runway_active_hours == null
             ? `续航算不出来 —— 不是「撑不了多久」（样本 ${board.samples} 条，还不够估速度）`
             : `${board.samples} 条样本 · 活跃小时不是自然小时`
               + (board.last_sample_min != null ? ` · 最后一条 ${fmtAgo(board.last_sample_min)}` : "")}

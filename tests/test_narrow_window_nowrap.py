@@ -111,6 +111,11 @@ class ButtonsNeverBreakMidWord(unittest.TestCase):
         self.assertIsNotNone(m, "找不到卡片上的「到期」那段 —— 断言可能打空了")
         self.assertIn("nowrap", m.group(0),
                       "「到期 <日期>」没有 nowrap,窄窗会劈成「2026- / 09-08」")
+        # ★ 「临时借用」角标：左列收窄后实测被劈成「临时借 / 用」（2026-09-21 截图）。
+        #   它是原子，不许内部断开 —— 要让的是旁边那个带省略号的邮箱。
+        mb = re.search(r"<span data-runway-borrowed[\s\S]*?>", self.hero)
+        self.assertIsNotNone(mb, "找不到「临时借用」角标 —— 断言可能打空了")
+        self.assertIn("nowrap", mb.group(0), "「临时借用」角标没有 nowrap，窄列会劈成两行")
         m2 = re.search(r"<span key=\{w\.label\}[^>]*>", self.hero)
         self.assertIsNotNone(m2, "找不到续航条里窗口额度那段 —— 断言可能打空了")
         self.assertIn("nowrap", m2.group(0), "「周 96% ↻6d13h」那段没有 nowrap")

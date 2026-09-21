@@ -891,7 +891,13 @@ function relayEntry() {
                      weekly: _rem(sl, 'secondary') };
           };
           var _ids = Object.keys(STATE.slots || {});
-          var _ok = _ids.filter(function (a2) { var s2 = STATE.slots[a2];
+          // ★★★ `?pool=stranded` 专验「池子见底」那一支 —— 一个号都不可用时，
+          //   代理会**忽略用户的停用设置**去借一个号，而那条 ⚠️ 只写在 proxy.log 里。
+          //   2026-09-21 真实发生过（5 冷却 / 3 停用 / 1 失效），用户看到的是
+          //   「轮换失效了，禁用的账号也被使用了」。没有这个开关，那条告警
+          //   **一个像素都验不到**，而截图会正常渲染、探针报干净。
+          var _strand = p.get('pool') === 'stranded';
+          var _ok = _strand ? [] : _ids.filter(function (a2) { var s2 = STATE.slots[a2];
             return !s2.auth_dead && !s2.rotate_off; });
           // 与 `proxy.py::_sort_avail` 同一把键：(套餐档, 置顶, 最紧已用%)
           _ok.sort(function (x, y) {
@@ -904,12 +910,19 @@ function relayEntry() {
             return (100 - (ex.tightest || 0)) - (100 - (ey.tightest || 0));
           });
           var _q = _ok.map(_ent), _rest = _ids.filter(function (a2) { return _ok.indexOf(a2) < 0; }).map(_ent);
+          // ★ 见底夹具要让冷却/停用**都有**，否则「N 冷却 · M 已停用」那行验不全；
+          //   并给一个真实的冷却分钟数，「最快 X 分钟后回来」才有东西可断言。
+          if (_strand) _rest.forEach(function (e, i) {
+            if (!e.off && !e.dead) { e.cool_min = 54 + i; }
+          });
           var _wk = _q.reduce(function (t2, e) { return t2 + (e.weekly || 0); }, 0);
           // ★ `?runway=none` 专验「取不到写 —，不写 0」那一支 —— 没有这个开关，
           //   那条分支一个像素都验不到（本仓反复记的假绿）。
           var _none = p.get('runway') === 'none';
           return Promise.resolve(JSON.stringify({
-            cur: _q[0] || null, cur_ago_min: 7, next: _q[0] || null,
+            // ★ 见底时 `cur` 必须是一个**不可用**的号 —— 那正是「临时借用」要说的事。
+            //   给 `_q[0]`（空）会让左侧整块不渲染，那条分支就又验不到了。
+            cur: _q[0] || (_strand ? _rest[0] : null), cur_ago_min: 7, next: _q[0] || null,
             queue: _q, rest: _rest, weekly_left_pp: _wk,
             burn_pp_per_active_hour: _none ? null : 39.3,
             runway_active_hours: _none ? null : Math.round(_wk / 39.3 * 10) / 10,

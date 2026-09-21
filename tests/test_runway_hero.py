@@ -47,11 +47,15 @@ const el = document.querySelector('[data-runway-hero]');
 if (el) {
   const r = el.getBoundingClientRect();
   out.h = Math.round(r.height);
+  out.ov = Math.round(el.scrollWidth - el.clientWidth);
   out.segs = el.querySelectorAll('[data-runway-seg]').length;
   out.rest = el.querySelectorAll('[data-runway-rest]').length;
   out.hours = (el.querySelector('[data-runway-hours]') || {}).textContent || '';
   out.note = (el.querySelector('[data-runway-note]') || {}).textContent || '';
   out.pin = el.querySelectorAll('[data-runway-pin]').length;
+  out.stranded = (el.querySelector('[data-runway-stranded]') || {}).textContent || '';
+  out.borrowed = (el.querySelector('[data-runway-borrowed]') || {}).textContent || '';
+  out.hoursEl = !!el.querySelector('[data-runway-hours]');
   // ★ 每段的**真实像素宽** + 它该写的名字 + 实际写了什么 + 有没有被裁。
   //   「装不装得下」是像素问题，判据就得拿像素来判 —— 拿占比当代理量已经错过一次。
   out.segw = [].slice.call(el.querySelectorAll('[data-runway-seg]')).map(function (n) {
@@ -103,24 +107,41 @@ def _probe(width=1300, query="nav=home"):
 class ItNeverGetsTallerThanTheBannerItReplaced(unittest.TestCase):
     """★★★ 用户给的硬约束：「可以降低但不能增加」。"""
 
+    #: ★★★ **每个会改变版面的分支都要量，不能只量默认那一档。**
+    #
+    #   2026-09-21 实测：见底态在 880 下右列被挤到第二行，hero 从 94px 撑到 **167px**
+    #   —— 而当时这条闸只跑默认夹具，**全绿**。根因是 flex 按 `flex-basis` 分行而
+    #   左列写的是 `auto`（取 max-content）；收缩只发生在行内，救不回换行的那一下。
+    #   ★ 一条只覆盖了默认分支的尺寸闸，在其余分支上**等于不存在**。
+    CASES = [("正常", "nav=home"), ("见底", "nav=home&pool=stranded")]
+
     @classmethod
     def setUpClass(cls):
-        cls.r = {w: _probe(w) for w in OLD_HEIGHT}
+        cls.r = {(w, name): _probe(w, q) for w in OLD_HEIGHT for name, q in cls.CASES}
         if any(v is None for v in cls.r.values()):
             raise unittest.SkipTest("harness 静态服务（3304）没在跑")
 
     def test_it_actually_rendered(self):
         """★★ 先正面证明它在 —— 没渲染时「高度 ≤ 上限」会因为 `h` 缺失而假绿。"""
-        for w, d in self.r.items():
-            with self.subTest(width=w):
-                self.assertIn("h", d, f"{w} 宽下续航条没渲染：{d}")
-                self.assertGreater(d["h"], 40, f"{w} 宽下高度异常：{d['h']}")
+        for (w, name), d in self.r.items():
+            with self.subTest(width=w, case=name):
+                self.assertIn("h", d, f"{w} 宽 · {name} 下续航条没渲染：{d}")
+                self.assertGreater(d["h"], 40, f"{w} 宽 · {name} 下高度异常：{d['h']}")
 
     def test_height_never_exceeds_the_old_hero(self):
-        for w, old in OLD_HEIGHT.items():
-            with self.subTest(width=w):
-                self.assertLessEqual(self.r[w]["h"], old,
-                                     f"★★★ {w} 宽下高 {self.r[w]['h']}px，超过旧 banner 的 {old}px")
+        for (w, name), d in self.r.items():
+            with self.subTest(width=w, case=name):
+                self.assertLessEqual(d["h"], OLD_HEIGHT[w],
+                                     f"★★★ {w} 宽 · {name} 下高 {d['h']}px，"
+                                     f"超过旧 banner 的 {OLD_HEIGHT[w]}px")
+
+    def test_it_never_overflows_sideways(self):
+        """★ 横向溢出与撑高是同一族缺陷的两个出口：装不下时要么换行(撑高)要么溢出。
+        只守一侧时，另一侧的退化**完全看不见**。"""
+        for (w, name), d in self.r.items():
+            with self.subTest(width=w, case=name):
+                self.assertLessEqual(d.get("ov", 0), 1,
+                                     f"★ {w} 宽 · {name} 下横向溢出 {d.get('ov')}px")
 
     def test_the_old_banner_is_really_gone(self):
         """★ 「当前使用中」与「建议切到」两句都必须从 **codex 档**消失。
@@ -129,10 +150,10 @@ class ItNeverGetsTallerThanTheBannerItReplaced(unittest.TestCase):
           agy 是**启动前**换凭证、没有逐请求挑号器，所以在那一档「当前使用中」是真话，
           「建议切到」也确实是你要手动做的动作。两档的机制本来就不同。
         """
-        for w, d in self.r.items():
-            with self.subTest(width=w):
+        for (w, name), d in self.r.items():
+            with self.subTest(width=w, case=name):
                 self.assertFalse(d["oldHero"],
-                                 f"★ {w} 宽下旧 banner 的文案还在：当前使用中 / 建议切到")
+                                 f"★ {w} 宽 · {name} 下旧 banner 的文案还在")
 
 
 @unittest.skipIf(not Path(CHROME).exists(), "没有 Chrome")
@@ -180,6 +201,68 @@ class TheHonestyLineTravelsWithTheNumber(unittest.TestCase):
         # ★★ 反向：算得出来的时候**不许**挂着这句借口，否则它退化成常驻噪音。
         self.assertNotIn("算不出来", self.ok["note"],
                          "★★ 续航算得出来却还挂着「算不出来」")
+
+
+@unittest.skipIf(not Path(CHROME).exists(), "没有 Chrome")
+class ItSaysSoWhenThePoolRunsDry(unittest.TestCase):
+    """★★★ 「系统推翻了你的设置」必须当面说，不能只写进 proxy.log。
+
+    2026-09-21 真实事故：九个号里 5 个冷却 / 3 个被手动停用 / 1 个凭证失效 ⇒ 一个可用的
+    都没有，代理走最后一层兜底**借用了一个已停用的号**（这是设计：在「codex 整个不能用」
+    与「多用一个你不想用的号」之间选后者）。它把 `⚠️ 所有号都被停用了自动轮换` 写进了
+    `proxy.log` —— **而用户不读 proxy.log**。他看到的是卡片上冒出一个不该出现的号，
+    报过来的原话是「轮换失效了，禁用轮换的账号也被使用了」。
+
+    ★ 缺的从来不是那条判断，是**披露**。本仓规矩：告警放在眼睛已经在的地方，
+      且文本要说「做什么」。
+    ⚠️ 这一档**必须有夹具**（`?pool=stranded`）—— 本机绝大多数时候池子是好的，
+      没有开关的话这条分支一个像素都验不到，而截图会正常渲染、探针报干净。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.dry = _probe(1300, "nav=home&pool=stranded")
+        cls.ok = _probe(1300)
+        if cls.dry is None or cls.ok is None:
+            raise unittest.SkipTest("harness 静态服务（3304）没在跑")
+
+    def test_it_says_the_pool_is_dry(self):
+        self.assertIn("不可用", self.dry["stranded"],
+                      f"★★★ 池子见底却没说：{self.dry['stranded']!r}")
+
+    def test_it_says_which_account_it_had_to_borrow(self):
+        """★★ 「这个号本来不该被用」要写在**号名旁边** —— 那是眼睛第一个落点。"""
+        self.assertIn("临时借用", self.dry["borrowed"],
+                      "★★ 借用了一个不可用的号却没标出来 —— 用户只会看到设置被无视")
+
+    def test_it_breaks_down_why_and_says_what_to_do(self):
+        """★ 只说「坏了」没用：要说**各是什么原因**，以及此刻能动的那个旋钮。"""
+        note = self.dry["note"]
+        for word in ("冷却", "停用", "失效"):
+            with self.subTest(word=word):
+                self.assertIn(word, note, f"★ 没说清有几个是「{word}」：{note!r}")
+        self.assertIn("打开轮换", note,
+                      "★★ 没告诉用户怎么办 —— 停用的号是他此刻唯一能动的旋钮")
+
+    def test_it_never_prints_a_zero_hour_runway_when_dry(self):
+        """★★★ 见底时可用池的余量恰好是 0，算出来就是「续航 ≈ 0 小时」——**那是假话**。
+
+        冷却的号一小时内就回来。「撑不了多久」与「暂时被锁在外面」是相反的两件事，
+        而这块版面上 0 会被读成前者。所以这一支**根本不画那个数字**，改说多久回来。
+        """
+        self.assertFalse(self.dry["hoursEl"],
+                         "★★★ 池子见底时仍在画续航数字 —— 它此刻恒为 0，是假话")
+        self.assertIn("分钟后回来", self.dry["text"],
+                      "★★ 没说多久能恢复 —— 那是用户唯一想知道的数")
+
+    def test_the_alarm_is_absent_when_the_pool_is_fine(self):
+        """★★ 反向：池子正常时**不许**挂着这条告警。
+
+        一盏长亮又无从消除的灯，本仓判过死刑 —— 它训练用户忽略所有指示器。
+        """
+        self.assertEqual("", self.ok["stranded"], "★★ 池子正常却报见底")
+        self.assertEqual("", self.ok["borrowed"], "★★ 池子正常却说在临时借用")
+        self.assertTrue(self.ok["hoursEl"], "★ 池子正常时反而不画续航数字了")
 
 
 @unittest.skipIf(not Path(CHROME).exists(), "没有 Chrome")
