@@ -27,6 +27,8 @@ SRC = ROOT / "codexbar" / "src"
 APP = SRC / "App.tsx"
 GHOST = SRC / "components" / "GhostButton.tsx"
 PROBE = SRC / "components" / "ProbeButton.tsx"
+CARD = SRC / "components" / "AccountCard.tsx"
+HERO = SRC / "components" / "RunwayHero.tsx"
 
 
 def strip_comments(src: str) -> str:
@@ -41,6 +43,8 @@ class ButtonsNeverBreakMidWord(unittest.TestCase):
         cls.ghost = strip_comments(GHOST.read_text(encoding="utf-8"))
         cls.probe = strip_comments(PROBE.read_text(encoding="utf-8"))
         cls.app = strip_comments(APP.read_text(encoding="utf-8"))
+        cls.card = strip_comments(CARD.read_text(encoding="utf-8"))
+        cls.hero = strip_comments(HERO.read_text(encoding="utf-8"))
 
     def test_anchors_exist(self):
         """★ 先证明被测文件还是那个文件 —— 组件改名后断言会静默打空。"""
@@ -93,13 +97,22 @@ class ButtonsNeverBreakMidWord(unittest.TestCase):
         self.assertIn("nowrap", m.group(0), "总览标题没有 nowrap")
 
     def test_hero_date_segments_never_break(self):
-        """★ 断开的日期会被读成另一个日期 —— 比断开的按钮严重得多。"""
-        m = re.search(r"<span[^>]*>订阅至", self.app)
-        self.assertIsNotNone(m, "找不到「订阅至」那段 —— 断言可能打空了")
+        """★ 断开的日期会被读成另一个日期 —— 比断开的按钮严重得多。
+
+        ⚠️ **2026-09-21 改的是指向，不是判据。** 这两段原来都在 `App.tsx` 的旧 hero 里；
+          hero 换成续航条之后，「订阅至」不再在总览顶部重复一遍（**没丢** ——
+          每张卡片本来就有 `到期 {a.exp}`，hero 那份是同一个号的重复），
+          窗口额度那段搬进了 `RunwayHero.tsx`。
+        ★ 不变量一个字没变：**日期/额度这种原子永远不许在内部断开**。
+          指向旧 markup 的断言必须跟着搬 —— 留着它只会假红，
+          而一条会假红的闸，用户学会的是忽略它。
+        """
+        m = re.search(r"<span[^>]*>到期 \{a\.exp\}", self.card)
+        self.assertIsNotNone(m, "找不到卡片上的「到期」那段 —— 断言可能打空了")
         self.assertIn("nowrap", m.group(0),
-                      "「订阅至 <日期>」没有 nowrap,窄窗会劈成「2026- / 09-08」")
-        m2 = re.search(r"<span[^>]*>\{i > 0 &&", self.app)
-        self.assertIsNotNone(m2, "找不到窗口额度那段 —— 断言可能打空了")
+                      "「到期 <日期>」没有 nowrap,窄窗会劈成「2026- / 09-08」")
+        m2 = re.search(r"<span key=\{w\.label\}[^>]*>", self.hero)
+        self.assertIsNotNone(m2, "找不到续航条里窗口额度那段 —— 断言可能打空了")
         self.assertIn("nowrap", m2.group(0), "「周 96% ↻6d13h」那段没有 nowrap")
 
     # ---- ② 容器允许整块换行 ---------------------------------------------------
@@ -111,12 +124,14 @@ class ButtonsNeverBreakMidWord(unittest.TestCase):
              "总览头部容器没有 flexWrap"),
             (r'gap:\s*7,\s*alignItems:\s*"center",\s*\n?\s*flexWrap:\s*"wrap"',
              "按钮行没有 flexWrap"),
-            (r'gap:\s*13,\s*marginTop:\s*8[^}]*flexWrap:\s*"wrap"',
-             "hero 元信息行没有 flexWrap"),
         )
         for pat, msg in needles:
             with self.subTest(msg=msg):
                 self.assertRegex(self.app, pat, msg)
+        # ★ hero 元信息行搬进了 `RunwayHero.tsx`（2026-09-21），所以它单独断言在那份文件上。
+        with self.subTest(msg="续航条元信息行没有 flexWrap"):
+            self.assertRegex(self.hero, r'gap:\s*11,\s*marginTop:\s*3[^}]*flexWrap:\s*"wrap"',
+                             "续航条元信息行没有 flexWrap —— 只做 nowrap 会变成横向溢出")
 
     def test_narrow_threshold_and_min_width_agree(self):
         """★ 自动折叠阈值 与 窗口 `minWidth` 是**一对**,只改一个就会破。

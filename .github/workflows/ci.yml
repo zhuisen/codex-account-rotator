@@ -18,7 +18,9 @@ jobs:
       #    plain `Test*` 类。两条不同的命令 = 两个不同的门，而只有一个会红。
       #    （2026-09-10：`test_proxy_relay_upstream` 因 `import pytest` 在 CI 直接
       #    ImportError，而本地一直绿。）
-      - run: python3 -m pip install --quiet pytest
+      # ★ pyflakes 是 `test_no_undefined_names.py` 的探针。没装它那条闸会 **skip**，
+      #   而 skip 在汇总行里和绿色一样不刺眼 —— 本仓的规矩是 skip 不算绿。
+      - run: python3 -m pip install --quiet pytest pyflakes
       - run: python3 -m pytest tests/ -q
 
   build:

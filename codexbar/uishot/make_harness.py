@@ -865,6 +865,52 @@ function relayEntry() {
       // ★ 2026-09-19 加:codex 档的拖拽顺序改写进 state.json(它就是轮换优先级)。
       case 'run_rotate': {
         var _a = (args && args.args) || [];
+        // ★★ `next --json` 的桩。**必须真的按 STATE 算**，不能返回一份写死的样本 ——
+        //   闸要验的正是「置顶排最前、停用不进队列、取不到写 —」，写死的话这些
+        //   一条都验不到，而截图会正常渲染、探针报干净。
+        if (_a[0] === 'next') {
+          var _pin = STATE.pinned || [];
+          var _rem = function (sl, k) {
+            var w = (sl.quota || {})[k] || {};
+            return w.used_percent == null ? null : Math.round(100 - w.used_percent);
+          };
+          var _ent = function (aid) {
+            var sl = (STATE.slots || {})[aid] || {};
+            var ws = [];
+            if (_rem(sl, 'primary') != null) ws.push({ label: '5h', rem: _rem(sl, 'primary'), reset: '4h19m' });
+            if (_rem(sl, 'secondary') != null) ws.push({ label: '周', rem: _rem(sl, 'secondary'), reset: '5d0h' });
+            var pi = _pin.indexOf(aid);
+            return { aid: aid, label: sl.label, email: sl.email, plan: sl.plan,
+                     pin: pi < 0 ? null : pi + 1, off: !!sl.rotate_off, dead: !!sl.auth_dead,
+                     cool_min: 0, wins: ws,
+                     tightest: ws.length ? Math.min.apply(null, ws.map(function (w) { return w.rem; })) : null,
+                     weekly: _rem(sl, 'secondary') };
+          };
+          var _ids = Object.keys(STATE.slots || {});
+          var _ok = _ids.filter(function (a2) { var s2 = STATE.slots[a2];
+            return !s2.auth_dead && !s2.rotate_off; });
+          // 与 `proxy.py::_sort_avail` 同一把键：(套餐档, 置顶, 最紧已用%)
+          _ok.sort(function (x, y) {
+            var ex = _ent(x), ey = _ent(y);
+            var tx = (STATE.slots[x].plan === 'pro') ? 1 : 0, ty = (STATE.slots[y].plan === 'pro') ? 1 : 0;
+            if (tx !== ty) return tx - ty;
+            var px = ex.pin == null ? _pin.length : ex.pin - 1;
+            var py = ey.pin == null ? _pin.length : ey.pin - 1;
+            if (px !== py) return px - py;
+            return (100 - (ex.tightest || 0)) - (100 - (ey.tightest || 0));
+          });
+          var _q = _ok.map(_ent), _rest = _ids.filter(function (a2) { return _ok.indexOf(a2) < 0; }).map(_ent);
+          var _wk = _q.reduce(function (t2, e) { return t2 + (e.weekly || 0); }, 0);
+          // ★ `?runway=none` 专验「取不到写 —，不写 0」那一支 —— 没有这个开关，
+          //   那条分支一个像素都验不到（本仓反复记的假绿）。
+          var _none = p.get('runway') === 'none';
+          return Promise.resolve(JSON.stringify({
+            cur: _q[0] || null, cur_ago_min: 7, next: _q[0] || null,
+            queue: _q, rest: _rest, weekly_left_pp: _wk,
+            burn_pp_per_active_hour: _none ? null : 39.3,
+            runway_active_hours: _none ? null : Math.round(_wk / 39.3 * 10) / 10,
+            samples: _none ? 3 : 226, last_sample_min: _none ? null : 181 }));
+        }
         if (_a[0] === 'priority' && _a[1] === '--set') {
           var want = _a.slice(2);
           var byLabel = {};

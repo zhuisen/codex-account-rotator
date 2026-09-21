@@ -3381,6 +3381,99 @@ def codex_integration_gate():
             "port": port, "accounts": nacc}
 
 
+def cmd_next(args):
+    """`codex-rotate next --json` —— 总览「续航条」要的全部数据，一次给齐。
+
+    ## ★★★ 为什么必须是 CLI，而不是前端自己算
+
+    「下一个请求会用谁」由 `proxy.py` 的挑号器决定。前端**有账号数据但没有挑号器**，
+    照着排序键再写一份 TS 实现 ⇒ 两份必然分叉，而症状是**界面信誓旦旦地报一个代理
+    根本不会挑的号，两边都不报错**。本仓已经因为"测试抄了一份排序键"栽过一次
+    （改真排序行对闸毫无影响）。所以这里 import 真的 `proxy.py`，调**同一个**
+    `usable()` + `_sort_avail()`。
+
+    ## 三个字段的语义，别混
+
+    · `cur`  = `last_aid` —— 代理**最近一次真的用了谁**。这是「正在使用」唯一诚实的定义；
+               `active` 是**上次 CLI 切换**留下的，实测过两者不一致（active=wing 而代理给 Huo）。
+    · `next` = 下一个请求会用谁（同源排序的第一名）。逐请求轮换下它与 `cur` 本来就可能不同。
+    · `runway` = 按 `quota_marks` 算的**活跃小时**，见下。
+
+    ## ★★ 续航的口径必须跟着数字走
+
+    `quota_marks` 是「额度跨整数百分点时记一条」`{aid,t,from,to}`，只在代理转发时才产生。
+    所以算出来的是 **pp/活跃小时**，不是 pp/自然小时 —— 你 3 小时没用 codex，池子一点没掉。
+    因此一并返回 `samples` 与 `last_sample_min`，让界面能如实标注；样本不足时
+    `runway` 返回 `None`（**不是 0**）—— 「算不出来」和「撑不了多久」是相反的两件事。
+    """
+    import importlib.util as _il
+    spec = _il.spec_from_file_location("_px_next", Path(__file__).resolve().parent / "proxy" / "proxy.py")
+    PX = _il.module_from_spec(spec)
+    spec.loader.exec_module(PX)
+
+    s = _state()
+    slots = s.get("slots", {})
+    now = time.time()
+    pinned = list(s.get("pinned") or [])
+
+    def win(sl, key):
+        w = (sl.get("quota") or {}).get(key) or {}
+        if w.get("used_percent") is None or not (w.get("window_minutes") or 0):
+            return None
+        r = w.get("resets_at")
+        left = ""
+        if r and r > now:
+            h = (r - now) / 3600
+            left = f"{int(h // 24)}d{int(h % 24)}h" if h >= 24 else f"{int(h)}h{int((h % 1) * 60):02d}m"
+        return {"label": "周" if (w["window_minutes"] or 0) >= 10000 else "5h",
+                "rem": round(100 - w["used_percent"]), "reset": left}
+
+    def ent(aid):
+        sl = slots.get(aid) or {}
+        ws = [w for w in (win(sl, "primary"), win(sl, "secondary")) if w]
+        return {"aid": aid, "label": sl.get("label"), "email": sl.get("email"),
+                "plan": sl.get("plan"), "pin": (pinned.index(aid) + 1) if aid in pinned else None,
+                "off": bool(sl.get("rotate_off")), "dead": bool(sl.get("auth_dead")),
+                "cool_min": max(0, int((sl.get("cooling_until", 0) - now) / 60)),
+                "wins": ws, "tightest": min([w["rem"] for w in ws], default=None),
+                "weekly": next((w["rem"] for w in ws if w["label"] == "周"), None)}
+
+    avail = [(a, sl) for a, sl in slots.items() if PX.usable(a, sl, now)]
+    queue = [ent(a) for a, _ in PX._sort_avail(list(avail), s)]
+    rest = [ent(a) for a, sl in slots.items() if not PX.usable(a, sl, now)]
+
+    # ★ 续航：只累加**下降**（`to > from` 是"已用%"上升 = 消耗）。上升是窗口重置，不是负消耗。
+    marks = [m for m in (s.get("quota_marks") or [])
+             if isinstance(m, dict) and m.get("t") and m.get("to", 0) > m.get("from", 0)]
+    win24 = [m for m in marks if m["t"] >= now - 24 * 3600]
+    span = (now - min((m["t"] for m in win24), default=now)) / 3600
+    burned = sum(m["to"] - m["from"] for m in win24)
+    rate = (burned / span) if (span > 0.5 and len(win24) >= 10) else None
+    wk_left = sum(e["weekly"] for e in queue if e["weekly"] is not None)
+    out = {
+        "cur": ent(s.get("last_aid")) if s.get("last_aid") in slots else None,
+        "cur_ago_min": int((now - s["last_proxy_ts"]) / 60) if s.get("last_proxy_ts") else None,
+        "next": queue[0] if queue else None,
+        "queue": queue, "rest": rest,
+        "weekly_left_pp": wk_left,
+        "burn_pp_per_active_hour": round(rate, 1) if rate else None,
+        # ★ 样本不足 ⇒ None，**不是 0**。「算不出来」与「撑不了多久」是相反的两件事。
+        "runway_active_hours": round(wk_left / rate, 1) if rate else None,
+        "samples": len(win24),
+        "last_sample_min": int((now - max((m["t"] for m in marks), default=now)) / 60) if marks else None,
+    }
+    if "--json" in args:
+        print(json.dumps(out, ensure_ascii=False))
+        return
+    n = out["next"]
+    print(f"下一个请求 → {n['label'] if n else '(无可用号)'}"
+          + (f"（置顶 #{n['pin']}）" if n and n["pin"] else ""))
+    print(f"正在使用   → {out['cur']['label'] if out['cur'] else '—'}"
+          + (f"（{out['cur_ago_min']} 分钟前）" if out["cur_ago_min"] is not None else ""))
+    print(f"全池续航   ≈ {out['runway_active_hours'] or '—'} 活跃小时"
+          f"（周窗共剩 {wk_left} pp · {out['samples']} 条样本）")
+
+
 def cmd_pin(args):
     """`codex-rotate pin [<label…>|--add <l>|--remove <l>|--clear|--json]` —— 置顶。
 
@@ -3679,7 +3772,7 @@ CMDS = {"add": cmd_add, "login": cmd_login, "list": cmd_list, "switch": cmd_swit
         "ensure-live": cmd_ensure_live, "credits": cmd_credits, "probe": cmd_probe,
         "dawn-probe": cmd_dawn_probe, "rotate": cmd_rotate,
         "tokens": cmd_tokens, "integration": cmd_integration,
-        "priority": cmd_priority, "pin": cmd_pin}
+        "priority": cmd_priority, "pin": cmd_pin, "next": cmd_next}
 
 
 # Disk-only commands run their whole load→mutate→save under the cross-process state mutex (lost-update

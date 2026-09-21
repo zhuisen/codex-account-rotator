@@ -288,6 +288,33 @@ def _plan_tier(slot):
     return 1 if plan == "pro" else 0
 
 
+def cooling(sl, now):
+    """这个号是否**仍在冷却**。
+
+    ★ `resets_at` 已过 ⇒ 窗口其实早就重置了，冷却标记是陈旧的，按"可用"处理。
+      不这么判的话，一次 429 会把号锁到冷却计时结束，而额度那时早已回满。
+    """
+    cu = sl.get("cooling_until", 0)
+    if cu <= now:
+        return False
+    ra = ((sl.get("quota") or {}).get("primary") or {}).get("resets_at")
+    return not (ra and ra <= now)
+
+
+def usable(aid, sl, now):
+    """这个号**能不能进候选**：非 dead、非冷却、未被手动停用轮换。
+
+    ★★ **唯一一份实现**（2026-09-21 从 `_pick` 里抽出来）。理由与 `_sort_avail` 一字不差：
+      `codex-rotate next` 要回答「下一个请求会用谁」，而它必须与代理**逐字同源** ——
+      各写一份的话，界面会信誓旦旦地报一个代理根本不会挑的号，且两边都不报错。
+      本仓已经因为"测试抄了一份排序键"栽过一次（改真排序行对闸毫无影响）。
+
+    ★ `aid` 形参目前只为可读性保留（调用方自己管 `exclude`）；别删，
+      它让调用点读起来是「这个号可用吗」而不是「这个 slot 可用吗」。
+    """
+    return not sl.get("auth_dead") and not cooling(sl, now) and not sl.get("rotate_off")
+
+
 def _pin_rank(aid, state):
     """置顶排名：`state["pinned"]`（aid 列表，按点击先后）里的位次。
 
@@ -463,12 +490,6 @@ def _pick(prev_id, exclude=None, conv=None):
     if not slots:
         return None, None, "empty"
 
-    def cooling(sl):
-        cu = sl.get("cooling_until", 0)
-        if cu <= now:
-            return False
-        ra = ((sl.get("quota") or {}).get("primary") or {}).get("resets_at")
-        return not (ra and ra <= now)  # window already reset → stale cooldown, treat as free
 
     # ★★ 用户手动停用轮换的号(`codex-rotate rotate <label> --off`,总览页那个开关)。
     #    用户 2026-09-07:「A 账号我不想轮换,就禁掉」。
@@ -477,12 +498,10 @@ def _pick(prev_id, exclude=None, conv=None):
     #      而漏迁移的号会**静默退出轮换池**(症状:代理只用那两三个号,零报错)。
     #    ⚠️ 会话粘性(`conv`/`affinity`)**也要过这道闸** —— 否则一段已经粘在 A 上的对话
     #      会在 A 被停用之后继续用 A,而用户以为自己已经把它摘出去了。
-    def rotatable(sl):
-        return not sl.get("rotate_off")
+    #   （判据本体在模块级 `usable()` —— 见下面那条「唯一一份」的理由。）
 
     def ok(aid, sl):
-        return (aid not in exclude and not sl.get("auth_dead")
-                and not cooling(sl) and rotatable(sl))
+        return aid not in exclude and usable(aid, sl, now)
 
     with _lock:
         # ★ 会话粘性优先:同一个 prompt_cache_key = 同一段对话 = 同一份 prompt cache。
@@ -498,7 +517,12 @@ def _pick(prev_id, exclude=None, conv=None):
     avail = [(aid, sl) for aid, sl in slots.items() if ok(aid, sl)]
     if not avail:  # nothing cleanly available → relax cooling, but never a dead or already-tried one
         avail = [(aid, sl) for aid, sl in slots.items()
-                 if aid not in exclude and not sl.get("auth_dead") and rotatable(sl)]
+                 # ⚠️ 这一层**只放宽冷却**，停用开关仍然生效（放宽它是下一层的事）。
+                 #    2026-09-21 抽 `usable()` 时这里漏改，留了个对已删除的 `rotatable`
+                 #    的调用 —— 而这条路只有「一个干净可用的号都没有」才走到，
+                 #    日常永远碰不到，是个埋在兜底里的 NameError。
+                 if aid not in exclude and not sl.get("auth_dead")
+                 and not sl.get("rotate_off")]
     if not avail:
         # ★★ **最后一层兜底:全被停用时忽略这个开关,并把它记进日志。**
         #    CLI 已经拒绝关掉最后一个,所以走到这里只可能是手改 state.json 或多进程竞态。

@@ -85,7 +85,10 @@ class CodexOnlyThingsStayOnTheCodexTab(unittest.TestCase):
 
     #: 每条：(说明, 必须被 `provider === "codex"` 包住的那段代码的锚点)
     GUARDED = [
-        ("Hero（当值号）", "{provider === \"codex\" && (() => {"),
+        # ★ 2026-09-21：hero 换成 `RunwayHero`（续航条），锚点跟着换。
+        #   `board &&` 也是判据的一部分 —— 板子没读到时整条不画，
+        #   而不是画一条数字全是「—」的空条（「读不到」与「确实没有」不同值）。
+        ("Hero（续航条）", '{provider === "codex" && board && ('),
         ("失效账号折叠区", "{provider === \"codex\" && dead.length > 0 && ("),
     ]
 

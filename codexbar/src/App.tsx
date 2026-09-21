@@ -21,7 +21,7 @@ import { useExpiryWatch } from "./hooks/useExpiryWatch";
 import { useDeadWatch } from "./hooks/useDeadWatch";
 import { useAutoSwitch } from "./hooks/useAutoSwitch";
 import { useKeyboard } from "./hooks/useKeyboard";
-import { fmtAgo, CARD_WARN_DAYS, maskId, winNumColor, fullVersion } from "./helpers";
+import { fmtAgo, maskId, winNumColor, fullVersion } from "./helpers";
 import { usePrivacy } from "./hooks/usePrivacy";
 import { useTraffic } from "./hooks/useTraffic";
 import { useGrokQuota } from "./hooks/useGrokQuota";
@@ -32,14 +32,14 @@ import IntegrationBanner from "./components/IntegrationBanner";
 import { useIntegration } from "./hooks/useIntegration";
 import { useCardOrder, applyOrder } from "./hooks/useCardOrder";
 import { useCardDrag } from "./hooks/useCardDrag";
+import RunwayHero from "./components/RunwayHero";
+import { useRotationBoard } from "./hooks/useRotationBoard";
 import { IcRefresh } from "./components/CardIcons";
 import ProviderTabs from "./components/ProviderTabs";
 import { POOL_PLATFORMS, loadPoolKey, savePoolKey, type PoolKey } from "./platforms";
 import { useAgyPool } from "./hooks/useAgyPool";
 import { agyWinRows, agyShown, agyResetText } from "./agy";
-import { IconTicket } from "./components/CardBadge";
 import ProbeButton from "./components/ProbeButton";
-import PlanBadge from "./components/PlanBadge";
 import "./App.css";
 
 // 平台详情页不进导航栏,只能从流量总览钻取(图例行 / 卡片「明细→」/ 点图层),用户定稿 2026-08-09。
@@ -110,6 +110,8 @@ export default function App() {
   // 拖拽手感层全在这个 hook 里，见其 docstring。★ 这里**没有** rAF 节流、也没有 FLIP：
   // 拖拽期间 DOM 顺序不动，让位交给 CSS `transition: transform`，每次 pointermove 直接写样式。
   const { preview, makeDrag } = useCardDrag();
+  // ★ 只在总览页取：它读的是本机文件，但没必要在别的页上跟着 state 变化重算。
+  const { board } = useRotationBoard(page === "overview");
   // ⚠️ 原来这里还有一个 `armedAid`：按下手柄→setState→打开卡片根节点的 `draggable`。
   //    **在 WKWebView 上根本起不来**（WebKit 在 mousedown 那一刻就判定能不能拖，
   //    React 的 setState 追不上）。现在手柄自己恒为 draggable，这个状态随之删除。
@@ -648,59 +650,16 @@ export default function App() {
 
               {/* ★★ Hero 是 **codex 的当值号**。挂在 Google 档上会写着「当前使用中 Asen」，
                   而那是另一家的账号 —— 与摘要那行同一条理由，且更显眼。 */}
-              {provider === "codex" && (() => {
-                const cur = accounts.find(a => a.aid === currentNode);
-                const betterExists = hero && hero.aid !== currentNode;
-                if (!cur) return null;
-                const sc = cur.status === "dead" ? "#E0524D" : t.accent;
-                return (
-                  <div style={{ display: "flex", alignItems: "center", gap: 18, background: t.heroBg, border: `1px solid ${t.heroBorder}`, borderRadius: 14, padding: "15px 18px", marginBottom: 13, boxShadow: t.heroShadow, transition: "background-color .35s ease, border-color .35s ease" }}>
-                    <Ring pct={cur.tightest < 0 ? 0 : cur.tightest} r={33} sw={6} color={sc} track={t.ringTrack} size={80}>
-                      <span style={{ fontSize: 19, fontWeight: 700, color: t.text, fontVariantNumeric: "tabular-nums", lineHeight: 1, marginTop: -1 }}>{cur.tightest < 0 ? "—" : cur.tightest}<span style={{ fontSize: 10, color: t.muted }}>%</span></span>
-                      <span style={{ fontSize: 8.5, color: t.muted, fontFamily: "'JetBrains Mono'", lineHeight: 1, marginTop: 2 }}>{cur.tightestWin?.label ?? ""}</span>
-                    </Ring>
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: ".14em", color: t.accent, fontFamily: "'JetBrains Mono'" }}>当前使用中</div>
-                      <div style={{ display: "flex", alignItems: "baseline", gap: 9, marginTop: 3 }}>
-                        <span style={{ fontSize: 24, fontWeight: 700, letterSpacing: "-.01em" }}>{cur.node}</span>
-                        <PlanBadge plan={cur.plan} t={t} size={10} />
-                        <span style={{ fontSize: 12, color: t.text2, fontFamily: "'JetBrains Mono'" }}>{maskId(cur.email, privacy)}</span>
-                      </div>
-                      {/* ★ **每一段 nowrap、段与段之间才允许换行。**
-                          窄窗实测(760px)曾把日期劈成「订阅至 2026- / 09-08」、「至 2026- / 09-21」——
-                          **断开的日期比断开的按钮更糟**:它会被读成另一个日期,而不是"看起来挤"。
-                          与 GhostButton/ProbeButton 的 nowrap 是同一个病根(用户 2026-08-24 报的头部
-                          断字只是它的第一处),所以同批一起修,别只补被点名的那一处。 */}
-                      <div style={{ display: "flex", alignItems: "center", gap: 13, marginTop: 8, fontSize: 12, color: t.text2, fontFamily: "'JetBrains Mono'", flexWrap: "wrap", rowGap: 6 }}>
-                        {cur.windows.map((w, i) => (
-                          <span key={w.label} style={{ whiteSpace: "nowrap" }}>{i > 0 && <span style={{ color: t.muted, marginRight: 13 }}>·</span>}{w.label} <b style={{ color: sc }}>{w.pct}%</b> <span style={{ color: t.muted }}>↻{w.reset}</span></span>
-                        ))}
-                        {cur.windows.length > 0 && <span style={{ color: t.muted }}>·</span>}
-                        <span style={{ whiteSpace: "nowrap" }} title={cur.expStale ? "OpenAI 上次复核订阅早于这个日期,所以「已过期」是拿陈旧快照下的结论 —— 续费不在它视野里。刷新 token 也拉不到新状态,要等 OpenAI 自己复核。" : undefined}>订阅至 {cur.exp}{cur.expStale && <span style={{ color: "#E0901C" }}>*</span>}</span>
-                        {cur.cards > 0 && (
-                          <>
-                            <span style={{ color: t.muted }}>·</span>
-                            <span style={{ display: "inline-flex", alignItems: "center", gap: 5, whiteSpace: "nowrap", color: cur.cardDays != null && cur.cardDays <= CARD_WARN_DAYS ? "#f2b45c" : t.accent }}>
-                              <IconTicket size={11} />重置卡 ×{cur.cards}
-                              {cur.cardExp
-                                ? (cur.cardsExpiring > 0 ? ` · ${cur.cardsExpiring} 张 ${cur.cardExp} 到期` : ` · 至 ${cur.cardExp}`)
-                                : " · 到期未知"}
-                            </span>
-                          </>
-                        )}
-                      </div>
-                    </div>
-                    {betterExists && hero ? (
-                      <span onClick={() => void run("switch-hero", ["switch", hero.node], `当前号 → ${hero.node}`)} style={{ display: "inline-flex", flexDirection: "column", alignItems: "center", gap: 4, padding: "8px 14px", borderRadius: 9, fontSize: 11, fontWeight: 700, color: t.accentText, background: t.accent, flexShrink: 0, cursor: "pointer", userSelect: "none", opacity: loadingAction?.startsWith("switch") ? 0.6 : 1 }}>
-                        <span style={{ fontSize: 10, opacity: 0.8 }}>建议切到 {hero.node}({hero.tightest}%)</span>
-                        <span>{loadingAction?.startsWith("switch") ? "切换中…" : "切换 →"}</span>
-                      </span>
-                    ) : (
-                      <span style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "10px 16px", borderRadius: 9, fontSize: 12.5, fontWeight: 700, color: t.accent, border: `1px solid ${t.accentBorder}`, background: t.accentSoft, flexShrink: 0 }}>✓ 额度最优</span>
-                    )}
-                  </div>
-                );
-              })()}
+              {/* ★★★ 2026-09-21 整块换成「续航条」（用户从六个方向里选的 D + 左侧账号环）。
+                  旧 Hero 的两个前提都已不成立，整段理由与实测在 `RunwayHero.tsx` 文件头：
+                    ① 「当前使用中」读 `state.active`（上次 CLI 切换），而代理逐请求挑号 ——
+                       实测两者不一致过，那行标题**会错且没有任何迹象**；
+                    ② 「建议切到 X」既不看置顶也不看停用，会劝你推翻自己刚设的置顶。
+                  ⚠️ 高度是硬约束（用户：不许增加）—— 旧的实测 1300 下 112px / 880 下 128px，
+                    闸量**渲染后的真实高度**，见 tests/test_runway_hero.py。 */}
+              {provider === "codex" && board && (
+                <RunwayHero t={t} board={board} privacy={privacy} />
+              )}
 
               {(() => {
                 // Grid order is by LABEL, not by quota. The store sorts quota-desc, which made the
