@@ -34,6 +34,19 @@ body { background: transparent; font-family: 'Space Grotesk', system-ui, sans-se
    ★ 触发靠调用方给 wrapper 传 `key={数据集身份}`（同图表 key 的判据）。**不能用数据当身份** ——
      `useTraffic` 每 2 分钟自动刷新，那样会让你正在读的时候突然重播一次。
    ★ 关掉动效的人要的是「没有」，不是「快一点」。 */
+/* 卡片动作条的入场（用户 2026-09-21：「弹出动态效果要好看自然贴切 codexbar 风格」）。
+   ★ 它**从卡片底边升起来** —— 所以是 `translateY(+8px)` 而不是复用 `cbFadeIn`
+     那条从上方落下的（方向与浮层实际出现的位置相反，看着像"掉进来"而不是"升起来"）。
+   ★ 时长与缓动**沿用仓里既有的那套**，不新发明：`.18s` 落在本仓 `.15s`(hover) 与
+     `.2s`(页面淡入) 之间；缓动与 `cbWipe` 同一条 `cubic-bezier(.22,.61,.36,1)`
+     —— 前快后缓，收尾不回弹，与"仪表"的克制一致（弹性/回弹属于另一种语言）。
+   ★ `scale(.985)` 而不是更小：浮层贴着卡片边缘，缩太多会先"缩进卡里"再撑开，
+     那是两段运动；只要一点点就够读出"它是新出现的"。 */
+@keyframes cbRise { from { opacity:0; transform: translateY(8px) scale(.985); }
+                    to   { opacity:1; transform: none; } }
+.cb-actions { animation: cbRise .18s cubic-bezier(.22,.61,.36,1) both; }
+/* ★ 本仓每条动画都带这一行：系统开了「减弱动态效果」就必须直接到位。 */
+@media (prefers-reduced-motion: reduce) { .cb-actions { animation: none; } }
 @keyframes cbWipe { from { clip-path: inset(0 100% 0 0); } to { clip-path: inset(0 0 0 0); } }
 .cb-wipe { animation: cbWipe .7s cubic-bezier(.22,.61,.36,1) both; }
 @media (prefers-reduced-motion: reduce) { .cb-wipe { animation: none; } }

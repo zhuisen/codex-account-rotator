@@ -84,23 +84,6 @@ const IconMoon = () => <svg width="13" height="13" viewBox="0 0 24 24" fill="cur
 const CARD_COLS = 3;
 const CARD_GRID_COLS = `repeat(${CARD_COLS}, minmax(0, 1fr))`;
 
-/**
- * 这张卡要不要给动作条预留高度？
- *
- * ★ 为什么需要预留：同排的卡在网格里本来就**等高**，所以选中卡一展开，同排兄弟会被拉高；
- *   而卡内的环是垂直居中、条形区靠 `flex:1` 吊在底边 —— 不预留的话多出来的高度摊在
- *   **中间**，邮箱与环之间裂开一道洞（用户 2026-08-24 截图圈过的就是它）。
- *   预留等于把那段高度按到卡片底部去。
- *
- * ★★ **但只有同排需要。** 原来写的是 `selectedCard !== null` 一刀切，于是选中第 1 排的
- *   一张卡，第 2、3 排也跟着各空出一截 —— 那几排根本没被拉高，留的是纯浪费。
- *   实测（2026-09-20 harness）：每张卡 156→203px、底部死空间 13→60px，
- *   正是用户报的「卡片的底部留白的地方多了」。
- */
-function sameRow(i: number, selectedIdx: number): boolean {
-  return selectedIdx >= 0 && Math.floor(i / CARD_COLS) === Math.floor(selectedIdx / CARD_COLS);
-}
-
 export default function App() {
   const { state, accounts, hero, currentNode, counts, tokens, lastRefreshAt, freshness, loadingAction, toast, refresh, run, showToast } = useStore();
   const [theme, setTheme] = useState<"dark" | "light">("dark");
@@ -750,11 +733,11 @@ export default function App() {
                           这样它只在同一档内比，不会拿 grok 卡去跟 codex 卡比高度。 */}
                     {provider === "codex" && (<>
                     <div data-cards-grid style={{ display: "grid", gridTemplateColumns: CARD_GRID_COLS, gap: 12, alignContent: "start" }}>
-                      {alive.map((a, i) => {
+                      {alive.map((a) => {
                         const shortcutIdx = alive.findIndex(x => x.aid === a.aid);   // ★ 就是「第几张」
                         // 改名按 aid 不按 label:cmd_rename 两者都认,而 aid 唯一 —— 重名时不会改到别的号上
                         return (
-                        <AccountCard key={a.aid} a={a} isCurrent={a.aid === currentNode} isBest={hero?.aid === a.aid} isSelected={selectedCard === a.aid} reserveActions={sameRow(i, alive.findIndex(x => x.aid === selectedCard))} shortcut={shortcutIdx >= 0 && shortcutIdx < 9 ? shortcutIdx + 1 : undefined} bestPct={bestPct} winSlots={winSlots} probing={loadingAction === `probe-${a.aid}`} privacy={privacy} t={t}
+                        <AccountCard key={a.aid} a={a} isCurrent={a.aid === currentNode} isBest={hero?.aid === a.aid} isSelected={selectedCard === a.aid} shortcut={shortcutIdx >= 0 && shortcutIdx < 9 ? shortcutIdx + 1 : undefined} bestPct={bestPct} winSlots={winSlots} probing={loadingAction === `probe-${a.aid}`} privacy={privacy} t={t}
                           drag={makeDrag(a.aid, savedAlive.map((x) => x.aid),
                             // ★★ 2026-09-21：这句话原来写「这个顺序就是轮换优先级」——
                             //   用户当天把轮换改回「默认容量最高优先 + 点亮才插队」之后，
@@ -905,7 +888,6 @@ export default function App() {
                                      //   切的就是这一列（见上面 useKeyboard 的分流）。超过 9 个不画。
                                      shortcut={i < 9 ? i + 1 : undefined}
                                      isSelected={selectedCard === a.sub}
-                                     reserveActions={sameRow(i, orderedAgy.findIndex(x => x.sub === selectedCard))}
                                      isBest={agyBest?.sub === a.sub} bestPct={agyBestPct ?? undefined}
                                      partialWins={agyPartial}
                                      onSelect={() => setSelectedCard(selectedCard === a.sub ? null : a.sub)}

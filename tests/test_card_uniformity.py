@@ -89,12 +89,26 @@ function corner(tag) {
 const tabFor = n => [...document.querySelectorAll('*')].filter(e =>
   e.children.length === 0 && (e.textContent || '').trim().toLowerCase() === n.toLowerCase())[0];
 
+const cards = () => [...document.querySelectorAll('[data-cards-grid] > div[data-aid]')];
+const heights = () => cards().map(c => Math.round(c.getBoundingClientRect().height));
+const click = i => cards()[i].dispatchEvent(new MouseEvent('click', { bubbles: true }));
+
 (async () => {
   try {
     measure('codex'); corner('codex');
-    document.querySelector('[data-cards-grid] > div[data-aid]')
-      .dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    out.heights = { '收起': heights() };
+    click(0);
     await wait(600); measure('codex-selected');
+    out.heights['选中第 1 张'] = heights();
+    out.actions = document.querySelectorAll('[data-actions]').length;
+    const ov = document.querySelector('[data-actions]');
+    if (ov) { const r = ov.getBoundingClientRect(), c = cards()[0].getBoundingClientRect();
+      out.overlay = { '超出卡片底边': Math.round(r.bottom - c.bottom),
+                      '动画': getComputedStyle(ov).animationName }; }
+    // ★ 改选另一张：验的是"换一张展开"也不改高度，不是只验"第一次展开"
+    click(3); await wait(600);
+    out.heights['改选第 4 张'] = heights();
+    click(3); await wait(400);          // 收起，让后面的档位测量回到干净状态
     for (const name of ['Gemini', 'grok']) {
       const tab = tabFor(name);
       if (!tab) { out.lanes[name] = 'tab-not-found'; continue; }
@@ -171,35 +185,61 @@ class TheTopRightCornerIsTheSameOnEveryLane(_Probed):
                              f"★ {name} 又往手柄那个坐标上放了控件")
 
 
-class TheActionRowIsOnlyReservedOnTheSelectedRow(_Probed):
-    """★★★ 预留只给同排 —— 别的排留的是纯浪费（用户：底部留白多了）。"""
+class SelectingACardNeverChangesAnyHeight(_Probed):
+    """★★★ 用户 2026-09-21：「不改变高度，而是弹出功能按钮去选择那种」。
 
-    def test_with_nothing_selected_every_card_is_tight(self):
-        gaps = {r["gap"] for r in self.rows("codex")}
-        self.assertTrue(max(gaps) <= 20,
-                        f"★★ 什么都没选时卡片底部就有死空间：{sorted(gaps)}")
+    ## 这条闸取代了整整一族「同排预留」的闸
 
-    def test_the_selected_row_still_reserves(self):
-        """★★★ 同排**必须**留 —— 不留的话高度摊在中间，邮箱与环之间裂开一道洞。"""
-        row0 = [r for r in self.rows("codex-selected") if r["row"] == 0]
-        self.assertTrue(any(r["gap"] > 30 for r in row0),
-                        f"★★★ 选中卡那一排没有预留，多出的高度会摊在卡片中间：{row0}")
+    动作条原来是文档流里的一块，展开时把卡片撑高 ~47px。同排的卡在网格里等高，
+    于是邻卡跟着长 —— 为此有过 `reserveActions` / `sameRow()` 一整套「给同排每张卡
+    预留一条等高隐形占位」的逻辑，外加 4 条闸。
 
-    def test_the_other_rows_do_not(self):
-        rows = self.rows("codex-selected")
-        others = [r for r in rows if r["row"] != 0]
-        self.assertTrue(others, "★★ 夹具只有一排 —— 这条闸需要 ≥2 排才有判别力")
-        worst = max(r["gap"] for r in others)
-        self.assertLessEqual(worst, 20,
-                             f"★★★ 没被选中的那几排也留了位（死空间 {worst}px）—— "
-                             "它们根本没被拉高，这是纯浪费")
+    **浮层把那套逻辑连根去掉**：动作条绝对定位、浮在卡片底部，卡片高度恒定。
+    所以那 4 条闸一并删除 —— 留着一族守护着已不存在行为的断言，下一个人会以为
+    那套逻辑还在生效（本仓记过的死代码形态：删功能就连组件本体一起删）。
 
-    def test_the_other_rows_keep_their_unselected_height(self):
-        """★★ 更强的说法：别的排的高度应当**一点都没变**。"""
-        base = {r["h"] for r in self.rows("codex")}
-        others = {r["h"] for r in self.rows("codex-selected") if r["row"] != 0}
-        self.assertEqual(others, base,
-                         f"★★ 选中一张卡把别的排也撑高了：{sorted(base)} → {sorted(others)}")
+    ★★ 判据是**量出来的高度**，不是"源码里有 position:absolute" ——
+      高度是 padding / flex 链 / 浮层定位三者合成的，任何一处改动都会改它。
+    """
+
+    EXPECT_STATES = ("收起", "选中第 1 张", "改选第 4 张")
+
+    def test_the_probe_measured_real_cards(self):
+        """★★ 先正面证明量到了卡 —— 空列表下「高度全都相同」恒真。"""
+        for k in self.EXPECT_STATES:
+            with self.subTest(state=k):
+                self.assertGreaterEqual(len(self.r["heights"][k]), 3,
+                                        f"{k}: 没量到足够多的卡：{self.r}")
+
+    def test_every_card_has_the_same_height_in_every_state(self):
+        for k in self.EXPECT_STATES:
+            hs = set(self.r["heights"][k])
+            with self.subTest(state=k):
+                self.assertEqual(len(hs), 1, f"★★★ {k} 时卡片高度不齐：{hs}")
+
+    def test_selecting_does_not_change_the_height_at_all(self):
+        """★★★ 这就是用户要的那句话 —— 展开动作条**不许改变任何高度**。"""
+        base = self.r["heights"]["收起"]
+        for k in self.EXPECT_STATES[1:]:
+            with self.subTest(state=k):
+                self.assertEqual(self.r["heights"][k], base,
+                                 f"★★★ {k} 把高度改了：{base} → {self.r['heights'][k]}")
+
+    def test_only_the_selected_card_has_an_action_bar(self):
+        """★ 浮层不再需要"隐形占位"，所以同一时刻**只该有一条**动作条在 DOM 里。"""
+        self.assertEqual(self.r["actions"], 1,
+                         f"★ 动作条数量不是 1：{self.r['actions']} —— 隐形占位又回来了？")
+
+    def test_the_overlay_sits_inside_the_card(self):
+        """★ 它是**覆盖在卡片底部**，不是吊在卡外（那是 demo 里的 B 案，用户没选）。"""
+        self.assertLessEqual(self.r["overlay"]["超出卡片底边"], 0,
+                             "★ 浮层探出了卡片底边 —— 用户选的是 A（覆盖在卡内）")
+
+    def test_the_entrance_animation_is_the_repos_own(self):
+        """★ 用户 2026-09-21：「弹出动态效果要好看自然贴切 codexbar 风格」。
+        判据是**真的挂上了那条动画**，不是源码里写了类名。"""
+        self.assertEqual(self.r["overlay"]["动画"], "cbRise",
+                         "★ 入场动画没生效 —— 浮层会硬生生地出现")
 
 
 class TheRowMathAndTheGridShareOneNumber(unittest.TestCase):
@@ -222,16 +262,13 @@ class TheRowMathAndTheGridShareOneNumber(unittest.TestCase):
         self.assertEqual(self.code.count("gridTemplateColumns: CARD_GRID_COLS"), n,
                          f"★★ {n} 张卡片网格里有的没走 CARD_GRID_COLS")
 
-    def test_the_row_math_uses_it_too(self):
-        self.assertIn("Math.floor(i / CARD_COLS)", self.code,
-                      "★★ 行算式没用 CARD_COLS —— 它会与网格分叉")
-
-    def test_reservation_is_never_lane_wide_again(self):
-        """★★★ 变回 `selectedCard !== null` 一刀切就是这条 bug 本身。"""
-        self.assertNotIn("reserveActions={selectedCard !== null}", self.code,
-                         "★★★ 预留又变成整档一刀切了 —— 没被拉高的排会跟着空出一截")
-        self.assertEqual(self.code.count("reserveActions={sameRow("), 2,
-                         "★★ codex 与 Gemini 两档都要走 sameRow()")
+    def test_the_reservation_logic_is_gone_for_good(self):
+        """★★ 卡片不再长高 ⇒ 那套预留逻辑**存在的理由本身消失了**，连代码一起删。
+        留一份没人调用的逻辑，下一个人会以为它还在生效（本仓记过的死代码形态）。"""
+        self.assertNotIn("reserveActions", self.code,
+                         "★★ `reserveActions` 又回来了 —— 卡片会重新随展开长高")
+        self.assertNotIn("function sameRow", self.code,
+                         "★★ `sameRow()` 还在 —— 它守的行为已经不存在了")
 
 
 if __name__ == "__main__":

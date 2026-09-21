@@ -99,16 +99,24 @@ class TheGeminiCardHasTheSameActionBar(unittest.TestCase):
     def test_the_card_can_be_selected(self):
         self.assertIn("isSelected", code(CARD), "★★ agy 卡不能选中 ⇒ 没有动作条")
 
-    def test_siblings_reserve_the_same_height(self):
-        """★★ 同排有别的卡展开时，本卡渲染**同一条动作条但整条隐形** ——
-        不是画一个"差不多高"的占位。账号卡那边手算过一次，sweep 当场量出还差 34px。"""
+    def test_the_action_bar_is_the_same_floating_overlay(self):
+        """★★ 与账号卡**同款浮层**（§5c 页面统一性）。
+
+        ⚠️ 2026-09-21 换代：这条原来断言的是「同排预留一条隐形动作条」——
+          那套机制（`reserveActions` / `visibility:hidden` 占位）是为了让**会长高的**
+          内嵌动作条不把兄弟卡顶歪。用户当天要求「不改变高度，弹出功能按钮」，
+          动作条改成绝对定位的浮层 ⇒ **卡片高度恒定，预留的理由本身消失了**，
+          连代码一起删（本仓：删功能就连组件本体一起删，不留骨架）。
+        ★ 真正的行为闸在 `test_card_uniformity.SelectingACardNeverChangesAnyHeight`
+          （量真实高度）；这里只守「两张卡用的是同一套」。
+        """
         c = code(CARD)
-        self.assertIn("(isSelected || reserveActions) && (", c, "★★ 没有占位 ⇒ 兄弟卡高度不齐")
-        i = c.index("(isSelected || reserveActions) && (")
-        seg = c[i:i + 700]
-        self.assertIn('visibility: "hidden"', seg, "★ 占位没隐形")
-        self.assertIn('pointerEvents: "none"', seg,
-                      "★★ 隐形那份能点 —— 会出现看不见却点得到的按钮")
+        self.assertIn('data-actions className="cb-actions"', c,
+                      "★★ Gemini 卡的动作条不是与账号卡同款的浮层")
+        self.assertIn('position: "absolute"', c[c.index("data-actions"):][:400],
+                      "★★ 动作条又回到文档流里 —— 展开会把同排的卡顶高")
+        self.assertNotIn("reserveActions", c,
+                         "★★ 预留逻辑又回来了 —— 它守的行为已经不存在了")
 
     def test_it_has_switch_rename_and_remove(self):
         c = code(CARD)

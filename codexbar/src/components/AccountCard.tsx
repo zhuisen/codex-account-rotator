@@ -26,7 +26,7 @@ function DeltaChip({ delta, t }: { delta: number; t: Theme }) {
 }
 
 
-export default function AccountCard({ a, isCurrent, isBest, isSelected, shortcut, bestPct, probing, privacy, t, onSelect, onSwitch, onShowDetail, onRemove, onProbe, onRename, onToggleRotate, onTogglePin, reserveActions, winSlots, drag }: {
+export default function AccountCard({ a, isCurrent, isBest, isSelected, shortcut, bestPct, probing, privacy, t, onSelect, onSwitch, onShowDetail, onRemove, onProbe, onRename, onToggleRotate, onTogglePin, winSlots, drag }: {
   a: Account; isCurrent: boolean; isBest: boolean; isSelected: boolean; shortcut?: number;
   /**
    * 拖拽排序的接线（用户 2026-09-19 从三个方案里选的**专用手柄**）。
@@ -56,16 +56,10 @@ export default function AccountCard({ a, isCurrent, isBest, isSelected, shortcut
   /** 把这个号移出/放回自动轮换池。真源是 `state.json` 的 `rotate_off`（**不是 localStorage**）——
    *  代理在 app 没开时也要读它，两个真源迟早分叉成「界面说停用了、代理还在用」。 */
   onToggleRotate: (label: string, on: boolean) => void;
-  /** 同排**有别的卡展开着**。此时本卡要预留一条等高的空位，否则它的细条与「到期」
-   *  会比那张展开的卡低整整一个动作条的高度（sweep 实测 **79px**，三个宽度全中）。
-   *  ★ 这不是"再加一个像素常量"：占位复用**同一份动作条外壳**，高度由构造保证一致 ——
-   *    写死一个数字会在下次改按钮尺寸时静默失准（同 `CardBadgeGhost` 的理由）。 */
-  /** 置顶/取消置顶（用户 2026-09-21：「点击就是优先使用该账号」）。
-   *  真源是 `state.json` 的 `pinned`（aid 队列），走 `codex-rotate pin --toggle` ——
-   *  与 `rotate_off` 同一条理由：代理在 app 没开时也要读它，存 localStorage 会分叉成
-   *  「界面点亮了、代理却在用别的号」。 */
+  /** 置顶/取消置顶（用户 2026-09-21：「点击就是优先使用该账号」）。真源是 `state.json`
+   *  的 `pinned`（aid 队列），走 `codex-rotate pin --toggle` —— 与 `rotate_off` 同一条
+   *  理由：代理在 app 没开时也要读它，存 localStorage 会分叉成「界面点亮了、代理用别的号」。 */
   onTogglePin?: () => void;
-  reserveActions?: boolean;
   /** 改名。空名/含空格/重名的校验在 `codex-rotate rename`(唯一真源)——那三种都会让按 label
    *  查找的 switch/probe 静默操作到错的号上。这里只挡「没改」。 */
   onRename: (next: string) => void;
@@ -323,12 +317,20 @@ export default function AccountCard({ a, isCurrent, isBest, isSelected, shortcut
           sweep 当场量出还差 **34px**。★ 高度必须**由构造保证**,不能由我心算:
           按钮尺寸一改,占位自动跟上;写死或另搭一套就会静默失准(同 `CardBadgeGhost` 的理由)。
           ★ 隐形那份必须 `pointerEvents: none` + `aria-hidden`,否则会出现看不见却点得到的按钮。 */}
-      {(isSelected || reserveActions) && (
-        <div onClick={(e) => e.stopPropagation()}
-             aria-hidden={!isSelected}
-             style={{ display: "flex", gap: 6, marginTop: 10, paddingTop: 8,
-                      borderTop: `1px solid ${isSelected ? t.divider : "transparent"}`,
-                      ...(isSelected ? null : { visibility: "hidden" as const, pointerEvents: "none" as const }),
+      {/* ★★★ 动作条是**浮在卡片底部的覆盖层**，不再内嵌（用户 2026-09-21 从三版 demo 里选的 A）。
+          在这之前它是文档流里的一块，展开时把卡片撑高 ~47px —— 而同排的卡在网格里等高，
+          于是邻卡跟着长，还得靠 `reserveActions` 给同排每张卡预留一条等高的隐形占位。
+          **浮层把那整套逻辑连根去掉**：卡片高度恒定，同排不被顶动，预留也就没有存在理由。
+          ★ 已知代价（demo 里就画出来了、用户选的时候知情）：它**盖住「到期 / 重置卡」那一行**。
+            换来的是全局布局零抖动 —— 那一行只在收起态读，而动作条是主动打开的。
+          ★ 半透明 + 模糊是为了让被盖住的那行**透出轮廓**，读者知道下面还有东西、不是没了。 */}
+      {isSelected && (
+        <div data-actions className="cb-actions" onClick={(e) => e.stopPropagation()}
+             style={{ position: "absolute", left: 10, right: 10, bottom: 10, zIndex: 3,
+                      display: "flex", gap: 6, padding: 8, borderRadius: 9,
+                      background: t.isDark ? "rgba(20,26,34,.97)" : "rgba(255,255,255,.97)",
+                      backdropFilter: "blur(6px)",
+                      border: `1px solid ${t.accent}`, boxShadow: t.shadow,
                      // ★ 6 个按钮塞在三列网格的一张 ~300px 卡里放不下。不换行时 flex 会把每个
                      //   压到 ~20px ⇒「切换到此号」变成一列竖排的单字(用户 2026-08-24 截图)。
                      //   探针实测:内容高 80px / 行高 13px = 六行。

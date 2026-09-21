@@ -40,7 +40,7 @@ const cmpBasis = (missing: string[]): string =>
  * ★ 颜色由调用方传入（`colorOf(traffic, "agy")`），不写死：用户在设置页能改平台色。
  */
 export default function AgyCard({ t, color, snap, busy, err, disabled, winSlots, onOpen, onRefresh,
-                                 isSelected, reserveActions, shortcut, isBest, bestPct, partialWins,
+                                 isSelected, shortcut, isBest, bestPct, partialWins,
                                  onSelect, onRename, onRemove, onProbe, probing,
                                  rotates, onToggleRotate,
                                   label, email, isCurrent, onSwitch, switching, drag, aid }: {
@@ -82,9 +82,6 @@ export default function AgyCard({ t, color, snap, busy, err, disabled, winSlots,
   // ── 与 codex 账号卡对齐（用户 2026-09-13：「gemini 的功能也没有 1:1 同步上 codex」）──
   /** 卡被选中 ⇒ 展开动作条。 */
   isSelected?: boolean;
-  /** 同排有别的卡展开 ⇒ 本卡渲染**同一条动作条但整条隐形**，高度由构造保证一致。
-   *  ★ 画一个"差不多高"的占位是行不通的：按钮尺寸一改就静默失准（账号卡实测差过 34px）。 */
-  reserveActions?: boolean;
   /** ⌘N 角标。没有就不画 —— agy 不进 `alive`，快捷键另走一条路。 */
   shortcut?: number;
   /** 全池里余量最多的那个号 ⇒ 画 `最优` / `USE`。 */
@@ -411,12 +408,15 @@ export default function AgyCard({ t, color, snap, busy, err, disabled, winSlots,
           ⚠️ **没有「探针」和「轮换开关」** —— 探针跑的是 `codex-rotate probe`，扣的是
              codex 的额度；而 agy 的自动切号发生在 `bin/agy` 拉起进程之前，不是按号的开关。
              给一个点了没用的按钮，比没有这个按钮糟。 */}
-      {(isSelected || reserveActions) && (
-        <div onClick={(e) => e.stopPropagation()}
-             aria-hidden={!isSelected}
-             style={{ display: "flex", gap: 6, marginTop: 10, paddingTop: 8,
-                      borderTop: `1px solid ${isSelected ? t.divider : "transparent"}`,
-                      ...(isSelected ? null : { visibility: "hidden" as const, pointerEvents: "none" as const }),
+      {/* ★ 与账号卡**同款浮层**（§5c 页面统一性：同一类卡必须长得一样）。
+          整段理由见 `AccountCard.tsx` 同处 —— 两张卡各写一套迟早只改一边。 */}
+      {isSelected && (
+        <div data-actions className="cb-actions" onClick={(e) => e.stopPropagation()}
+             style={{ position: "absolute", left: 10, right: 10, bottom: 10, zIndex: 3,
+                      display: "flex", gap: 6, padding: 8, borderRadius: 9,
+                      background: t.isDark ? "rgba(20,26,34,.97)" : "rgba(255,255,255,.97)",
+                      backdropFilter: "blur(6px)",
+                      border: `1px solid ${t.accent}`, boxShadow: t.shadow,
                       flexWrap: "wrap", rowGap: 6 }}>
           {isCurrent ? (
             <span style={{ flex: "1 1 auto", minWidth: 62, textAlign: "center", fontSize: 11,

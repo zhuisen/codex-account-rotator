@@ -127,7 +127,8 @@ class TheExtraCardsStillStayOutOfThePool(unittest.TestCase):
 
     def test_neither_card_is_rendered_from_alive(self):
         # ★ 2026-09-20 起 map 带上了下标（`sameRow()` 算「第几排」要用）。锚点跟着改。
-        i = APP.index("{alive.map((a, i) => {")
+        # ★ 2026-09-21：浮层取代预留之后不再需要下标，map 签名跟着回到 `(a)`。
+        i = APP.index("{alive.map((a) => {")
         j = APP.index('{provider === "gemini"', i)
         seg = APP[i:j]
         for tag in ("<GrokCard", "<AgyCard"):
