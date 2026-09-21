@@ -330,7 +330,12 @@ export default function AccountCard({ a, isCurrent, isBest, isSelected, shortcut
                       display: "flex", gap: 6, padding: 8, borderRadius: 9,
                       background: t.isDark ? "rgba(20,26,34,.97)" : "rgba(255,255,255,.97)",
                       backdropFilter: "blur(6px)",
-                      border: `1px solid ${t.accent}`, boxShadow: t.shadow,
+                      /* ★ 边框用**发丝线**不用 accent（用户 2026-09-21：「取消绿色的边框」）。
+                         青色在本仓专属「激活态 / 推荐项 / 主按钮」，而卡片被选中时
+                         **本身已经有一圈青边**了 —— 浮层再来一圈是同一个语义说两遍，
+                         而且两圈青挨在一起会让人以为它们是两个不同的激活对象。
+                         分层交给发丝线 + 阴影，这也是全局 `ui-design.md` 的原话。 */
+                      border: `1px solid ${t.cardBorder}`, boxShadow: t.shadow,
                       // ★★★ **绝不换行**（用户 2026-09-21：「我不要出现换行的」）。
                       //   换行的动作条不只是难看：第二行会把浮层撑高、盖掉更多卡片内容，
                       //   而且「最后一个按钮掉下去」看起来像它坏了。

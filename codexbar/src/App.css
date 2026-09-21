@@ -42,9 +42,15 @@ body { background: transparent; font-family: 'Space Grotesk', system-ui, sans-se
      —— 前快后缓，收尾不回弹，与"仪表"的克制一致（弹性/回弹属于另一种语言）。
    ★ `scale(.985)` 而不是更小：浮层贴着卡片边缘，缩太多会先"缩进卡里"再撑开，
      那是两段运动；只要一点点就够读出"它是新出现的"。 */
-@keyframes cbRise { from { opacity:0; transform: translateY(8px) scale(.985); }
+@keyframes cbRise { from { opacity:0; transform: translateY(6px) scale(.99); }
                     to   { opacity:1; transform: none; } }
-.cb-actions { animation: cbRise .18s cubic-bezier(.22,.61,.36,1) both; }
+/* ★ `transform-origin: bottom` 是这次微调里**唯一有实质差别**的一条：浮层贴着卡片
+   底边，缩放却从中心长开 ⇒ 顶边和底边同时往外推，看着像"膨胀"而不是"从底边升起"。
+   把原点钉在底边之后，底边不动、只有上沿抬起来，与它实际锚定的位置一致。
+   ★ 另两处是收敛：位移 8→6px、缩放 .985→.99 —— 原来的幅度在 45px 高的条上偏大，
+     眼睛会先看见"动"再看见"内容"。 */
+.cb-actions { animation: cbRise .16s cubic-bezier(.22,.61,.36,1) both;
+              transform-origin: bottom; }
 /* ★ 本仓每条动画都带这一行：系统开了「减弱动态效果」就必须直接到位。 */
 @media (prefers-reduced-motion: reduce) { .cb-actions { animation: none; } }
 @keyframes cbWipe { from { clip-path: inset(0 100% 0 0); } to { clip-path: inset(0 0 0 0); } }

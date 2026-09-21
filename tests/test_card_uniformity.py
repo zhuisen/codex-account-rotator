@@ -106,6 +106,13 @@ const click = i => cards()[i].dispatchEvent(new MouseEvent('click', { bubbles: t
     const bar = document.querySelector('[data-actions]');
     if (bar) { const br = bar.getBoundingClientRect(), cs = getComputedStyle(bar);
       const kids = [...bar.children].map(e => e.getBoundingClientRect());
+      out.barBorder = cs.borderTopColor;
+      // ★ computed 值是**像素**不是关键字（`169.664px 46px`），所以判据是
+      //   「y 分量 ≈ 元素高度」。直接比字面量 'bottom' 会恒红（实测踩到）。
+      out.barOrigin = cs.transformOrigin;
+      out.barOriginAtBottom =
+        Math.abs(parseFloat(cs.transformOrigin.split(' ')[1]) - br.height) < 2;
+      out.accent = getComputedStyle(document.querySelector('[data-actions] span')).backgroundColor;
       out.bar = { 行数: new Set(kids.map(r => Math.round(r.top))).size,
                   溢出: Math.round(Math.max(0, Math.max(...kids.map(r => r.right))
                                               - (br.right - parseFloat(cs.paddingRight)))) }; }
@@ -304,6 +311,26 @@ class SelectingACardNeverChangesAnyHeight(_Probed):
                                 "★★★ 卡片最小宽低于 300 —— 动作条会重新折行")
         self.assertIn("repeat(auto-fill, minmax(${CARD_MIN_W}px, 1fr))", app,
                       "★★★ 网格不是按最小宽自适应 —— 窄窗会把卡压到装不下动作条")
+
+    def test_the_overlay_border_is_a_hairline_not_the_accent(self):
+        """★★ 用户 2026-09-21：「取消绿色的边框」。
+
+        青色在本仓**专属「激活态 / 推荐项 / 主按钮」**，而卡片被选中时本身已经有一圈
+        青边 ⇒ 浮层再来一圈是同一个语义说两遍，两圈青挨在一起还会让人以为它们是
+        两个不同的激活对象。分层交给发丝线 + 阴影（全局 `ui-design.md` 的原话）。
+
+        ★ 判据取**渲染后的 computed border-color**，不是源码里写了哪个变量 ——
+          主题换一套、`cardBorder` 被改成青色，源码断言照样绿。
+        """
+        self.assertIsNotNone(self.r.get("barBorder"), f"没量到浮层边框：{self.r}")
+        self.assertNotEqual(self.r["barBorder"], self.r["accent"],
+                            f"★★ 浮层边框仍是 accent 青：{self.r['barBorder']}")
+
+    def test_the_entrance_animation_grows_from_the_bottom_edge(self):
+        """★ 浮层贴着卡片**底边**，缩放却从中心长开的话，顶边和底边会同时往外推，
+        看着像"膨胀"而不是"从底边升起" —— 与它实际锚定的位置不一致。"""
+        self.assertTrue(self.r.get("barOriginAtBottom"),
+                        f"★ 缩放原点不在底边：{self.r.get('barOrigin')}")
 
     def test_the_entrance_animation_is_the_repos_own(self):
         """★ 用户 2026-09-21：「弹出动态效果要好看自然贴切 codexbar 风格」。
