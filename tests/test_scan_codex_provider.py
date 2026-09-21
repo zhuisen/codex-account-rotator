@@ -23,6 +23,7 @@ token 记到前半段的 provider 上。这与"模型按 `turn_context` 顺序�
 两个完全独立的来源：一个是本机 rollout 逐行解析，一个是对方的账单接口。
 """
 import importlib.util
+import re
 import json
 import subprocess
 import sys
@@ -208,9 +209,51 @@ class TheUiSaysTheCostDoesNotApply(unittest.TestCase):
                       "组件定义在,但没人调用它")
 
     def test_it_warns_that_the_equivalent_cost_does_not_apply_to_relay_tokens(self):
+        """⚠️ 同上（2026-09-21）：判据从「不适用」这三个字改成**这条披露的事实**。
+        文案压成一行后说的是「勿与下方「总费用」相加」—— 一字未少，只是换了说法。"""
         self.assertIn("data-route-footnote", self.PAGE)
-        self.assertIn("不适用", self.PAGE)
-        self.assertIn("中转站", self.PAGE)
+        i = self.PAGE.index("data-route-footnote")
+        note = self.PAGE[i:i + 900]
+        self.assertIn("总费用", note, "★★ 没点名「总费用」这个口径")
+        self.assertRegex(note, r"(不适用|不要相加|勿与[^\n]{0,20}相加)",
+                         "★★ 没给出「别把两个口径合起来算」这个动作")
+        self.assertIn("中转站", note)
+
+    def test_the_numbers_line_up_in_columns(self):
+        """★★ 用户 2026-09-21：「对称点」。
+
+        原来每行是 `名称 数值 · 占比` 顺排 ⇒ 名称一长一短，**数值与占比每行都落在
+        不同的 x 上**，读的时候要横着找。全局 `ui-design.md` 写得很直接：
+        **数字右对齐成列（mono 保证对齐），标签左对齐**。
+        ★ 判据打在**布局机制**上（网格 + 右对齐 + 等宽数位），不是某个像素值 ——
+          像素值会随字号改动而失真，而机制不会。
+        """
+        # ⚠️ 取窗从 `data-route-split` 起算 3200 字符**不够** —— 这一块的注释很长，
+        #   窗口停在网格样式之前，断言当场假红（我自己第一版就是这样）。
+        #   本仓记过：**定长切片找结构边界是危险的**。改成从块首取到 `RouteSplit`
+        #   函数的收尾（`data-route-footnote` 之后 600 字符），覆盖整块。
+        i = self.PAGE.index("data-route-split")
+        j = self.PAGE.index("data-route-footnote", i)
+        blk = self.PAGE[i:j + 600]
+        self.assertIn('display: "grid"', blk, "★★ 还是顺排的内联文本，数字不成列")
+        self.assertIn('gridTemplateColumns: "1fr auto auto"', blk,
+                      "★ 不是「标签 | 数值 | 占比」三列")
+        self.assertGreaterEqual(blk.count('textAlign: "right"'), 4,
+                                "★★ 数字列没有右对齐 —— 位数不同就会参差")
+        self.assertGreaterEqual(blk.count('fontVariantNumeric: "tabular-nums"'), 4,
+                                "★ 没用等宽数位，刷新时数字会左右跳")
+
+    def test_the_footnote_is_one_line_not_a_paragraph(self):
+        """★ 用户 2026-09-21：「具体的说明不要了」。压掉的是**解释**不是**披露**。
+
+        判据：脚注里不再出现那几句解释性从句。三条事实由上面两条闸守着。
+        """
+        i = self.PAGE.index("data-route-footnote")
+        note = self.PAGE[i:i + 900]
+        for gone in ("那是按 OpenAI 牌价折算的等效成本",
+                     "这批数来自中转站自己的账单",
+                     "代理转发时 codex 只记"):
+            self.assertNotIn(gone, note, f"★ 解释性从句又回来了：{gone}")
 
     def test_the_pool_ids_get_human_names_not_raw_ids(self):
         """★ `rotateproxy` / `openai` 是内部名，直接印给用户看等于让他去猜。"""
@@ -270,9 +313,23 @@ class TheRouteRowActuallyRenders(unittest.TestCase):
 
     def test_the_cost_footnote_is_visible_when_relay_tokens_exist(self):
         """★★ 这一句是整个 Phase 4 的意义:不说出来,同一批 token 会以两个不同的价
-        出现在两页上,而两页都没标注。"""
+        出现在两页上,而两页都没标注。
+
+        ⚠️ 2026-09-21 收窄措辞依赖：原来断言的是「不适用」三个字，而那是旧长句
+          「下面的「总费用」对它们不适用」里的词。用户当天要求「具体的说明不要了」，
+          文案压成一行「… 已含在「账号池」行内 · 勿与下方「总费用」相加」——
+          **事实一字未少，只是换了说法**，而旧断言当场假红。
+        ★ 所以判据改成**那条事实的两个要件**：① 点名「总费用」这个口径；
+          ② 给出可执行的动作（别相加 / 不适用）。措辞怎么改都行，事实不能掉。
+        """
         self.assertIn("data-route-footnote", self.rawdom)
-        self.assertIn("不适用", self.d)
+        i = self.rawdom.index("data-route-footnote")
+        note = re.sub(r"<[^>]+>", "", self.rawdom[i:i + 700])
+        self.assertIn("总费用", note,
+                      "★★ 脚注没点名「总费用」这个口径 —— 读者不知道说的是哪个数")
+        self.assertTrue(any(w in note for w in ("相加", "不适用")),
+                        f"★★ 脚注没说「别把两个口径合起来算」这个动作：{note[:120]}")
+        self.assertIn("中转站", note, "★ 没说清这批 token 的来源")
 
 
 class RelayAttributionSurvivedTheArchitectureChange(unittest.TestCase):
@@ -309,8 +366,17 @@ class RelayAttributionSurvivedTheArchitectureChange(unittest.TestCase):
         """★★ 最要紧的一句话：这批已含在「账号池」那一行里。
         不写出来，读者会把总量算两遍 —— 而两个数都来自我们自己的页面。"""
         page = (self.ROOT / "codexbar" / "src" / "pages" / "PlatformPage.tsx").read_text(encoding="utf-8")
-        self.assertIn("已经含在上面「账号池」那一行里", page)
-        self.assertIn("不要相加", page)
+        # ⚠️ 2026-09-21：原来断言的是整句旧文案「已经含在上面「账号池」那一行里」。
+        #    用户当天要求「具体的说明不要了」，脚注压成一行「… 已含在「账号池」行内 ·
+        #    勿与下方「总费用」相加」—— **事实一字未少，只是换了说法**，而旧断言当场假红。
+        # ★ 判据改成**这条披露的三个要件**：这批 token 已含在账号池那一行、不许相加、
+        #   以及中转站账单这一节存在。措辞怎么改都行，三件事不能掉。
+        i = page.index("data-route-footnote")
+        note = page[i:i + 900]
+        self.assertRegex(note, r"已(经)?含在[^\n]{0,8}账号池",
+                         "★★ 脚注没说「这批已含在账号池那一行里」—— 读者会把总量算两遍")
+        self.assertRegex(note, r"(不要相加|勿与[^\n]{0,20}相加|不适用)",
+                         "★★ 脚注没给出「别相加」这个动作")
         self.assertIn("中转站账单", page)
 
     def test_the_pool_rows_never_reference_the_relay_bill(self):

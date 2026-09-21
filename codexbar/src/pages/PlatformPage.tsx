@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from "react";
+import React, { useCallback, useMemo, useState } from "react";
 import { type Theme, modelColor, TABLE_TYPE as TZ } from "../theme";
 import { costOf, fmtUSD, priceOf, isPriced } from "../rates";
 import StackedArea, { type Layer } from "../components/StackedArea";
@@ -14,6 +14,8 @@ import { useIntro, introEnabled } from "../hooks/useIntro";
 import CacheChip from "../components/CacheChip";
 import PageSub from "../components/PageSub";
 
+/** 等宽字族。★ 数字右对齐成列靠它保证等宽（全局 `ui-design.md`）。 */
+const MONO = "'JetBrains Mono', monospace";
 const AMBER = "#E0A21C";
 const SRC: Record<string, string> = {
   claude: "~/.claude/projects/**/*.jsonl",
@@ -173,47 +175,74 @@ function RouteSplit({ t, p, labels, rangeTxt }: {
       {/* ★ 挪进标题行后浮层要**靠左对齐角标**并留出右侧余量：
           `minWidth: 320` 在窄窗下会顶出容器（本仓 UI 规范:溢出算 bug）。 */}
       <div className="cb-hoverpop"
-           style={{ minWidth: 300, maxWidth: "min(460px, 60vw)", padding: "10px 12px", borderRadius: 10,
+           style={{ minWidth: 300, maxWidth: "min(460px, 60vw)", padding: "11px 13px", borderRadius: 10,
                     background: t.cardBg, border: `1px solid ${t.cardBorder}`,
-                    boxShadow: t.shadow, display: "flex", flexDirection: "column", gap: 5,
-                    color: t.muted, whiteSpace: "nowrap" }}>
+                    boxShadow: t.shadow, color: t.muted, whiteSpace: "nowrap",
+                    /* ★★ 三列网格，不是一行行的内联文本（用户 2026-09-21：「对称点」）。
+                       原来每行是 `名称 数值 · 占比` 顺排，名称一长一短 ⇒ 数值与占比
+                       **每行都落在不同的 x 上**，读的时候要横着找。
+                       全局 `ui-design.md` 写得很直接：**数字右对齐成列（mono 保证对齐），
+                       标签左对齐** —— 这里正是它。 */
+                    display: "grid", gridTemplateColumns: "1fr auto auto",
+                    columnGap: 12, rowGap: 5, alignItems: "baseline",
+                    /* ★ 字号显式写在浮层上（用户：「字体清晰点」）。外层角标是 11.5，
+                       继承过来数字偏小；12.5 是在这块宽度里不换行的上限。 */
+                    fontSize: 12.5 }}>
         {/* ★★ 窗口跟着页面档位走（2026-09-10）。此前后端只下发 90 天一个合计,
             这里只好写死"近 90 天" —— 今日档旁边挂着 90 天的数，正是本仓在 scan 侧
             栽过的那个"同页两个数不同窗口"（119M vs 9,004M）。现在按日下发、按档求和。 */}
-        <span style={{ fontWeight: 600, color: t.text }}>路由 · {rangeTxt}</span>
+        <span style={{ gridColumn: "1 / -1", fontWeight: 700, color: t.text }}>
+          路由 · {rangeTxt}
+        </span>
         {rows.map((r) => (
-          <span key={r.id} style={{ fontFamily: "'JetBrains Mono', monospace",
-                                    fontVariantNumeric: "tabular-nums" }}>
+          <React.Fragment key={r.id}>
+            <span style={{ color: t.text2 }}>{nameOf(r.id)}</span>
             {/* ★ 金额琥珀只给**真的在花钱**的那条路由。未登记/未标注走中性色 ——
                 颜色在本仓是有语义的,乱用等于把语义稀释掉。 */}
-            {nameOf(r.id)} <b style={{ color: isRelay(r.id) ? "#E0A21C" : isPool(r.id) ? t.text : t.muted }}>{fmtTok(r.total)}</b>
-            <span style={{ opacity: 0.7 }}> · {((r.total / sum) * 100).toFixed(1)}%</span>
-          </span>
+            <b style={{ textAlign: "right", fontFamily: MONO, fontVariantNumeric: "tabular-nums",
+                        color: isRelay(r.id) ? "#E0A21C" : isPool(r.id) ? t.text : t.muted }}>
+              {fmtTok(r.total)}
+            </b>
+            <span style={{ textAlign: "right", fontFamily: MONO,
+                           fontVariantNumeric: "tabular-nums", color: t.muted }}>
+              {((r.total / sum) * 100).toFixed(1)}%
+            </span>
+          </React.Fragment>
         ))}
         {billed.length > 0 && (
           <>
-            <span style={{ fontWeight: 600, color: t.text, marginTop: 4 }}>
+            <span style={{ gridColumn: "1 / -1", fontWeight: 700, color: t.text, marginTop: 5 }}>
               中转站账单 · {rangeTxt}
             </span>
             {billed.map((r) => (
-              <span key={r.id} style={{ fontFamily: "'JetBrains Mono', monospace",
-                                        fontVariantNumeric: "tabular-nums" }}>
-                {nameOf(r.id)} <b style={{ color: "#E0A21C" }}>{fmtTok(r.total)}</b>
-                <span style={{ opacity: 0.7 }}> · 实扣 {fmtUSD(r.cost)}</span>
-              </span>
+              <React.Fragment key={r.id}>
+                <span style={{ color: t.text2 }}>{nameOf(r.id)}</span>
+                <b style={{ textAlign: "right", fontFamily: MONO, color: "#E0A21C",
+                            fontVariantNumeric: "tabular-nums" }}>{fmtTok(r.total)}</b>
+                <span style={{ textAlign: "right", fontFamily: MONO, color: t.muted,
+                               fontVariantNumeric: "tabular-nums" }}>
+                  实扣 {fmtUSD(r.cost)}
+                </span>
+              </React.Fragment>
             ))}
           </>
         )}
         {(relayTok > 0 || billedTok > 0) && (
-          <span data-route-footnote style={{ color: "#E0A21C", whiteSpace: "normal" }}>
-            {/* ★★ 两个来源、两个口径,必须同时说清楚"是什么"和"别加两遍"。 */}
-            ⚠️ 其中 {fmtTok(relayTok + billedTok)} 经中转站（真实扣款
-            {fmtUSD(billedCost)}）—— <b>下面的「总费用」对它们不适用</b>
-            （那是按 OpenAI 牌价折算的等效成本）。
-            {billedTok > 0 && (
-              <> 这批数来自中转站自己的账单，<b>已经含在上面「账号池」那一行里</b>
-              （代理转发时 codex 只记 <code>rotateproxy</code>），<b>不要相加</b>。</>
-            )}
+          /* ★★ 用户 2026-09-21：「具体的说明不要了」。原来这里是五行解释性文字，
+             把一个 8 行的浮层撑成 13 行，而其中大半是**为什么**而不是**是什么**。
+             ⚠️ 但**披露本身不能跟着删** —— 它说的是一条仍然成立的事实：这批 token
+             已经含在「账号池」那一行里（代理转发时 codex 只记 `rotateproxy`），
+             与下方按 OpenAI 牌价折算的「总费用」**不是一个口径，相加就是错的**。
+             所以这里压缩的是**解释**，不是**披露**（同 GrokCard 那条：省掉的是解释）。
+             ★ 全文没有消失：它在 `.claude/rules/traffic.md` 与本文件的注释里。 */
+          <span data-route-footnote
+                style={{ gridColumn: "1 / -1", color: "#E0A21C", whiteSpace: "normal",
+                         marginTop: 6, paddingTop: 6, borderTop: `1px solid ${t.divider}`,
+                         fontSize: 11, lineHeight: 1.55 }}>
+            ⚠️ 其中 {fmtTok(relayTok + billedTok)} 经中转站
+            {billedCost > 0 && <> · 实扣 {fmtUSD(billedCost)}</>}
+            {billedTok > 0 && <> · 已含在「账号池」行内</>}
+            {" · "}<b>勿与下方「总费用」相加</b>
           </span>
         )}
       </div>
