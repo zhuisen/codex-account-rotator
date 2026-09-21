@@ -1734,6 +1734,41 @@ harness 新增 `?agylive=<sub>` 投递一条兄弟 webview 会发的事件。实
 
 ### B46 · 一次运行日志体检：查出 4 件，其中最大的一件**四条原始判断里没有一条提到** — 2026-09-14 ✅
 
+---
+
+### 从现况板搬来（2026-09-21，逐字未改）—— 两块已经不是「进行时」的
+
+> `memory.md` 只写进行时。下面两块都不是：前者是**等复现再跑的判别实验**（没人在推进它），
+> 后者已发版且闸已做变异验证。按「已发布的整段挪进 CHANGELOG，板上留一行指针」搬过来 ——
+> **搬运保真，摘要不保真**，所以一个字没改。
+
+### 0a-bis. `Selected model is at capacity` —— **未复现，根因未定**（2026-09-08）
+
+用户报此错并问「是不是我改完配置导致的」。**排除**：本轮只改了 `proxy/cxp` 的 argv 路由
+（diff 里 model / service_tier 一个都没碰），两个 config 的 mtime（11:39 / 12:03）都早于第一次编辑；
+额度链正常（plus4/6/7 今天 429 六次全部被代理正确接住换号，现跑 Pro1 持续 200）。
+**当场用现状配置真跑 `codex exec` —— 成功**，所以是间歇性的。
+
+两个都能解释同样证据的假说，**别当已知**：
+- H1 **fast 通道容量** —— `rotateproxy.config.toml:7` 有 `service_tier = "fast"`（base 是 `"default"`），
+  而 `gpt-6-astra` 的 tier 定义只有 `{"id":"priority","name":"Fast","description":"2x speed, increased usage"}`。
+  ⚠️ 这行**不在 09-06 备份里**（那份只有 provider/model/effort=high），是之后被加的，非本轮所为。
+- H2 **gpt-6-astra 整体容量** —— 模型刚发布。
+
+**判别实验（下次复现时，同一时刻跑）**：
+`codex exec -c service_tier='"default"' --skip-git-repo-check 'reply with exactly OK'`
+成功 ⇒ H1（改 `rotateproxy.config.toml:7` 为 `"default"`）；也失败 ⇒ H2（换 `gpt-5.6-sol`/`gpt-5.5`）。
+**未替用户改** —— `fast` 是「2x 速度 + 更高用量」，关掉是有代价的取舍。
+
+## 1c. 已发版、待真机回归（Codex session 隔离守卫）
+
+- Codex PATH wrapper 的 session isolation guard 已收窄：原生 picker、`--all`、session name 与 ID 均透传，只拦自动接入最近 thread 的 `resume/fork --last`。新任务仍用 fresh `codex` 或 `/new <task-name>`。
+- `scripts/test-codex-session-visibility.sh` 已覆盖 picker/名称/ID 放行与 `--last` 阻断，并用过宽 guard 做变异验证（变异版会红）。
+
+
+---
+
+
 > **线上验收（2026-09-21 从 `memory.md` 搬来，逐字未改）。** 板上那两条都已了结，
 > 按「已发布的整段挪进 CHANGELOG，板上留一行指针」搬过来 —— 搬运保真，摘要不保真。
 >
