@@ -178,5 +178,5 @@ echo
 echo "==> loaded:"
 for n in autosync quotad proxy dawnprobe; do
     printf '  %-13s %s\n' "$n" \
-        "$(launchctl print "gui/$UID_NUM/$PREFIX.$n" 2>/dev/null | awk '/^\tstate = /{print $3; exit}' || echo '?')"
+        "$(launchctl print "gui/$UID_NUM/$PREFIX.$n" 2>/dev/null | awk '/^\tstate = /&&!f{print $3; f=1}' || echo '?')"
 done

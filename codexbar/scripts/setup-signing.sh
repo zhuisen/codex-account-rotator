@@ -17,7 +17,9 @@ CERTDIR="$ROOT/scratch/signing"
 OPENSSL="/usr/bin/openssl"
 mkdir -p "$CERTDIR"
 
-if security find-identity -p codesigning | grep -q "$IDENTITY"; then
+# ⚠️ 不用 `grep -q`：pipefail 下它提前退出会让 `security` 吃 SIGPIPE，条件静默变成假 ——
+#   把「证书已存在」误判成「不存在」，再造一张重复的。见 tests/test_deploy_script_sigpipe.py。
+if security find-identity -p codesigning | grep -F "$IDENTITY" >/dev/null; then
     echo "==> identity '$IDENTITY' already in keychain — skipping creation"
 else
     echo "==> creating self-signed code-signing cert '$IDENTITY'"
@@ -54,7 +56,7 @@ if [ -d "$APP" ]; then
     codesign --verify --strict "$APP"
     echo
     echo "DONE. Now relaunch CodexBar — grants persist across future rebuilds."
-    codesign -dvv "$APP" 2>&1 | grep -E "Authority|Signature" | head -2
+    codesign -dvv "$APP" 2>&1 | grep -E "Authority|Signature" | sed -n 1,2p   # 不用 head：见上
 else
     echo "!! $APP not found — build first: cd codexbar && npx tauri build --bundles app"
 fi

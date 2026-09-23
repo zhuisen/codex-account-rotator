@@ -48,7 +48,9 @@ echo "==> deploying to $APP"
 rm -rf "$APP"
 cp -R "$BUILD" "$APP"
 
-if security find-identity -p codesigning 2>/dev/null | grep -q "$IDENTITY"; then
+# ⚠️ 不用 `grep -q`：它匹配到就退出，`security` 若还在写会吃 SIGPIPE，pipefail 让整个条件
+#   变成**假** —— 静默落到下面 ad-hoc 那一支，下次启动重新弹 TCC 授权（同 `_running` 那条竞态）。
+if security find-identity -p codesigning 2>/dev/null | grep -F "$IDENTITY" >/dev/null; then
     echo "==> signing with '$IDENTITY'"
     codesign --force --deep --sign "$IDENTITY" "$APP"
     codesign --verify --strict "$APP"
@@ -75,7 +77,12 @@ open "$APP"
 #   ★ 同族判据：本仓已有的「常驻服务代码 ✓ 均为最新」比的是进程启动时刻 vs 源码 mtime。
 #     这里比的是**可执行文件路径** —— 同一个问题的另一面：装好了 ≠ 跑起来了。
 sleep 3
-_running="$(ps -Ao pid=,comm= | awk '$2 ~ /codexbar$/ {print $1; exit}')"
+# ⚠️ **awk 里不许 `exit`，管道尾巴上也不许 `head`**（2026-09-23 实测）。本脚本开着
+#   `set -euo pipefail`：awk 读到第一行就退出会关掉管道，`ps` 还在写就吃 SIGPIPE（exit 141），
+#   pipefail 把它算成整条管道失败，`set -e` 随即**静默杀掉整个 deploy.sh** ——
+#   后面的版本号与 B≠0 告警一行都不打，而看上去和成功一模一样（新包其实已经装好并启动了）。
+#   是竞态：`ps` 写得比 awk 退出快就不触发，所以时好时坏。闸：tests/test_deploy_script_sigpipe.py。
+_running="$(ps -Ao pid=,comm= | awk '$2 ~ /codexbar$/ && !f {print $1; f=1}')"
 if [ -z "$_running" ]; then
     echo "⚠️  启动后没看到 codexbar 进程 —— 它可能被单实例闸挡住了，或者崩了。"
 elif [ "$(ps -o comm= -p "$_running")" != "$APP/Contents/MacOS/codexbar" ]; then
