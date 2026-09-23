@@ -378,7 +378,7 @@ export default function PlatformPage({ t, data, raw, cacheMode, pk, st, setSt, o
   const dCost = prev ? delta(v?.cost ?? 0, prev.cost) : null;
 
   const capt = isToday
-    ? `今日 · ${v?.labels.length ?? 0} 格 · 每 2 小时`
+    ? `今日 · ${v?.labels.length ?? 0} 格 · 每小时`
     : `${md(range.s)} → ${md(range.e)} · ${v?.labels.length ?? 0} 格 · ${granLabel(effGran(st, rangeDays))}`;
   const kpis: Kpi[] = [
     { k: "总 token", v: fmtTok(v?.agg.total ?? 0), n: v?.agg.total ?? 0, fmt: fmtTok,

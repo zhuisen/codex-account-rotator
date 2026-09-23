@@ -74,7 +74,7 @@ out.gran_year = effGran(R({ preset: "year" }), 256);
 out.gran_custom_same_len = effGran(R({ preset: "custom", custom: { s: "2026-01-01", e: "2026-09-13" } }), 256);
 out.gran_year_manual = effGran(R({ preset: "year", gran: "day" }), 256);
 
-// 今日 = 每 2 小时
+// 今日 = 每小时一格（2026-09-23 用户从「每 2 小时」改）
 const td = bucketsFor(data, "codex", R({ preset: "today" }), TODAY);
 out.today_n = td.labels.length;
 out.today_sum = td.buckets.reduce((s, b) => s + b.total, 0);
@@ -241,18 +241,23 @@ class CustomSpansAreInclusive(unittest.TestCase):
         self.assertEqual(self.o["d30_last"], "2026-09-12")
 
 
-class TodayIsBucketedEveryTwoHours(unittest.TestCase):
-    """★ 交接稿 §5：今日档按**每 2 小时**分格（`今日 · 12 格 · 每 2 小时`）。"""
+class TodayIsBucketedEveryHour(unittest.TestCase):
+    """★ 今日档**一格一小时**（`今日 · 24 格 · 每小时`）。
+
+    ⚠️ 2026-09-23 起**偏离交接稿 §5**（那里写的是每 2 小时一格）—— 用户原话：
+      「AI用量的今日，横轴颗粒度改为每小时的，不是两小时跨度」。用户指令优先于稿子。
+    """
 
     @classmethod
     def setUpClass(cls):
         cls.o = _probe()
 
-    def test_twelve_buckets(self):
-        self.assertEqual(self.o["today_n"], 12)
+    def test_one_bucket_per_hour(self):
+        """★★ 夹具是 24 个小时桶 ⇒ 24 格。仍是 12 就说明还在两两合并。"""
+        self.assertEqual(self.o["today_n"], 24)
 
-    def test_no_token_is_dropped_in_the_merge(self):
-        """★★ 合并而不是隔一取一 —— 后者丢掉一半的量，而图形看上去只是"矮了一点"。"""
+    def test_no_token_is_dropped(self):
+        """★★ 总量不许因为改颗粒度而变 —— 不管合并还是拆开，一天的 token 都是那么多。"""
         self.assertEqual(self.o["today_sum"], 240, "24 小时 × 10")
 
 

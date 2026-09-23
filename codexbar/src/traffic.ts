@@ -555,21 +555,6 @@ function aggregate(days: Record<string, Bucket>, keys: string[],
 }
 
 /**
- * 今日档：**每 2 小时**一格（交接稿 §5）。
- *
- * ★ `p.hours` 是逐小时的，这里两两合并。合并而不是隔一取一 —— 后者会丢掉一半的量，
- *   而图形看上去只是"矮了一点"。
- */
-function byTwoHours(ks: string[], p: Platform): { labels: string[]; buckets: Bucket[] } {
-  const labels: string[] = [], buckets: Bucket[] = [];
-  for (let i = 0; i < ks.length; i += 2) {
-    labels.push(ks[i]);
-    buckets.push(sumBuckets(ks.slice(i, i + 2).map((k) => p.hours[k] ?? EMPTY)));
-  }
-  return { labels, buckets };
-}
-
-/**
  * 某平台在**某一天**的小时键（已排序）。
  *
  * ★★★ **`p.hours` 跨多天（30 天），所以任何消费点都必须点名是哪一天。**
@@ -590,9 +575,9 @@ export function hourKeysOf(p: Platform, day: string): string[] {
  *   `scan.py --hours-day <日期>` 现补。返回 `null` 让调用方去补，**而不是画一根空柱**：
  *   一根空柱和"那天真的没用"长得一模一样。
  *
- * ★ 单天**不做两小时合并**（`byTwoHours` 是今日档的做法）——
- *   今日档合并是因为它常只有小半天、格子太窄；整天是 24 格，正好一格一小时，
- *   而用户要的就是"横轴按小时"。
+ * ★ 今日档与单天现在是**同一种颗粒度**：一格一小时。
+ *   （今日档原先按交接稿 §5 两两合并成「每 2 小时」一格，用户 2026-09-23 改成每小时，
+ *   `byTwoHours` 随之删除。）
  */
 export function hoursOfDay(p: Platform, day: string): { labels: string[]; buckets: Bucket[] } | null {
   const ks = hourKeysOf(p, day);
@@ -603,7 +588,7 @@ export function hoursOfDay(p: Platform, day: string): { labels: string[]; bucket
 /**
  * 这个区间是不是**恰好一天**。→ 那一天的 `YYYY-MM-DD`，否则 `null`。
  *
- * ★ 「今日」档单独走 `byTwoHours`，所以这里只管自定义区间与其它 preset。
+ * ★ 「今日」档在 `bucketsFor` 里单独处理（它用的是数据自带的「今天」），所以这里只管自定义区间与其它 preset。
  */
 export function singleDayOf(st: RangeState, today: string): string | null {
   if (st.preset === "today") return null;
@@ -621,7 +606,13 @@ export function bucketsFor(data: TrafficData, key: string, st: RangeState, today
   //   「今日」档于是画出了整整 30 天，总 token 21.64B、较昨日 ↑4130%。
   //   用户当场截图报「今日的 token 用量有 bug」。**改了 `hours` 的契约，
   //   就必须回头看每一个消费点** —— 那个字段以前的含义是"今天"，现在不是了。
-  if (st.preset === "today") return byTwoHours(hourKeysOf(p, today), p);
+  // ★★ 今日档**一格一小时**（用户 2026-09-23：「横轴颗粒度改为每小时的，不是两小时跨度」）。
+  //   原先按交接稿 §5 两两合并成每 2 小时一格；数据本来就是逐小时的，合并只是在丢分辨率 ——
+  //   尤其今日常只有小半天，12 个小时并成 6 格，一次集中使用的峰被抹平一半。
+  if (st.preset === "today") {
+    const ks = hourKeysOf(p, today);
+    return { labels: ks, buckets: ks.map((k) => p.hours[k] ?? EMPTY) };
+  }
   // ★★ 区间恰好一天 ⇒ 横轴按小时（用户 2026-09-15 指定）。
   //   取不到小时桶就**照旧走日聚合**（画出那一根日柱）—— 调用方另有一条
   //   「按需补扫」的路，而在补到之前画一根真实的日柱，比画空诚实。

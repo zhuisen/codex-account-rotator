@@ -172,7 +172,7 @@ export default function TrafficPage({ t, data, raw, cacheMode, prefs, st, setSt,
    */
   /** 图表标题行右侧的小字（交接稿 §1）。与 `token` 同一行，由 `StackedArea` 渲染。 */
   const capt = isToday
-    ? `今日 · ${view?.labels.length ?? 0} 格 · 每 2 小时`
+    ? `今日 · ${view?.labels.length ?? 0} 格 · 每小时`
     : `${md(range.s)} → ${md(range.e)} · ${view?.labels.length ?? 0} 格 · ${granLabel(effGran(st, days))}`;
   const loading = !view;
   const kpis: Kpi[] = loading ? [
