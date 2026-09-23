@@ -12,9 +12,9 @@
 ★★ **夹具里 `last_aid` 与 `active` 必须不同**（make_harness.py 已这样造）——
   两者相同时，读哪个都是同一个像素，改没改都绿（本仓形态⑩）。本文件第一条先证这个前提。
 
-## ② 卡片动作弹层打开 10 秒后直接收回（不论是否在操作；同日从 30 秒改为 10 秒）
+## ② 卡片动作弹层打开后到点直接收回（不论是否在操作；时长 = `CARD_ACTIONS_LIFE_MS`，同日 30→10→5 秒）
 
-★ 用 Chrome headless 的 `--virtual-time-budget` **真的让时间走过去**，而不是断言源码里有个 10000：
+★ 用 Chrome headless 的 `--virtual-time-budget` **真的让时间走过去**，而不是断言源码里有个数字：
   那种断言在「计时器根本没挂上」「挂上了但被每次渲染重置」时同样是绿的。
 """
 import json
@@ -132,8 +132,10 @@ class TheTrayTitleFollowsTheProxyToo(unittest.TestCase):
                          "★ 前端的「在用」判据与托盘不一致")
 
 
-# 卡片动作弹层：点开 → 5s 在 → 11s 不在；另一组 8s 时按一下键，11s 照样不在。
-# ★ 5s 那一拍同时挡「收得太早」：阈值被改成 3s 之类时 at5 会先红。
+# 卡片动作弹层：点开 → 时长一半时在 → 到点 +600ms 不在；另一组 80% 时按一下键，到点 +600ms 照样不在。
+# ★★ 时间点**从 `CARD_ACTIONS_LIFE_MS` 推导**，不写死（用户同一天把时长调了三次：30→10→5 秒，
+#    写死的话每调一次测试就要跟着改，而漏改的那一版会在错误的时刻取样、判据悄悄失效）。
+# ★ 「一半时还在」同时挡「收得太早」。
 _CARD_PROBE = r"""
 setTimeout(function () {
   var out = {};
@@ -142,38 +144,44 @@ setTimeout(function () {
   if (card) card.click();
   var poke = %(poke)s;
   function has() { return !!document.querySelector('[data-actions]'); }
-  setTimeout(function () { out.at5 = has(); }, 5000);
+  setTimeout(function () { out.at5 = has(); }, __HALF__);
   if (poke) setTimeout(function () {
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Shift', bubbles: true }));
-  }, 8000);
+  }, __POKE__);
   setTimeout(function () { out.at11 = has();
-    document.title = '__MF__' + JSON.stringify(out); }, 11000);
+    document.title = '__MF__' + JSON.stringify(out); }, __AFTER__);
 }, 2600);
 """
 
 
 @unittest.skipIf(not Path(CHROME).exists(), "没有 Chrome")
-class TheActionPopoverClosesItselfAfterTenSeconds(unittest.TestCase):
+class TheActionPopoverClosesItselfOnTime(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.idle = _probe("harness.html", "nav=home", _CARD_PROBE % {"poke": "false"}, budget=20000)
-        cls.busy = _probe("harness.html", "nav=home", _CARD_PROBE % {"poke": "true"}, budget=20000)
+        life = _const("CARD_ACTIONS_LIFE_MS")
+        if not life:
+            raise unittest.SkipTest("读不到 CARD_ACTIONS_LIFE_MS —— 探针无从定时")
+        def probe(poke):
+            js = (_CARD_PROBE % {"poke": poke}).replace("__HALF__", str(life // 2)) \
+                 .replace("__POKE__", str(life * 4 // 5)).replace("__AFTER__", str(life + 600))
+            return _probe("harness.html", "nav=home", js, budget=life + 6000)
+        cls.idle, cls.busy = probe("false"), probe("true")
         if cls.idle is None or cls.busy is None:
             raise unittest.SkipTest("harness 静态服务（3304）没在跑")
 
     def test_it_opened_in_the_first_place(self):
-        """★★ 先证它**打开过** —— 没打开时「11 秒后不在」是白绿。"""
+        """★★ 先证它**打开过**（时长一半时还在）—— 没打开时「到点后不在」是白绿。"""
         self.assertTrue(self.idle["card"], "★★ 找不到卡片")
         self.assertTrue(self.idle["at5"], "★★ 点了卡片动作弹层没出来 —— 下面几条都没有意义")
 
     def test_it_closes_after_ten_seconds(self):
-        self.assertFalse(self.idle["at11"], "★★★ 打开 11 秒了，动作弹层还在")
+        self.assertFalse(self.idle["at11"], "★★★ 到点 600ms 了，动作弹层还在")
 
     def test_activity_does_not_keep_it_open(self):
-        """★★ 用户定的语义：**10 秒后直接收回，不管动与不动**。
+        """★★ 用户定的语义：**到点直接收回，不管动与不动**。
 
         第一版做成了「有操作就重置计时」，被用户否掉。这条守住现在的语义：
-        8 秒时按了一下键，11 秒时**必须已经收回**。
+        到 80% 时按了一下键，到点 600ms 后**必须已经收回**。
         """
         self.assertTrue(self.busy["at5"], "★★ 这一组也没打开过 —— 下面的判断没意义")
         self.assertFalse(self.busy["at11"], "★★ 有操作就不收了 —— 用户要的是到点就收")
@@ -196,9 +204,9 @@ setTimeout(function () {
     }
     out[tag] = o;
   }
-  setTimeout(function () { snap('open'); }, 5000);
-  setTimeout(function () { snap('mid'); }, 10070);
-  setTimeout(function () { snap('after'); document.title = '__MF__' + JSON.stringify(out); }, 10600);
+  setTimeout(function () { snap('open'); }, __HALF__);
+  setTimeout(function () { snap('mid'); }, __MID__);
+  setTimeout(function () { snap('after'); document.title = '__MF__' + JSON.stringify(out); }, __AFTER__);
 }, 2600);
 """
 
@@ -226,10 +234,15 @@ class TheActionPopoverLeavesTheWayItCame(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.r = _probe("harness.html", "nav=home", _EXIT_PROBE, budget=16000)
+        cls.life, cls.exit = _const("CARD_ACTIONS_LIFE_MS"), _const("CARD_ACTIONS_EXIT_MS")
+        if not cls.life:
+            raise unittest.SkipTest("读不到 CARD_ACTIONS_LIFE_MS —— 探针无从定时")
+        # ★ 「到点后 70ms」取样退场中的样子（退场共 EXIT+40ms），「到点后 600ms」确认已卸载。
+        js = _EXIT_PROBE.replace("__HALF__", str(cls.life // 2)) \
+                        .replace("__MID__", str(cls.life + 70)).replace("__AFTER__", str(cls.life + 600))
+        cls.r = _probe("harness.html", "nav=home", js, budget=cls.life + 6000)
         if cls.r is None:
             raise unittest.SkipTest("harness 静态服务（3304）没在跑")
-        cls.life, cls.exit = _const("CARD_ACTIONS_LIFE_MS"), _const("CARD_ACTIONS_EXIT_MS")
 
     def test_it_opened(self):
         self.assertTrue(self.r["open"]["present"], "★★ 动作条没打开过 —— 下面几条都没意义")

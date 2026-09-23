@@ -135,10 +135,10 @@ export default function App() {
   const [detailModal, setDetailModal] = useState<AccountDetail | null>(null);
   const [selectedCard, setSelectedCard] = useState<string | null>(null);
   /**
-   * ★ 卡片动作弹层**打开 10 秒后直接收回，不管有没有在操作**（用户 2026-09-23 定；同日从 30 秒改为 10 秒）。
+   * ★ 卡片动作弹层**打开后到点直接收回，不管有没有在操作**（用户 2026-09-23 定；时长见 `CARD_ACTIONS_LIFE_MS`）。
    *
    * ⚠️ 第一版是「30 秒**无操作**才收，每次点击/按键重置计时」—— 用户明确否掉：
-   *   「30秒后直接收回，不管动与不动」，随后又定为 10 秒。所以这里**不监听任何输入、不重置**。
+   *   「30秒后直接收回，不管动与不动」，随后改 10 秒、再改 5 秒。所以这里**不监听任何输入、不重置**。
    *   已知代价（用户选的）：改名改到一半、正在点探针确认时到点也会收走，半截名字丢弃
    *   （与改名框 onBlur 放弃的行为一致，不会静默提交）。
    * ★ 挂在 `selectedCard` 上：codex 卡、agy 卡、失效号小条共用这一个选中态，一处生效。
