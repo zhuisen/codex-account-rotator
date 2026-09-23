@@ -93,7 +93,7 @@ const IconMoon = () => <svg width="13" height="13" viewBox="0 0 24 24" fill="cur
  *   窄屏自动退到 2 列、每张反而更宽。**卡片永远不会窄到装不下自己的动作条。**
  */
 const CARD_MIN_W = 320;
-/** 卡片动作弹层无操作多久自动收回（用户 2026-09-23 定：30 秒）。 */
+/** 卡片动作弹层打开后多久自动收回（用户 2026-09-23 定：30 秒，不论是否在操作）。 */
 const CARD_ACTIONS_IDLE_MS = 30_000;
 const CARD_GRID_COLS = `repeat(auto-fill, minmax(${CARD_MIN_W}px, 1fr))`;
 
@@ -136,29 +136,19 @@ export default function App() {
   const [detailModal, setDetailModal] = useState<AccountDetail | null>(null);
   const [selectedCard, setSelectedCard] = useState<string | null>(null);
   /**
-   * ★ 卡片动作弹层 **30 秒无操作自动收回**（用户 2026-09-23）。
+   * ★ 卡片动作弹层**打开 30 秒后直接收回，不管有没有在操作**（用户 2026-09-23 定）。
    *
-   * 「无操作」= 这 30 秒里没有任何按键或点击。计时器在每次按键/点击时**重置**，
-   * 所以正在点动作条、正在改名打字时不会被收走 —— 只有真的放着不管才收。
-   * ★ 用**捕获阶段**监听：改名输入框的 `onKeyDown` 会 `stopPropagation`（挡 ⌘1~⌘9 切号），
-   *   冒泡阶段听不到打字，于是改名改到一半会被收走、半截名字丢掉。
-   * ★ 挂在 `selectedCard` 上而不是组件里：codex 卡、agy 卡、失效号小条共用这一个选中态，
-   *   一处计时三处都生效。
+   * ⚠️ 第一版是「30 秒**无操作**才收，每次点击/按键重置计时」—— 用户明确否掉：
+   *   「30秒后直接收回，不管动与不动」。所以这里**不监听任何输入、不重置**。
+   *   已知代价（用户选的）：改名改到一半、正在点探针确认时到点也会收走，半截名字丢弃
+   *   （与改名框 onBlur 放弃的行为一致，不会静默提交）。
+   * ★ 挂在 `selectedCard` 上：codex 卡、agy 卡、失效号小条共用这一个选中态，一处生效。
+   *   换选另一张卡 = `selectedCard` 变了 = 重新计 30 秒（那是一次新的打开，不是「重置」）。
    */
   useEffect(() => {
     if (!selectedCard) return;
-    let id = window.setTimeout(() => setSelectedCard(null), CARD_ACTIONS_IDLE_MS);
-    const poke = () => {
-      window.clearTimeout(id);
-      id = window.setTimeout(() => setSelectedCard(null), CARD_ACTIONS_IDLE_MS);
-    };
-    window.addEventListener("pointerdown", poke, true);
-    window.addEventListener("keydown", poke, true);
-    return () => {
-      window.clearTimeout(id);
-      window.removeEventListener("pointerdown", poke, true);
-      window.removeEventListener("keydown", poke, true);
-    };
+    const id = window.setTimeout(() => setSelectedCard(null), CARD_ACTIONS_IDLE_MS);
+    return () => window.clearTimeout(id);
   }, [selectedCard]);
   const [autoSwitch, setAutoSwitch] = useState(() => getSettings().autoSwitchEnabled);
   // 侧栏折叠态。**默认折叠**（DEFAULTS.navOpen = false），选择会记住 —— 每次启动都弹回默认的开关很烦人。

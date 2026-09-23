@@ -12,7 +12,7 @@
 ★★ **夹具里 `last_aid` 与 `active` 必须不同**（make_harness.py 已这样造）——
   两者相同时，读哪个都是同一个像素，改没改都绿（本仓形态⑩）。本文件第一条先证这个前提。
 
-## ② 卡片动作弹层 30 秒无操作自动收回
+## ② 卡片动作弹层打开 30 秒后直接收回（不论是否在操作）
 
 ★ 用 Chrome headless 的 `--virtual-time-budget` **真的让时间走过去**，而不是断言源码里有个 30000：
   那种断言在「计时器根本没挂上」「挂上了但被每次渲染重置」时同样是绿的。
@@ -132,7 +132,7 @@ class TheTrayTitleFollowsTheProxyToo(unittest.TestCase):
                          "★ 前端的「在用」判据与托盘不一致")
 
 
-# 卡片动作弹层：点开 → 5s 在 → 31s 不在；另一组在 25s 时按一下键，31s 仍在、56s 才收。
+# 卡片动作弹层：点开 → 5s 在 → 31s 不在；另一组 25s 时按一下键，31s 照样不在。
 _CARD_PROBE = r"""
 setTimeout(function () {
   var out = {};
@@ -153,7 +153,7 @@ setTimeout(function () {
 
 
 @unittest.skipIf(not Path(CHROME).exists(), "没有 Chrome")
-class TheActionPopoverClosesItselfAfterThirtyIdleSeconds(unittest.TestCase):
+class TheActionPopoverClosesItselfAfterThirtySeconds(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.idle = _probe("harness.html", "nav=home", _CARD_PROBE % {"poke": "false"}, budget=70000)
@@ -167,16 +167,16 @@ class TheActionPopoverClosesItselfAfterThirtyIdleSeconds(unittest.TestCase):
         self.assertTrue(self.idle["at5"], "★★ 点了卡片动作弹层没出来 —— 下面几条都没有意义")
 
     def test_it_closes_after_thirty_idle_seconds(self):
-        self.assertFalse(self.idle["at31"], "★★★ 放着不管 31 秒，动作弹层还在")
+        self.assertFalse(self.idle["at31"], "★★★ 打开 31 秒了，动作弹层还在")
 
-    def test_activity_resets_the_clock(self):
-        """★★ 正在用的时候不许收走 —— 25 秒时按了一下键，31 秒时必须还在。
+    def test_activity_does_not_keep_it_open(self):
+        """★★ 用户定的语义：**30 秒后直接收回，不管动与不动**。
 
-        反向那一侧：只写「30 秒后收」而不重置，改名改到一半、点到一半都会被收走。
+        第一版做成了「有操作就重置计时」，被用户否掉。这条守住现在的语义：
+        25 秒时按了一下键，31 秒时**必须已经收回**。
         """
-        self.assertTrue(self.busy["at31"], "★★ 25 秒时有操作，31 秒却被收走了 —— 没有重置计时")
-        self.assertFalse(self.busy["at56"], "★ 最后一次操作后 31 秒仍没收 —— 重置之后不再计时")
-
+        self.assertTrue(self.busy["at5"], "★★ 这一组也没打开过 —— 下面的判断没意义")
+        self.assertFalse(self.busy["at31"], "★★ 有操作就不收了 —— 用户要的是到点就收")
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
