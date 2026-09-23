@@ -12,9 +12,9 @@
 ★★ **夹具里 `last_aid` 与 `active` 必须不同**（make_harness.py 已这样造）——
   两者相同时，读哪个都是同一个像素，改没改都绿（本仓形态⑩）。本文件第一条先证这个前提。
 
-## ② 卡片动作弹层打开 30 秒后直接收回（不论是否在操作）
+## ② 卡片动作弹层打开 10 秒后直接收回（不论是否在操作；同日从 30 秒改为 10 秒）
 
-★ 用 Chrome headless 的 `--virtual-time-budget` **真的让时间走过去**，而不是断言源码里有个 30000：
+★ 用 Chrome headless 的 `--virtual-time-budget` **真的让时间走过去**，而不是断言源码里有个 10000：
   那种断言在「计时器根本没挂上」「挂上了但被每次渲染重置」时同样是绿的。
 """
 import json
@@ -132,7 +132,8 @@ class TheTrayTitleFollowsTheProxyToo(unittest.TestCase):
                          "★ 前端的「在用」判据与托盘不一致")
 
 
-# 卡片动作弹层：点开 → 5s 在 → 31s 不在；另一组 25s 时按一下键，31s 照样不在。
+# 卡片动作弹层：点开 → 5s 在 → 11s 不在；另一组 8s 时按一下键，11s 照样不在。
+# ★ 5s 那一拍同时挡「收得太早」：阈值被改成 3s 之类时 at5 会先红。
 _CARD_PROBE = r"""
 setTimeout(function () {
   var out = {};
@@ -144,39 +145,38 @@ setTimeout(function () {
   setTimeout(function () { out.at5 = has(); }, 5000);
   if (poke) setTimeout(function () {
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Shift', bubbles: true }));
-  }, 25000);
-  setTimeout(function () { out.at31 = has(); }, 31000);
-  setTimeout(function () { out.at56 = has();
-    document.title = '__MF__' + JSON.stringify(out); }, 56000);
+  }, 8000);
+  setTimeout(function () { out.at11 = has();
+    document.title = '__MF__' + JSON.stringify(out); }, 11000);
 }, 2600);
 """
 
 
 @unittest.skipIf(not Path(CHROME).exists(), "没有 Chrome")
-class TheActionPopoverClosesItselfAfterThirtySeconds(unittest.TestCase):
+class TheActionPopoverClosesItselfAfterTenSeconds(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.idle = _probe("harness.html", "nav=home", _CARD_PROBE % {"poke": "false"}, budget=70000)
-        cls.busy = _probe("harness.html", "nav=home", _CARD_PROBE % {"poke": "true"}, budget=70000)
+        cls.idle = _probe("harness.html", "nav=home", _CARD_PROBE % {"poke": "false"}, budget=20000)
+        cls.busy = _probe("harness.html", "nav=home", _CARD_PROBE % {"poke": "true"}, budget=20000)
         if cls.idle is None or cls.busy is None:
             raise unittest.SkipTest("harness 静态服务（3304）没在跑")
 
     def test_it_opened_in_the_first_place(self):
-        """★★ 先证它**打开过** —— 没打开时「31 秒后不在」是白绿。"""
+        """★★ 先证它**打开过** —— 没打开时「11 秒后不在」是白绿。"""
         self.assertTrue(self.idle["card"], "★★ 找不到卡片")
         self.assertTrue(self.idle["at5"], "★★ 点了卡片动作弹层没出来 —— 下面几条都没有意义")
 
-    def test_it_closes_after_thirty_idle_seconds(self):
-        self.assertFalse(self.idle["at31"], "★★★ 打开 31 秒了，动作弹层还在")
+    def test_it_closes_after_ten_seconds(self):
+        self.assertFalse(self.idle["at11"], "★★★ 打开 11 秒了，动作弹层还在")
 
     def test_activity_does_not_keep_it_open(self):
-        """★★ 用户定的语义：**30 秒后直接收回，不管动与不动**。
+        """★★ 用户定的语义：**10 秒后直接收回，不管动与不动**。
 
         第一版做成了「有操作就重置计时」，被用户否掉。这条守住现在的语义：
-        25 秒时按了一下键，31 秒时**必须已经收回**。
+        8 秒时按了一下键，11 秒时**必须已经收回**。
         """
         self.assertTrue(self.busy["at5"], "★★ 这一组也没打开过 —— 下面的判断没意义")
-        self.assertFalse(self.busy["at31"], "★★ 有操作就不收了 —— 用户要的是到点就收")
+        self.assertFalse(self.busy["at11"], "★★ 有操作就不收了 —— 用户要的是到点就收")
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
