@@ -333,6 +333,10 @@ paths:
     不带 ⇒ `401 missing CSRF token`；用 `ANTIGRAVITY_CSRF_TOKEN` 自设 ⇒ `invalid CSRF token`；
     日志 / 进程环境 / `presence/`（空锁文件）里都找不到。落成 `csrf_required`（**不是**「会自动重试」的 `rpc_error`），
     采样器据 sidecar 退避一小时。**云端 `retrieveUserQuotaSummary` 成为唯一来源**，由菜单栏 webview 后台每 10 分钟保鲜。
+  - ★★★ **云端摘要必须打 `daily-cloudcode-pa.googleapis.com`，不是 `cloudcode-pa`**（2026-09-24，B69）。
+    agy 1.2.x 的后端换了 host；旧 host 同样回 200 同形响应，但**四桶恒 1.0、reset 恒 now+窗口**（空账本）——
+    打错 host 没有任何报错。判据：与 agy 自己的 `/usage` 状态栏（`⏱ 5h% (重置时刻) · 📅 周%`）对照，
+    驱动方法见 CHANGELOG B69（一次性 agy + pty 窗口大小 + 只发 `/usage`，零生成）。
   - `fetchAvailableModels` **仍在用**，但只用于 `health`（刷 token + 打一次，验凭证还活着）。
     ★ 组名**不再靠猜**：新端点自带 `displayName` / `bucketId`，旧那套「按 `(remainingFraction,
     resetTime)` 分桶 + 成员最多的那组是 gemini」的启发式已删除，闸在

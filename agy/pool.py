@@ -98,6 +98,15 @@ AGY_BIN = Path(os.environ.get("AGY_REAL", str(Path.home() / ".local" / "bin" / "
 
 TOKEN_HOST, TOKEN_PATH = "oauth2.googleapis.com", "/token"
 API_HOST = "cloudcode-pa.googleapis.com"
+#: ★★★ **额度摘要只能打 `daily-cloudcode-pa`**（2026-09-24 实测，CHANGELOG B69）。
+#:   agy 1.2.x 的后端换成了这个 host：同一个 token、同一个请求，
+#:   打 `cloudcode-pa` 恒回「四桶 1.0 + resetTime = now + 窗口」（**永远未启动**，
+#:   自 09-21 起 54/54 次如此，44 次真实运行 / 2.3M token 后仍不动）；
+#:   打 `daily-cloudcode-pa` 回真数（sam 5h 0.717 / 周 0.948，5h 重置 21:32:22Z
+#:   与 agy 自己状态栏的 `⏱ 77% (05:32)` 逐分钟对上）。
+#:   ⚠️ 两边都回 200、形状完全相同 —— 打错 host **没有任何报错**，只有一个恒满的假读数。
+#:   与本仓「上游缺省值恰好是 1.0」那条同一个坑：没有和满格只隔一个 host。
+QUOTA_API_HOST = "daily-cloudcode-pa.googleapis.com"
 MODELS_PATH = "/v1internal:fetchAvailableModels"
 #: ★★★ 按账号读**完整**额度摘要（含周窗口）。2026-09-15 从 agy 二进制
 #:   `strings` 里挖出来的，与本地 RPC `…/RetrieveUserQuotaSummary` 并列摆着。
@@ -489,7 +498,7 @@ def fetch_quota(access_token):
       而 0 是"用光了"的合法值。这条降级契约一个字没变。
     """
     try:
-        c = HTTPSConnection(API_HOST, timeout=TIMEOUT)
+        c = HTTPSConnection(QUOTA_API_HOST, timeout=TIMEOUT)
         c.request("POST", QUOTA_SUMMARY_PATH, body="{}",
                   headers={"Authorization": "Bearer " + access_token,
                            "Content-Type": "application/json", **ANTIGRAVITY_HEADERS})

@@ -174,3 +174,43 @@ class TheSamplerBacksOffWhenCsrfIsRequired(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TheQuotaSummaryGoesToTheHostAgyActuallyUses(unittest.TestCase):
+    """★★★ agy 1.2.x 的后端是 `daily-cloudcode-pa`（2026-09-24 实测，CHANGELOG B69）。
+
+    打 `cloudcode-pa` 同样回 200、形状完全相同，只是**四桶恒 1.0、reset 恒 now+窗口**——
+    打错 host 没有任何报错，只有一个恒满的假读数（用户：「5h 配额都没减少，数据不合理」）。
+    行为闸：真调 `fetch_quota`，只把 HTTPSConnection 换成记录 host 的假连接。
+    """
+
+    def test_fetch_quota_talks_to_the_daily_backend(self):
+        sys.path.insert(0, str(ROOT))
+        from agy import pool as P
+        seen = []
+
+        class FakeConn:
+            def __init__(self, host, *a, **k):
+                seen.append(host)
+
+            def request(self, *a, **k):
+                pass
+
+            def getresponse(self):
+                return types.SimpleNamespace(status=200, read=lambda: json.dumps(
+                    {"groups": [{"displayName": "Gemini Models", "buckets": [
+                        {"bucketId": "gemini-5h", "window": "5h", "remainingFraction": 0.7,
+                         "resetTime": "2026-09-23T21:32:22Z"}]}]}).encode())
+
+            def close(self):
+                pass
+
+        orig = P.HTTPSConnection
+        P.HTTPSConnection = FakeConn
+        try:
+            groups, err = P.fetch_quota("tok")
+        finally:
+            P.HTTPSConnection = orig
+        self.assertEqual(seen, ["daily-cloudcode-pa.googleapis.com"],
+                         "★★★ 额度摘要没打 agy 1.2 的真后端 —— 会读到一个恒满的空账本")
+        self.assertFalse(err)

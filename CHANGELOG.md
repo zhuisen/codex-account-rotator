@@ -914,6 +914,24 @@ body **522 KB 明文**还在传，codex 自己关连接 ⇒ 代理写 EPIPE ⇒ 
 闸：`test_agy_quota_timely.py`（9 条：恰好一个 webview 驱动 / 后台不看可见性 / 并行总耗时≈最慢者且不串号 / 退避与锁序）
 + `test_agy_degrade_contract.py::test_csrf_401_is_its_own_reason_not_rpc_error`；7 个变异全红。
 
+### B69 · 「5h 配额都没减少，数据不合理」—— 额度摘要一直打的是旧后端 — 2026-09-24 ✅（未发版）
+
+**真因**：agy 1.2.x 的后端换成了 **`daily-cloudcode-pa.googleapis.com`**，而我们一直打 `cloudcode-pa`。
+两边同 token、同请求、都回 200、形状一模一样 —— 旧 host 只是**永远回「四桶 1.0 + resetTime = now + 窗口」**。
+自 09-21 17:35 起 54/54 次如此；44 次真实运行（2.3M token）与一次受控探针（13,934 token，身份已证）之后都纹丝不动。
+**怎么找到的**：codex（gpt-6-astra/high）建议先拿 agy 自己的 `/usage` 做对照。驱动一个一次性 agy（设 pty 窗口大小，
+只发 `/usage`、零生成），状态栏显示 `⏱ 77% (05:32) · 📅 96%` ⇒ agy 看得到真数，是我们读错了地方。
+排除项：`project` 字段（`aicode-consumers`）、新版 User-Agent、OAuth client（`aud` 相同）、`fetchAvailableModels` 逐模型额度
+（27 个模型也全 1.0 —— 同样是旧后端）。二进制 `strings` 里 `daily-cloudcode-pa` 与生产 host 并列，一试即中：
+sam 5h 0.717 / 周 0.948，5h 重置 21:32:22Z = 05:32 SGT，与状态栏逐分钟对上。
+**修**：`agy/pool.py` 新增 `QUOTA_API_HOST = "daily-cloudcode-pa.googleapis.com"`，`fetch_quota` 改用它。
+修后实测：sam gemini 68.5%、dbk 92.8%、doushutangmu 100%（当天确实没用）。
+⚠️ **修正一条错误结论**：B68 里「本机 RPC 失效后云端成了唯一来源」本身成立，但「云端 100% 是真数」不成立 —— 当时读的是空账本。
+⚠️ 附带：agy 这一侧的咨询两次都失败（omc 5 分钟超时；直连 `agy -p` 空输出），结论只来自 codex + 实测。
+⚠️ 另一个仍然开着的：钥匙串当值号在排查中途从 dbk 被冲成 sam（常驻 agy 进程写回，已知机制），
+   所以「哪个号在消耗」必须看 agy 日志的 `applyAuthResult`，不能看我们以为装进去的号。
+闸：`test_agy_quota_timely.py::TheQuotaSummaryGoesToTheHostAgyActuallyUses`（行为闸，退回旧 host 即红）。
+
 ---
 
 ## v1.8.0 — 2026-09-19
