@@ -68,6 +68,16 @@ ACC_PALETTE = ["#2dd4bf", "#4d9fff", "#8b7cf6", "#E0A21C", "#27B26B", "#E0784F"]
 MODEL_SHADES = ["#2dd4bf", "#7fe8da", "#158f80", "#4d9fff", "#8b7cf6", "#E0A21C"]
 
 _TS_RE = re.compile(r"^\[proxy (\d\d)-(\d\d) (\d\d):(\d\d):(\d\d)(?: #(\S+))?\] (.*)$")
+
+#: 失败了也**不花钱**的请求方法 —— 与 `proxy.py::Handler._billable()` 是**同一条判据**
+#: （那边是「不是 GET/HEAD 就算计费」）。两处跨文件，由 `tests/test_rotation_free_hangups.py`
+#: 逐方法比对，改一边另一边立刻红。
+FREE_METHODS = ("GET", "HEAD")
+
+
+def billable_method(method):
+    """这个方法的请求中途断掉会不会已经计费。**认不出方法 ⇒ 按计费算**（读不到 ≠ 免费）。"""
+    return not method or method not in FREE_METHODS
 _ROLLOUT_RE = re.compile(r"rollout-\d{4}-\d\d-\d\dT[\d-]+-([0-9a-f-]{36})\.jsonl$")
 
 
@@ -245,6 +255,14 @@ def scan_proxy_log(text, now, start, end, resolve=None):
     """
     requests, resp_owner, markers, log_lines = [], {}, [], []
     undated = in_window = 0
+    # ★★ rid → 最近一次 `→` 行的方法（2026-09-23）。`stream err` 行本身不带方法，而
+    #    **免费的 `GET /models` 断连占了断流的绝大多数**：codex 0.156.0 的空闲会话每 270s 后台刷新
+    #    一次模型列表、5s 没收完就自己挂断，当天一个空闲窗口就刷出 80 个「断流」，而那段时间
+    #    POST 一个都没有 —— 页面却写着「已 200 后断流,**已计费**」（CHANGELOG B67）。
+    #    · 必须在**时间窗过滤之前**记：请求行可能恰好落在窗口起点之前，断流行在窗口里。
+    #    · rid = 线程号 mod 4096 + 毫秒 mod 4096，会复用 ⇒ 按行序「最近一次」取，不当全局唯一键。
+    #    · 查不到方法（旧格式无 rid / 请求行在尾部截取之外）⇒ **仍按计费算**，宁可多报不可漏报。
+    method_of = {}
     for line in text.splitlines():
         if not line.startswith("[proxy"):
             continue                       # Python traceback 等,静默跳过
@@ -256,6 +274,8 @@ def scan_proxy_log(text, now, start, end, resolve=None):
                 undated += 1
             continue
         mo, da, h, mi, se, rid, body = m.groups()
+        if rid and body.startswith("→ "):
+            method_of[rid] = body[2:].split(" ", 1)[0]
         ts = parse_proxy_ts(int(mo), int(da), int(h), int(mi), int(se), now)
         if ts is None or ts < start or ts > end:
             continue
@@ -285,7 +305,10 @@ def scan_proxy_log(text, now, start, end, resolve=None):
             #   所以它进事件流(不进泳道标记:泳道那两种是位置标注,这一类要的是文字说明)。
             kind = None
             if body.startswith("stream err"):
-                kind = "stream_err"
+                # 免费请求（GET/HEAD）的断连是**客户端自己挂断**，不是计费断流：不进泳道/KPI/事件，
+                # 也不参与「断流 → 轮换」的归因。原文仍留在下面的 log_lines（原始日志照实显示）。
+                if billable_method(method_of.get(rid) if rid else None):
+                    kind = "stream_err"
             elif "→ cooled" in body:
                 kind = "cool_429"
             elif "committed" in body:

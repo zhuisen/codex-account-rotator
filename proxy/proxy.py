@@ -18,6 +18,7 @@ stdlib-only; streams the SSE response back close-delimited.
 """
 import base64
 import datetime
+import gzip
 try:
     import fcntl                       # POSIX
 except ModuleNotFoundError:            # Windows —— 语义等价的 LockFileEx 兼容层,见 portalock.py
@@ -37,6 +38,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -854,6 +856,18 @@ class Handler(BaseHTTPRequestHandler):
             hdrs["chatgpt-account-id"] = account_id
         hdrs.setdefault("originator", "codex_cli_rs")
         hdrs["Content-Length"] = str(len(body))
+        # ★ 模型列表向上游要 gzip、在本机解压后再交给客户端（2026-09-23，CHANGELOG B67）。
+        #   codex 0.156.0 请求 `/models` **不带 Accept-Encoding**（假上游抓包实测：10 个 GET 全无），
+        #   于是 http.client 替它发 `identity`，上游回 **522 KB** 明文；gzip 只有 **103 KB**。
+        #   而 codex 后台刷新模型列表的预算是 **5 秒**（59 个超时样本全落在 5.00–5.05s），
+        #   上游首字节就要 ~2s，剩下的时间里传 522 KB 经常传不完 ⇒ codex 挂断 ⇒ 代理记「断流」。
+        #   只动 GET /models：它是免费请求、体积大、整包缓冲无害；**SSE 的 POST 绝不能缓冲**。
+        #   客户端自己要了 gzip 时原样透传（它会自己解压，这里再解一次就是解两遍）。
+        self._inflate = self._should_inflate()
+        if self._inflate:
+            for k in [k for k in hdrs if k.lower() == "accept-encoding"]:
+                del hdrs[k]
+            hdrs["Accept-Encoding"] = "gzip"
         # ★ body 指纹。三方评审(codex/grok/kimi)收敛到同一个残余双计费机制:上游已 200 并计费 →
         # SSE 在 completed 前断掉 → codex 把**整轮当成全新 POST 重发** → 代理重新挑号 → 第二个号
         # 再计一次。代理的 400-abort 拦不住它(那是一个新的 HTTP 请求,与首发无任何关联标识)。
@@ -886,6 +900,14 @@ class Handler(BaseHTTPRequestHandler):
             raise UpstreamCommitted(e) from e
         _plog(f"← {resp.status} [{label}]", rid)
         return conn, resp
+
+    def _should_inflate(self):
+        """这次请求要不要「向上游要 gzip、本机解压」。见 `_open` 里的说明。"""
+        if self.command != "GET":
+            return False
+        if urllib.parse.urlsplit(self.path).path.rstrip("/").rsplit("/", 1)[-1] != "models":
+            return False
+        return "gzip" not in (self.headers.get("Accept-Encoding") or "").lower()
 
     def _billable(self):
         """这次请求失败会不会烧钱。
@@ -956,14 +978,31 @@ class Handler(BaseHTTPRequestHandler):
                 _conv[conv] = aid
                 while len(_conv) > 512:          # FIFO 上界:长跑的代理不能无限攒会话
                     _conv.pop(next(iter(_conv)))
+        inflated = None
+        if getattr(self, "_inflate", False) and \
+                (resp.getheader("Content-Encoding") or "").strip().lower() == "gzip":
+            # 整包读完再解压：只有 GET /models 会走到这里（~100 KB），且客户端要的是明文。
+            try:
+                inflated = gzip.decompress(resp.read())
+            except (OSError, EOFError, zlib.error) as e:
+                # 还没发出任何响应头 ⇒ 可以干净地回一个错误。GET 不计费,502 让 codex 自己重试即可。
+                _plog(f"gzip inflate failed [{label}]: {e} → 502")
+                self.send_error(502, "upstream gzip body could not be decoded")
+                return
         self.send_response(resp.status)
         hop = {"connection", "transfer-encoding", "content-length", "keep-alive"}
+        if inflated is not None:
+            hop = hop | {"content-encoding"}      # 交出去的已经是明文
         for k, v in resp.getheaders():
             if k.lower() not in hop:
                 self.send_header(k, v)
         self.send_header("Connection", "close")
         self.end_headers()
         self.close_connection = True
+        if inflated is not None:
+            self.wfile.write(inflated)
+            self.wfile.flush()
+            return
         scanbuf, got = b"", False
         while True:
             chunk = resp.read(4096)
