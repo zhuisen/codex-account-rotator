@@ -173,8 +173,9 @@ class AHandMadeSetupIsReportedAsExternalNotTodo(Sandbox):
 
     def test_an_external_setup_still_counts_as_ready(self):
         """它确实在工作 —— 只是不是我们装的。不能因此一直弹「未接入」。"""
-        self.cfg.write_text(USER_CONFIG + '\n[model_providers.rotateproxy]\nbase_url = "x"\n',
-                            encoding="utf-8")
+        # ★ 「在工作」的手工配置要带 WS 关闭 —— 不带的那种见 `AHandMadeProviderWithoutWsIsNotDone`。
+        self.cfg.write_text(USER_CONFIG + '\n[model_providers.rotateproxy]\nbase_url = "x"\n'
+                            'supports_websockets = false\n', encoding="utf-8")
         (self.home / "rotateproxy.config.toml").write_text(
             'model_provider = "rotateproxy"\n', encoding="utf-8")
         for n in connector.ENTRIES:
@@ -188,6 +189,106 @@ class AHandMadeSetupIsReportedAsExternalNotTodo(Sandbox):
         self.cfg.write_text(USER_CONFIG, encoding="utf-8")
         self.apply("runtime", "provider")
         self.assertEqual(self.step("provider")["state"], "done")
+
+
+
+#: v1.0.0~v1.6.1 `docs/INSTALL.md` 原样给的 provider 块 —— **没有** `supports_websockets`。
+#: 照它手工接入的用户就是 2026-09-23 那批「发版后还是被横幅报 WS 没关」的人。
+OLD_INSTALL_BLOCK = (
+    "[model_providers.rotateproxy]\n"
+    'name = "codex-rotate proxy"\n'
+    'base_url = "http://127.0.0.1:8011"\n'
+    'wire_api = "responses"\n'
+    "\n"
+    "[model_providers.rotateproxy.auth]\n"
+    'command = "/path/to/codex-account-rotator/proxy/auth-token"\n'
+)
+
+
+class AHandMadeProviderWithoutWsIsNotDone(Sandbox):
+    """★★ `external`（你自己写的）≠「它在正确地工作」。
+
+    2026-09-23：Connector 只看有没有 `[model_providers.rotateproxy]` 标题，照旧文档配的
+    用户被报「已接入」，而横幅同时在喊 WS 没关 —— 两处说法打架，一键接入无事可做。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.text = USER_CONFIG + "\n" + OLD_INSTALL_BLOCK
+        self.cfg.write_text(self.text, encoding="utf-8")
+
+    def test_the_old_install_block_gets_a_ws_step_that_is_todo(self):
+        self.assertEqual(self.step("provider")["state"], "external")
+        self.assertEqual(self.step("ws")["state"], "todo")
+
+    def test_it_is_not_ready_until_fixed(self):
+        (self.home / "rotateproxy.config.toml").write_text(
+            'model_provider = "rotateproxy"\n', encoding="utf-8")
+        for n in connector.ENTRIES:
+            (self.bin / n).write_text("#!/bin/sh\n", encoding="utf-8")
+        connector._svc_loaded = lambda name: True
+        self.apply("runtime")
+        self.assertFalse(self.plan()["ready"])
+        self.apply("ws")
+        self.assertTrue(self.plan()["ready"])
+
+    def test_the_fix_adds_exactly_one_line_inside_the_table(self):
+        """★★★ 只加一行，且加在**主表**里（不是 `.auth` 子表、不是文件末尾）；其余字节不变。"""
+        self.apply("ws")
+        after = self.cfg.read_text(encoding="utf-8")
+        a, b = self.text.splitlines(keepends=True), after.splitlines(keepends=True)
+        self.assertEqual(len(b), len(a) + 1)
+        i = b.index("supports_websockets = false\n")
+        self.assertEqual(b[i - 1].strip(), "[model_providers.rotateproxy]")
+        self.assertEqual(b[:i] + b[i + 1:], a, "★★★ 那一行之外有字节被改了")
+
+    def test_an_explicit_true_is_flipped_not_duplicated(self):
+        self.cfg.write_text(self.text.replace('wire_api = "responses"\n',
+                                              'wire_api = "responses"\nsupports_websockets = true\n'),
+                            encoding="utf-8")
+        self.apply("ws")
+        after = self.cfg.read_text(encoding="utf-8")
+        self.assertEqual(after.count("supports_websockets"), 1)
+        self.assertIn("supports_websockets = false", after)
+
+    def test_it_is_idempotent(self):
+        self.apply("ws")
+        once = self.cfg.read_text(encoding="utf-8")
+        self.apply("ws")
+        self.assertEqual(self.cfg.read_text(encoding="utf-8"), once)
+        self.assertEqual(self.step("ws")["state"], "done")
+
+    def test_the_profiles_own_table_is_fixed_too(self):
+        """profile overlay 里也可能有一张同名表（本机就有）—— 它覆盖 base，漏了它等于没修。"""
+        prof = self.home / "rotateproxy.config.toml"
+        prof.write_text('model_provider = "rotateproxy"\n\n' + OLD_INSTALL_BLOCK, encoding="utf-8")
+        self.apply("ws")
+        self.assertIn("supports_websockets = false", prof.read_text(encoding="utf-8"))
+        self.assertEqual(connector.ws_gaps(), [])
+
+    def test_our_managed_block_never_grows_a_ws_step(self):
+        """托管块本来就带这一行 —— 不该多出一步让人以为还缺什么。"""
+        self.cfg.write_text(USER_CONFIG, encoding="utf-8")
+        self.apply("runtime", "provider", "profile")
+        self.assertEqual([s for s in self.plan()["steps"] if s["id"] == "ws"], [])
+
+    def test_the_connector_and_the_gate_agree(self):
+        """★★★ 不变量：Connector 说「好了」⇔ 接入闸的 WS 项说 ok。两处各判一次、必须同一个答案。"""
+        import importlib.machinery, importlib.util
+        loader = importlib.machinery.SourceFileLoader("cr_ws_agree", str(ROOT / "codex-rotate"))
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        mod = importlib.util.module_from_spec(spec)
+        loader.exec_module(mod)
+        mod.CODEX_HOME = self.home
+        (self.home / "rotateproxy.config.toml").write_text(
+            'model_provider = "rotateproxy"\n', encoding="utf-8")
+
+        def gate_ws():
+            return [c for c in mod.codex_integration_gate()["checks"] if c["id"] == "ws"][0]["state"]
+
+        self.assertEqual((self.step("ws")["state"], gate_ws()), ("todo", "bad"))
+        self.apply("ws")
+        self.assertEqual((self.step("ws")["state"], gate_ws()), ("done", "ok"))
 
 
 class TheEntriesNeverClobberUserFiles(Sandbox):
@@ -242,7 +343,8 @@ class TheWrapperStepIsOptIn(Sandbox):
         """不装 wrapper 也算接好了（`cxp` 就能用）——否则会逼用户改 `codex`。"""
         for n in connector.ENTRIES:
             (self.bin / n).write_text("#", encoding="utf-8")
-        self.cfg.write_text('[model_providers.rotateproxy]\n', encoding="utf-8")
+        self.cfg.write_text('[model_providers.rotateproxy]\nsupports_websockets = false\n',
+                            encoding="utf-8")
         (self.home / "rotateproxy.config.toml").write_text("rotateproxy\n", encoding="utf-8")
         connector._svc_loaded = lambda name: True
         self.apply("runtime")

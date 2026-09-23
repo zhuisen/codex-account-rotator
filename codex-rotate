@@ -3321,8 +3321,16 @@ def codex_integration_gate():
 
     # ③ WS 直连必须关掉 —— codex 的 `responses_websocket` 端点硬编码 `wss://chatgpt.com/...`,
     #    **不认 base_url**,开着就完全绕过代理、只烧 auth.json 那一个号(proxy/cxp:35-41)。
-    hay = "\n".join(x for x in (prof_txt, blk) if x)
-    norm = hay.replace(" ", "")
+    # ★★ 只认 **`[model_providers.rotateproxy]` 表里**的那一行(2026-09-23 修)。
+    #    `supports_websockets` 是 provider 字段 —— codex 二进制里它只出现在
+    #    `base_url … wire_api … supports_websockets` 那组 provider 字段中。第一版把 profile
+    #    **整份文件**当干草堆,于是 Connector 写在 profile 顶层的那一行(不在任何 provider 表里,
+    #    codex 大概率当未知键忽略)就能让这道闸报绿,而 provider 表里其实没关 —— 假绿。
+    #    profile 自己也可以定义同名表(overlay 覆盖 base),所以两份文件的表都看;
+    #    任一张表显式写了 `true` 就算没关(覆盖顺序不该由这道闸去猜)。
+    tables = [b.replace(" ", "") for b in
+              (_toml_block(prof_txt, "model_providers.rotateproxy"), blk) if b]
+    norm = "" if any("supports_websockets=true" in b for b in tables) else "\n".join(tables)
     # ★★ 同一条铁律在这一个函数里我犯了**三次**(2026-09-19):这条查的是「找没找到某个键」,
     #    而「在读得到的那半里没找到」≠「它不在」。任一来源是**存在但读不到**时,
     #    结论只能是 `unknown` —— 否则一次权限错误会被报成「你的 WS 没关,正在烧单号」。

@@ -857,6 +857,25 @@ B61 加的「核实跑起来的是哪一份」用了 `ps | awk '{print; exit}'`�
 另：一次量到 880 宽见底态 hero 撑到 167px（上限 128），改 flex-basis 后变回 94px，**但改回去也是 94px** ——
 四种组合 × 连跑 6 次不复现，成因未定，未宣称修复；真正的防线是高度闸现在也量见底档。
 
+### B66 · 横幅喊「WS 没关」、Connector 说「已接入」—— 发版修不到的老用户 — 2026-09-23 ✅（未发版）
+
+用户转来的反馈：「更新后还是提示 WS 没关」。原理本身属实（WS 端点硬编码 `wss://chatgpt.com`、不认 `base_url`），
+但问的是**为什么发版修不到**。三层叠在一起：
+① v1.0.0~v1.6.1 的 `docs/INSTALL.md` 给的 provider 块只有 name/base_url/wire_api，**没有** `supports_websockets = false`
+   （v1.7.0 才补）—— 照旧文档手工接入的人全缺；
+② 更新只换 bundle，`~/.codex` 原样不动；v1.7.0 加的是**检测**不是修复；
+③ Connector 只看「有没有 `[model_providers.rotateproxy]` 这个标题」，有就报 `external`（"它在工作，不碰"）⇒
+   **同一台机器上两处说法相反**，一键接入无事可做。形状：**`external`（你自己写的）被当成了「它在正确地工作」**。
+修：Connector 多一步 `ws` —— 只在存在用户自写的 provider 表时出现，缺这一行即 `todo`，apply 只往**那张表**
+补一行（或把显式 `true` 改成 `false`），表外一个字节不动；profile overlay 里的同名表一并处理。
+顺带抓到**闸自己的假绿**：接入闸把 profile **整份文件**当干草堆，而 Connector 写在 profile **顶层**的
+`supports_websockets = false` 不在任何 provider 表里（codex 二进制里该键只出现在 provider 字段组中，顶层大概率
+被当未知键忽略）⇒ provider 表没关也报绿。现只认两份文件里 `[model_providers.rotateproxy]` 表内的值，任一张表显式
+`true` 即判没关。闸：`test_connector.py::AHandMadeProviderWithoutWsIsNotDone`（8 条，含「Connector 与接入闸必须
+同答」的不变量，夹具是旧 INSTALL.md 的原样块）+ `test_codex_integration_gate.py` 3 条；5 个变异全红。
+⚠️ 「profile 顶层那一行无效」是按二进制 `strings` 的字段分组推断，**没做对照实验**（交互式会话里开/关看 WS 连接数）；
+   修法在两种情况下都成立（只认表内值 ⇒ 顶层行有效与否都不会误报）。
+
 ---
 
 ## v1.8.0 — 2026-09-19

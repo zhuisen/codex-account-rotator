@@ -259,6 +259,31 @@ class TheWebsocketBypassIsCaught(GateCase):
         self.assertEqual(self.check("ws")["state"], "ok")
 
 
+    def test_a_top_level_line_in_the_profile_does_not_count(self):
+        """★★ `supports_websockets` 是 provider 字段。profile **顶层**那一行不在任何 provider 表里，
+        不能让它替 provider 表报绿（2026-09-23：Connector 写的 profile 顶层恰好有这一行 ⇒ 假绿）。"""
+        self.wire_entry()
+        self.wire_provider(ws=False)
+        (self.home / "rotateproxy.config.toml").write_text(
+            'model_provider = "rotateproxy"\nsupports_websockets = false\n', encoding="utf-8")
+        self.assertEqual(self.check("ws")["state"], "bad")
+
+    def test_the_profiles_own_table_counts(self):
+        self.wire_entry()
+        self.wire_provider(ws=False)
+        (self.home / "rotateproxy.config.toml").write_text(
+            'model_provider = "rotateproxy"\n[model_providers.rotateproxy]\n'
+            'supports_websockets = false\n', encoding="utf-8")
+        self.assertEqual(self.check("ws")["state"], "ok")
+
+    def test_an_explicit_true_anywhere_is_bad(self):
+        self.wire_entry()
+        self.wire_provider(ws=True)
+        (self.home / "rotateproxy.config.toml").write_text(
+            'model_provider = "rotateproxy"\n[model_providers.rotateproxy]\n'
+            'supports_websockets = true\n', encoding="utf-8")
+        self.assertEqual(self.check("ws")["state"], "bad")
+
 class TheCliContractHolds(unittest.TestCase):
     """App 要消费 `--json`。★ 与 `health` 共用同一个真源，否则 UI 和 CLI 迟早两种答案。"""
 

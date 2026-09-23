@@ -166,6 +166,90 @@ def profile_block():
     ])
 
 
+PROVIDER_HEADER = "[model_providers.rotateproxy]"
+WS_LINE = "supports_websockets = false"
+
+
+def _external_tables(text):
+    """用户**自己写的**（托管区之外）`[model_providers.rotateproxy]` 表 → [(头行下标, 表尾下标)]。
+
+    表 = 头行之后、到下一个 `[...]` 头之前（所以 `.auth` 子表不算在内）。按行下标返回，
+    改写时只动这几行，其余字节原样保留。
+    """
+    before, managed, after = split_managed(text)
+    if text is None:
+        return [], []
+    lines = text.splitlines(keepends=True)
+    # 托管区的行不算「用户的」—— 那是我们写的，本来就带这一行。
+    skip = set()
+    if managed is not None:
+        a = before.count("\n")
+        skip = set(range(a, a + managed.count("\n") + 1))
+    out, i = [], 0
+    while i < len(lines):
+        if i not in skip and lines[i].strip() == PROVIDER_HEADER:
+            j = i + 1
+            while j < len(lines) and not (lines[j].strip().startswith("[")
+                                          and lines[j].strip().endswith("]")):
+                j += 1
+            out.append((i, j))
+            i = j
+        else:
+            i += 1
+    return lines, out
+
+
+def _ws_value(lines, span):
+    """表里 `supports_websockets` 的值：'false' / 'true' / None（没写）。"""
+    for ln in lines[span[0] + 1:span[1]]:
+        s = ln.split("#", 1)[0].replace(" ", "").strip()
+        if s.startswith("supports_websockets="):
+            return s.split("=", 1)[1]
+    return None
+
+
+def ws_gaps():
+    """哪些文件里有**用户自己写的** provider 表、却没写 `supports_websockets = false`。
+
+    ★★ 为什么要有这一步（2026-09-23 用户报：「发版更新后，用户还是会出现这样的问题」）：
+      v1.0.0~v1.6.1 的 `docs/INSTALL.md` 给的 provider 块**只有** name/base_url/wire_api，
+      没有这一行 —— 照旧文档手工接入的人全都缺它。而 Connector 原来只看「有没有
+      `[model_providers.rotateproxy]` 这个标题」，有就报 `external`（"它正在工作，不碰"），
+      于是**同一台机器上横幅喊「WS 没关、只烧一个号」，Connector 却说「已接入」**，
+      一键接入也无事可做。修 app 修不到它：更新只换 bundle，`~/.codex` 原样不动。
+    """
+    gaps = []
+    for p in (_codex_home() / "config.toml", _codex_home() / "rotateproxy.config.toml"):
+        lines, spans = _external_tables(_read(p))
+        if any(_ws_value(lines, sp) != "false" for sp in spans):
+            gaps.append(p)
+    return gaps
+
+
+def _fix_ws(path):
+    """只往用户的 provider 表里补/改那一行。**这张表以外一个字节都不动。**
+
+    · 没写 → 紧跟表头插一行；
+    · 写了 `true` → 就地改成 `false`（保留行首缩进与行尾注释之外的其它行）。
+    """
+    lines, spans = _external_tables(_read(path))
+    for a, b in reversed(spans):
+        v = _ws_value(lines, (a, b))
+        if v == "false":
+            continue
+        if v is None:
+            nl = "\r\n" if lines[a].endswith("\r\n") else "\n"
+            if not lines[a].endswith(("\n", "\r\n")):
+                lines[a] += nl
+            lines.insert(a + 1, WS_LINE + nl)
+        else:
+            for k in range(a + 1, b):
+                if lines[k].split("#", 1)[0].replace(" ", "").strip().startswith("supports_websockets="):
+                    nl = "\r\n" if lines[k].endswith("\r\n") else ("\n" if lines[k].endswith("\n") else "")
+                    lines[k] = WS_LINE + nl
+    _atomic_write(path, "".join(lines))
+
+
 def _merge_managed(path, block):
     """把 `block` 放进 `path` 的托管区：已有就替换，没有就追加。标记之外原样保留。"""
     before, managed, after = split_managed(_read(path))
@@ -314,6 +398,19 @@ def plan(src, store):
         "缺了它 codex **不报错**，会静默退回单号直连 —— 和正常运行长得一模一样",
         fstate, fdetail, preview=pblk)
 
+    # ③½ 你自己写的 provider 表缺 WS 关闭 —— 只在确实有「用户自己的表」时才出现这一步
+    #     （我们托管的块本来就带这一行）。`external` 不等于「它在正确地工作」。
+    if pstate == "external" or fstate == "external":
+        gaps = ws_gaps()
+        add("ws", "关掉 WS 直连",
+            "★ 不关的话 codex 走 WebSocket 直连 chatgpt.com、**不经过代理**，"
+            "只烧 auth.json 那一个号，代理日志里一条都看不到",
+            "todo" if gaps else "done",
+            ("在你自己写的 `[model_providers.rotateproxy]` 里补一行 `" + WS_LINE + "`："
+             + "、".join(str(g) for g in gaps) + " —— 只动这一行，其它内容一个字节都不改")
+            if gaps else "你的 provider 表里已经关了",
+            preview=PROVIDER_HEADER + "\n" + WS_LINE + "   ← 只加这一行")
+
     # ④ 入口
     bin_ = _local_bin()
     ours, theirs, miss = [], [], []
@@ -423,6 +520,11 @@ def apply(src, store, want):
     if "profile" in want:
         _merge_managed(_codex_home() / "rotateproxy.config.toml", profile_block())
         done.append("profile")
+
+    if "ws" in want:
+        for p in ws_gaps():
+            _fix_ws(p)
+        done.append("ws")
 
     if "entries" in want:
         for name, rel in ENTRIES.items():
