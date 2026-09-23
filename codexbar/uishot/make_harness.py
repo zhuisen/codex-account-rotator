@@ -1738,7 +1738,12 @@ def redacted_state():
     #   那半（角标上的 1 / 2）一个像素都验不到，而截图会正常渲染、探针报干净。
     #   取前两个非 dead 的号，与 `pinned` 的真实形状一致（aid 列表，按点击先后）。
     alive_ids = [a for a, sl in out_slots.items() if not sl.get("auth_dead")]
-    return {"active": idmap.get(raw.get("active"), ""), "slots": out_slots,
+    active = idmap.get(raw.get("active"), "")
+    # ★★ `last_aid`（代理最近一次真的用了谁）**必须与 `active` 不同**（2026-09-23）。
+    #   菜单栏/托盘改成跟代理走之后，判据就是「高亮落在 last_aid 而不是 active 上」——
+    #   两者相同的夹具下，改没改都是同一个像素（本仓形态⑩：判据档位要挑只有被测那条能挡住的输入）。
+    last_aid = next((a for a in alive_ids if a != active), active)
+    return {"active": active, "last_aid": last_aid, "slots": out_slots,
             "pinned": alive_ids[:2],
             "last_proxy_ts": raw.get("last_proxy_ts")}
 

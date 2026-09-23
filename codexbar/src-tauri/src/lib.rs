@@ -1752,8 +1752,20 @@ fn format_tray_title() -> String {
     let Ok(state) = serde_json::from_str::<Value>(&data) else {
         return "codex".into();
     };
-    let active = state["active"].as_str().unwrap_or("");
     let slots = state["slots"].as_object();
+    // ★★ 托盘显示**代理此刻在用的号**（`last_aid`），不是 `active`（上次 CLI 切换）。
+    //   用户 2026-09-23：「现在是代理轮换的状态，我希望菜单栏显示的账号信息跟着代理轮换走」。
+    //   逐请求轮换下 `active` 可以几天不变，托盘却一直挂着它 —— 显示的是一个代理根本没在用的号。
+    //   `last_aid` 由 proxy.py 在每次成功响应后写进 state.json，下面那个 1s 的 mtime 监视会
+    //   在 ~1 秒内 `refresh_tray`，所以托盘跟得上每一次换号。
+    //   ★ 取不到（新装机、代理还没服务过请求、或指向一个已删除的号）才退回 `active`；
+    //     与前端 `useStore.inUseNode` **同一条判据**（跨语言没法共用，只能同步改）。
+    let last = state["last_aid"].as_str().unwrap_or("");
+    let active = if !last.is_empty() && slots.map_or(false, |m| m.contains_key(last)) {
+        last
+    } else {
+        state["active"].as_str().unwrap_or("")
+    };
     if let Some(slots) = slots {
         // Dead accounts other than the active one used to be invisible here: the title only showed ✗ when
         // the ACTIVE account died, so a node could quietly go dead and nothing on screen said so. Surface

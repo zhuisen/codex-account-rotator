@@ -113,6 +113,13 @@ export function useStore() {
     });
 
   const currentNode = state.active;
+  /**
+   * ★★ **代理此刻在用的号** —— 菜单栏跟着它走（用户 2026-09-23：「现在是代理轮换的状态，
+   *   我希望菜单栏显示的账号信息跟着代理轮换走」）。
+   *   `currentNode`（= `active`）保留给**切号/死号监视/自动切号**这些只关心 auth.json 的路径；
+   *   显示「谁在用」一律用这个。取不到 `last_aid`（新装机、代理还没服务过任何请求）才退回 `active`。
+   */
+  const inUseNode = (state.last_aid && state.slots?.[state.last_aid]) ? state.last_aid : state.active;
   const hero = recommended(accounts);
   const counts: StoreCounts = {
     total: accounts.length,
@@ -134,7 +141,7 @@ export function useStore() {
     .filter(a => a.status !== "dead" && a.cards > 0 && a.cardDays != null && a.cardDays <= CARD_WARN_DAYS)
     .sort((x, y) => (x.cardDays ?? 0) - (y.cardDays ?? 0))[0] ?? null;
 
-  return { state, tokens, accounts, hero, currentNode, slots, counts, lastRefreshAt, freshness, cardAlert,
+  return { state, tokens, accounts, hero, currentNode, inUseNode, slots, counts, lastRefreshAt, freshness, cardAlert,
            // ★ 本地优先:自己发起的动作永远比镜像来的可信(镜像可能已经过期,见 `useBusyMirror`)。
            //   两个 surface 因此显示同一个动作 id,按钮文案/转圈逻辑一行都不用改。
            // ★ 过滤掉流量扫描:它走 `useTraffic` 的 `busy`,不是账号池动作。

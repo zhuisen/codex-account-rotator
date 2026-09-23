@@ -57,10 +57,11 @@ export default function AccountRow({ a, isCurrent, isBest, bestPct, privacy, t, 
           <span className="mb-row-name" style={{ color: t.text }}>{a.node}</span>
             <PlanBadge plan={a.plan} t={t} />
           <span className="mb-row-status" style={{ color: sc }}>{STATUS_TEXT[a.status]}</span>
-          {isBest && <span className="mb-row-badge-use" style={{ color: t.accentText, background: t.accent }}>USE</span>}
-          {isCurrent && <span className="mb-row-badge-cur" style={{ color: t.accent, border: `1px solid ${t.accentBorder}` }}>当前</span>}
+          {/* ★ 文案与总览同一套：「在用」= 代理最近一次真的用了它，「下一个」= 真挑号器的下一个。
+              旧的「当前 / USE」分别是 `active` 与「剩余最多」，逐请求轮换下两者都在说别的事。 */}
+          {isBest && <span className="mb-row-badge-use" title="代理下一个请求会挑这个号" style={{ color: t.accentText, background: t.accent, whiteSpace: "nowrap" }}>下一个</span>}
           {isCurrent ? (
-            <span className="mb-row-delta" style={{ color: t.accent, background: t.accentSoft }}>✓ 当前</span>
+            <span className="mb-row-delta" title="代理最近一次请求用的就是这个号" style={{ color: t.accent, background: t.accentSoft, whiteSpace: "nowrap" }}>✓ 在用</span>
           ) : delta != null && (
             <span className="mb-row-delta" style={{
               color: delta === 0 ? t.accent : delta <= -50 ? AMBER : t.text2,

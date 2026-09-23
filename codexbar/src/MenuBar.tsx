@@ -107,7 +107,7 @@ const IconEyeOff = () => <svg width="15" height="15" viewBox="0 0 24 24" fill="n
 const IconWarn = () => <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2 1 21h22L12 2zm1 14h-2v2h2v-2zm0-7h-2v5h2V9z"/></svg>;
 
 export default function MenuBar() {
-  const { accounts, currentNode, counts, lastRefreshAt, cardAlert, loadingAction, toast, refresh, run, showToast } = useStore();
+  const { accounts, currentNode, inUseNode, counts, lastRefreshAt, cardAlert, loadingAction, toast, refresh, run, showToast } = useStore();
   const { visible: bannerVisible, dismiss: bannerDismiss } = useCardBannerDismiss();
   const { integration } = useIntegration();
   const [theme, setTheme] = useState<"dark" | "light">(loadTheme);
@@ -490,7 +490,11 @@ export default function MenuBar() {
         {/* ★★ 一档一份列表。三家的账号语义根本不同（逐请求换号 / 启动前换凭证 / 单号只读），
             堆在一起时读者会拿同一套直觉去理解它们 —— 这正是分档的理由（同主窗 ProviderTabs）。 */}
         {plat === "codex" && alive.map(a => (
-          <AccountRow key={a.aid} a={a} isCurrent={a.aid === currentNode} isBest={mbBoard?.next?.aid === a.aid}
+          /* ★★ 高亮跟着**代理**走（`last_aid`），不跟 `active`（上次 CLI 切换）——
+             逐请求轮换下 `active` 可以几天不变，而代理每个请求都在挑。
+             「下一个」与「在用」是同一个号时只标「在用」，免得一行挂两个意思重叠的角标。 */
+          <AccountRow key={a.aid} a={a} isCurrent={a.aid === inUseNode}
+            isBest={mbBoard?.next?.aid === a.aid && a.aid !== inUseNode}
             bestPct={bestPct} privacy={privacy} t={t} onSelect={() => void openMain("navigate-overview", "codex")}
             // 当前号不给按钮:切到自己是空操作,画出来只会让人以为点了没反应。
             // 失效号在下面那个折叠区,本来就不传。
@@ -542,7 +546,7 @@ export default function MenuBar() {
             </summary>
             <div className="mb-dead-list">
               {dead.map(a => (
-                <AccountRow key={a.aid} a={a} isCurrent={a.aid === currentNode} isBest={false} bestPct={bestPct} privacy={privacy} t={t} onSelect={() => void openMain("navigate-overview", "codex")} />
+                <AccountRow key={a.aid} a={a} isCurrent={a.aid === inUseNode} isBest={false} bestPct={bestPct} privacy={privacy} t={t} onSelect={() => void openMain("navigate-overview", "codex")} />
               ))}
             </div>
           </details>

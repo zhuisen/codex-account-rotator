@@ -48,6 +48,9 @@ export interface Slot {
 }
 export interface AppState {
   slots?: Record<string, Slot>; active?: string; last_proxy_ts?: number;
+  /** 代理**最近一次真的用了谁**（proxy.py 每次成功响应后写入）。★ 与 `active` 不是一回事：
+   *  `active` 是上次 CLI 切换（auth.json 里那个，直连才用），逐请求轮换下它长期不变。 */
+  last_aid?: string;
   /** ★★ **置顶队列**（aid 列表，按点击先后）—— 用户 2026-09-21 定的轮换语义：
    *  默认容量最高优先，点亮哪个才优先用哪个；可置顶多个，先点的先用。
    *  ⚠️ 它是**顶层键**不是 slot 上的字段（要保留"第几个被点"的次序），
