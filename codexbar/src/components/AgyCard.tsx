@@ -10,6 +10,7 @@ import {
 import { fmtAgo, fmtResetDate, winNumColor } from "../helpers";
 import { IconBtn, IcPen, IcTrash, IcRotate } from "./CardIcons";
 import ProbeButton from "./ProbeButton";
+import CardActionBar from "./CardActionBar";
 import { useRef, useState } from "react";
 
 const MONO = "'JetBrains Mono'";
@@ -410,24 +411,7 @@ export default function AgyCard({ t, color, snap, busy, err, disabled, winSlots,
              给一个点了没用的按钮，比没有这个按钮糟。 */}
       {/* ★ 与账号卡**同款浮层**（§5c 页面统一性：同一类卡必须长得一样）。
           整段理由见 `AccountCard.tsx` 同处 —— 两张卡各写一套迟早只改一边。 */}
-      {isSelected && (
-        <div data-actions className="cb-actions" onClick={(e) => e.stopPropagation()}
-             style={{ position: "absolute", left: 10, right: 10, bottom: 10, zIndex: 3,
-                      display: "flex", gap: 6, padding: 8, borderRadius: 9,
-                      background: t.isDark ? "rgba(20,26,34,.97)" : "rgba(255,255,255,.97)",
-                      backdropFilter: "blur(6px)",
-                      /* ★ 边框用**发丝线**不用 accent（用户 2026-09-21：「取消绿色的边框」）。
-                         青色在本仓专属「激活态 / 推荐项 / 主按钮」，而卡片被选中时
-                         **本身已经有一圈青边**了 —— 浮层再来一圈是同一个语义说两遍，
-                         而且两圈青挨在一起会让人以为它们是两个不同的激活对象。
-                         分层交给发丝线 + 阴影，这也是全局 `ui-design.md` 的原话。 */
-                      border: `1px solid ${t.cardBorder}`, boxShadow: t.shadow,
-                      // ★★★ **绝不换行**（用户 2026-09-21：「我不要出现换行的」）。
-                      //   换行的动作条不只是难看：第二行会把浮层撑高、盖掉更多卡片内容，
-                      //   而且「最后一个按钮掉下去」看起来像它坏了。
-                      //   ★ 空间不够时**一起压缩**，不是折行 —— 所以下面每个控件都可收缩，
-                      //     而卡片本身有 `CARD_MIN_W` 兜底，保证压到极限仍装得下。
-                      flexWrap: "nowrap" }}>
+      <CardActionBar open={!!isSelected} t={t}>
           {isCurrent ? (
             <span style={{ flex: "1 1 auto", minWidth: 62, textAlign: "center", fontSize: 11,
                            fontWeight: 600, whiteSpace: "nowrap", color: t.accent, padding: "5px 0" }}>✓ 当前</span>
@@ -484,11 +468,10 @@ export default function AgyCard({ t, color, snap, busy, err, disabled, winSlots,
                              padding: "5px 10px", borderRadius: 6, cursor: "pointer",
                              whiteSpace: "nowrap", flexShrink: 0 }}>确认删除</span>
               <span onClick={() => setConfirmDelete(false)}
-                    style={{ fontSize: 11, color: t.muted, padding: "5px 10px", cursor: "pointer" }}>取消</span>
+                    style={{ fontSize: 11, color: t.text2, padding: "5px 10px", cursor: "pointer" }}>取消</span>
             </>
           ))}
-        </div>
-      )}
+      </CardActionBar>
     </div>
   );
 }

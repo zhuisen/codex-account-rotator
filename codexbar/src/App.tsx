@@ -2,7 +2,7 @@ import { useState, useMemo, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { isWindowsUI } from "./helpers";
+import { isWindowsUI, CARD_ACTIONS_LIFE_MS } from "./helpers";
 import { THEMES } from "./theme";
 import Ring from "./components/Ring";
 import Toast from "./components/Toast";
@@ -93,8 +93,7 @@ const IconMoon = () => <svg width="13" height="13" viewBox="0 0 24 24" fill="cur
  *   窄屏自动退到 2 列、每张反而更宽。**卡片永远不会窄到装不下自己的动作条。**
  */
 const CARD_MIN_W = 320;
-/** 卡片动作弹层打开后多久自动收回（用户 2026-09-23 定：先 30 秒，同日改为 **10 秒**；不论是否在操作）。 */
-const CARD_ACTIONS_IDLE_MS = 10_000;
+
 const CARD_GRID_COLS = `repeat(auto-fill, minmax(${CARD_MIN_W}px, 1fr))`;
 
 export default function App() {
@@ -147,7 +146,7 @@ export default function App() {
    */
   useEffect(() => {
     if (!selectedCard) return;
-    const id = window.setTimeout(() => setSelectedCard(null), CARD_ACTIONS_IDLE_MS);
+    const id = window.setTimeout(() => setSelectedCard(null), CARD_ACTIONS_LIFE_MS);
     return () => window.clearTimeout(id);
   }, [selectedCard]);
   const [autoSwitch, setAutoSwitch] = useState(() => getSettings().autoSwitchEnabled);

@@ -178,5 +178,88 @@ class TheActionPopoverClosesItselfAfterTenSeconds(unittest.TestCase):
         self.assertTrue(self.busy["at5"], "★★ 这一组也没打开过 —— 下面的判断没意义")
         self.assertFalse(self.busy["at11"], "★★ 有操作就不收了 —— 用户要的是到点就收")
 
+
+# 收回动画 + 倒计时细线（用户 2026-09-23 从 demo 里选 A · 原路退回 + 细线）。
+_EXIT_PROBE = r"""
+setTimeout(function () {
+  var out = {};
+  var card = document.querySelector('[data-aid]');
+  if (card) card.click();
+  function bar() { return document.querySelector('[data-actions]'); }
+  function snap(tag) {
+    var b = bar(), o = { present: !!b };
+    if (b) {
+      var cs = getComputedStyle(b), tk = b.querySelector('[data-actions-countdown]');
+      o.leaving = b.hasAttribute('data-leaving');
+      o.anim = cs.animationName; o.dur = cs.animationDuration; o.pe = cs.pointerEvents;
+      if (tk) { var ts = getComputedStyle(tk); o.tick = { anim: ts.animationName, dur: ts.animationDuration }; }
+    }
+    out[tag] = o;
+  }
+  setTimeout(function () { snap('open'); }, 5000);
+  setTimeout(function () { snap('mid'); }, 10070);
+  setTimeout(function () { snap('after'); document.title = '__MF__' + JSON.stringify(out); }, 10600);
+}, 2600);
+"""
+
+
+def _ms(css_time):
+    """'0.14s' / '140ms' / '10s' → 毫秒。"""
+    v = css_time.strip().split(",")[0]
+    return float(v[:-2]) if v.endswith("ms") else float(v[:-1]) * 1000
+
+
+def _const(name):
+    src = (ROOT / "codexbar" / "src" / "helpers.ts").read_text(encoding="utf-8")
+    m = re.search(rf"export const {name} = ([\d_]+);", src)
+    return int(m.group(1).replace("_", "")) if m else None
+
+
+@unittest.skipIf(not Path(CHROME).exists(), "没有 Chrome")
+class TheActionPopoverLeavesTheWayItCame(unittest.TestCase):
+    """★★ 收回不许「一帧就没了」（用户：「现在太生硬了」）。
+
+    生硬的根因：动作条是条件渲染，弹出有 160ms 动画，收回是**组件直接卸载、0ms**。
+    所以这组闸量的是**退场那一刻它还在、且正在播退场动画**，不是「源码里有个 cbSink」——
+    后者在「keyframes 写了但组件照样立即卸载」时同样是绿的，而那正是原来的缺陷。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.r = _probe("harness.html", "nav=home", _EXIT_PROBE, budget=16000)
+        if cls.r is None:
+            raise unittest.SkipTest("harness 静态服务（3304）没在跑")
+        cls.life, cls.exit = _const("CARD_ACTIONS_LIFE_MS"), _const("CARD_ACTIONS_EXIT_MS")
+
+    def test_it_opened(self):
+        self.assertTrue(self.r["open"]["present"], "★★ 动作条没打开过 —— 下面几条都没意义")
+        self.assertFalse(self.r["open"]["leaving"], "★ 刚打开就标成了退场中")
+
+    def test_it_is_still_there_and_sinking_right_after_the_timer(self):
+        """★★★ 计时器到点后 70ms：必须**还在**，且在播 cbSink。立即卸载 = 原来那个生硬。"""
+        mid = self.r["mid"]
+        self.assertTrue(mid["present"], "★★★ 到点那一刻直接没了 —— 没有退场动画")
+        self.assertTrue(mid["leaving"], "★★ 还在但没标退场态")
+        self.assertEqual("cbSink", mid["anim"], f"★★ 退场播的不是 cbSink：{mid['anim']}")
+        self.assertEqual(self.exit, round(_ms(mid["dur"])),
+                         "★ 退场时长不是 CARD_ACTIONS_EXIT_MS —— CSS 与常量分叉了")
+        self.assertEqual("none", mid["pe"], "★ 退场中还能点 —— 会点中一个正在消失的按钮")
+
+    def test_it_is_gone_after_the_exit(self):
+        self.assertFalse(self.r["after"]["present"], "★★ 退场播完了还挂着")
+
+    def test_the_countdown_line_runs_for_exactly_the_life(self):
+        """★★ 细线时长必须**等于**收回计时器 —— 它是预告，预告不准比没有更糟。
+
+        期望值从 helpers.ts 现读（不在测试里抄一个 10000），两处同源才有意义。
+        """
+        tick = self.r["open"].get("tick")
+        self.assertIsNotNone(tick, "★★ 打开的动作条里没有倒计时细线")
+        self.assertEqual("cbTick", tick["anim"], f"★ 细线没在播 cbTick：{tick}")
+        self.assertIsNotNone(self.life, "★ 没从 helpers.ts 读到 CARD_ACTIONS_LIFE_MS")
+        self.assertEqual(self.life, round(_ms(tick["dur"])),
+                         f"★★ 细线走 {tick['dur']}，而收回计时器是 {self.life}ms —— 预告与实际对不上")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

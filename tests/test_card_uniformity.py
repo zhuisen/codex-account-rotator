@@ -105,7 +105,12 @@ const click = i => cards()[i].dispatchEvent(new MouseEvent('click', { bubbles: t
     //   写 nowrap 却让内容溢出，同样是坏的，而只看属性看不出来。
     const bar = document.querySelector('[data-actions]');
     if (bar) { const br = bar.getBoundingClientRect(), cs = getComputedStyle(bar);
-      const kids = [...bar.children].map(e => e.getBoundingClientRect());
+      // ★ 只数**参与排版**的子元素。2026-09-23 加了倒计时细线（绝对定位钉在底边），
+      //   它的 top 天然与按钮不同 —— 不排除的话「行数」恒为 2，一条假红（实测当场踩到）。
+      //   绝对定位的东西本来就不会「折行」，数它等于在量一个不存在的缺陷。
+      const kids = [...bar.children].filter(e => getComputedStyle(e).position !== 'absolute')
+                                    .map(e => e.getBoundingClientRect());
+      out.barKids = kids.length;
       out.barBorder = cs.borderTopColor;
       // ★ computed 值是**像素**不是关键字（`169.664px 46px`），所以判据是
       //   「y 分量 ≈ 元素高度」。直接比字面量 'bottom' 会恒红（实测踩到）。
@@ -286,13 +291,18 @@ class SelectingACardNeverChangesAnyHeight(_Probed):
         ★ 保险仍然要留：字号档位、更长的按钮文案、以后多加一个控件，
           任何一条都会让那 4px 余量消失，而那时 `nowrap` 就是最后一道。
         """
+        # ★ 2026-09-23 起动作条外壳收进 `CardActionBar`（两张卡共用一份），保险跟着搬过去；
+        #   两张卡则必须**真的用它** —— 各写一套正是那次「只改了一边」的由来。
+        strip = lambda raw: re.sub(r"(?<![:/])//.*", "", re.sub(r"\{?/\*[\s\S]*?\*/\}?", "", raw))
+        bar = strip((SRC / "components" / "CardActionBar.tsx").read_text(encoding="utf-8"))
+        i = bar.index("data-actions")
+        self.assertIn('flexWrap: "nowrap"', bar[i:], "★ 动作条允许换行了 —— 保险没了")
         for name in ("AccountCard.tsx", "AgyCard.tsx"):
-            raw = (SRC / "components" / name).read_text(encoding="utf-8")
-            code = re.sub(r"(?<![:/])//.*", "", re.sub(r"\{?/\*[\s\S]*?\*/\}?", "", raw))
-            i = code.index("data-actions")
+            code = strip((SRC / "components" / name).read_text(encoding="utf-8"))
             with self.subTest(card=name):
-                self.assertIn('flexWrap: "nowrap"', code[i:i + 900],
-                              f"★ {name} 的动作条允许换行了 —— 保险没了")
+                self.assertIn("<CardActionBar open=", code, f"★ {name} 没用共用的动作条外壳")
+                self.assertNotIn("data-actions", code,
+                                 f"★★ {name} 又自己写了一份动作条外壳 —— 两套迟早只改一边")
         icons = (SRC / "components" / "CardIcons.tsx").read_text(encoding="utf-8")
         self.assertIn("flexShrink: 1", icons,
                       "★ 图标钮压不动 —— nowrap 下只能横向溢出")

@@ -110,10 +110,14 @@ class TheGeminiCardHasTheSameActionBar(unittest.TestCase):
         ★ 真正的行为闸在 `test_card_uniformity.SelectingACardNeverChangesAnyHeight`
           （量真实高度）；这里只守「两张卡用的是同一套」。
         """
+        # ★ 2026-09-23：外壳收进共用组件 `CardActionBar` —— 「同款」从「两处长得像」
+        #   升级成「只有一份」。第一版收回动画就栽在两处各写一套上：只改了账号卡。
         c = code(CARD)
-        self.assertIn('data-actions className="cb-actions"', c,
-                      "★★ Gemini 卡的动作条不是与账号卡同款的浮层")
-        self.assertIn('position: "absolute"', c[c.index("data-actions"):][:400],
+        self.assertIn("<CardActionBar open=", c, "★★ Gemini 卡的动作条不是与账号卡同款的浮层")
+        self.assertIn("<CardActionBar open=", code(SRC / "components" / "AccountCard.tsx"),
+                      "★★ 账号卡没用共用外壳 —— 两边又分叉了")
+        bar = code(SRC / "components" / "CardActionBar.tsx")
+        self.assertIn('position: "absolute"', bar[bar.index("data-actions"):],
                       "★★ 动作条又回到文档流里 —— 展开会把同排的卡顶高")
         self.assertNotIn("reserveActions", c,
                          "★★ 预留逻辑又回来了 —— 它守的行为已经不存在了")

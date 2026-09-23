@@ -131,6 +131,16 @@ export interface Account {
 /** ≤ this many days left ⇒ amber + pulse (design handoff §4). */
 export const CARD_WARN_DAYS = 3;
 
+/**
+ * 卡片动作条打开后多久自动收回（用户 2026-09-23：先 30 秒，同日改为 **10 秒**；不论是否在操作）。
+ * ★★ **唯一真源**：App 的收回计时器与动作条底边的倒计时细线都读它。两处各写一个数的话，
+ *   迟早出现「细线走完了弹层还在」或「细线才走一半弹层就没了」—— 那条细线存在的意义
+ *   就是**预告**收回时刻，预告不准比没有更糟。
+ */
+export const CARD_ACTIONS_LIFE_MS = 10_000;
+/** 收回动画时长（用户 2026-09-23 从 demo 里选的 A · 原路退回）。比入场 160ms 略快：收比出应更利落。 */
+export const CARD_ACTIONS_EXIT_MS = 140;
+
 export const now = () => Date.now() / 1000;
 export const clamp = (n: number) => Math.max(0, Math.min(100, Math.round(n)));
 

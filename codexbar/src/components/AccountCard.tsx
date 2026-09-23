@@ -4,6 +4,7 @@ import StaleMark from "./StaleMark";
 import DragHandle, { type DragWiring } from "./DragHandle";
 import { type Account, fmtCd, fmtAgeSec, maskId, winBarColor, winNumColor,
          QUOTA_STALE_SEC } from "../helpers";
+import CardActionBar from "./CardActionBar";
 import Ring from "./Ring";
 import PlanBadge from "./PlanBadge";
 import CardBadge, { isCardExpiring } from "./CardBadge";
@@ -75,6 +76,7 @@ export default function AccountCard({ a, isCurrent, isBest, isSelected, shortcut
   const [editing, setEditing] = useState<string | null>(null);   // null = 不在改名
   // 卡片一取消选中就退出改名:否则输入框会留在收起的卡片上,看不见却仍持有焦点
   useEffect(() => { if (!isSelected) { setConfirmDelete(false); setEditing(null); } }, [isSelected]);
+
 
   const isDead = a.status === "dead";
   const isCool = a.status === "cool";
@@ -340,27 +342,8 @@ export default function AccountCard({ a, isCurrent, isBest, isSelected, shortcut
           ★ 已知代价（demo 里就画出来了、用户选的时候知情）：它**盖住「到期 / 重置卡」那一行**。
             换来的是全局布局零抖动 —— 那一行只在收起态读，而动作条是主动打开的。
           ★ 半透明 + 模糊是为了让被盖住的那行**透出轮廓**，读者知道下面还有东西、不是没了。 */}
-      {isSelected && (
-        <div data-actions className="cb-actions" onClick={(e) => e.stopPropagation()}
-             style={{ position: "absolute", left: 10, right: 10, bottom: 10, zIndex: 3,
-                      display: "flex", gap: 6, padding: 8, borderRadius: 9,
-                      background: t.isDark ? "rgba(20,26,34,.97)" : "rgba(255,255,255,.97)",
-                      backdropFilter: "blur(6px)",
-                      /* ★ 边框用**发丝线**不用 accent（用户 2026-09-21：「取消绿色的边框」）。
-                         青色在本仓专属「激活态 / 推荐项 / 主按钮」，而卡片被选中时
-                         **本身已经有一圈青边**了 —— 浮层再来一圈是同一个语义说两遍，
-                         而且两圈青挨在一起会让人以为它们是两个不同的激活对象。
-                         分层交给发丝线 + 阴影，这也是全局 `ui-design.md` 的原话。 */
-                      border: `1px solid ${t.cardBorder}`, boxShadow: t.shadow,
-                      // ★★★ **绝不换行**（用户 2026-09-21：「我不要出现换行的」）。
-                      //   换行的动作条不只是难看：第二行会把浮层撑高、盖掉更多卡片内容，
-                      //   而且「最后一个按钮掉下去」看起来像它坏了。
-                      //   ★ 空间不够时**一起压缩**，不是折行 —— 所以下面每个控件都可收缩，
-                      //     而卡片本身有 `CARD_MIN_W` 兜底，保证压到极限仍装得下。
-                     // ★ 6 个按钮塞在三列网格的一张 ~300px 卡里放不下。不换行时 flex 会把每个
-                     //   压到 ~20px ⇒「切换到此号」变成一列竖排的单字(用户 2026-08-24 截图)。
-                     //   探针实测:内容高 80px / 行高 13px = 六行。
-                     flexWrap: "nowrap" }}>
+      {/* 外壳（定位 / 磨砂材质 / 收回动画 / 倒计时细线 / 不换行）在 `CardActionBar` —— 与 agy 卡共用一份。 */}
+      <CardActionBar open={isSelected} t={t}>
           {/* ★★ 压成**一行**(用户 2026-09-07:「都是出现换行问题」)。
               两行动作条不只是难看:卡片高度差 ~80px,而同排兄弟卡的环是**垂直居中**的,
               于是邻卡一展开,兄弟卡的邮箱与环之间就裂开一道大洞(用户截图圈出的正是它)。
@@ -423,11 +406,10 @@ export default function AccountCard({ a, isCurrent, isBest, isSelected, shortcut
             <>
               {/* ★ 确认态**保留文字**:删除不可逆,把「确认删除」也压成图标等于让人凭记忆点。 */}
               <span onClick={() => { setConfirmDelete(false); onRemove(a.node); }} style={{ fontSize: 11, fontWeight: 700, color: "#fff", background: "#E0524D", padding: "5px 10px", borderRadius: 6, cursor: "pointer", whiteSpace: "nowrap", flexShrink: 0 }}>确认删除</span>
-              <span onClick={() => setConfirmDelete(false)} style={{ fontSize: 11, color: t.muted, padding: "5px 10px", cursor: "pointer" }}>取消</span>
+              <span onClick={() => setConfirmDelete(false)} style={{ fontSize: 11, color: t.text2, padding: "5px 10px", cursor: "pointer" }}>取消</span>
             </>
           )}
-        </div>
-      )}
+      </CardActionBar>
     </div>
   );
 }
