@@ -135,7 +135,9 @@ class AgyReasonSetsAgree(unittest.TestCase):
                                  "{} 抄了 grok 的措辞(agy 给的是剩余,方向相反)".format(reason))
 
     def test_every_note_says_something_actionable(self):
-        cues = ("起一次", "跑一次", "装了", "自动重试", "过几秒", "接口可能改了")
+        # ★ 「↻ 可立即刷新」（2026-09-23，csrf_required）：重试修不好的那一类，给的下一步是
+        #   「看云端读数、要新的就点 ↻」—— 它是动作，不是"会自愈"的空头承诺。
+        cues = ("起一次", "跑一次", "装了", "自动重试", "过几秒", "接口可能改了", "↻ 可立即刷新")
         for reason, note in ts_note_bodies().items():
             with self.subTest(reason=reason):
                 self.assertTrue(any(c in note for c in cues),

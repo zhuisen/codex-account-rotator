@@ -277,7 +277,7 @@ export default function MenuBar() {
   // ★ 只在**账号 Tab + codex 档**时启用：每次查询要起一个 python 子进程，
   //   而今日 Tab 与 Gemini 档一个像素都用不到它（同总览那条 `provider === "codex"` 的理由）。
   const { board: mbBoard } = useRotationBoard(tab === "acc" && plat === "codex");
-  const agyPool = useAgyPool(tab === "acc" && plat === "gemini");
+  const agyPool = useAgyPool(tab === "acc" && plat === "gemini", { background: true });
   const alive = accounts.filter(a => a.status !== "dead");
   const dead = accounts.filter(a => a.status === "dead");
   /** 芯片行的数据。★ 计数一律是**这一档渲染出来几行** —— 写"池里有几个"就是在说

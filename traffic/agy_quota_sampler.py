@@ -98,6 +98,8 @@ HEARTBEAT_SECS = int(os.environ.get("AGY_SAMPLER_HEARTBEAT", "1800"))
 # ★ 空闲判据用**时长**不用轮数:快轮询阶段 2 秒一轮,按轮数算 3 轮 = 6 秒就收工,
 #   会在 agy 刚起来还没就绪时把自己关掉。
 IDLE_SECS = int(os.environ.get("AGY_SAMPLER_IDLE_SECS", "180"))
+#: 本机接口要 CSRF token（agy 1.2+，见 `agy-quota` 的 `csrf_required`）时，多久才再试一次。
+CSRF_BACKOFF_SECS = int(os.environ.get("AGY_SAMPLER_CSRF_BACKOFF", "3600"))
 MAX_LIFETIME_SECS = int(os.environ.get("AGY_SAMPLER_MAX_LIFETIME", str(24 * 3600)))
 
 
@@ -251,6 +253,27 @@ for _s in (signal.SIGTERM, signal.SIGINT):
         pass
 
 
+def _csrf_backoff():
+    """sidecar 一小时内刚确认过「本机接口要 CSRF token」⇒ 这次不必再试。
+
+    ★★ 只让采样器自己退出是不够的：app 每 60s 看锁不在就把它**再拉起来**（`lib.rs` 补拉），
+      于是「退出」会变成「每分钟重生一次、每次都去打一个注定 401 的接口」。
+      所以判据落在**起手**：看上次的结论还新不新。每小时仍会真试一次 ——
+      哪天 agy 放开了接口，最多一小时后自己恢复，不需要谁来记得改回来。
+    ★ 读不到 / 不是这个 reason ⇒ 一律不退（"没读到"不许变成"不用采"）。
+    """
+    try:
+        s = json.loads(SIDECAR.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if not isinstance(s, dict) or s.get("reason") != "csrf_required":
+        return False
+    try:
+        return time.time() - float(s.get("fetched_at") or 0) < CSRF_BACKOFF_SECS
+    except (TypeError, ValueError):
+        return False
+
+
 def main():
     ledger = LEDGER_DIR / LEDGER
 
@@ -270,6 +293,8 @@ def main():
     #   `tests/test_no_zombie_children.py::EarlyExitNeverLeavesALock`。
     if not agy_alive():
         return 0
+    if _csrf_backoff():         # ★ 同样排在 take_lock 之前 —— 早退路径不许留陈锁（见上）
+        return 0
 
     # ★ 取锁放在探活**之后**：从这一行往下，任何出口都必须经过下面那个 `finally` 的 unlink。
     if not take_lock(LEDGER_DIR / LOCK):
@@ -281,7 +306,12 @@ def main():
     idle_since = None        # 第一次探测不到 agy 的时刻
     try:
         while time.time() - started < MAX_LIFETIME_SECS:
-            flat = flatten(fetch())
+            snap = fetch()
+            # ★★ 本机接口要 CSRF token（agy 1.2+）⇒ 重试永远不会好，继续每分钟起一个子进程
+            #    纯属空转（2026-09-23 实测已空转约 22 小时）。直接退出；额度改由云端读数提供。
+            if snap and snap.get("reason") == "csrf_required":
+                break
+            flat = flatten(snap)
             now = time.time()
             if flat:
                 got_one, idle_since = True, None

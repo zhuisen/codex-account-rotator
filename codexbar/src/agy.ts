@@ -29,7 +29,8 @@ export type AgyReason =
   | "no_ports"
   | "bad_payload"
   | "rpc_error"
-  | "network_error";
+  | "network_error"
+  | "csrf_required";
 
 export interface AgyBucket {
   bucket_id: string | null;
@@ -225,6 +226,10 @@ export function agyReasonNote(s: AgySnapshot): string {
     case "rpc_error":
       return `agy 的额度接口返回错误${s.detail ? `（${s.detail.slice(0, 60)}）` : ""}。`
         + `这不是「额度耗尽」，下次刷新会自动重试。`;
+    case "csrf_required":
+      // ★ 这一种**重试修不好**，所以不能说"下次会自动重试"（那句在别的 case 里是真话）。
+      return `agy 1.2 起本机额度接口需要它内部的 token，这里读不到。`
+        + `这不是「额度耗尽」：各号额度改由云端读数提供（每 10 分钟自动刷新，↻ 可立即刷新）。`;
     case "network_error":
       return `连不上 agy 的本地端口${s.detail ? `（${s.detail.slice(0, 60)}）` : ""}。`
         + `这不是「额度耗尽」，下次刷新会自动重试。`;

@@ -57,6 +57,9 @@ class Upstream(http.server.BaseHTTPRequestHandler):
             self._send(200, json.dumps(GOOD_PAYLOAD))
         elif self.__class__.mode == "not_ready":
             self._send(500, NOT_READY_BODY)
+        elif self.__class__.mode == "csrf":
+            # 逐字来自 2026-09-23 对 agy 1.2.x 的实测
+            self._send(401, '{"code":"unauthenticated","message":"missing CSRF token"}')
         elif self.__class__.mode == "rpc_error":
             self._send(503, '{"code":"unavailable"}')
         elif self.__class__.mode == "empty_groups":
@@ -117,7 +120,7 @@ class AgyDegradeContract(unittest.TestCase):
         self.assertIsNone(out["quota"], "失败时 quota 必须是 None,不是 {} 也不是满额")
         self.assertIn(out["reason"], (
             "not_installed", "no_process", "not_ready", "no_ports",
-            "bad_payload", "rpc_error", "network_error"))
+            "bad_payload", "rpc_error", "network_error", "csrf_required"))
         blob = json.dumps({k: v for k, v in out.items() if k != "last_good"})
         self.assertNotIn("remaining_percent", blob,
                          "★ 失败路径漏出了额度数字 —— 这正是'假满额'的形状")
@@ -171,6 +174,13 @@ class AgyDegradeContract(unittest.TestCase):
     def test_rpc_error(self):
         out = self.run_tool("rpc_error")
         self.assertEqual(out["reason"], "rpc_error")
+        self.assert_no_fabricated_quota(out)
+
+    def test_csrf_401_is_its_own_reason_not_rpc_error(self):
+        """★★ agy 1.2+ 本机接口要内部 CSRF token —— **重试修不好**，所以不能落成
+        `rpc_error`（那一类的文案承诺"下次会自动重试"）。"""
+        out = self.run_tool("csrf")
+        self.assertEqual(out["reason"], "csrf_required")
         self.assert_no_fabricated_quota(out)
 
     def test_empty_groups_is_bad_payload(self):

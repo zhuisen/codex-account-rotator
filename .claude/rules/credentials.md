@@ -329,6 +329,10 @@ paths:
     而从没找过第二个端点；端点就摆在 agy 二进制的 `strings` 里，与本地 RPC 方法名并排。
     实测两个号都 200（`gemini-weekly` 98.78% / 97.33%）。**这是 §6「只看默认响应就断言
     接口没这能力 = 假阴性」的又一次实证，用户追问两次才逼出搜索。**
+  - ★★ **本机 RPC（`agy-quota`）自 agy 1.2.x 起要内部 CSRF token**（2026-09-23 实测，CHANGELOG B68）：
+    不带 ⇒ `401 missing CSRF token`；用 `ANTIGRAVITY_CSRF_TOKEN` 自设 ⇒ `invalid CSRF token`；
+    日志 / 进程环境 / `presence/`（空锁文件）里都找不到。落成 `csrf_required`（**不是**「会自动重试」的 `rpc_error`），
+    采样器据 sidecar 退避一小时。**云端 `retrieveUserQuotaSummary` 成为唯一来源**，由菜单栏 webview 后台每 10 分钟保鲜。
   - `fetchAvailableModels` **仍在用**，但只用于 `health`（刷 token + 打一次，验凭证还活着）。
     ★ 组名**不再靠猜**：新端点自带 `displayName` / `bucketId`，旧那套「按 `(remainingFraction,
     resetTime)` 分桶 + 成员最多的那组是 gemini」的启发式已删除，闸在

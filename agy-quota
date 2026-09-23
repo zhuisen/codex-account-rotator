@@ -80,6 +80,11 @@ REASONS = (
     "bad_payload",
     "rpc_error",
     "network_error",
+    # ★★ agy **1.2.x 起**本机额度接口要求一个 agy 内部生成的 CSRF token（2026-09-23 实测：
+    #    不带 ⇒ `401 missing CSRF token`；用 `ANTIGRAVITY_CSRF_TOKEN` 自设 ⇒ `invalid CSRF token`；
+    #    日志 / 进程环境 / presence 目录里都没有它）。**重试永远不会好**，所以必须与
+    #    `rpc_error`（"下次会自动重试"）分开 —— 同一句"会重试"放在修不好的状态上就是假话。
+    "csrf_required",
 )
 
 # ★★ `not_installed` 与 `no_process` 必须分开,这是本文件里最容易被合并掉的一处语义:
@@ -313,6 +318,7 @@ def probe(pid, deadline):
     if not ports:
         return None, "no_ports", "进程在但没有监听端口"
     saw_not_ready = False
+    saw_csrf = False
     last = None
     # 高位端口通常是明文 HTTP;两种都试,别硬编(见文件头坑 4)
     for port in sorted(ports, reverse=True):
@@ -337,9 +343,15 @@ def probe(pid, deadline):
             if NOT_READY_MARK in text.lower():
                 saw_not_ready = True             # ★ 预热窗口,不是「拿不到」
                 continue
+            if status == 401 and "csrf" in text.lower():
+                saw_csrf = True                  # ★ 见 REASONS 里 csrf_required 的说明
+                continue
             last = ("rpc_error", "HTTP {}".format(status))
     if saw_not_ready:
         return None, "not_ready", "agy 刚起,额度服务还在预热（实测约 10 秒）"
+    if saw_csrf:
+        # 优先于 `last`：另一个端口回的「HTTP 发给了 HTTPS」之类只是协议没对上，不是原因。
+        return None, "csrf_required", "agy 1.2 起本机额度接口需要内部 CSRF token"
     if last:
         return None, last[0], last[1]
     return None, "network_error", "所有端口都连不上"

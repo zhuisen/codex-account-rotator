@@ -200,7 +200,12 @@ function autoRefreshEnabled(): boolean {
  *   ③ **探测失败不许写成"没有漂移"**。原来 `catch { setDrifted(false) }` 把
  *      「这次没探到」折叠成「确实没漂移」，那条琥珀告警会因为一次子进程失败而消失。
  */
-export function useAgyPool(enabled: boolean): {
+export function useAgyPool(enabled: boolean, opts?: {
+  /** ★★ 后台保鲜（用户 2026-09-23 拍板：「app 开着就每 10 分钟刷一次」）。
+   *  只该有**一个** webview 传 true —— 菜单栏：它开机即建、从不卸载，
+   *  两边都开会在同一个 10 分钟边界上各起一次子进程。 */
+  background?: boolean;
+}): {
   accounts: AgyPoolAccount[];
   /** **现在**钥匙串里是谁（现读，不是 `live_seen`）。 */
   liveSub: string | null;
@@ -416,8 +421,13 @@ export function useAgyPool(enabled: boolean): {
    * ★ 三处**必须是同一个阀**。曾经挂载用 10 分钟、心跳用 2 分钟，结果启动 30s 后必定多取一次
    *   （`useTraffic` 实测过）——「新鲜」只能有一套标准。
    *
-   * ⚠️ **不受 `enabled` 之外的条件放宽**：没人在看 Gemini 档时不该往云端发请求。
-   *   这与 ① 那条「池文件挂载就读」不冲突 —— 那是读盘，这是联网。
+   * ⚠️ ~~不受 `enabled` 之外的条件放宽：没人在看 Gemini 档时不该往云端发请求~~ ——
+   *   **2026-09-23 用户拍板反转**（「gemini 的额度刷新不及时」）：本机实时读数随 agy 1.2
+   *   失效（需要内部 CSRF token，见 `agy-quota` 的 `csrf_required`），云端成了唯一来源，
+   *   而它只在 Gemini 档开着时才前进 ⇒ 每次打开都先看到上次打开时的旧数。
+   *   现在由 `opts.background` 那个 webview 在后台按同一个阀保鲜（见下一个 effect）；
+   *   这里的「进档 / 可见心跳」仍保留 —— 它们让正在看的那一刻不必等下一个后台 tick。
+   *   成本：零额度，只联网；各号并行后一次 2–3s（原串行 8.4s）。
    */
   useEffect(() => {
     if (!enabled) return;
@@ -430,6 +440,22 @@ export function useAgyPool(enabled: boolean): {
     }, TICK_MS);
     return () => clearInterval(id);
   }, [enabled, refreshQuotaIfStale]);
+
+  /**
+   * ④ 后台保鲜：**不看 `enabled`、不看可见性**（窗口藏着恰恰是最需要它的时候 ——
+   *   用户点开那一刻看到的应该是 10 分钟内的数，而不是上次打开时的）。
+   *   仍受设置页「后台自动刷新」开关约束；阀与另外三处是**同一个** `QUOTA_FRESH_MS`，
+   *   而 `quotaRanAt` 读自盘上的 `quota_ran_at`，所以别的 webview 刚取过时这里不会再取。
+   */
+  const background = !!opts?.background;
+  useEffect(() => {
+    if (!background) return;
+    if (autoRefreshEnabled()) refreshQuotaIfStale();
+    const id = setInterval(() => {
+      if (autoRefreshEnabled()) refreshQuotaIfStale();
+    }, TICK_MS);
+    return () => clearInterval(id);
+  }, [background, refreshQuotaIfStale]);
 
   /**
    * ③ 托盘弹出 —— 菜单栏 webview **只在 app 启动时挂载一次**（show/hide 不重建），

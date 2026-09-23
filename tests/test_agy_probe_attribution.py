@@ -111,15 +111,25 @@ class TheIdentityLookupIsActuallyWired(unittest.TestCase):
         if not log_dir.is_dir():
             raise unittest.SkipTest("本机没有 agy 日志目录（CI / 没装 agy）—— 无法做行为验证")
 
-        # 找一份**确实含 applyAuthResult** 的日志，用它的文件名时间戳当 `started_at`。
-        sample = None
+        # 找一份**确实含 applyAuthResult**、且**时间上孤立**的日志，用它的文件名时间戳当 `started_at`。
+        # ★ 必须孤立（2026-09-23 实测假红）：别的会话并发跑 `agy -p`（当晚一个 localrag 任务
+        #   23 分钟起了 35 个）时，同一 `_LOG_SKEW` 窗口里有两份日志 ⇒ `_run_identity` **按设计**
+        #   返回 None（认不出就不猜）。拿这种样本去断言"必须解出 email"，红的是样本不是实现。
+        stamps = {}
         for f in log_dir.glob("cli-*.log"):
             m = re.match(r"cli-(\d{8}_\d{6})\.log$", f.name)
-            if not m:
+            if m:
+                stamps[f] = time.mktime(time.strptime(m.group(1), "%Y%m%d_%H%M%S"))
+        # ★ 窗口从源码读，不在这里再写一份（两份迟早漂）。
+        skew = int(re.search(r"^_LOG_SKEW = (\d+)", (ROOT / "agy-rotate").read_text(encoding="utf-8"),
+                             re.M).group(1))
+        sample = None
+        for f, ts in sorted(stamps.items(), key=lambda kv: -kv[1]):
+            if any(g is not f and abs(t - ts) <= skew for g, t in stamps.items()):
                 continue
             try:
                 if "applyAuthResult: email=" in f.read_text(errors="replace"):
-                    sample = (f, time.mktime(time.strptime(m.group(1), "%Y%m%d_%H%M%S")))
+                    sample = (f, ts)
                     break
             except OSError:
                 continue
@@ -127,7 +137,7 @@ class TheIdentityLookupIsActuallyWired(unittest.TestCase):
             raise unittest.SkipTest("agy 日志里没有 `applyAuthResult` —— 没有已知阳性可用")
 
         ns = {"re": re, "time": time, "Path": Path, "os": os,
-              "AGY_LOG_DIR": log_dir, "_LOG_SKEW": 5}
+              "AGY_LOG_DIR": log_dir, "_LOG_SKEW": skew}
         exec(compile(ast.Module(body=[_fn("_run_identity")], type_ignores=[]),
                      "agy-rotate", "exec"), ns)
         got = ns["_run_identity"](sample[1])

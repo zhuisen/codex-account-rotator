@@ -896,6 +896,24 @@ body **522 KB 明文**还在传，codex 自己关连接 ⇒ 代理写 EPIPE ⇒ 
 闸：`test_rotation_free_hangups.py`（11 条，当天原样行作夹具，含与 `proxy._billable` 逐方法同答的不变量）+
 `test_proxy_models_gzip.py`（7 条，真起代理 + 假上游）；10 个变异全红。
 
+### B68 · 「gemini 的额度刷新不及时」—— 本机实时源随 agy 1.2 失效 + 云端只在看着时才前进 — 2026-09-23 ✅（未发版）
+
+**① 本机实时源死了 22.5 小时没人发现**：`.agy-quota.json` 自 **09-22 22:32** 起每分钟 `HTTP 401`，与 agy CLI 1.1.x→1.2.x
+自动升级同夜（今天 19:22 又到 1.2.9）。起一个临时 agy 实测（交互态不发 prompt、零额度）：不带 token ⇒
+`401 missing CSRF token`；用二进制里出现的 `ANTIGRAVITY_CSRF_TOKEN` 自设 ⇒ `invalid CSRF token`；日志、进程环境、
+`presence/`（全是空锁文件）里都没有它。**短期修不回来。** 而 UI 对这个 401 说的是「下次刷新会自动重试」—— 修不好的状态上
+挂着一句"会自愈"，于是没人去看。
+**② 云端（`retrieveUserQuotaSummary`，零额度、按号）只在 Gemini 档开着时才前进**：当天 01:24 刷过一次，下一次是 20:46 用户打开时。
+**修（用户逐项拍板 1/2/3 全做）**：
+1. **后台保鲜**：菜单栏 webview（开机即建、从不卸载）按同一个 10 分钟阀在后台取，不看 Gemini 档、不看可见性；仍受「后台自动刷新」开关约束。
+   ⚠️ 这**反转**了「没人看就不联网」的旧设计（用户 2026-09-23 拍板）。成本：零额度，只联网。
+2. **各号并行**：`agy-rotate quota` 实测 **8.4s → 2.1–3.0s**（3 个号，3 次）；落盘仍一次、持锁。
+3. **如实分类**：`agy-quota` 把含 `csrf` 的 401 落成新 reason `csrf_required`（不再混进「会自动重试」的 `rpc_error`），
+   文案说明「已改用云端读数、↻ 可立即刷新」；采样器见 sidecar 一小时内刚确认过就**起手退出**
+   （app 每 60s 看锁补拉它 —— 只在循环里 break 等于每分钟重生一次），每小时仍真试一次以便 agy 哪天放开时自愈。
+闸：`test_agy_quota_timely.py`（9 条：恰好一个 webview 驱动 / 后台不看可见性 / 并行总耗时≈最慢者且不串号 / 退避与锁序）
++ `test_agy_degrade_contract.py::test_csrf_401_is_its_own_reason_not_rpc_error`；7 个变异全红。
+
 ---
 
 ## v1.8.0 — 2026-09-19
