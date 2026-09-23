@@ -355,7 +355,11 @@ export default function AccountCard({ a, isCurrent, isBest, isSelected, shortcut
                   style={{ flex: "1 1 auto", minWidth: 44, textAlign: "center", fontSize: 11, fontWeight: 700, whiteSpace: "nowrap", color: t.accentText, background: t.accent, padding: "5px 8px", borderRadius: 6, cursor: "pointer" }}>切换</span>
           )}
           {isCurrent && (
-            <span style={{ flex: "1 1 auto", minWidth: 62, textAlign: "center", fontSize: 11, fontWeight: 600, whiteSpace: "nowrap", color: t.accent, padding: "5px 0" }}>✓ 当前</span>
+            /* ★ 与右上角的「直连」是**同一件事**（这张卡就是 auth.json 里那个号），所以同一个词。
+               2026-09-23 右上角改名时漏了这里，一张卡上同一个意思挂两个名字 ——
+               而用户报的「一个界面三个使用」里被圈出来的正有这一个。 */
+            <span title="不走代理直接跑 codex 时用的就是这个号（auth.json 里是它）"
+                  style={{ flex: "1 1 auto", minWidth: 62, textAlign: "center", fontSize: 11, fontWeight: 600, whiteSpace: "nowrap", color: t.accent, padding: "5px 0" }}>✓ 直连</span>
           )}
           {!isDead && (
             /* ★ 探针**不压成图标**:它是全 app 唯一花钱的控件,必须与旁边免费的按钮

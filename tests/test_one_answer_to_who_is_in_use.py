@@ -89,13 +89,24 @@ class TheCodexTabHasExactlyOneAnswer(unittest.TestCase):
         """★★ 「当前」与顶部的「正在使用」撞名却说的是另一回事（直连号 vs 代理在用）。
 
         ⚠️ 判据打在**传给组件的文案**上，不是全文搜「当前」——
-          动作条里「✓ 当前」「把当前号切到 X」等等都合法，全文搜必假红，
+          「把当前号切到 X」这类 tooltip 仍含「当前」二字，全文搜必假红，
           而一条会假红的闸，用户学会的是忽略它（本仓形态④/⑫）。
         """
         call = _call_site(self.APP, "<AccountCard")
         self.assertIn('curLabel="直连"', call,
                       "★★ codex 卡片的右上角标没改成「直连」—— 与顶部「正在使用」撞名")
         self.assertIn("curTitle=", call, "★ 改了名就必须给一句解释它到底是什么")
+
+    def test_the_action_bar_uses_the_same_word_as_the_corner(self):
+        """★★ 动作条里的「✓ 直连」与右上角「直连」是同一件事，必须同一个词。
+
+        ⚠️ 2026-09-23 右上角改名时这里漏了，而这条闸当时的注释甚至写着「动作条里的
+          『✓ 当前』是合法的」—— 一张卡上同一个意思挂着两个名字，截图一眼就能看出来。
+        """
+        src = (SRC / "components" / "AccountCard.tsx").read_text(encoding="utf-8")
+        code = re.sub(r"\{/\*[\s\S]*?\*/\}|/\*[\s\S]*?\*/", "", src)
+        self.assertIn(">✓ 直连</span>", code, "★★ codex 卡动作条没用「✓ 直连」")
+        self.assertNotIn(">✓ 当前</span>", code, "★★ codex 卡动作条还在写「✓ 当前」，与右上角「直连」两个名字")
 
     def test_the_agy_tab_keeps_its_own_wording(self):
         """★ agy **没有逐请求挑号器**，手动切号就是它的机制 ——
