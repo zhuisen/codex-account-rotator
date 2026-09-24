@@ -1,6 +1,7 @@
 ---
 paths:
   - "**/rotation.py"
+  - "**/agy_rotation.py"
   - "**/LogsPage.tsx"
   - "**/proxy.py"
 ---
@@ -68,3 +69,10 @@ paths:
   `?focusacc=<号>`（聚焦）。★ 这两个驱动**必须轮询等待**，泳道要等异步 IPC 才渲染，
   固定延时会命中 0 个而看着像选择器写错。★ 浮层要派发 **`mouseover`** 不是 `mouseenter`
   —— React 的 `onMouseEnter` 是合成事件，靠根节点 mouseover 委托。
+- ★★ **Gemini 版块（`traffic/agy_rotation.py`，2026-09-24，B71）口径与 codex 版不同，别互相照抄**：
+  段 = **agy 以这个号的身份在运行**（`cli-*.log` 文件名时间 → mtime），不是逐请求；身份只认 agy 自己日志的
+  `applyAuthResult: email=`，**认不出就不归属**（计 `responses_unplaced`，不按时间猜）。**token 恒 0**
+  —— agy 的用量账本不带身份，前端显示「—」。日表「在岗」必须取**区间并集**（本机常有多个 agy 同号并发，
+  求和实测一天 139,633s）。身份变了却无换号记录 = **drift**，与 switch 分开报。Gemini 版的 `rot.log`
+  就是 `agy.log` 的换号行，运行日志里**不再并一次**（否则每行两遍且错标 proxy）。harness：`?agyrot=fail`。
+  闸 `tests/test_agy_rotation_lanes.py`。

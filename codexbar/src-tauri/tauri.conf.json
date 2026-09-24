@@ -56,6 +56,7 @@
       "../../traffic/quota_anchors.py": "scripts/traffic/quota_anchors.py",
       "../../traffic/agy_quota_sampler.py": "scripts/traffic/agy_quota_sampler.py",
       "../../traffic/rotation.py": "scripts/traffic/rotation.py",
+      "../../traffic/agy_rotation.py": "scripts/traffic/agy_rotation.py",
       "../../relay-ctl": "scripts/relay-ctl",
       "../../relay/__init__.py": "scripts/relay/__init__.py",
       "../../relay/store.py": "scripts/relay/store.py",

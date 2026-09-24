@@ -171,8 +171,12 @@ class AnAccountOutOfRotationSaysSoOnTheOverview(unittest.TestCase):
         # ★ 期望值从**页面真正用的那份夹具**推导（内联在 harness.html 里），不另抄一份、
         #   也不去读真实 state.json。`"rotate_off": true` 是 JSON 夹具里的形态；
         #   agy 那份是 JS 表达式（`rotate_off: (...)`），冒号后无空格，天然不会误匹配。
-        fixture = (APP_DIR / "harness.html").read_text(encoding="utf-8")
-        want = len(re.findall(r'"rotate_off"\s*:\s*true', fixture))
+        #   ★ 只取 `var STATE = …;` 那一行：同一份 harness 里还内联着别的夹具（Gemini 代理轮换
+        #   `__AGYROT__` 的日表行也带 `"rotate_off": true`），全文计数会把它们也算进来。
+        html = (APP_DIR / "harness.html").read_text(encoding="utf-8")
+        m = re.search(r"^\s*var STATE = (.*);\s*$", html, re.M)
+        self.assertIsNotNone(m, "★★ harness 里找不到 `var STATE = …;` —— 夹具形态变了")
+        want = len(re.findall(r'"rotate_off"\s*:\s*true', m.group(1)))
         self.assertGreater(want, 0,
                            "★★ 夹具里一个停轮换的号都没有 —— 这条闸此刻没有判别力")
         self.assertEqual(d.count("data-rotate-off"), want,

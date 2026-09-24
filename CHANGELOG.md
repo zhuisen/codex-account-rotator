@@ -957,6 +957,26 @@ sam 5h 0.717 / 周 0.948，5h 重置 21:32:22Z = 05:32 SGT，与状态栏逐分�
    闸 `EveryScriptSpawningTestImportsTheIsolation` 当场扫出另外 **17 个**漏了隔离的模块（已补），
    第一版只查子串被变异证明是空闸，已改成两支都要。
 
+### B71 · 日志页「代理轮换」分成 Codex ｜ Gemini 两个版块 — 2026-09-24 ✅（未发版）
+
+**需求**（用户拍板）：标题行放分段切换（Codex ｜ Gemini）；Gemini 版 = 会话泳道 + 换号事件。
+**实现**：新模块 `traffic/agy_rotation.py`（纯函数，只读本机日志与池文件，输出与 `rotation.collect` 同形 +
+`platform: "agy"`，实测 0.2s）；只读 IPC `read_agy_rotation`（不 emit，已进安装包 resources）；
+`LogsPage` 的 `Seg` 选中态记在 localStorage `codexbar_rot_plat`。
+**口径**（agy 没有代理，能诚实拿到的只有两样）：
+- 泳道段 = **agy 以这个号的身份在运行**（`cli-*.log` 文件名时间 → mtime），身份取 agy 自己日志的
+  `applyAuthResult: email=`；同一份日志里身份变了就**切段**；认不出身份的会话**不归属**，计入 `responses_unplaced`。
+- 换号事件来自 `agy.log`（自动 / 恢复成你选的 / 借用 / 手动）；**身份变了却没有换号记录**单列成 drift 事件
+  ——「多半是某个仍在跑的 agy 把钥匙串写回了自己的身份」。
+- **不按号记 token**：agy 的用量账本不带身份，按时间拼是猜。token 列显示「—」，请求改叫「会话」，
+  429 / 断流 / 均每次三项在 Gemini 版不显示。
+**踩到的一个真错**：日表「在岗」第一版把各会话时长**求和**，真机算出单日 139,633s（> 86,400）——
+本机常有好几个 agy 同号并发。改成**区间并集**（dbk 当天 39,616s）。
+**闸**：`tests/test_agy_rotation_lanes.py`（11 条，5 个变异全红：认不出也猜 / 中途换身份不切段 / 并集改求和 /
+drift 并进 switch / Gemini 版运行日志重复并入）。
+顺带修一条被新夹具戳穿的闸：`test_connector_oneclick` 数「停轮换角标」的期望值时对**整份** harness 计数，
+新内联的 Gemini 轮换夹具也带 `"rotate_off": true` ⇒ 期望 4、实画 3 的假红。改为只数 `var STATE = …;` 那一份。
+
 ---
 
 ## v1.8.0 — 2026-09-19

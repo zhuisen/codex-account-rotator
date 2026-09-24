@@ -39,6 +39,8 @@ const winLabel = (h: WinH): string => (h >= 168 ? `${h / 24}d` : `${h}h`);
  *  ★ 读回来要**校验在合法集合里**：localStorage 里是字符串，手改过或旧版本留下的值
  *    会变成一个谁都不匹配的窗口，页面就永远空着且没有任何报错。 */
 const WIN_KEY = "codexbar_rot_win";
+/** 代理轮换看的是哪个平台（Codex / Gemini）。 */
+const PLAT_KEY = "codexbar_rot_plat";
 function loadWin(): WinH {
   try {
     const n = Number(localStorage.getItem(WIN_KEY));
@@ -263,8 +265,35 @@ export default function LogsPage({ t }: { t: Theme }): React.ReactElement {
   const [focus, setFocus] = useState<string | null>(null);
   const [tip, setTip] = useState<Tip | null>(null);
   const [filter, setFilter] = useState<string>("all");
+  /** ★ 2026-09-24 用户：「代理轮换改成 codex 和 gemini 两个版块」（选的是标题行分段切换）。
+   *  Gemini 那一版来自 `traffic/agy_rotation.py`：agy 没有代理，泳道 = agy **以这个号的身份
+   *  在运行**的时段（取自 agy 自己日志的 `applyAuthResult`），事件 = `agy.log` 的换号记录；
+   *  **没有按号的 token**（账本不带身份，按时间拼就是猜），那几格一律显示「—」并说明。 */
+  const [plat, setPlatState] = useState<"codex" | "agy">(() => {
+    try { return localStorage.getItem(PLAT_KEY) === "agy" ? "agy" : "codex"; } catch { return "codex"; }
+  });
+  const setPlat = useCallback((v: "codex" | "agy") => {
+    setPlatState(v);
+    try { localStorage.setItem(PLAT_KEY, v); } catch { /* 无痕模式：本次不记住 */ }
+  }, []);
+  const isAgy = plat === "agy";
 
   const load = useCallback(async (hours: WinH) => {
+    if (plat === "agy") {
+      // ★ Gemini 没有快照（冷路径实测 0.2s，不值得多一份缓存文件）。
+      setBusy(true);
+      try {
+        const r = await invoke<Rotation>("read_agy_rotation", { hours });
+        setRot(r.ok ? r : null);
+        setErr(r.ok ? null : (r.detail ?? "读不到 agy 日志"));
+      } catch (e: unknown) {
+        setRot(null);
+        setErr(String(e));
+      } finally {
+        setBusy(false);
+      }
+      return;
+    }
     // ★★ 两段式:先把**成品快照**画出来(读盘 ~1ms),再后台重扫。
     //    用户报的「太卡」就是缺这一段 —— 原来每次进页面/切窗口都同步等一次全扫
     //    (实测 1h 0.9s / 24h 1.7s / 7d 3.3s,冷缓存下更久)。
@@ -289,7 +318,10 @@ export default function LogsPage({ t }: { t: Theme }): React.ReactElement {
       //   长亮又灭不掉的灯是本仓判过死刑的形态。
       setBusy(false);
     }
-  }, []);
+  }, [plat]);
+
+  // ★ 换版块时先清空：不许把另一个平台的泳道留在新标签下面（同「换窗口失败必须清空」）。
+  useEffect(() => { setRot(null); setFocus(null); setTip(null); }, [plat]);
 
   useEffect(() => {
     load(win);
@@ -320,7 +352,8 @@ export default function LogsPage({ t }: { t: Theme }): React.ReactElement {
           left: pct(s.start),
           width: Math.max(0, pct(s.end) - pct(s.start)),
           // 稿子 §1：色块透明度 = token 密度（.45–1）
-          op: 0.45 + (s.tokens / Math.max(60, s.end - s.start) / maxDensity) * 0.55,
+          // ★ Gemini 没有按号 token ⇒ 密度无从谈起，统一中等透明度（不是「很淡 = 用得少」）。
+          op: isAgy ? 0.8 : 0.45 + (s.tokens / Math.max(60, s.end - s.start) / maxDensity) * 0.55,
         })),
         errs: rot.markers.filter(m => m.acc === a.acc && m.kind === "stream_err").map(m => pct(m.t)),
         cools: rot.markers.filter(m => m.acc === a.acc && m.kind === "cool_429").map(m => pct(m.t)),
@@ -369,7 +402,9 @@ export default function LogsPage({ t }: { t: Theme }): React.ReactElement {
   }, [win]);
 
   const logs = useMemo(() => {
-    const proxy = (rot?.log ?? []).map(
+    // ★ Gemini 版的 `rot.log` 就是 `agy.log` 的换号行，而服务日志里 `agy` 那一源**已经整份**
+    //   含着它们 —— 再并一次就每行两遍，还会被错标成 `proxy`。所以 Gemini 版不并。
+    const proxy = isAgy ? [] : (rot?.log ?? []).map(
       (l): SvcLine => ({ src: "proxy", t: l.t, inferred: false, text: l.text }));
     // ★ 有时间的按时间倒序；**没有时间的排在最后**，不许给它们编一个时间去参与排序。
     const merged = [...proxy, ...svc];
@@ -378,7 +413,7 @@ export default function LogsPage({ t }: { t: Theme }): React.ReactElement {
     const all = [...dated, ...undated];
     if (filter === "all") return all;
     return all.filter(l => l.text.toLowerCase().includes(filter));
-  }, [rot, svc, filter]);
+  }, [rot, svc, filter, isAgy]);
 
   const cov = rot?.coverage;
   /**
@@ -435,7 +470,12 @@ export default function LogsPage({ t }: { t: Theme }): React.ReactElement {
    * ★ 而这部分**是花了钱的**：按本仓的计费相位，`stream err` = 已送达上游 = **已计费**。
    *   所以它不只是"统计不全"，是"这些钱看不见"。
    */
-  const covNote = cov
+  const covNote = isAgy
+    ? "Gemini 按**会话**统计：agy 没有代理，看不到逐请求记录。泳道是 agy 以这个号的身份在运行的时段"
+      + "（取自 agy 自己日志里的 `applyAuthResult`），不是「在消耗」。agy 的用量账本不带账号身份，"
+      + "按时间去拼就是猜，所以**不显示按号的 token**。"
+      + (cov && cov.responses_unplaced > 0 ? ` 另有 ${cov.responses_unplaced} 场会话认不出身份、未计入。` : "")
+    : cov
     ? `已归属 ${cov.responses_with_tokens}/${cov.responses_seen} 次响应`
       + `（${cov.attributed_pct === null ? "—" : Math.round(cov.attributed_pct * 100) + "%"}）。`
       + (cov.responses_seen > cov.responses_with_tokens
@@ -585,6 +625,10 @@ export default function LogsPage({ t }: { t: Theme }): React.ReactElement {
       <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12,
                     flexShrink: 0, flexWrap: "wrap", rowGap: 8 }}>
         <span style={{ fontSize: 22, fontWeight: 700, letterSpacing: "-.01em", flexShrink: 0 }}>代理轮换</span>
+        <span data-rot-plat style={{ flexShrink: 0 }}>
+          <Seg opts={["codex", "agy"] as const} cur={plat} on={setPlat}
+               label={(v) => (v === "codex" ? "Codex" : "Gemini")} t={t} />
+        </span>
 
         {/* ★ `flex: 1 1 auto` + `minWidth: 0` 是必需的：不给它，这条汇总是**不可收缩**的，
             于是空间不够时被挤到第二行的会是右边的窗口分段控件（`1h 6h 24h 7d`），
@@ -595,13 +639,14 @@ export default function LogsPage({ t }: { t: Theme }): React.ReactElement {
                       //   （实测 Seg 独占第二行），basis=0 才会让它吃剩余空间、在内部折。
                       flex: "1 1 0", minWidth: 0, rowGap: 4,
                       fontFamily: MONO, fontSize: 11.5, color: t.text2 }}>
-          <Stat t={t} v={rot ? fmtTok(rot.kpi.tokens) : "—"} k="token" title={covNote} />
-          <Stat t={t} v={rot ? String(rot.kpi.requests) : "—"} k="请求" />
-          <Stat t={t} v={rot ? fmtTok(rot.kpi.avg_tokens) : "—"} k="均/次" />
+          <Stat t={t} v={rot && !isAgy ? fmtTok(rot.kpi.tokens) : "—"} k="token" title={covNote} />
+          <Stat t={t} v={rot ? String(rot.kpi.requests) : "—"} k={isAgy ? "会话" : "请求"} />
+          {!isAgy && <Stat t={t} v={rot ? fmtTok(rot.kpi.avg_tokens) : "—"} k="均/次" />}
           <Stat t={t} v={rot ? String(rot.kpi.rotations) : "—"} k="轮换" />
           <Stat t={t} v={rot ? dur(rot.kpi.avg_dwell) : "—"} k="驻留" />
-          <Stat t={t} v={rot ? String(rot.kpi.cool_429) : "—"} k="429" c={COOL} />
-          <Stat t={t} v={rot ? String(rot.kpi.stream_err) : "—"} k="断流" c={WARN} />
+          {/* ★ 429 / 断流是代理才有的事件，Gemini 那一版不画（画成 0 = 说它确实没发生过）。 */}
+          {!isAgy && <Stat t={t} v={rot ? String(rot.kpi.cool_429) : "—"} k="429" c={COOL} />}
+          {!isAgy && <Stat t={t} v={rot ? String(rot.kpi.stream_err) : "—"} k="断流" c={WARN} />}
           {/* ★ 汇总条上原有一格「Pro 保底 Nm」,用户 2026-09-07 要求去掉。
               ⚠️ **信号本身没有删** —— 它仍在两个更合适的位置:
                 · 泳道上 Pro 号的紫色 `PRO` 徽章(哪个号是保底档,一眼可见);
@@ -623,8 +668,8 @@ export default function LogsPage({ t }: { t: Theme }): React.ReactElement {
                       alignItems: "center", gap: 12 }}>
           <span style={{ display: "flex", gap: 12, fontSize: 10, color: t.text2 }}>
             <Legend t={t}><span style={{ width: 13, height: 7, borderRadius: 2, background: t.accent, opacity: .85 }} />在岗</Legend>
-            <Legend t={t}><span style={{ width: 6, height: 6, borderRadius: "50%", background: WARN }} />断流</Legend>
-            <Legend t={t}><span style={{ width: 8, height: 8, borderRadius: "50%", border: `2px solid ${COOL}` }} />429</Legend>
+            {!isAgy && <Legend t={t}><span style={{ width: 6, height: 6, borderRadius: "50%", background: WARN }} />断流</Legend>}
+            {!isAgy && <Legend t={t}><span style={{ width: 8, height: 8, borderRadius: "50%", border: `2px solid ${COOL}` }} />429</Legend>}
           </span>
           {/* ★ 「现在 xx:xx · 当前号 X」已删（用户 2026-09-07）：两条信息在这一页都是**重复的** ——
               时间轴右端本来就标着「现在」那条青竖线，而「当前号」在泳道上已经有「当前」徽章。
@@ -665,7 +710,7 @@ export default function LogsPage({ t }: { t: Theme }): React.ReactElement {
             <span style={{ position: "absolute", right: 0, color: t.accent, letterSpacing: 0 }}>现在</span>
           </div>
           <div style={{ display: "grid", gridTemplateColumns: "58px 44px 1fr 74px", gap: 8, textAlign: "right" }}>
-            <span>TOKEN</span><span>请求</span><span>主模型</span><span>额度</span>
+            <span>TOKEN</span><span>{isAgy ? "会话" : "请求"}</span><span>主模型</span><span>额度</span>
           </div>
         </div>
 
@@ -747,7 +792,7 @@ export default function LogsPage({ t }: { t: Theme }): React.ReactElement {
                 display: "grid", gridTemplateColumns: "58px 44px 1fr 74px", gap: 8,
                 alignItems: "center", textAlign: "right", fontFamily: MONO,
               }}>
-                <span style={{ fontSize: 15, fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>{fmtTok(l.tokens)}</span>
+                <span style={{ fontSize: 15, fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>{isAgy ? "—" : fmtTok(l.tokens)}</span>
                 <span style={{ fontSize: 12.5, color: t.text2, fontVariantNumeric: "tabular-nums" }}>{l.requests}</span>
                 {/* ★ 模型名放不下时截省略号，全名走 title —— 模型名长度不可控
                     （`gpt-5.3-codex-mini` 之类），为它加宽会挤掉右边的额度条。 */}
@@ -790,16 +835,16 @@ export default function LogsPage({ t }: { t: Theme }): React.ReactElement {
               <div style={{ fontSize: 9.5, color: "#8a93a0", marginBottom: 4 }}>{tip.range} · {tip.dur}</div>
               <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11 }}>
                 <span style={{ color: "#c3cad3", fontWeight: 700 }}>{tip.acc}</span>
-                <span style={{ fontWeight: 700, color: t.accent }}>{fmtTok(tip.tokens)}</span>
+                <span style={{ fontWeight: 700, color: t.accent }}>{isAgy ? "" : fmtTok(tip.tokens)}</span>
               </div>
               <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, marginTop: 2 }}>
-                <span style={{ color: "#8a93a0" }}>请求</span><span style={{ color: "#c3cad3" }}>{tip.requests} 次</span>
+                <span style={{ color: "#8a93a0" }}>{isAgy ? "会话" : "请求"}</span><span style={{ color: "#c3cad3" }}>{tip.requests} {isAgy ? "场" : "次"}</span>
               </div>
               <div style={{ marginTop: 5, paddingTop: 4, borderTop: "1px solid rgba(255,255,255,.1)" }}>
                 {tip.models.length === 0 && (
                   // ★ 「这段没有归属到 token」不是 0 —— 请求可能失败(没有响应就没有 token 记录),
                   //   或者那些响应没走代理。写 0 会被读成"这段白跑了"。
-                  <div style={{ fontSize: 9.5, color: "#8a93a0" }}>该时段无归属到的 token</div>
+                  <div style={{ fontSize: 9.5, color: "#8a93a0" }}>{isAgy ? "agy 不按号记 token" : "该时段无归属到的 token"}</div>
                 )}
                 {tip.models.map((m, i) => (
                   <div key={i} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 9.5, marginTop: 2 }}>

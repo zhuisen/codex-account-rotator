@@ -1042,6 +1042,12 @@ function relayEntry() {
         if (rs === 'snaponly') return Promise.resolve(ROT.ok);
         return Promise.resolve(ROT[rs] || ROT.ok);
       }
+      // ★ Gemini 版「代理轮换」（2026-09-24）。夹具由 **真的 `traffic/agy_rotation.py::collect`**
+      //   在生成 harness 时跑一份合成日志算出来（见文件末尾 `agy_rot_fixture`）——
+      //   不在这里手写 JSON，否则验的是一份与引擎无关的假数据。`?agyrot=fail` 验失败态。
+      case 'read_agy_rotation':
+        if (p.get('agyrot') === 'fail') return Promise.reject('读不到 agy 日志');
+        return Promise.resolve(__AGYROT__);
       case 'read_proxy_rotation': {
         var rk = p.get('rot') || 'ok';
         // ★★ `?rot=snaponly` —— **全扫永不返回**,只有快照能把页面画出来。
@@ -1803,6 +1809,43 @@ def redacted_state():
             "last_proxy_ts": raw.get("last_proxy_ts")}
 
 
+def agy_rot_fixture():
+    """合成三个号的 agy 会话日志 + 换号记录，交给**真引擎** `agy_rotation.collect` 算一份 24h 的结果。
+
+    ★ 形状覆盖：同号长会话、并发会话、有记录的换号、**没有记录的换号**（钥匙串被写回 ⇒ drift）、
+      一场认不出身份的会话（进 `responses_unplaced`）、一个池里有但窗口内没跑过的号。
+    """
+    import sys as _s
+    import tempfile as _t
+    _s.path.insert(0, str(HERE.parent.parent / "traffic"))
+    import agy_rotation as AR
+    now = time.time()
+    from pathlib import Path
+    d = Path(_t.mkdtemp(prefix="harness-agyrot-"))
+    logs = d / "log"; logs.mkdir()
+    runs = [(-20 * 3600, -14 * 3600, "demo0@example.com"), (-13 * 3600, -9 * 3600, "demo0@example.com"),
+            (-8.5 * 3600, -6 * 3600, "demo1@example.com"), (-5.5 * 3600, -2 * 3600, "demo0@example.com"),
+            (-5 * 3600, -4 * 3600, "demo0@example.com"), (-90 * 60, -10, "demo1@example.com"),
+            (-3 * 3600, -3 * 3600 + 600, None)]
+    for i, (a, b, email) in enumerate(runs):
+        t0 = now + a
+        f = logs / time.strftime("cli-%Y%m%d_%H%M%S.log", time.localtime(t0 + i))
+        body = "I%s 00000 x.go:1] start\n" % time.strftime("%m%d %H:%M:%S.000000", time.localtime(t0))
+        if email:
+            body += "I%s 11111 server_oauth.go:196] applyAuthResult: email=%s, authMethod=consumer\n" % (
+                time.strftime("%m%d %H:%M:%S.000000", time.localtime(t0 + 2)), email)
+        f.write_text(body)
+        os.utime(f, (now + b, now + b))
+    (d / "agy.log").write_text("[agy %s] auto 自动切到 [Asen]（剩余 91.0%%，new，落点 keyring）\n"
+                               % time.strftime("%m-%d %H:%M:%S", time.localtime(now - 8.5 * 3600 - 30)))
+    (d / ".agy-pool.json").write_text(json.dumps({"accounts": {
+        "s0": {"label": "qq55", "email": "demo0@example.com", "quota": {"gemini": {"remaining": 0.93}}},
+        "s1": {"label": "Asen", "email": "demo1@example.com", "quota": {"gemini": {"remaining": 0.41}}},
+        "s2": {"label": "Huo", "email": "demo2@example.com", "quota": {"gemini": {"remaining": 1.0}},
+               "rotate_off": True}}}))
+    return AR.collect(24, now=now, log_dir=logs, store=d)
+
+
 # 版本号从 tauri.conf.json 现取 —— 写死过 0.9.0,发到 0.9.1 后截图上的版本号就在说假话
 VERSION = json.loads((HERE.parent / "src-tauri/tauri.conf.json").read_text())["version"]
 stub = (STUB.replace("__SNAPSHOT__", json.dumps(snapshot))
@@ -1810,7 +1853,8 @@ stub = (STUB.replace("__SNAPSHOT__", json.dumps(snapshot))
             # ★ 现算,不写死:grok 夹具里的重置时间和"N 分钟前"都是相对 now 的,
             #   钉死一个时间戳会让夹具随日子腐烂成「已重置 / 3 天前」,那时截出来的图是错的。
             .replace("__NOW__", str(int(time.time())))
-            .replace("__STATE__", json.dumps(redacted_state())))
+            .replace("__STATE__", json.dumps(redacted_state()))
+            .replace("__AGYROT__", json.dumps(agy_rot_fixture())))
 ANCHOR = "<script type=\"module\""
 for src, dst in (("index.html", "harness.html"), ("menubar.html", "harness-menubar.html")):
     html = (APP / src).read_text()

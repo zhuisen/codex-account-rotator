@@ -1463,6 +1463,28 @@ fn read_rotation_snapshot(hours: Option<f64>) -> Result<Value, String> {
     Ok(all.get(&key).cloned().unwrap_or(Value::Null))
 }
 
+/// Gemini（agy）的「代理轮换」—— 与 `read_proxy_rotation` **同形**（`traffic/agy_rotation.py`）。
+/// 只读本机 agy 日志与池文件：不联网、不碰凭证、不 emit。2026-09-24 用户要求日志页分 Codex / Gemini 两版。
+#[tauri::command]
+async fn read_agy_rotation(hours: Option<f64>) -> Result<Value, String> {
+    let hours = hours.unwrap_or(24.0).max(0.1).min(24.0 * 31.0);
+    let script = format!("{}/traffic/agy_rotation.py", script_dir());
+    let out = tauri::async_runtime::spawn_blocking(move || {
+        py_cmd().arg(&script).arg("--hours").arg(format!("{}", hours)).output()
+    })
+    .await
+    .map_err(|e| format!("join: {}", e))?
+    .map_err(|e: std::io::Error| format!("exec: {}", e))?;
+    if !out.status.success() {
+        return Err(format!(
+            "agy_rotation.py 退出码 {:?}: {}",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    serde_json::from_slice(&out.stdout).map_err(|e| format!("parse: {}", e))
+}
+
 #[tauri::command]
 async fn read_proxy_rotation(hours: Option<f64>) -> Result<Value, String> {
     let hours = hours.unwrap_or(24.0).max(0.1).min(24.0 * 31.0);
@@ -2460,7 +2482,7 @@ pub fn run() {
             set_main_visible,
             read_auth_tokens,
             read_logs,
-            read_proxy_rotation,
+            read_proxy_rotation, read_agy_rotation,
             read_rotation_snapshot,
             read_account_detail,
             quit_app,
