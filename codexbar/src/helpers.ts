@@ -402,6 +402,33 @@ export function poolFreshness(slots: Record<string, Slot>, atNow = now()):
   return { fresh, stale, unknown, oldestAgeSec: oldest };
 }
 
+/** 池级新鲜度的**文案**。codex 与 Gemini 两档共用这一份（用户 2026-09-24：Gemini 档缺这一行、
+ *  两档不统一）。两处各写一套迟早只改一边 —— `unknown` 进分母那条就是这么漏过一次的。 */
+export function freshnessLine(lastAt: number | undefined,
+  f: { fresh: number; stale: number; unknown: number }): string {
+  if (!lastAt) return "尚未刷新过全池";
+  const total = f.fresh + f.stale + f.unknown;
+  const bad: string[] = [];
+  if (f.stale) bad.push(`${f.stale} 个陈旧`);
+  if (f.unknown) bad.push(`${f.unknown} 个从未读到`);
+  return bad.length
+    ? `最近刷新 ${fmtAgo(lastAt)} · ${f.fresh}/${total} 新鲜，${bad.join("，")}`
+    : `全池 ${total} 个都是新的 · ${fmtAgo(lastAt)}`;
+}
+
+/** Gemini 池的新鲜度：按各号的 `quota_at`（云端按账号读成功的时刻），阈值与 codex 同一条
+ *  `QUOTA_STALE_SEC`。没有 `quota_at` = 从未读到，进分母（同 `poolFreshness`）。 */
+export function agyPoolFreshness(accts: { quota_at?: number | null }[], atNow = now()):
+  { fresh: number; stale: number; unknown: number; lastAt: number | undefined } {
+  let fresh = 0, stale = 0, unknown = 0, lastAt: number | undefined;
+  for (const a of accts) {
+    if (!a.quota_at) { unknown++; continue; }
+    if (atNow - a.quota_at > QUOTA_STALE_SEC) stale++; else fresh++;
+    if (lastAt == null || a.quota_at > lastAt) lastAt = a.quota_at;
+  }
+  return { fresh, stale, unknown, lastAt };
+}
+
 /** When the pool was last read FROM THE SERVER. Deliberately derived from the snapshots rather than
  *  stored separately: a rollout-derived snapshot is a local echo, not a pool refresh, so counting it
  *  would report the pool as fresher than it is.

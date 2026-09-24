@@ -107,12 +107,13 @@ class NoOrphanFields(unittest.TestCase):
         """★★ 评审抓出:`{fresh:1, stale:0, unknown:1}` 会显示成「全池 1 个都是新的」——
         把一个**从没读到过**的号说成新的,正是这条链路一路在防的那种谎。
         分母必须是**全部账号**,不是「我算得出来的那部分」。"""
-        app = (ROOT / "codexbar" / "src" / "App.tsx").read_text(encoding="utf-8")
-        i = app.index("freshness.fresh")
-        seg = re.sub(r"\{/\*.*?\*/\}", "", app[max(0, i - 900):i + 900], flags=re.S)
-        self.assertIn("freshness.unknown", seg,
+        # ★ 2026-09-24 文案搬进 `helpers.ts::freshnessLine`（codex / Gemini 两档共用），判据跟过去。
+        h = (ROOT / "codexbar" / "src" / "helpers.ts").read_text(encoding="utf-8")
+        i = h.index("export function freshnessLine(")
+        seg = h[i:h.index("\n}\n", i)]
+        self.assertIn("f.unknown", seg,
                       "unknown 没有进池级展示 —— 从没读到过的号会被算成「新的」")
-        self.assertRegex(seg, r"freshness\.fresh\s*\+\s*freshness\.stale\s*\+\s*freshness\.unknown",
+        self.assertRegex(seg, r"f\.fresh\s*\+\s*f\.stale\s*\+\s*f\.unknown",
                          "分母漏了 unknown")
 
     def test_pool_freshness_is_consumed_by_ui(self):
@@ -121,7 +122,7 @@ class NoOrphanFields(unittest.TestCase):
                       if p.name != "helpers.ts")
         self.assertIn("poolFreshness", src,
                       "poolFreshness 只在 helpers 里算,没有任何 UI 消费 —— 孤儿字段")
-        self.assertIn("freshness.stale", src,
+        self.assertIn("freshnessLine(lastRefreshAt, freshness)", src,
                       "覆盖度算出来了但没画出来")
 
 

@@ -183,6 +183,11 @@ export default function AgyCard({ t, color, snap, busy, err, disabled, winSlots,
                                         marginLeft: 4, color: t.accent, fontWeight: 700 }}>
             <IcPin on />{pinRank + 1}
           </span>
+        )}
+        {/* ★ 停用轮换角标 —— 与账号卡同位同色同义（琥珀 = 主动停用，不是坏了）。 */}
+        {rotates === false && (
+          <span data-rotate-off title="已停用自动轮换 —— 启动 agy 时不会挑它（池子空且开着借用时除外）。展开卡片点循环图标可放回"
+                style={{ marginLeft: 4, color: "#E0901C", fontWeight: 700 }}>⊘</span>
         )}</span>
       {/* ★ 右上角**只许有拖拽手柄**（用户 2026-09-20：「卡片统一一下」）。
           原来这里还有一个 ↻ 手动重取，坐标 `top:4 right:8` —— 与上面那个 `DragHandle`
@@ -361,7 +366,11 @@ export default function AgyCard({ t, color, snap, busy, err, disabled, winSlots,
           {/* ★ 底注一行,降级与否都在同一位置、同样高度 —— 卡片不会因为 agy 关掉就长高一截。
               ★★ **数字绝不假装是活的**:有上次读数就说明它是几时的,没有就说读不到。
               位置与外框刻意与账号卡的「到期」行同构(对齐的一部分,不是装饰线)。 */}
-          <div style={{ display: "flex", flexDirection: "column", gap: 6,
+          {/* ★★ 页脚**恒为一行**，与账号卡同构（用户 2026-09-24：「gemini 的卡片下面有较大的留白」）。
+              原来是 `flexDirection: column`，隐形占位徽章自成第二行 ⇒ 卡片比 codex 卡高 23px
+              （实测 179 vs 156），且那 23px 全是底部空白。 */}
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between",
+                        gap: 8, flexWrap: "nowrap", minWidth: 0,
                         marginTop: 5, paddingTop: 7, borderTop: `1px solid ${t.divider}`,
                         color: alarmed ? "#E0901C" : t.muted }}>
             {/* ★★ 这一格与账号卡的「到期」同位（用户 2026-09-16 点名的一致性）。
@@ -396,7 +405,7 @@ export default function AgyCard({ t, color, snap, busy, err, disabled, winSlots,
                 : shown ? "重置 —"
                 : "额度暂时读不到"}</span>
             {/* agy 没有重置卡这个概念，占位只为让页脚与账号卡等高。 */}
-            <span style={{ alignSelf: "flex-end" }}><CardBadgeGhost /></span>
+            <span style={{ minWidth: 0, overflow: "hidden", display: "flex", justifyContent: "flex-end" }}><CardBadgeGhost /></span>
           </div>
         </div>
       </div>

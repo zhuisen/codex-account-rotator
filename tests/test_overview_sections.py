@@ -116,7 +116,9 @@ class CodexOnlyThingsStayOnTheCodexTab(unittest.TestCase):
 
         ⚠️ 锚点不能是「新鲜」两个字 —— 上面几百行的注释里就有「新鲜度 10min」这类说法，
         `index()` 命中的是那些，闸恒红。取渲染那一行独有的模板串。"""
-        i = APP.index("`最近刷新 ${fmtAgo(lastRefreshAt)}")
+        # ★ 2026-09-24 文案搬进 `helpers.ts::freshnessLine`（两档共用）；codex 档那一行
+        #   仍只数 codex 池（`freshness` 来自 useStore），Gemini 档另有一行数 Gemini 池。
+        i = APP.index("{freshnessLine(lastRefreshAt, freshness)}")
         self.assertIn('{provider === "codex" && (', APP[max(0, i - 1500):i],
                       "★ 新鲜度行没有按档收起")
 

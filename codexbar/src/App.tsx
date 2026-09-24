@@ -20,7 +20,7 @@ import { useExpiryWatch } from "./hooks/useExpiryWatch";
 import { useDeadWatch } from "./hooks/useDeadWatch";
 import { useAutoSwitch } from "./hooks/useAutoSwitch";
 import { useKeyboard } from "./hooks/useKeyboard";
-import { fmtAgo, maskId, fullVersion } from "./helpers";
+import { maskId, fullVersion, freshnessLine, agyPoolFreshness } from "./helpers";
 import { usePrivacy } from "./hooks/usePrivacy";
 import { useTraffic } from "./hooks/useTraffic";
 import { useGrokQuota } from "./hooks/useGrokQuota";
@@ -587,6 +587,15 @@ export default function App() {
                     自动切号 {agyPool.autoOn === null ? "—" : agyPool.autoOn ? "开" : "关"}
                   </span>
                 </div>)}
+                {/* ★ 与 codex 档同位同形的新鲜度行（用户 2026-09-24 点名的不统一）。
+                    数的是 **Gemini 池**各号的 `quota_at`，不是 codex 的快照。 */}
+                {provider === "gemini" && agyPool.accounts.length > 0 && (() => {
+                  const f = agyPoolFreshness(agyPool.accounts);
+                  return (
+                    <span data-agy-freshness style={{ fontSize: 10, color: t.muted, fontFamily: "'JetBrains Mono'" }}>
+                      {freshnessLine(f.lastAt, f)}
+                    </span>);
+                })()}
                 {provider === "codex" && (
                 <span style={{ fontSize: 10, color: t.muted, fontFamily: "'JetBrains Mono'" }}>
                   {/* ★★ 原文是「上次全池刷新 X 前」,而它取的是**全池最大值** —— 那句话本身就是假的:
@@ -597,17 +606,7 @@ export default function App() {
                       `{fresh:1, stale:0, unknown:1}` 会显示成「全池 1 个都是新的」——
                       把一个从没读到过的号说成新的，正是这条链路一路在防的那种谎。
                       分母 = 全部账号，不是「我算得出来的那部分账号」。 */}
-                  {lastRefreshAt
-                    ? (() => {
-                        const total = freshness.fresh + freshness.stale + freshness.unknown;
-                        const bad: string[] = [];
-                        if (freshness.stale) bad.push(`${freshness.stale} 个陈旧`);
-                        if (freshness.unknown) bad.push(`${freshness.unknown} 个从未读到`);
-                        return bad.length
-                          ? `最近刷新 ${fmtAgo(lastRefreshAt)} · ${freshness.fresh}/${total} 新鲜，${bad.join("，")}`
-                          : `全池 ${total} 个都是新的 · ${fmtAgo(lastRefreshAt)}`;
-                      })()
-                    : "尚未刷新过全池"}
+                  {freshnessLine(lastRefreshAt, freshness)}
                 </span>)}
                 </div>
               </div>

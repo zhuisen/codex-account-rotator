@@ -857,6 +857,17 @@ B61 加的「核实跑起来的是哪一份」用了 `ps | awk '{print; exit}'`�
 另：一次量到 880 宽见底态 hero 撑到 167px（上限 128），改 flex-basis 后变回 94px，**但改回去也是 94px** ——
 四种组合 × 连跑 6 次不复现，成因未定，未宣称修复；真正的防线是高度闸现在也量见底档。
 
+### B72 · Gemini 账号版块三处与 codex 不统一 — 2026-09-24 ✅（未发版）
+
+用户点名（「这些都是 gemini 账号版块做不到位、不统一的地方」），修前 harness 1300×900 实测：
+① 顶栏右侧「最近刷新 · N/M 新鲜」只在 Codex 档有 —— Gemini 档补上同位同形的一行，数的是 **Gemini 池**各号的
+  `quota_at`，阈值同一条 `QUOTA_STALE_SEC`；文案抽成 `helpers.ts::freshnessLine` 两档共用（两处各写迟早只改一边）。
+② 停用轮换的 ⊘ 角标只画在 codex 卡上 —— `AgyCard` 补上，同位同色（琥珀）。
+③ **Gemini 卡 179px vs codex 卡 156px**：页脚写成 `flexDirection: column`，隐形占位徽章自成第二行，
+  多出来的 23px 全是底部空白。改成与账号卡同构的单行页脚后三张都是 156。
+闸 `tests/test_gemini_overview_parity.py`（5 条，渲染后的页面上量；3 个变异——页脚改回两行 / 去掉 ⊘ / 去掉新鲜度行——
+每个都重建 bundle 后变红）。三条旧闸的锚点跟着文案搬家（判据不变：`unknown` 进分母、codex 那行只数 codex 池）。
+
 ## v1.9.1 — 2026-09-24
 
 **Gemini 额度读数恢复真实、轮换规则与 codex 对齐；日志页「代理轮换」分成 Codex ｜ Gemini 两个版块。**
