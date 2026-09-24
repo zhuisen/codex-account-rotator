@@ -135,6 +135,11 @@ loopback RPC,**不联网、不消耗配额**)。没装那家 CLI 的机器上**�
 
 时间窗 `1h / 6h / 24h / 7d` 可切且**记住上次选择**；进页面先画上次快照（~1ms）再后台重扫，不阻塞。
 
+**Codex ｜ Gemini 两个版块**（v1.9.1 起，标题行切换）。Gemini(agy) 没有代理，所以它那一版口径不同：
+泳道段 = **agy 以这个号的身份在运行**（身份取 agy 自己日志的 `applyAuthResult`，会话中途换了身份就切段，
+认不出的会话只计数不归属）；事件 = `agy.log` 的换号记录，外加「身份变了却没有换号记录」的 **drift**
+（多半是某个常驻 agy 把钥匙串写回了自己的身份）；**不按号记 token**（agy 用量账本不带身份，按时间拼就是猜），显示「—」。
+
 ## 它解决的 4 个痛点
 
 | 痛点 | 怎么解的 |
@@ -191,6 +196,7 @@ loopback RPC,**不联网、不消耗配额**)。没装那家 CLI 的机器上**�
 | `traffic/sources.local.json`(gitignored) | 本机停用哪些平台:`{"disabled": ["grok"]}`。等价 CLI:`--exclude grok` / `--only kimi` |
 | `traffic/scan.py` | **多 AI 流量总览扫描器**(`[--days N] [--json] [--no-cache]`)。读 Claude / Codex / Grok / Kimi / Antigravity 五家 + OpenClaw / Reasonix / DeepSeek Harness 三个宿主源(按模型名回流各家)（平台注册表在文件里，**加一家 = 写个解析器 + 加一行**，前端自动跟上）,**纯本地只读、不联网、不消耗任何额度**,与账号池无关。CodexBar「AI用量信息」页的数据源 |
 | `traffic/rotation.py` | **代理轮换泳道的数据引擎**。把 `proxy.log` 的在岗时间线与 codex rollout 的 token 记账按 `response_id` 精确 join。纯模块、不联网、不碰凭证；带文件级缓存与成品快照（`.rotation-cache.json` / `.rotation-latest.json`，均 gitignored） |
+| `traffic/agy_rotation.py` | 代理轮换 **Gemini 版块**的数据（与 `rotation.py` 同形 + `platform: "agy"`）。读 `~/.gemini/antigravity-cli/log/cli-*.log` 与 `agy.log`；纯模块、只读、不联网、不碰凭证 |
 | `traffic/discover.py` | **数据源体检**(`--json`):找本机还有哪些 AI 把用量落了盘,并现场验算它的 token 口径。纯本地只读、不联网、不碰凭证,SQLite 一律 `mode=ro`,**只出报告不自动启用**(接一家的实质是写解析器) |
 | `claude/claude_tokens.py` | ⚠️ 只统计 Claude 的旧扫描器,能力已被 `traffic/scan.py` 完全覆盖(v0.7.0 起 app 不再调用)。保留仅作 CLI |
 | `scripts/install-launchd.sh` | **生成并加载 3 个 launchd 服务**(autosync/quotad/proxy)。★ keepalive(04:30)与 refreshquota(07:00)已于 2026-08-29 按需取消 —— 前者职责由代理接手(覆盖面见上表①),后者与 quotad 的 300s 全池扫描重复。两个 CLI 子命令仍可手动跑。生成而非提交成文件:plist 内嵌绝对路径,提交的副本换台机器就是错的,且会静默漂移(旧的 `launchd/*.plist` 就漂到了写死 `/usr/bin/python3`)。★脚本会**解析并钉住 OpenSSL 版的 python3**,见「维护约定」 |
