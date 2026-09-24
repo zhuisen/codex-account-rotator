@@ -30,6 +30,10 @@
 ⚠️ **历史行不会消失**（本机 8MB），所以每条修法都必须对**裸名字**的旧行也成立 ——
 下面每组闸都有一条专门打在旧格式上。
 """
+try:
+    from . import _isolation  # noqa: F401  ★ 见 tests/_isolation.py —— 必须在任何被测模块之前
+except ImportError:
+    import _isolation  # noqa: F401
 import json
 import os
 import subprocess

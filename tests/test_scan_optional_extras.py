@@ -26,6 +26,10 @@
 ② **`scan.py` 运行时按路径加载的每个同目录模块,都必须在打包资源里**。
    这道堵的是第 ① 层,让功能在安装包里真的可用,而不只是"不崩"。
 """
+try:
+    from . import _isolation  # noqa: F401  ★ 见 tests/_isolation.py —— 必须在任何被测模块之前
+except ImportError:
+    import _isolation  # noqa: F401
 import json
 import os
 import re

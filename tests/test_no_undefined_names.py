@@ -24,6 +24,10 @@
 未用的 import / 变量在本仓是常态（大量按平台分支的代码），全开会制造噪音，
 而**一条会假红的闸，用户学会的是忽略它**。
 """
+try:
+    from . import _isolation  # noqa: F401  ★ 见 tests/_isolation.py —— 必须在任何被测模块之前
+except ImportError:
+    import _isolation  # noqa: F401
 import subprocess
 import sys
 import tempfile

@@ -16,6 +16,10 @@ autosync 新入池的号和所有存量号都**没有**这个键。用正向命�
 粘性(`conv`/`affinity`)尤其危险:一段已经粘在 A 上的对话会继续用 A,
 而用户以为自己已经把它摘出去了。
 """
+try:
+    from . import _isolation  # noqa: F401  ★ 见 tests/_isolation.py —— 必须在任何被测模块之前
+except ImportError:
+    import _isolation  # noqa: F401
 import importlib.util
 import json
 import os

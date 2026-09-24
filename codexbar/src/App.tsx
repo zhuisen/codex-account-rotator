@@ -4,7 +4,6 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { isWindowsUI, CARD_ACTIONS_LIFE_MS } from "./helpers";
 import { THEMES } from "./theme";
-import Ring from "./components/Ring";
 import Toast from "./components/Toast";
 import GhostButton from "./components/GhostButton";
 import AccountCard from "./components/AccountCard";
@@ -21,7 +20,7 @@ import { useExpiryWatch } from "./hooks/useExpiryWatch";
 import { useDeadWatch } from "./hooks/useDeadWatch";
 import { useAutoSwitch } from "./hooks/useAutoSwitch";
 import { useKeyboard } from "./hooks/useKeyboard";
-import { fmtAgo, maskId, winNumColor, fullVersion } from "./helpers";
+import { fmtAgo, maskId, fullVersion } from "./helpers";
 import { usePrivacy } from "./hooks/usePrivacy";
 import { useTraffic } from "./hooks/useTraffic";
 import { useGrokQuota } from "./hooks/useGrokQuota";
@@ -38,7 +37,6 @@ import { IcRefresh } from "./components/CardIcons";
 import ProviderTabs from "./components/ProviderTabs";
 import { POOL_PLATFORMS, loadPoolKey, savePoolKey, type PoolKey } from "./platforms";
 import { useAgyPool } from "./hooks/useAgyPool";
-import { agyWinRows, agyShown, agyResetText } from "./agy";
 import ProbeButton from "./components/ProbeButton";
 import "./App.css";
 
@@ -283,6 +281,12 @@ export default function App() {
   // agy 账号池。★ 只在总览的 Google 档才读 —— 与 grok 额度同一条纪律：
   //   不是每个页面都需要它，而"顺手读一下"会变成"每次开 app 都读"。
   const agyPool = useAgyPool(page === "overview" && provider === "gemini");
+  // ★ 与 codex 档同一块续航条、同一个板子形状；数据走只读 IPC `read_agy_board`。
+  //   `dep` = 池数据：置顶 / 切号 / 停用之后据此重读（agy 那边没有 `state-changed`）。
+  const { board: agyBoard, err: agyBoardErr } = useRotationBoard(
+    page === "overview" && provider === "gemini", { source: "agy", dep: agyPool.accounts });
+  const agyPinOf = new Map([...(agyBoard?.queue ?? []), ...(agyBoard?.rest ?? [])]
+    .map((e) => [e.aid, e.pin == null ? null : e.pin - 1] as const));
 
   /**
    * Gemini 档的排序列表。★ 与 codex 档**同一条规则**：显示顺序与 ⌘N 共用一个数组。
@@ -351,60 +355,10 @@ export default function App() {
   //    放在前面时页面**整页白屏**，只在 harness 的 `errors` 探针里留一句
   //    `Cannot access 'je' before initialization`（压缩后的变量名）——
   //    零渲染的页面量出来正好是「零溢出、零报错」，看着像通过（本仓记过的假阴性）。
-  /** Hero 上固定画这两格。★ 写死槽位而不是"有什么画什么" —— 非当值号读不到周窗口，
-   *  "有什么画什么"会让 Hero 时有两段时有一段，而那个少**没有任何地方解释**。 */
-  const agyHeroSlots = ["5h", "周"] as const;
-  /**
-   * 池里余量最多的那个号。★ 口径与 codex 的 hero **一致**：比的是各自**最紧**的那个窗口
-   * —— 拿 `windows[0]` 比等于把真正的约束藏起来（本仓 §8 的老规矩）。
-   * ★ 读不到额度的号**不参与**（`remaining` 取不到就跳过），否则"未知"会冒充满额被推荐。
-   */
-  //
-  // ★★★ **只在所有候选都测到的窗口上比较**（2026-09-15 用户实报：
-  //   「出现一个 use，一个当前」—— USE 挂在 dbk 上，而"当前"是 sam）。
-  //
-  //   当时的真实数字：
-  //       dbk  5h 99.x%   周 **没测到**（非当值号）  ⇒ min = 99.x
-  //       sam  5h 100%    周 98.78%                ⇒ min = 98.78
-  //   于是 99.x > 98.78，dbk 被判成"最优"并挂上 USE —— 而它只是**少测了一个窗口**。
-  //
-  //   这正是本仓 §8 那条「基准必须用 tightest，不能用 windows[0] —— 两把不同的尺」
-  //   在**账号之间**的形态：`min(5h)` 和 `min(5h, 周)` 根本不是同一个量，
-  //   把它们比大小，就是在奖励"测得少的那个"。
-  //   ⚠️ 而周窗口对非当值号是**结构性测不到**的（只有本机 RPC 有，云端那条没有周 ——
-  //     2026-09-15 实测：两个号各 27 模型、各只有 2 个桶，没有任何周桶）。
-  //     所以"等数据齐了再比"不是一个选项，**必须定义在什么基础上比**。
-  //
-  //   判据：取所有候选**都有**的那些窗口（交集）作为共同基准；交集为空 ⇒ 不给推荐。
-  //   ★ 本例交集 = {5h} ⇒ dbk 99.x vs sam 100 ⇒ sam 胜 ⇒ USE 落在当前号上，矛盾消失。
-  //   ★ 代价是显式的：若 dbk 的周其实只剩 5%，按 5h 比仍会推荐它 —— 我们**无法知道**。
-  //     所以下面 `agyPartial` 标出"这次比较少看了哪些窗口"，由徽章的 title 如实说出来。
-  const agyRowsOf = agyPool.accounts.map((a) => ({
-    a, rows: agyWinRows(agyShown(agyPool.snapshotOf(a, agySnap))?.quota),
-  })).filter((x) => x.rows.length > 0);
-  /** 所有候选都测到的窗口标签。★ 用**交集**而不是并集：并集会把"没测到"当成一格空，
-   *  而空格在取 `min` 时会被静默跳过 —— 那正好等于奖励测得少的那个号。 */
-  const agyCommonWins = agyRowsOf.length
-    ? agyRowsOf.reduce<string[]>((acc, x, i) => {
-        const mine = x.rows.map(r => r.label);
-        return i === 0 ? mine : acc.filter(l => mine.includes(l));
-      }, [])
-    : [];
-  /** 这次比较**少看了**哪些窗口（有号测到、但不是人人都有）。空 = 大家窗口齐平。 */
-  const agyPartial = [...new Set(agyRowsOf.flatMap(x => x.rows.map(r => r.label)))]
-    .filter(l => !agyCommonWins.includes(l));
-  const agyRank = agyRowsOf.map(({ a, rows }) => ({
-    a,
-    pct: Math.min(...rows.filter(r => agyCommonWins.includes(r.label)).map(r => r.remaining)),
-  })).filter(x => Number.isFinite(x.pct));
-  // ★★ **打平时当前号赢。** `reduce` 取第一个最大值，于是两个号都是 96% 时
-  //   会推荐"切到另一个 96%"——那是一次零收益的换号，而换号在 agy 上的代价是
-  //   得重开一个会话。判据与差值角标同一条：**领先/持平不建议切**。
-  const agyTop = agyRank.length
-    ? agyRank.reduce((m, x) => (x.pct > m.pct
-        || (x.pct === m.pct && x.a.sub === agyPool.liveSub) ? x : m)) : null;
-  const agyBest = agyTop?.a ?? null;
-  const agyBestPct = agyTop?.pct ?? null;
+  // ★★ 2026-09-24：Gemini 的「正在使用 / 下一个」改由 `agy/pool.py::pick`（`read_agy_board`）给出，
+  //   前端**不再自己排**。原来这里有一段「在各号都测到的窗口上比最小值」的推荐逻辑（`agyBest`），
+  //   它既不看置顶、不看停用、也不看 15% 阈值 —— 与 wrapper 真正装进去的号是两份实现，
+  //   codex 那边已经因此栽过（界面报一个根本不会被挑的号）。整段理由见 git 历史与 CHANGELOG B70。
 
   // ★ `name` 是展开态显示的中文名，`tip` 只在**折叠态**当悬浮提示 —— 展开后标签已经在那儿，
   //   再挂一个 title 是重复。原来 traffic 的 tip 写死「Claude / Codex / Grok」三家，
@@ -792,86 +746,25 @@ export default function App() {
                     </div>
                     </>)}
                     {provider === "gemini" && (<>
-                    {/* ★★ Hero 区 —— 与 Codex 档**同构**（用户 2026-09-13：
-                        「gemini 的功能也没有 1:1 同步上 codex」）。
-                        ★ 三处刻意不同，都是因为 agy 没有对应的事实，不是漏做：
-                          · 没有 `PlanBadge`（agy 不分套餐）
-                          · 没有「订阅至」（云端那条只回额度，不回订阅期）
-                          · 「建议切到」后面写明**只对下一次启动生效** —— agy 只在启动时读凭证。 */}
-                    {(() => {
-                      const cur = agyPool.accounts.find(a => a.sub === agyPool.liveSub);
-                      if (!cur) return null;
-                      const snap = agyPool.snapshotOf(cur, agySnap);
-                      const rows = agyWinRows(agyShown(snap)?.quota);
-                      const tight = rows.length
-                        ? rows.reduce((m, r) => (r.remaining < m.remaining ? r : m)) : null;
-                      const c = colorOf(traffic, "agy");
-                      return (
-                        <div style={{ display: "flex", alignItems: "center", gap: 18, background: t.heroBg,
-                                      border: `1px solid ${t.heroBorder}`, borderRadius: 14,
-                                      padding: "15px 18px", marginBottom: 13, boxShadow: t.heroShadow,
-                                      transition: "background-color .35s ease, border-color .35s ease" }}>
-                          <Ring pct={tight?.remaining ?? 0} r={33} sw={6}
-                                color={tight ? c : t.ringTrack} track={t.ringTrack} size={80}>
-                            <span style={{ fontSize: 19, fontWeight: 700, color: t.text,
-                                           fontVariantNumeric: "tabular-nums", lineHeight: 1, marginTop: -1 }}>
-                              {tight ? Math.round(tight.remaining) : "—"}
-                              <span style={{ fontSize: 10, color: t.muted }}>%</span></span>
-                            <span style={{ fontSize: 8.5, color: t.muted, fontFamily: "'JetBrains Mono'",
-                                           lineHeight: 1, marginTop: 2 }}>{tight?.label ?? ""}</span>
-                          </Ring>
-                          <div style={{ flex: 1, minWidth: 0 }}>
-                            <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: ".14em",
-                                          color: t.accent, fontFamily: "'JetBrains Mono'" }}>当前使用中</div>
-                            <div style={{ display: "flex", alignItems: "baseline", gap: 9, marginTop: 3 }}>
-                              {/* ★ `data-hero-acct`：供 uishot 的 `trails` 探针**按时间**采「当前使用中」
-                                  到底是谁。这一格的错法是**瞬态**的 —— 终态永远对，错的是中间那几帧
-                                  （`liveSub` 被 `live_seen` 打回去的那一段），而单次终态快照对它沉默。 */}
-                              <span data-hero-acct
-                                    style={{ fontSize: 24, fontWeight: 700, letterSpacing: "-.01em" }}>{cur.label}</span>
-                              <span style={{ fontSize: 12, color: t.text2, fontFamily: "'JetBrains Mono'" }}>
-                                {maskId(cur.email ?? "", privacy)}</span>
-                            </div>
-                            <div style={{ display: "flex", flexWrap: "wrap", gap: "2px 14px", marginTop: 6,
-                                          fontSize: 12, fontFamily: "'JetBrains Mono'", color: t.text2 }}>
-                              {/* ★ 每一段 nowrap、段与段之间才允许换行（同 codex hero）。 */}
-                              {agyHeroSlots.map((lab) => {
-                                const r = rows.find(x => x.label === lab);
-                                return (
-                                  // ★★★ `seen_at` = 这一格是**上次当值时看到的**，不是现值。
-                                  //   Hero 是整页最显眼的地方，在这里不标龄就等于把一个
-                                  //   记忆里的数字当成现读推给用户 —— 比留空更糟。
-                                  //   降级方式与卡片同构：降不透明度 + 数字前加 `~` + title 说明。
-                                  <span key={lab} style={{ whiteSpace: "nowrap",
-                                                           opacity: r?.seen_at ? .62 : 1 }}
-                                        title={r
-                                          ? (r.seen_at
-                                              ? `这是这个号**上次当值时**读到的（${fmtAgo(r.seen_at)}）—— 周窗口只有当前登录的号读得到`
-                                              : undefined)
-                                          : `${lab} 窗口只有**当前登录**的号读得到（本机 RPC）`}>
-                                    {lab}{" "}
-                                    <b style={{ color: r ? winNumColor(r.remaining, t) : t.muted }}>
-                                      {r ? `${r.seen_at ? "~" : ""}${Math.round(r.remaining)}%` : "—"}</b>{" "}
-                                    <span style={{ color: t.muted }}>↻{r ? agyResetText(r).text : "—"}</span>
-                                  </span>
-                                );
-                              })}
-                            </div>
-                          </div>
-                          {agyBest && agyBest.sub !== cur.sub && (
-                            <div onClick={() => agyPool.switchTo(agyBest.label)}
-                                 title="切过去 —— ★ 只对下一次启动的 agy 生效，已经开着的会话不受影响"
-                                 style={{ background: t.accent, color: t.accentText, borderRadius: 10,
-                                          padding: "10px 16px", cursor: "pointer", textAlign: "center",
-                                          flexShrink: 0 }}>
-                              <div style={{ fontSize: 11.5, fontWeight: 700 }}>
-                                建议切到 {agyBest.label}({Math.round(agyBestPct!)}%)</div>
-                              <div style={{ fontSize: 13, fontWeight: 700, marginTop: 2 }}>切换 →</div>
-                            </div>
-                          )}
-                        </div>
-                      );
-                    })()}
+                    {/* ★★★ 2026-09-24：Hero 换成与 codex 档**同一个** `RunwayHero`（用户：「gemini 的账号总览
+                        同步更新 codex 的规范规则」）。原来那块「当前使用中 + 建议切到 X 切换→」有两个问题：
+                          ① 「建议切到」是前端自己排的，既不看置顶也不看停用 —— 与 wrapper 真正会挑的号不同源；
+                          ② codex 档 2026-09-21 已因同样的理由删掉了它（见 `RunwayHero.tsx` 文件头）。
+                        「下一个」与卡片角标同一个真源：`agy-rotate next --json` → `agy/pool.py::pick`。 */}
+                    {agyBoard && <RunwayHero t={t} board={agyBoard} privacy={privacy} source="agy" />}
+                    {agyBoardErr && (
+                      <div data-runway-err style={{
+                        display: "flex", alignItems: "center", gap: 8, marginBottom: 13,
+                        padding: "7px 12px", borderRadius: 10, fontSize: 11,
+                        fontFamily: "'JetBrains Mono'", color: "#E0901C",
+                        background: t.ghostBg, border: `1px solid ${t.cardBorder}` }}>
+                        <span style={{ fontWeight: 700 }}>⚠️ 续航数据没读到</span>
+                        <span style={{ color: t.text2, minWidth: 0, overflow: "hidden",
+                                       textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          {agyBoard ? "上面这条是上次读到的 · " : ""}{agyBoardErr}
+                        </span>
+                      </div>
+                    )}
                     <div data-cards-grid style={{ display: "grid", gridTemplateColumns: CARD_GRID_COLS, gap: 12, alignContent: "start" }}>
                       {/* ★★ 池里**有号就一号一卡**；一个都没有时退回原来那张只读卡
                           （`agy-rotate login --current` 之前就是这个状态，它仍然成立）。
@@ -900,8 +793,11 @@ export default function App() {
                                      //   切的就是这一列（见上面 useKeyboard 的分流）。超过 9 个不画。
                                      shortcut={i < 9 ? i + 1 : undefined}
                                      isSelected={selectedCard === a.sub}
-                                     isBest={agyBest?.sub === a.sub} bestPct={agyBestPct ?? undefined}
-                                     partialWins={agyPartial}
+                                     isBest={agyBoard?.next?.aid === a.sub}
+                                     bestTitle="下次启动 agy 会装进这个号（与顶部续航条同一个真源：agy-rotate next）"
+                                     bestPct={agyBoard?.next?.tightest ?? undefined}
+                                     pinRank={agyPinOf.get(a.sub) ?? null}
+                                     onTogglePin={() => agyPool.togglePin(a.label)}
                                      onSelect={() => setSelectedCard(selectedCard === a.sub ? null : a.sub)}
                                      onRename={(next) => agyPool.renameTo(a.label, next)}
                                      /* ★ 移除**不可逆**：卡片上两段确认，`agy-rotate remove`

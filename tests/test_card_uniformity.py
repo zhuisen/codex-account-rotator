@@ -25,6 +25,10 @@ Gemini 卡上更是两个控件直接叠在一起。用户：「卡片统一一�
 ★ 这两条都**只能量**，不能靠读代码推：死空间是「最后一个有墨的元素底边」到卡片底边的
   距离，它由 flex 链、预留占位、padding 三者合成，任何一处改动都会改它。
 """
+try:
+    from . import _isolation  # noqa: F401  ★ 见 tests/_isolation.py —— 必须在任何被测模块之前
+except ImportError:
+    import _isolation  # noqa: F401
 import json
 import re
 import shutil

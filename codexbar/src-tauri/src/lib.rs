@@ -536,6 +536,27 @@ async fn read_rotation_board() -> Result<String, String> {
     }
 }
 
+/// Gemini（agy）总览续航条的数据 —— **只读**，与 `read_rotation_board` 同形同理。
+///
+/// ★★ 走 `agy-rotate next --json`：它调 `agy/pool.py` 的**唯一**选号实现（`auto` 也调它），
+///   所以「下一个」就是 wrapper 下次启动真会装进去的号。纯读：不刷 token、不联网、不写池、
+///   **不 emit** —— 只读查询绝不走会广播的写通道（2026-09-21 自激回环的教训）。
+#[tauri::command]
+async fn read_agy_board() -> Result<String, String> {
+    let script = format!("{}/agy-rotate", script_dir());
+    let out = tauri::async_runtime::spawn_blocking(move || {
+        py_cmd().arg(&script).arg("next").arg("--json").output()
+    })
+    .await
+    .map_err(|e| format!("join: {}", e))?
+    .map_err(|e| format!("exec: {}", e))?;
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).to_string())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).to_string())
+    }
+}
+
 /// dawn-probe 的开关与上次运行时间 —— **只读**。
 ///
 /// ★★ 2026-09-21 从 `run_rotate` 挪出来（agy 评审发现）。`dawn-probe --status` 是纯查询，
@@ -1014,7 +1035,9 @@ fn read_agy_pool() -> Result<Option<String>, String> {
 #[tauri::command]
 async fn run_agy_rotate(args: Vec<String>) -> Result<String, String> {
     const ALLOWED: &[&str] = &["quota", "switch", "live", "rename", "remove",
-                               "health", "probe", "rotate", "auto-switch"];
+                               "health", "probe", "rotate", "auto-switch",
+                               // 2026-09-24：与 codex 对齐的置顶插队 / 池子空时借用开关（写池，不联网）
+                               "pin", "borrow"];
     let sub = args.first().cloned().unwrap_or_default();
     if !ALLOWED.contains(&sub.as_str()) {
         return Err(format!("disallowed agy-rotate subcommand: {:?}", sub));
@@ -2413,7 +2436,7 @@ pub fn run() {
             run_traffic,
             run_discover,
             read_integration,
-            read_rotation_board,
+            read_rotation_board, read_agy_board,
             read_dawn_status,
             connector_plan,
             connector_apply,

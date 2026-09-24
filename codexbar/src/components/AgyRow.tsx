@@ -34,7 +34,9 @@ const MB_WIN_SLOTS = ["5h", "周"] as const;
  * ③ **「没在跑」不染警告色**：agy 不常驻，那是常态。染了就是又造一盏长亮的灯。
  */
 export default function AgyRow({ t, color, snap, busy, disabled, onOpen,
-                                 label, isCurrent, onSwitch, switching }: {
+                                 label, isCurrent, onSwitch, switching, isBest }: {
+  /** 「下一个」—— 下次启动 agy 会装进这个号（`agy/pool.py::pick`，与总览同源）。2026-09-24。 */
+  isBest?: boolean;
   t: Theme;
   /** agy 平台识别色，来自 `colorOf(data, "agy")`（已折进用户偏好）。 */
   color: string;
@@ -74,7 +76,7 @@ export default function AgyRow({ t, color, snap, busy, disabled, onOpen,
           <span style={{ fontSize: 12, fontWeight: 700, color: t.muted, lineHeight: 1 }}>—</span>
         </Ring>
         <div className="mb-row-info">
-          <NameLine t={t} color={color} label={label} isCurrent={isCurrent} inPool={!!onSwitch}
+          <NameLine t={t} color={color} label={label} isCurrent={isCurrent} inPool={!!onSwitch} isBest={isBest}
                     mark={degraded && snap
                       ? <StaleMark t={t} note={agyReasonNote(snap)} tone={tone} size={10} />
                       : undefined} />
@@ -103,7 +105,7 @@ export default function AgyRow({ t, color, snap, busy, disabled, onOpen,
       </Ring>
       <div className="mb-row-info">
         <NameLine t={t} color={color} sub={tight.group ?? undefined}
-                  label={label} isCurrent={isCurrent} inPool={!!onSwitch}
+                  label={label} isCurrent={isCurrent} inPool={!!onSwitch} isBest={isBest}
                   mark={degraded && snap
                     ? <StaleMark t={t} note={agyReasonNote(snap)} tone={tone} size={10} />
                     : undefined} />
@@ -173,14 +175,17 @@ function Shell({ t, color, onOpen, switching, isCurrent, children }: {
   );
 }
 
-function NameLine({ t, color, sub, mark, label, isCurrent, inPool }: {
+function NameLine({ t, color, sub, mark, label, isCurrent, inPool, isBest }: {
   t: Theme; color: string; sub?: string; mark?: React.ReactNode;
-  label?: string; isCurrent?: boolean; inPool?: boolean;
+  label?: string; isCurrent?: boolean; inPool?: boolean; isBest?: boolean;
 }) {
   return (
     <>
       <div className="mb-row-name-line">
         <span className="mb-row-name" style={{ color }}>{label ?? "agy"}</span>
+        {/* ★ 与 codex 行同一套：「下一个」来自真挑号器（`agy-rotate next`），不是「剩余最多」。 */}
+        {isBest && <span className="mb-row-badge-use" title="下次启动 agy 会装进这个号"
+                         style={{ color: t.accentText, background: t.accent, whiteSpace: "nowrap" }}>下一个</span>}
         {/* ★★ 徽章三态，**别合并**（与总览的 AgyCard 同一套语义）：
             · 在池里且当值 → 「当前」  · 在池里不当值 → 「切换」  · 不在池里 → 「只读」
             合并成一个灰标签就等于回到用户问过的那句「不是解决了吗」。 */}

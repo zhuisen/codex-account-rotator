@@ -25,6 +25,10 @@
 
 所以这里的主闸判的是「**它真的能跑出答案**」，不是「源码里有那几个字」。
 """
+try:
+    from . import _isolation  # noqa: F401  ★ 见 tests/_isolation.py —— 必须在任何被测模块之前
+except ImportError:
+    import _isolation  # noqa: F401
 import ast
 import json
 import os

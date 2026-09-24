@@ -768,6 +768,10 @@ function relayEntry() {
             drifted: drift,
           }));
         }
+        // ★ 借用开关的读回（设置页）。`?agyborrow=0` 渲染「已关闭」那一态。
+        if ((args.args || [])[0] === 'borrow' && (args.args || []).indexOf('--status') >= 0) {
+          return _later(JSON.stringify({ borrow: p.get('agyborrow') !== '0' }));
+        }
         return _later('ok');
       case 'read_traffic_snapshot_days':
       case 'read_traffic_snapshot':
@@ -868,6 +872,57 @@ function relayEntry() {
       //   `emit("state-changed")`，hook 又监听同一个事件 ⇒ 自激回环
       //   （实测 12 秒 789 个 python 子进程）。真实链路已改走专用只读 IPC，
       //   **桩必须跟着改** —— 否则 harness 验的是一条产品里已经不存在的路。
+      // ★★ Gemini 总览的续航条（2026-09-24 与 codex 对齐）。**必须按池夹具真算**，
+      //   规则与 `agy/pool.py::pick/board` 同一把键：置顶 > 容量；停用 / 见底（< 15%）进「不可用」。
+      //   `?agypin=<label,…>` 置顶、`?agyborrow=0` 关借用、`?agystrand=1` 全部不可用。
+      //   ⚠️ 迟滞 5pp 这里不模拟（`next` = 队首）—— harness 只验画面，选号语义由 Python 闸守。
+      case 'read_agy_board':
+        return invoke('read_agy_pool', {}).then(function (raw) {
+          if (!raw) return JSON.stringify({ cur: null, cur_ago_min: null, next: null, next_reason: 'none',
+            queue: [], rest: [], weekly_left_pp: 0, burn_pp_per_active_hour: null,
+            runway_active_hours: null, samples: 0, last_sample_min: null });
+          var pool = JSON.parse(raw), accs = pool.accounts || {};
+          var pins = (p.get('agypin') || '').split(',').filter(Boolean);
+          var subOf = {}; Object.keys(accs).forEach(function (s2) { subOf[accs[s2].label] = s2; });
+          var pinned = pins.map(function (l) { return subOf[l]; }).filter(Boolean);
+          var strand = p.get('agystrand') === '1';
+          var rem = function (a) { var g = (a.quota || {}).gemini; return g ? g.remaining * 100 : null; };
+          var usable = function (s2) { var a = accs[s2]; var r = rem(a);
+            return !strand && !a.rotate_off && !(r != null && r < 15); };
+          var ent = function (s2) {
+            var a = accs[s2] || {}, wins = [];
+            ((a.quota_summary || [])[0] || { buckets: [] }).buckets.forEach(function (b) {
+              wins.push({ label: b.window === 'weekly' ? '周' : '5h',
+                          rem: Math.round(b.remainingFraction * 100),
+                          reset: b.window === 'weekly' ? '4d9h' : '1h11m' });
+            });
+            var r = rem(a), pi = pinned.indexOf(s2);
+            return { aid: s2, label: a.label, email: a.email, plan: null,
+                     pin: pi < 0 ? null : pi + 1, off: !!a.rotate_off, dead: false,
+                     cool_min: (strand || (r != null && r < 15)) && !a.rotate_off ? 71 : 0,
+                     wins: wins,
+                     tightest: wins.length ? Math.min.apply(null, wins.map(function (w) { return w.rem; })) : null,
+                     weekly: (wins.filter(function (w) { return w.label === '周'; })[0] || {}).rem };
+          };
+          var ids = Object.keys(accs);
+          var ok = ids.filter(usable);
+          ok.sort(function (x, y) {
+            var px = pinned.indexOf(x) < 0 ? pinned.length : pinned.indexOf(x);
+            var py = pinned.indexOf(y) < 0 ? pinned.length : pinned.indexOf(y);
+            if (px !== py) return px - py;
+            return (rem(accs[y]) || 0) - (rem(accs[x]) || 0);
+          });
+          var q = ok.map(ent), rest = ids.filter(function (s2) { return ok.indexOf(s2) < 0; }).map(ent);
+          // ★ 与真后端一致：`cur` = **现读**钥匙串（`live --json` 那份），不是种子 `live_seen`。
+          var _np = Object.keys(accs).length;
+          var live = (p.get('agydrift') === '1' && _np > 1) ? 'sub1' : pool.live_seen;
+          return JSON.stringify({
+            cur: live && accs[live] ? ent(live) : null, cur_ago_min: null,
+            next: q[0] || null, next_reason: q.length ? 'new' : 'none',
+            queue: q, rest: rest,
+            weekly_left_pp: q.reduce(function (t2, e) { return t2 + (e.weekly || 0); }, 0),
+            burn_pp_per_active_hour: null, runway_active_hours: null, samples: 0, last_sample_min: null });
+        });
       case 'read_rotation_board': {
         {
           // ★★ **必须真的按 STATE 算**，不能返回一份写死的样本 —— 闸要验的正是

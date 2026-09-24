@@ -273,6 +273,23 @@ def keyring_read():
         return None
 
 
+#: agy 真凭证一律由 Google 签发；测试夹具永远不是。
+_GOOGLE_ISS = ("https://accounts.google.com", "accounts.google.com")
+
+
+def is_google_issued(cred):
+    """这份凭证是不是 Google 签的（看 `id_token.iss`，只解不验签）。
+
+    ★★★ 为什么要有（2026-09-24 事故）：`python3 -m unittest discover -s tests -p 'test_agy*'`
+      这种**按文件名过滤**的跑法不会加载 `tests/__init__.py` 与 `test_isolation_bootstrap.py`，
+      于是 `AGY_KEYRING=0` 没被设置 ⇒ 测试夹具 `new@x.y` 被 `install_live` **写进了用户真实的钥匙串**，
+      还把 `auth/agy/new.json` 落进了真凭证目录。隔离靠"跑法对了才生效"的环境变量，
+      等于把安全交给每一个未来的调用者去记住。所以闸放在**写入点本身**：
+      不是 Google 签发的凭证，钥匙串一律不写 —— 与怎么跑测试无关。
+    """
+    return (claims(cred) or {}).get("iss") in _GOOGLE_ISS
+
+
 def keyring_write(cred):
     """写回钥匙串。返回 **True 才表示真的写进去了** —— 调用方据此决定要不要走文件兜底。
 
@@ -289,6 +306,8 @@ def keyring_write(cred):
       （`security` 只有 argv 与那个 128 字节的 prompt 两种入口），而 agy 自己用的
       go-keyring 也是 argv —— 我们没有扩大暴露面，只是没有缩小它。
     """
+    if not is_google_issued(cred):
+        return False                                  # ★ 见 is_google_issued：钥匙串无法隔离，只认真凭证
     if not _keyring_on():
         return False
     blob = _KR_PREFIX + base64.b64encode(
@@ -369,7 +388,7 @@ def install_live(cred):
     #   `_adopt` 也做这件事，但那是 CLI 层；低层自己兜一道，手工调用同样安全。
     cur = read_live()
     cur_sub = (claims(cur) or {}).get("sub")
-    if cur and cur_sub and not cred_path(cur_sub).exists():
+    if cur and cur_sub and is_google_issued(cur) and not cred_path(cur_sub).exists():
         try:
             write_cred(cur_sub, cur)
         except OSError:
@@ -391,6 +410,9 @@ def install_live(cred):
 
 
 def _write_live_file(cred):
+    # ★★ 兜底文件**可以**隔离（`AGY_TOKEN_FILE`）—— 只在它指向真实默认路径时拒写非 Google 凭证。
+    if "AGY_TOKEN_FILE" not in os.environ and not is_google_issued(cred):
+        raise OSError("拒绝把非 Google 签发的凭证写进 agy 的真实登录文件（多半是测试没隔离）")
     LIVE.parent.mkdir(parents=True, exist_ok=True)
     if LIVE.exists():
         try:
@@ -537,3 +559,162 @@ def quota_by_group(groups):
         name = "gemini" if str(g.get("displayName", "")).lower().startswith("gemini") else "claude"
         out[name] = {"remaining": tight["remainingFraction"], "reset": tight.get("resetTime")}
     return out
+
+
+# ── 选号（2026-09-24：与 codex 轮换逻辑对齐）──────────────────────────────
+#
+# ★★★ **唯一一份实现。** `agy-rotate auto`（wrapper 在每次启动 agy 前调）、`pick`、
+#   `next --json`（总览续航条 / 「下一个」角标）**全部调这里**。与 codex 那条铁律一字不差：
+#   「下一个会用谁」只许有一份实现 —— 前端有账号数据但没有挑号器，照着排序键再写一份，
+#   症状就是界面信誓旦旦地报一个 wrapper 根本不会挑的号，两边都不报错。
+#   （此前 Gemini 总览的「建议切到 X」与 `USE` 就是前端自己排的，既不看停用也不看阈值。）
+#
+# 规则照搬 `proxy.py` 的 `usable()` / `_pin_rank()` / `_sort_avail()` / `_pick()`（用户 2026-09-24 拍板）：
+#   · 排序键：**置顶 > 容量**（agy 没有套餐档）。未置顶的号**全部并列**，容量接管 = 容量最高优先；
+#   · 可置顶多个，按点击先后排队；存 **sub** 不存 label（改名不该改轮换）；
+#   · 停用轮换（`rotate_off`）、凭证失效、额度见底（< `LOW_WATER`）的号不进候选；
+#   · 迟滞 5 个百分点：当前号与第一名同置顶档、且只少 ≤ 5pp 就不换（换号会丢 prompt 缓存）；
+#   · 池子空了：`borrow_off` 缺省（= 允许）时借一个停用的号，否则不换（agy 照用当前号跑）。
+# ⚠️ 与 codex 的一处**结构性**不同：codex 逐请求挑，agy 只在**每次启动**时挑（钥匙串是单槽，
+#   已开着的会话不受影响）。所以这里的「迟滞」发生在两次启动之间，不在两个请求之间。
+
+PICK_HYSTERESIS = float(os.environ.get("AGY_PICK_HYSTERESIS", "5"))
+
+
+def remaining_pct(a):
+    """gemini 组**最紧**窗口的剩余百分比；读不到返回 None（绝不当 100）。"""
+    r = ((a.get("quota") or {}).get("gemini") or {}).get("remaining")
+    return float(r) * 100 if isinstance(r, (int, float)) else None
+
+
+def is_dead(a):
+    """凭证确认失效（掉登录）。只认 `invalid_grant` 这一种明确的否定 —— 网络抖动不算。"""
+    h = a.get("last_health") or {}
+    return (h.get("ok") is False and "invalid_grant" in str(h.get("kind", "")) + str(h.get("err", ""))) \
+        or "invalid_grant" in str(a.get("quota_err") or "")
+
+
+def is_exhausted(a):
+    """额度见底 = 读得到且低于 `LOW_WATER`。读不到**不算**见底（那是「不知道」）。"""
+    r = remaining_pct(a)
+    return r is not None and r < LOW_WATER * 100
+
+
+def usable(sub, a):
+    """能不能进候选：未停用轮换、凭证没死、额度没见底。与 `proxy.py::usable` 同构。"""
+    return not a.get("rotate_off") and not is_dead(a) and not is_exhausted(a)
+
+
+def pin_rank(sub, pool):
+    """置顶位次；未置顶的**全部并列**（返回 `len(pinned)`）—— 这一个 `len()` 让容量接管。"""
+    pinned = pool.get("pinned") or []
+    try:
+        return pinned.index(sub)
+    except ValueError:
+        return len(pinned)
+
+
+def _cap_key(a):
+    r = remaining_pct(a)
+    return (1, 0.0) if r is None else (0, -r)          # 读不到的排在有读数的之后
+
+
+def sort_avail(items, pool):
+    """按「置顶 > 容量」就地排序 `[(sub, acc)]`。**唯一的排序实现。**"""
+    items.sort(key=lambda kv: (pin_rank(kv[0], pool), _cap_key(kv[1])))
+    return items
+
+
+def pick(pool, live_sub):
+    """→ (sub|None, reason)。这次启动 agy 应该用哪个号。
+
+    reason ∈ wanted（兑现用户显式 switch）· sticky（迟滞留在当前号）· new · borrow · none
+    ★ `live_wanted`（用户在界面上点了「切换」）只在那个号**仍然可用**时兑现 ——
+      否则一次手动切换会让轮换永久失效（旧实现就是如此：兑现后直接 return，从不再看容量）。
+    """
+    accs = pool.get("accounts") or {}
+    want = pool.get("live_wanted")
+    if want in accs and usable(want, accs[want]):
+        return want, "wanted"
+    avail = sort_avail([(s, a) for s, a in accs.items() if usable(s, a)], pool)
+    if not avail:
+        if pool.get("borrow_off"):
+            return None, "none"
+        relaxed = [(s, a) for s, a in accs.items() if not is_dead(a) and not is_exhausted(a)]
+        if not relaxed:
+            return None, "none"
+        return sort_avail(relaxed, pool)[0][0], "borrow"
+    best_sub, best = avail[0]
+    cur = accs.get(live_sub)
+    if cur is not None and live_sub != best_sub and usable(live_sub, cur) and PICK_HYSTERESIS > 0:
+        lr, br = remaining_pct(cur), remaining_pct(best)
+        if (pin_rank(live_sub, pool) == pin_rank(best_sub, pool)
+                and lr is not None and br is not None and lr + PICK_HYSTERESIS >= br):
+            return live_sub, "sticky"
+    return best_sub, ("sticky" if best_sub == live_sub else "new")
+
+
+def _left(ts, now):
+    if not ts or ts <= now:
+        return ""
+    h = (ts - now) / 3600
+    return f"{int(h // 24)}d{int(h % 24)}h" if h >= 24 else f"{int(h)}h{int((h % 1) * 60):02d}m"
+
+
+def _iso_ts(s):
+    try:
+        import datetime as _dt
+        return _dt.datetime.fromisoformat(str(s).replace("Z", "+00:00")).timestamp()
+    except (TypeError, ValueError):
+        return None
+
+
+def board(pool, live_sub, now=None):
+    """`agy-rotate next --json` —— 与 `codex-rotate next --json` **同形**，总览直接复用 `RunwayHero`。
+
+    · `cur`  = 钥匙串里**现在**是谁（现读，不是我们以为装进去的号）；
+    · `next` = 下次启动会用谁（`pick` 的结论 —— 含迟滞与借用，不是简单的第一名）；
+    · `runway_*` / `burn_*` 恒为 None：agy 没有 codex 那份 `quota_marks` 消耗记录，
+      **算不出来就说算不出来**（用户 2026-09-24 定：先显示「—」）。
+    """
+    now = time.time() if now is None else now
+    accs = pool.get("accounts") or {}
+    pinned = list(pool.get("pinned") or [])
+
+    def ent(sub):
+        a = accs.get(sub) or {}
+        wins = []
+        for g in a.get("quota_summary") or []:
+            if not str(g.get("displayName", "")).lower().startswith("gemini"):
+                continue
+            for b in g.get("buckets") or []:
+                fr = b.get("remainingFraction")
+                if not isinstance(fr, (int, float)):
+                    continue
+                wk = str(b.get("window", "")).startswith("week")
+                wins.append({"label": "周" if wk else "5h", "rem": round(fr * 100),
+                             "reset": _left(_iso_ts(b.get("resetTime")), now)})
+        wins.sort(key=lambda w: w["label"] != "5h")
+        cool = 0
+        if is_exhausted(a):
+            rs = _iso_ts(((a.get("quota") or {}).get("gemini") or {}).get("reset"))
+            cool = max(0, int((rs - now) / 60)) if rs else 0
+        return {"aid": sub, "label": a.get("label"), "email": a.get("email"), "plan": None,
+                "pin": (pinned.index(sub) + 1) if sub in pinned else None,
+                "off": bool(a.get("rotate_off")), "dead": is_dead(a), "cool_min": cool,
+                "wins": wins, "tightest": min([w["rem"] for w in wins], default=None),
+                "weekly": next((w["rem"] for w in wins if w["label"] == "周"), None)}
+
+    queue = [ent(s) for s, _ in sort_avail([(s, a) for s, a in accs.items() if usable(s, a)], pool)]
+    rest = [ent(s) for s, a in accs.items() if not usable(s, a)]
+    nxt, why = pick(pool, live_sub)
+    return {
+        "cur": ent(live_sub) if live_sub in accs else None,
+        "cur_ago_min": None,
+        "next": ent(nxt) if nxt else None,
+        "next_reason": why,
+        "queue": queue, "rest": rest,
+        "weekly_left_pp": sum(e["weekly"] for e in queue if e["weekly"] is not None),
+        "burn_pp_per_active_hour": None, "runway_active_hours": None,
+        "samples": 0, "last_sample_min": None,
+    }

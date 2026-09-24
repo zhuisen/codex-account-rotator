@@ -14,6 +14,10 @@ agy 更危险,因为上游 `remainingFraction` 的**缺省值就是 1.0**:任何
 假上游起在 127.0.0.1,用 `AGY_PIDS_OVERRIDE` / `AGY_PORTS_OVERRIDE` 跳过 `ps`/`lsof` 发现,
 ★ 全程**不碰真实的 agy 进程**,也不依赖本机此刻有没有 agy 在跑(否则这些断言会随机变色)。
 """
+try:
+    from . import _isolation  # noqa: F401  ★ 见 tests/_isolation.py —— 必须在任何被测模块之前
+except ImportError:
+    import _isolation  # noqa: F401
 import http.server
 import json
 import os

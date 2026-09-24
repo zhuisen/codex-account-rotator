@@ -13,6 +13,10 @@
 ★ 断言的是**真实产出**,不是我在测试里粘的一份期望副本:跑一次真脚本(打到假上游),
 拿它实际吐出来的 key 去比 TS。粘副本的话,改坏脚本时副本也会跟着被改,闸就空了。
 """
+try:
+    from . import _isolation  # noqa: F401  ★ 见 tests/_isolation.py —— 必须在任何被测模块之前
+except ImportError:
+    import _isolation  # noqa: F401
 import http.server
 import json
 import os

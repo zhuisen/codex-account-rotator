@@ -29,6 +29,10 @@ Codex 的 5h 窗口**用过才锚定**：一次没用过时服务端每轮都回
 唯一进到"探测阶段"的用例用的是**必然失败的假凭证**，验的是「几个进程进到那一步」，
 不是探测本身。
 """
+try:
+    from . import _isolation  # noqa: F401  ★ 见 tests/_isolation.py —— 必须在任何被测模块之前
+except ImportError:
+    import _isolation  # noqa: F401
 import json
 import os
 import subprocess

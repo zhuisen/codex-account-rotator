@@ -16,6 +16,10 @@
 `None`，而 provider 那条忘了用 `.exists()` 分开 ⇒ 一台干净的 .dmg 机器被判成 `broken`
 （红：「你装了但坏了」）。实测于 2026-09-19，`ACleanMachineReadsAsNotInstalled` 守着它。
 """
+try:
+    from . import _isolation  # noqa: F401  ★ 见 tests/_isolation.py —— 必须在任何被测模块之前
+except ImportError:
+    import _isolation  # noqa: F401
 import importlib.machinery
 import importlib.util
 import json

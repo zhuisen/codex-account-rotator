@@ -10,6 +10,10 @@
 两条都是 Fable 复核抓到的：锁**当时确实是零闸**（`with _store_lock()` 那行删掉全绿），
 `import fcntl` 是**回归**（`codex-rotate:23` 与 `proxy.py:22` 早就是 try/except 写法）。
 """
+try:
+    from . import _isolation  # noqa: F401  ★ 见 tests/_isolation.py —— 必须在任何被测模块之前
+except ImportError:
+    import _isolation  # noqa: F401
 import ast
 import json
 import os

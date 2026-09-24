@@ -932,6 +932,31 @@ sam 5h 0.717 / 周 0.948，5h 重置 21:32:22Z = 05:32 SGT，与状态栏逐分�
    所以「哪个号在消耗」必须看 agy 日志的 `applyAuthResult`，不能看我们以为装进去的号。
 闸：`test_agy_quota_timely.py::TheQuotaSummaryGoesToTheHostAgyActuallyUses`（行为闸，退回旧 host 即红）。
 
+### B70 · Gemini 轮换与总览按 codex 的规则对齐 + 一次测试污染真钥匙串的事故 — 2026-09-24 ✅（未发版）
+
+**需求**（用户逐项拍板）：换号时机「每次启动挑容量最高」；同步置顶插队、借用开关、「下一个」单一实现；
+总览照搬 codex 的 `RunwayHero`、续航先显示「—」。
+**实现**：
+- `agy/pool.py` 新增**唯一**选号实现 `usable / pin_rank / sort_avail / pick / board`，规则照搬 `proxy.py`：
+  置顶 > 容量（未置顶全部并列）、迟滞 5pp（不跨置顶档）、停用 / 凭证失效 / 见底（< 15%）不选、读不到排最后、
+  池子空时按 `borrow_off` 决定借不借。`live_wanted`（手动切换）**只在那个号仍可用时兑现** ——
+  旧实现兑现后直接 return，一次手动切换就让轮换永久失效，还会把见底的号装回去。
+- `agy-rotate`：`auto` / `pick` 改调 `pool.pick`；新增 `next --json`（与 `codex-rotate next --json` 同形）/ `pin` / `borrow`。
+- App：只读 IPC `read_agy_board`（不 emit）；`useRotationBoard` 加 `source: "agy"`；Gemini 总览换成 `RunwayHero source="agy"`
+  （三处说法改成 agy 的真话：启动时借用 / 额度见底 / 没有消耗记录）；卡片「下一个」+ 置顶按钮与角标；菜单栏行「下一个」；
+  设置页「Gemini 池子空时借用已停用的号」。删掉前端自排的 `agyBest`（最优 / USE / 建议切到 X）。
+- **被取代的闸**：`test_agy_rank_common_basis.py`（整份删除）与 `TheGeminiTabHasAHeroLikeCodex` —— 它们守的是被撤掉的
+  前端排名；「界面报的号 = 真挑号器会挑的号」由 `test_gemini_follows_codex_rotation.py` 接着守（18 条，6 个变异全红）。
+**★★★ 事故（当场发现当场修）**：为跑 agy 相关测试用了 `discover -s tests -p 'test_agy*'` —— 这种按文件名过滤的跑法
+**既不导入 `tests/__init__.py`、也匹配不到 `test_isolation_bootstrap.py`**，`AGY_KEYRING=0` 没被设置 ⇒
+测试夹具 `new@x.y` 被 `install_live` **写进了用户真实的 agy 钥匙串**，`auth/agy/new.json` 落进真凭证目录，
+还有测试经 `bin/agy` 对**真账号池**跑了 `auto`。已恢复（`agy-rotate switch dbk`，钥匙串核对为 dbk；删掉 `new.json`；池 3 号完好）。
+修法不是「记得设变量」，是两道**与跑法无关**的闸：
+① 源头：`keyring_write` 拒写非 Google 签发（`id_token.iss`）的凭证；真实默认路径的兜底文件同样拒写；
+② 隔离唯一实现 `tests/_isolation.py`（另把 `AGY_POOL_STORE` 指到临时目录），**每个会起脚本子进程的测试模块自己 import 它**；
+   闸 `EveryScriptSpawningTestImportsTheIsolation` 当场扫出另外 **17 个**漏了隔离的模块（已补），
+   第一版只查子串被变异证明是空闸，已改成两支都要。
+
 ---
 
 ## v1.8.0 — 2026-09-19

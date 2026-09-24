@@ -8,16 +8,12 @@ import {
   agyShown, agyTightest, agyWinRows, agyQuotaVisible, agyReasonNote, agyReasonTone, agyResetText,
 } from "../agy";
 import { fmtAgo, fmtResetDate, winNumColor } from "../helpers";
-import { IconBtn, IcPen, IcTrash, IcRotate } from "./CardIcons";
+import { IconBtn, IcPen, IcTrash, IcRotate, IcPin } from "./CardIcons";
 import ProbeButton from "./ProbeButton";
 import CardActionBar from "./CardActionBar";
 import { useRef, useState } from "react";
 
 const MONO = "'JetBrains Mono'";
-
-/** 「这次是在哪些窗口上比的」—— 给 `最优`/`USE` 的 title 用。 */
-const cmpBasis = (missing: string[]): string =>
-  missing.length ? "各号都读得到的那些窗口" : "全部窗口";
 
 /**
  * 总览九宫格里的 agy(Antigravity)额度卡。与 `GrokCard` 同款外形 —— 同样的圆环、
@@ -41,10 +37,15 @@ const cmpBasis = (missing: string[]): string =>
  * ★ 颜色由调用方传入（`colorOf(traffic, "agy")`），不写死：用户在设置页能改平台色。
  */
 export default function AgyCard({ t, color, snap, busy, err, disabled, winSlots, onOpen, onRefresh,
-                                 isSelected, shortcut, isBest, bestPct, partialWins,
+                                 isSelected, shortcut, isBest, bestPct,
                                  onSelect, onRename, onRemove, onProbe, probing,
-                                 rotates, onToggleRotate,
+                                 rotates, onToggleRotate, pinRank = null, onTogglePin, bestTitle,
                                   label, email, isCurrent, onSwitch, switching, drag, aid }: {
+  /** 置顶位次（0 起）；未置顶 null。与 codex 账号卡同一套语义（2026-09-24 对齐）。 */
+  pinRank?: number | null;
+  onTogglePin?: () => void;
+  /** 「下一个」角标的解释。 */
+  bestTitle?: string;
   t: Theme;
   /** 拖拽排序接线。与账号卡**同一份** `DragWiring` —— 两处各写一份迟早分叉。
    *  不传时这张卡行为与以前完全一致。 */
@@ -89,16 +90,7 @@ export default function AgyCard({ t, color, snap, busy, err, disabled, winSlots,
   isBest?: boolean;
   /** 最优号的余量，用来算本卡的差值角标 `-N%`。 */
   bestPct?: number;
-  /**
-   * ★★★ 这次"谁最优"的比较**少看了**哪些窗口。
-   *
-   * 周窗口只有当值号读得到（云端按账号那条结构上没有周），所以池里各号的窗口集合
-   * 常常**不齐**。比较只能落在大家都有的那些窗口上 —— 而"少看了什么"必须说出来，
-   * 否则 `USE` 会被读成"这个号全面最优"，事实只是"在我们都量到的那部分上最优"。
-   * 2026-09-15 用户实报的「一个 USE 一个当前」就是这个比较出的岔子。
-   */
-  partialWins?: string[];
-  onSelect?: () => void;
+    onSelect?: () => void;
   /** 改显示名。★ label 只是昵称，身份始终是 `sub`（同 codex 的 aid）。 */
   onRename?: (next: string) => void;
   /** 从池里移除。★ **不可逆** —— 这里有两段确认，CLI 侧另有一道拒绝删当值号的守卫。 */
@@ -184,7 +176,14 @@ export default function AgyCard({ t, color, snap, busy, err, disabled, winSlots,
           那个角标本来就是"这张卡怎么来的"，两种写法都在回答同一个问题。 */}
       <span style={{ position: "absolute", top: 6, left: 10, color,
                      fontFamily: MONO, letterSpacing: ".04em", fontSize: Z.shortcut }}>
-        {shortcut ? `⌘${shortcut}` : "CLI"}</span>
+        {shortcut ? `⌘${shortcut}` : "CLI"}
+        {/* ★ 置顶角标收起态就看得见，带队列位次 —— 与 codex 账号卡同位同义。 */}
+        {pinRank !== null && (
+          <span data-pin-badge style={{ display: "inline-flex", alignItems: "center", gap: 1,
+                                        marginLeft: 4, color: t.accent, fontWeight: 700 }}>
+            <IcPin on />{pinRank + 1}
+          </span>
+        )}</span>
       {/* ★ 右上角**只许有拖拽手柄**（用户 2026-09-20：「卡片统一一下」）。
           原来这里还有一个 ↻ 手动重取，坐标 `top:4 right:8` —— 与上面那个 `DragHandle`
           **字面上同一个位置**，两个控件叠在同一个角上。手动重取的能力没丢：
@@ -223,7 +222,11 @@ export default function AgyCard({ t, color, snap, busy, err, disabled, winSlots,
                               background: "transparent", border: `1px solid ${hexA(color, .45)}`,
                               borderRadius: 5, padding: "0 4px", fontFamily: "inherit" }} />
             ) : (
-              <span style={{ fontSize: Z.name, fontWeight: 700, color, minWidth: 0,
+              /* ★ `data-hero-acct` 只挂在**当值号**这张卡的名字上：uishot 的 `trails` 探针按时间采
+                 「界面说当前是谁」。2026-09-24 Hero 换成 `RunwayHero`（数据来自后端现读，不经种子）之后，
+                 仍然会闪回种子的只剩卡片「当前」徽章这一路（`liveSub`），所以标记跟着搬到这里。 */
+              <span data-hero-acct={isCurrent ? "" : undefined}
+                    style={{ fontSize: Z.name, fontWeight: 700, color, minWidth: 0,
                              overflow: "hidden", textOverflow: "ellipsis" }}>{label ?? "agy"}</span>
             )}
             {/* ★★ 徽章三态，**别合并**：
@@ -254,20 +257,16 @@ export default function AgyCard({ t, color, snap, busy, err, disabled, winSlots,
                 （已经在用最优号时再喊一句"用这个"只是噪音）。 */}
             {/* ★ `title` 如实说出这次比较的**基础**。少看了窗口就直说少看了哪些 ——
                 不说的话 `USE` 会被读成"全面最优"，而事实只是"在都量到的那部分上最优"。 */}
-            {isBest && (() => {
-              const why = partialWins?.length
-                ? `在**${(partialWins.length ? cmpBasis(partialWins) : "")}**上余量最多。`
-                  + `⚠️ 这次比较没算上 ${partialWins.join("、")} —— 那些窗口不是每个号都读得到`
-                  + `（周窗口只有当值号有，云端按账号那条没有周）。`
-                : "在所有号都读到的窗口上余量最多。";
-              return isCurrent
-                ? <span title={why}
-                        style={{ fontSize: Z.curBadge, fontWeight: 700, padding: "1px 5px", borderRadius: 5,
-                                 color: "#27B26B", border: "1px solid #27B26B55" }}>最优</span>
-                : <span title={why}
-                        style={{ fontSize: Z.curBadge, fontWeight: 700, padding: "1px 5px", borderRadius: 5,
-                                 color: t.accent, border: `1px solid ${t.accent}55` }}>USE</span>;
-            })()}
+            {/* ★★ 2026-09-24：与 codex 账号卡对齐（用户：「按照 codex 的规范」）——
+                角标是**「下一个」**，由 `agy/pool.py::pick`（`next --json`）决定，
+                不再是前端自己排的「最优 / USE」：那一份既不看置顶也不看停用、也不看 15% 阈值，
+                而 wrapper 真正装进去的号由 `pick` 决定 —— 两份实现必然分叉（codex 那边已栽过）。 */}
+            {isBest && (
+              <span data-next-badge title={bestTitle}
+                    style={{ fontSize: Z.curBadge, fontWeight: 700, color: t.accentText,
+                             background: t.accent, padding: "1px 5px", borderRadius: 4,
+                             flexShrink: 0, whiteSpace: "nowrap" }}>下一个</span>
+            )}
             {/* 差值角标：**只在落后时画**。领先/持平画一个 `+0%` 只是噪音。 */}
             {gap != null && !isBest && (
               <span title={`比最优的号少 ${-gap}%`}
@@ -430,6 +429,18 @@ export default function AgyCard({ t, color, snap, busy, err, disabled, winSlots,
             <ProbeButton t={t} variant="inline" label="探针"
               hint={`起一次 agy 让 ${label ?? "这个号"} 真跑一句，验它是否真能干活。⚠️ 花的是 **agy 自己**的额度（实测单次约 15k token、约 30s）`}
               loading={!!probing} onConfirm={onProbe} loadingText="探测…" />
+          )}
+          {/* ★ 置顶排在「轮换开关」前面（与 codex 卡同序）。 */}
+          {onTogglePin && (
+            <IconBtn title={pinRank !== null
+                       ? `已置顶（第 ${pinRank + 1} 位）。点一下取消 —— 取消后回到「容量最高优先」`
+                       : "置顶：下次启动 agy 优先用这个号。可置顶多个，按点击先后排队；额度见底时自动用下一个"}
+                     onClick={onTogglePin}
+                     color={pinRank !== null ? t.accentText : t.muted}
+                     border={pinRank !== null ? t.accent : t.ghostBorder}
+                     bg={pinRank !== null ? t.accent : undefined}>
+              <IcPin on={pinRank !== null} />
+            </IconBtn>
           )}
           {onToggleRotate && (
             <IconBtn title={rotates

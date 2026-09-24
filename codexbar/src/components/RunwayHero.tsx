@@ -35,9 +35,14 @@ const MONO = "'JetBrains Mono'";
  * 环 72（旧 80）、右侧三行都压在 12px 行高内。闸量的是**渲染后的真实高度**，
  * 不是这些数字 —— 高度由内边距 / 环 / 行高 / 换行四者合成，改任何一处都会变。
  */
-export default function RunwayHero({ t, board, privacy }: {
+export default function RunwayHero({ t, board, privacy, source = "codex" }: {
   t: Theme; board: Board; privacy: boolean;
+  /** ★ 2026-09-24 Gemini 总览复用这块（用户：「按 codex 的规范同步」）。组件与布局一字不改，
+   *  只换**说法**：agy 逐次**启动**时挑号（不是逐请求）、不可用 = 额度见底（不是冷却）、
+   *  没有 codex 那份消耗记录可估续航 —— 照抄 codex 的原话在这三处都是假话。 */
+  source?: "codex" | "agy";
 }): React.ReactElement | null {
+  const agy = source === "agy";
   const cur = board.cur ?? board.next;
   if (!cur) return null;
   const n = board.next;
@@ -172,8 +177,11 @@ export default function RunwayHero({ t, board, privacy }: {
               只写在下面那条告警里的话，用户仍然是先看到一个不该出现的名字。 */}
           {borrowed && (
             <span data-runway-borrowed title={
-              cur.off ? "你已停用它的自动轮换，但此刻没有别的号可用，代理临时借用了它"
-                      : cur.dead ? "这个号的凭证已失效" : `这个号在冷却中（还有 ${cur.cool_min} 分钟）`}
+              cur.off ? (agy ? "你已停用它的自动轮换，但此刻没有别的号可用，启动时临时借用了它"
+                             : "你已停用它的自动轮换，但此刻没有别的号可用，代理临时借用了它")
+                      : cur.dead ? "这个号的凭证已失效"
+                      : agy ? `这个号额度见底（约 ${cur.cool_min} 分钟后回来）`
+                      : `这个号在冷却中（还有 ${cur.cool_min} 分钟）`}
               style={{ fontSize: 9, fontWeight: 700, color: "#E0524D", cursor: "help",
                        border: "1px solid #E0524D", borderRadius: 5, padding: "0 4px",
                        // ★ 左列收窄之后它会被劈成「临时借 / 用」—— 断字在本仓算 bug。
@@ -197,7 +205,8 @@ export default function RunwayHero({ t, board, privacy }: {
             </span>
           ))}
           {showNext && n && (
-            <span data-runway-next style={{ whiteSpace: "nowrap", color: t.muted }}>
+            <span data-runway-next style={{ whiteSpace: "nowrap", color: t.muted }}
+                  title={agy ? "下次启动 agy 时会装进去的号（已开着的会话不受影响）" : undefined}>
               · 下一个 → <b style={{ color: t.accent }}>{n.label}</b>
             </span>
           )}
@@ -281,10 +290,11 @@ export default function RunwayHero({ t, board, privacy }: {
           {/* ★ 文本要说「做什么」，不是只说「坏了」。停用的号是**唯一**用户此刻能动的旋钮
               （冷却要等、失效要重登），所以只在有停用号时才给那句操作提示。 */}
           {stranded
-            ? `${nCool} 个冷却中 · ${nOff} 个你已停用 · ${nDead} 个凭证失效`
+            ? `${nCool} 个${agy ? "额度见底" : "冷却中"} · ${nOff} 个你已停用 · ${nDead} 个凭证失效`
               + (nOff > 0 ? " —— 想立刻继续用，把某个停用的号在它卡片上打开轮换" : "")
             : board.runway_active_hours == null
-            ? `续航算不出来 —— 不是「撑不了多久」（样本 ${board.samples} 条，还不够估速度）`
+            ? (agy ? "续航算不出来 —— Gemini 还没有可估消耗速度的记录，不是「撑不了多久」"
+                   : `续航算不出来 —— 不是「撑不了多久」（样本 ${board.samples} 条，还不够估速度）`)
             : `${board.samples} 条样本 · 活跃小时不是自然小时`
               + (board.last_sample_min != null ? ` · 最后一条 ${fmtAgo(board.last_sample_min)}` : "")}
         </div>

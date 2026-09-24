@@ -26,6 +26,10 @@ token 丢掉，而本仓的号只存在于那一份文件里）。
 `cxd` 与 wrapper 自己早就这么做（`exec "${CODEX_NATIVE_BIN:-…npm-global/bin/codex}"`），
 这份是同一条规则的第三处实现 —— 原来漏的那处。
 """
+try:
+    from . import _isolation  # noqa: F401  ★ 见 tests/_isolation.py —— 必须在任何被测模块之前
+except ImportError:
+    import _isolation  # noqa: F401
 import ast
 import os
 import re

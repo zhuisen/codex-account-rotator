@@ -22,6 +22,10 @@
 `AGY_POOL_STORE` / `AGY_TOKEN_FILE` 全部指向临时目录。**那个 token 文件是用户唯一的
 agy 登录凭证**，写坏的代价是他要重新走一遍浏览器 OAuth —— 这不是"测试残留"级别的事故。
 """
+try:
+    from . import _isolation  # noqa: F401  ★ 见 tests/_isolation.py —— 必须在任何被测模块之前
+except ImportError:
+    import _isolation  # noqa: F401
 import importlib.util
 import json
 import os
@@ -365,16 +369,24 @@ class AutoSwitchIsFailOpenAndSticky(unittest.TestCase):
         seg = self.CLI[i:self.CLI.index("\ndef ", i + 10)]
         self.assertIn("except Exception", seg, "★★ auto 会把异常抛给 wrapper ⇒ 挡住 agy 启动")
 
-    def test_it_does_not_switch_while_the_current_account_is_fine(self):
-        """★ 无谓换号会打断 agy 的 prompt 缓存（上游那些项目把这叫 sticky，默认就是它）。
+    def test_it_does_not_switch_within_the_hysteresis(self):
+        """★ 差距在 5 个百分点以内不换（迟滞，同 codex 代理）—— 无谓换号会打断 prompt 缓存。
 
-        ⚠️ 第一版只断言 `cmd_auto` 里出现过 `LOW_WATER` 和 `return` —— 把那条早退整个删掉，
-        这两个词在函数后半段**还在**，闸照样绿（变异工具当场拦下）。所以改成真跑一遍看结果。
+        ⚠️ 2026-09-24 规则改了（用户拍板「每次启动挑容量最高」，与 codex 对齐）：
+          旧规则是「当前号 ≥ 15% 就一直粘着」，那条的夹具（90% vs 100%）在新规则下**应该换**，
+          见下一条。这里只守「差距很小时不来回跳」。
         """
-        live, sub = self._pool(cur_remaining=0.9, other_remaining=1.0)
+        live, sub = self._pool(cur_remaining=0.97, other_remaining=1.0)
         self._run_auto(live)
         self.assertEqual(_sub_of(live), sub,
-                         "★ 当前号还有 90% 就被换掉了 —— 白白打断 prompt 缓存")
+                         "★ 只差 3 个点就换号 —— 迟滞没生效，会在两个号之间来回跳")
+
+    def test_it_switches_to_the_higher_capacity_account(self):
+        """★★ 新规则（2026-09-24）：**容量最高优先** —— 差距超过迟滞就换，不再等当前号见底。"""
+        live, sub = self._pool(cur_remaining=0.9, other_remaining=1.0)
+        self._run_auto(live)
+        self.assertNotEqual(_sub_of(live), sub,
+                            "★★ 另一个号多 10 个点却没换 —— 还是旧的「粘到见底」规则")
 
     def test_it_does_switch_when_the_current_account_runs_low(self):
         """★ 反向闸。只测"不换"的话，一个**永远不换**的实现也能全绿 ——
@@ -412,7 +424,7 @@ class AutoSwitchIsFailOpenAndSticky(unittest.TestCase):
     def test_a_pool_of_one_never_switches(self):
         i = self.CLI.index("def cmd_auto(")
         seg = self.CLI[i:self.CLI.index("\ndef ", i + 10)]
-        self.assertIn("len(accs) < 2", seg, "★ 只有一个号时还去换 —— 纯浪费")
+        self.assertIn("len(_accounts(pool)) < 2", seg, "★ 只有一个号时还去换 —— 纯浪费")
 
     def test_selection_happens_before_exec(self):
         """★★★ agy **只在启动时**读凭证。`passthrough()` 走 `os.execv`，
@@ -632,7 +644,7 @@ class TheGoogleTabShowsThePoolNotAReadOnlyCard(unittest.TestCase):
         #    真正不能放的仍是会**挂死 GUI** 的那个：`login` 会起交互式 agy。
         self.assertEqual(allowed & {"login", "pick", "auto"}, set(),
                          "★★★ 白名单放进了会挂死 GUI 的子命令")
-        self.assertTrue(allowed <= {"quota", "switch", "live", "rename", "remove",
+        self.assertTrue(allowed <= {"quota", "switch", "live", "rename", "remove", "pin", "borrow",  # pin/borrow 2026-09-24 审过：只写池、不联网、不起 agy
                                     "health", "probe", "rotate", "auto-switch", "list"},
                         f"★★ 白名单里有没审过的子命令: {sorted(allowed)}")
 
@@ -710,6 +722,9 @@ class TheRealLiveStoreIsTheKeychainNotTheFile(unittest.TestCase):
         self.addCleanup(os.environ.__setitem__, "AGY_KEYRING", "0")
         m = _load_pool(d, live)
         m.subprocess = fake
+        # ★ 这组测的就是钥匙串写入路径，而 `security` 已被换成假的 —— 在**这份模块副本**上
+        #   放行夹具凭证是安全的（真模块的 `is_google_issued` 闸不受影响）。
+        m.is_google_issued = lambda cred: True
         return m, live
 
     def test_read_prefers_the_keychain_over_the_file(self):
@@ -1014,12 +1029,17 @@ class AnExplicitChoiceIsNeverSilentlyUndone(unittest.TestCase):
         self.assertIn('pool["live_seen"]', self.CLI)
 
     def test_auto_restores_it_before_judging_headroom(self):
-        """★★★ 顺序是判据：恢复必须排在「当前号够用就 return」**之前**，
-        否则那条 early-return 先把路挡死（本仓 §7.-1 ⑦：这条断言的绿是谁给的）。"""
-        seg = self._fn(self.CLI, "cmd_auto")
-        i = seg.index('pool.get("live_wanted")')
-        j = seg.index("if cur is not None and _score(cur) >= P.LOW_WATER:")
-        self.assertLess(i, j, "★★★ 恢复排在 headroom 判断之后 ⇒ 被它兜住，永远不执行")
+        """★★★ 行为闸（2026-09-24 从源码次序改成真调 `pool.pick`）：用户显式选的号
+        **只要还可用**就兑现 —— 哪怕别的号容量更高；**见底了就不兑现**（否则一次手动切换
+        让轮换永久失效，还会把见底的号装回去 —— 旧实现正是如此）。"""
+        sys.path.insert(0, str(ROOT))
+        from agy import pool as P
+        q = lambda r: {"gemini": {"remaining": r, "reset": "2099-01-01T00:00:00Z"}}
+        pool = {"live_wanted": "b", "accounts": {"a": {"quota": q(1.0)}, "b": {"quota": q(0.6)}}}
+        self.assertEqual(P.pick(pool, "a"), ("b", "wanted"),
+                         "★★★ 钥匙串被抢回 a 之后，没把用户选的 b 装回去")
+        pool["accounts"]["b"]["quota"] = q(0.05)
+        self.assertNotEqual(P.pick(pool, "a")[0], "b", "★★ 见底的号也被「兑现」装回去了")
 
     def test_the_restore_is_announced(self):
         seg = self._fn(self.CLI, "cmd_auto")

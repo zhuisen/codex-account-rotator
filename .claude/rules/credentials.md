@@ -337,6 +337,10 @@ paths:
     agy 1.2.x 的后端换了 host；旧 host 同样回 200 同形响应，但**四桶恒 1.0、reset 恒 now+窗口**（空账本）——
     打错 host 没有任何报错。判据：与 agy 自己的 `/usage` 状态栏（`⏱ 5h% (重置时刻) · 📅 周%`）对照，
     驱动方法见 CHANGELOG B69（一次性 agy + pty 窗口大小 + 只发 `/usage`，零生成）。
+  - ★★★ **agy 选号只有一份实现：`agy/pool.py::pick`**（2026-09-24，B70，与 codex 对齐）：置顶 > 容量、迟滞 5pp、
+    停用 / 失效 / 见底不选、`borrow_off` 控制借用；`auto`、`pick`、`next --json`（总览「下一个」）全调它。
+    ⚠️ 测试**必须** import `tests/_isolation.py`；`keyring_write` 拒写非 Google 签发的凭证 ——
+    2026-09-24 按文件名过滤地跑测试时，夹具真的被写进了用户钥匙串。
   - `fetchAvailableModels` **仍在用**，但只用于 `health`（刷 token + 打一次，验凭证还活着）。
     ★ 组名**不再靠猜**：新端点自带 `displayName` / `bucketId`，旧那套「按 `(remainingFraction,
     resetTime)` 分桶 + 成员最多的那组是 gemini」的启发式已删除，闸在

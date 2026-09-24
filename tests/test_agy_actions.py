@@ -20,11 +20,16 @@
 `loadCodeAssist` 回的 `aicode-consumers`。**那个 429 长得和「额度用光了」一模一样** ——
 用它做探针会把"我们拼错了"报成"你的号没额度了"，正是本仓最贵的那一类错。
 """
+try:
+    from . import _isolation  # noqa: F401  ★ 见 tests/_isolation.py —— 必须在任何被测模块之前
+except ImportError:
+    import _isolation  # noqa: F401
 import ast
 import re
 import unittest
 from pathlib import Path
 
+import sys
 ROOT = Path(__file__).resolve().parents[1]
 CLI = (ROOT / "agy-rotate").read_text(encoding="utf-8")
 SRC = ROOT / "codexbar" / "src"
@@ -125,8 +130,15 @@ class TheAutoSwitchTogglesAreActuallyRead(unittest.TestCase):
         self.assertIn('pool.get("auto_off")', b, "★★★ 全局开关没被读 —— 关了也照切")
 
     def test_auto_honours_the_per_account_switch(self):
+        """★★★ 2026-09-24：选号并进 `pool.pick`（与 `next` 同源）。判据从「`cmd_auto` 源码里
+        有那几个字」改成：`auto` 真的走 `pick`，且 `pick` 真的不挑停用的号（行为）。"""
         b = fn("cmd_auto")
-        self.assertIn('a.get("rotate_off")', b, "★★★ 按号开关没被读 —— 摘出去的号照样被挑")
+        self.assertIn("P.pick(pool, live_sub)", b, "★★★ auto 没走唯一的选号实现")
+        sys.path.insert(0, str(ROOT))
+        from agy import pool as P
+        q = lambda r: {"gemini": {"remaining": r, "reset": "2099-01-01T00:00:00Z"}}
+        pool = {"accounts": {"a": {"quota": q(0.5)}, "b": {"quota": q(1.0), "rotate_off": True}}}
+        self.assertEqual(P.pick(pool, "a")[0], "a", "★★★ 摘出轮换的 b 照样被挑")
 
     def test_the_flag_is_stored_inverted(self):
         """★★ 存**反向**（`rotate_off`）：缺省必须等于「参与轮换」——

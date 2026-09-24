@@ -32,6 +32,10 @@ Python 侧用 `rglob("*.py")`，而本仓有 **7 个无扩展名的 python 脚�
 （`bin/agy`、`codex-rotate`、`agy-rotate`、`grok-quota`…），**覆盖率 0/7** ——
 于是它在真凶所在的文件上**从未扫过一个字节**，却报告「Python 侧干净」。
 """
+try:
+    from . import _isolation  # noqa: F401  ★ 见 tests/_isolation.py —— 必须在任何被测模块之前
+except ImportError:
+    import _isolation  # noqa: F401
 import os
 import re
 import subprocess

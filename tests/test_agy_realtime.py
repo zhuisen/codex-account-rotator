@@ -30,6 +30,10 @@ codex 那条链路是 **proxy 逐请求写 → quotad 定时/跨重置触发 →
 所以采样器 docstring 里那句「agy 不在任何地方落 token 计数」**是对的**，
 Phase 5 只能做「额度%」的实时化，做不成「token 的实时化」。
 """
+try:
+    from . import _isolation  # noqa: F401  ★ 见 tests/_isolation.py —— 必须在任何被测模块之前
+except ImportError:
+    import _isolation  # noqa: F401
 import ast
 import json
 import os

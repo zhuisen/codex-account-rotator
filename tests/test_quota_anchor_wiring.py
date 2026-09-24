@@ -15,6 +15,10 @@
 ★ 同族的第二个坑:`note()` 会真的写盘。这里全部指到临时目录,
   **绝不碰真实的 `<store>/.quota-anchors.json`**。
 """
+try:
+    from . import _isolation  # noqa: F401  ★ 见 tests/_isolation.py —— 必须在任何被测模块之前
+except ImportError:
+    import _isolation  # noqa: F401
 import importlib.machinery
 import importlib.util
 import json

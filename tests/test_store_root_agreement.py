@@ -20,6 +20,10 @@
 三个面板独立指出：代码改完了、没人喂它，安装器里一个任务都没带。
 两条闸缺一不可，别把这条当成"脑裂已解决"的证据。
 """
+try:
+    from . import _isolation  # noqa: F401  ★ 见 tests/_isolation.py —— 必须在任何被测模块之前
+except ImportError:
+    import _isolation  # noqa: F401
 import os
 import re
 import subprocess

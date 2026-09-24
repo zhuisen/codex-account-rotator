@@ -39,6 +39,10 @@ rotateproxy 改写成 openai(238 这个数基本就是它的产物);另一部分
 `codex-rotate switch --best` 仍是有用的手动入口(按**最紧窗口**判、只看 Plus),
 只是不再由 `cxp` 自动调用 —— 走代理之后"开场挑一个号"已无必要,代理每个请求都在挑。
 """
+try:
+    from . import _isolation  # noqa: F401  ★ 见 tests/_isolation.py —— 必须在任何被测模块之前
+except ImportError:
+    import _isolation  # noqa: F401
 import importlib.machinery
 import importlib.util
 import os

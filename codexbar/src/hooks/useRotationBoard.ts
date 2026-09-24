@@ -48,7 +48,16 @@ export interface Board {
   last_sample_min: number | null;
 }
 
-export function useRotationBoard(enabled: boolean): { board: Board | null; err: string | null } {
+/**
+ * ★ `source: "agy"`（2026-09-24，Gemini 总览与 codex 对齐）：同一块续航条、同一个板子形状，
+ *   数据来自 `read_agy_board`（→ `agy-rotate next --json` → `agy/pool.py` 的**唯一**选号实现）。
+ *   agy 那边没有 `state-changed`，所以刷新跟着它自己的两条广播走（额度刷新 / 当值号变化），
+ *   外加 `dep` —— 置顶、切号、停用这些写操作之后调用方的池数据会变，据此重读一次。
+ */
+export function useRotationBoard(enabled: boolean, opts?: {
+  source?: "codex" | "agy"; dep?: unknown;
+}): { board: Board | null; err: string | null } {
+  const source = opts?.source ?? "codex";
   const [board, setBoard] = useState<Board | null>(null);
   const [err, setErr] = useState<string | null>(null);
   /** 在途请求数（只许 1 个）+ 期间来过新事件吗。见下面 `load` 的注释。 */
@@ -73,7 +82,7 @@ export function useRotationBoard(enabled: boolean): { board: Board | null; err: 
         //   `run_rotate` 无条件 `emit("state-changed")`，而下面那个 effect 正是
         //   监听同一个事件来刷新自己 ⇒ 自激回环（实测 12 秒 789 个 python 子进程，
         //   两个 webview 一起闪）。闸：`tests/test_no_event_feedback_loop.py`。
-        const raw = await invoke<string>("read_rotation_board");
+        const raw = await invoke<string>(source === "agy" ? "read_agy_board" : "read_rotation_board");
         setBoard(JSON.parse(raw) as Board);
         setErr(null);
       } catch (e: unknown) {
@@ -87,15 +96,26 @@ export function useRotationBoard(enabled: boolean): { board: Board | null; err: 
         if (pending.current) { pending.current = false; load(); }
       }
     })();
-  }, [enabled]);
+  }, [enabled, source]);
 
   useEffect(() => {
     load();
+    if (source === "agy") {
+      const uns = ["agy-pool-updated", "agy-live-changed"].map((ev) => listen(ev, () => load()));
+      return () => { for (const u of uns) void u.then((f) => f()); };
+    }
     // ★ 跟着 `state-changed` 走就够：置顶/停用/切号/额度刷新都会发它。
     //   这块没有自己的定时器 —— 它读的是本机文件，没人操作时数字不会变。
     const un = listen("state-changed", () => load());
     return () => { void un.then((f) => f()); };
-  }, [load]);
+  }, [load, source]);
+
+  // 写操作之后（置顶 / 切号 / 停用）池数据会变 ⇒ 重读一次。首轮由上面那个 effect 负责。
+  const first = useRef(true);
+  useEffect(() => {
+    if (first.current) { first.current = false; return; }
+    load();
+  }, [opts?.dep, load]);
 
   return { board, err };
 }

@@ -21,6 +21,10 @@
    停掉续期，暂停就变成慢性死亡（token 过期 → 恢复时号已废）。
    这条看起来矛盾，所以更需要一条测试说明它是**故意**的，而不是漏掉的。
 """
+try:
+    from . import _isolation  # noqa: F401  ★ 见 tests/_isolation.py —— 必须在任何被测模块之前
+except ImportError:
+    import _isolation  # noqa: F401
 import re
 import importlib.machinery
 import importlib.util

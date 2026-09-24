@@ -127,3 +127,52 @@ class IsolationIsInPlace(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class EveryScriptSpawningTestImportsTheIsolation(unittest.TestCase):
+    """★★★ 2026-09-24 事故：按文件名过滤地跑（`-p 'test_agy*'`）不加载本文件与 `tests/__init__.py`，
+    隔离全灭 ⇒ 夹具被写进用户真实的钥匙串。所以每个会起脚本子进程的测试模块**自己** import
+    `tests/_isolation.py`，这条闸盯着新加的测试也照做。"""
+
+    SCRIPTS = ("agy-rotate", '"bin" / "agy"', "bin/agy", "agy-quota", "agy_quota_sampler",
+               "codex-rotate", "grok-quota", "connector.py")
+
+    def test_every_such_module_imports_it(self):
+        from pathlib import Path as _P
+        here = _P(__file__).resolve().parent
+        spawners = []
+        for f in sorted(here.glob("test_*.py")):
+            src = f.read_text(encoding="utf-8")
+            if "subprocess" in src and any(k in src for k in self.SCRIPTS):
+                spawners.append(f)
+        self.assertGreaterEqual(len(spawners), 5, f"★ 只扫到 {len(spawners)} 个 —— 扫描范围坏了")
+        # ★ 两支都要：`from . import` 管 `-m unittest tests.x`（包内），裸 `import` 管 `discover -s tests`
+        #   （顶层模块）。只查子串 `import _isolation` 会被任一支单独满足 —— 变异实测是空闸。
+        need = ("    from . import _isolation", "except ImportError:\n    import _isolation")
+        missing = [f.name for f in spawners if f.name != "test_isolation_bootstrap.py"
+                   and not all(n in f.read_text(encoding="utf-8") for n in need)]
+        self.assertEqual([], missing, "★★★ 这些测试会起脚本子进程却没 import tests/_isolation.py —— "
+                                      "按文件名过滤地跑时会碰真钥匙串 / 真账号池：\n  " + "\n  ".join(missing))
+
+
+class TheRealKeychainRefusesFixtureCredentials(unittest.TestCase):
+    """★★★ 源头那道闸：非 Google 签发的凭证**绝不**写进钥匙串 —— 与测试怎么跑无关。"""
+
+    def test_a_fixture_never_reaches_security(self):
+        import base64
+        import json
+        import sys
+        from pathlib import Path as _P
+        sys.path.insert(0, str(_P(__file__).resolve().parents[1]))
+        from agy import pool as P
+        body = base64.urlsafe_b64encode(json.dumps({"sub": "new", "email": "new@x.y"}).encode()).decode().rstrip("=")
+        fixture = {"id_token": f"h.{body}.s", "token": {"access_token": "a", "refresh_token": "rt"}}
+        calls = []
+        orig_run, orig_on = P.subprocess.run, P._keyring_on
+        P.subprocess.run = lambda *a, **k: calls.append(a) or (_ for _ in ()).throw(AssertionError("reached security"))
+        P._keyring_on = lambda: True
+        try:
+            self.assertFalse(P.keyring_write(fixture))
+        finally:
+            P.subprocess.run, P._keyring_on = orig_run, orig_on
+        self.assertEqual(calls, [], "★★★ 夹具凭证走到了 `security` —— 真钥匙串会被覆盖")

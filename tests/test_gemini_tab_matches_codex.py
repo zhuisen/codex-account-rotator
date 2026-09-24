@@ -47,51 +47,9 @@ def gemini_block():
     return "\n".join(out)
 
 
-class TheGeminiTabHasAHeroLikeCodex(unittest.TestCase):
-
-    def test_there_is_a_hero(self):
-        b = gemini_block()
-        self.assertIn("当前使用中", b, "★★ Gemini 档没有 Hero 区")
-
-    def test_the_hero_shows_both_windows(self):
-        """★ 与卡片同一条纪律：槽位写死 `5h`/`周`，缺的显式画 `—`。
-        "有什么画什么"会让 Hero 时有两段时有一段，而那个少没有任何地方解释。"""
-        c = code(APP)
-        m = re.search(r'agyHeroSlots = \[([^\]]+)\]', c)
-        self.assertIsNotNone(m, "★ Hero 的槽位表不见了 —— 判据看不懂了，先修闸")
-        self.assertEqual(re.findall(r'"([^"]+)"', m.group(1)), ["5h", "周"])
-
-    def test_it_suggests_switching_to_the_best(self):
-        self.assertIn("建议切到", gemini_block(), "★★ Hero 没有「建议切到」")
-
-    def test_a_tie_goes_to_the_current_account(self):
-        """★★ 打平时当前号赢。`reduce` 取第一个最大值，于是两个号都是 96% 时会推荐
-        "切到另一个 96%" —— 零收益，而 agy 换号的代价是得重开一个会话。"""
-        c = code(APP)
-        i = c.index("const agyTop")
-        seg = c[i:c.index("\n  const agyBest", i)]
-        self.assertIn("x.a.sub === agyPool.liveSub", seg, "★★ 平局时会推荐一次零收益的换号")
-
-    def test_unknown_quota_never_gets_recommended(self):
-        """★★★ 读不到额度的号**不参与**排名。让"未知"冒充满额被推荐，
-        是本仓在 codex 选号器上栽过的同一条（未知被当成 0% 已用 ⇒ 排最空闲）。
-
-        ⚠️ **判据 2026-09-15 改过，而且是收紧不是放松。** 旧版钉的是字面
-        `x.pct != null`；那一版只挡"一行都没有"的号。现在两道：
-          ① `.filter((x) => x.rows.length > 0)` —— 一行都读不到的号直接出局；
-          ② `Number.isFinite(x.pct)` —— 共同基准为空时 `Math.min()` 返回 `Infinity`，
-             不挡的话会冒出一个"余量 Infinity"的假最优号（比 null 更难发现，
-             因为它是个数字，一路都不会报错）。
-        逐字钉实现的闸在这次重构里假红了一次 —— 判据因此改成**行为**：
-        候选集必须同时被这两道挡过。
-        """
-        c = code(APP)
-        i = c.index("const agyRowsOf")
-        seg = c[i:c.index("const agyTop", i)]
-        self.assertIn("x.rows.length > 0", seg,
-                      "★★★ 一行额度都读不到的号仍会进候选集")
-        self.assertIn("Number.isFinite", seg,
-                      "★★★ 没挡 Infinity —— 共同基准为空时会造出一个假的最优号")
+# ★ 2026-09-24：原 `TheGeminiTabHasAHeroLikeCodex`（自绘 Hero +「建议切到 X」+ 前端排名的平局/未知规则）
+#   已随用户拍板「Gemini 总览同步 codex 的规范」整体撤掉 —— Hero 换成 codex 同一个 `RunwayHero`，
+#   「下一个」由 `agy/pool.py::pick` 决定。接替它的闸在 `tests/test_gemini_follows_codex_rotation.py`。
 
 
 class TheGeminiCardHasTheSameActionBar(unittest.TestCase):
@@ -190,7 +148,7 @@ class TheThingsDeliberatelyLeftOut(unittest.TestCase):
         self.assertIsNotNone(m, "★ 白名单不见了 —— 参数直接进 argv")
         allowed = set(re.findall(r'"([a-z-]+)"', m.group(1)))
         self.assertNotIn("login", allowed, "★★★ GUI 能跑 login —— 必然挂死")
-        self.assertTrue(allowed <= {"quota", "switch", "live", "rename", "remove",
+        self.assertTrue(allowed <= {"quota", "switch", "live", "rename", "remove", "pin", "borrow",  # pin/borrow 2026-09-24 审过：只写池、不联网、不起 agy
                                     "health", "probe", "rotate", "auto-switch"},
                         f"★★ 白名单里有没审过的子命令: {sorted(allowed)}")
 

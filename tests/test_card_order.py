@@ -18,6 +18,10 @@
 `node --experimental-strip-types` 直接跑**真文件** —— 不是对源码做文本断言，
 也不是测一份抄过来的副本（本仓铁律：闸的期望值要从真源推导）。
 """
+try:
+    from . import _isolation  # noqa: F401  ★ 见 tests/_isolation.py —— 必须在任何被测模块之前
+except ImportError:
+    import _isolation  # noqa: F401
 import json
 import re
 import shutil

@@ -18,6 +18,10 @@ Connector 是本仓**第一个主动改用户配置文件**的东西。它碰的
 ★ `services` 那一步会真跑 `install-launchd.sh` 并调 `launchctl` —— 测试**一律不选它**，
   只用静态闸验「失败必须如实上报」。
 """
+try:
+    from . import _isolation  # noqa: F401  ★ 见 tests/_isolation.py —— 必须在任何被测模块之前
+except ImportError:
+    import _isolation  # noqa: F401
 import importlib
 import json
 import os

@@ -26,6 +26,10 @@
 闸量的是**渲染后的真实高度** —— 它由内边距 / 环尺寸 / 行高 / 换行四者合成，
 断言源码里那几个常量会漏掉任何一种撑高的方式。
 """
+try:
+    from . import _isolation  # noqa: F401  ★ 见 tests/_isolation.py —— 必须在任何被测模块之前
+except ImportError:
+    import _isolation  # noqa: F401
 import json
 import re
 import subprocess
@@ -374,8 +378,12 @@ class TheOrderComesFromTheOneImplementation(unittest.TestCase):
         #   `codex-rotate next --json`。所以判据从「前端提到 next」变成
         #   **「前端 → 只读 IPC → 真 CLI」三段都在**，比原来更强：
         #   它同时挡住「前端自己算」和「Rust 桩里返回假数据」两种退化。
-        self.assertIn('invoke<string>("read_rotation_board")', code,
-                      "★★ 前端没走那条只读 IPC")
+        # ⚠️ 2026-09-24：同一个 hook 兼管 Gemini（`source: "agy"` → `read_agy_board`），
+        #   调用写成三元式；判据改成「两条只读 IPC 都在调用点里」，不变量不变。
+        self.assertRegex(code, r'invoke<string>\([^)]*"read_rotation_board"',
+                         "★★ 前端没走那条只读 IPC")
+        self.assertRegex(code, r'invoke<string>\([^)]*"read_agy_board"',
+                         "★★ Gemini 那一路没走只读 IPC")
         rs = (ROOT / "codexbar" / "src-tauri" / "src" / "lib.rs").read_text(encoding="utf-8")
         i = rs.index("async fn read_rotation_board")
         seg = rs[i:rs.index("\n}", i)]

@@ -25,6 +25,10 @@
 降为**纯摆放**（卡片位置 + ⌘N），键从 `pick_order` 改名 `card_order`。
 一个叫「挑号顺序」却不挑号的键会骗下一个人 —— 那是本仓最反感的命名。
 """
+try:
+    from . import _isolation  # noqa: F401  ★ 见 tests/_isolation.py —— 必须在任何被测模块之前
+except ImportError:
+    import _isolation  # noqa: F401
 import importlib.util
 import json
 import os

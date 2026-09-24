@@ -13,6 +13,10 @@ grok CLI 用着的时候数字冻着，菜单栏标题里也没有 grok。
 
 账单接口只回整数百分比，所以「实时」= 整数跳变后约 15s 内进 UI，不是更细的曲线。
 """
+try:
+    from . import _isolation  # noqa: F401  ★ 见 tests/_isolation.py —— 必须在任何被测模块之前
+except ImportError:
+    import _isolation  # noqa: F401
 import ast
 import importlib.machinery
 import importlib.util

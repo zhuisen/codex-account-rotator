@@ -228,6 +228,8 @@ export function useAgyPool(enabled: boolean, opts?: {
   probe: (label?: string) => void;
   /** 按号开关自动轮换。 */
   setRotate: (label: string, on: boolean) => void;
+  /** 置顶 / 取消置顶。 */
+  togglePin: (label: string) => void;
   /** 全局自动切号开关。`null` = 还没读到。 */
   autoOn: boolean | null;
   setAuto: (on: boolean) => void;
@@ -496,6 +498,9 @@ export function useAgyPool(enabled: boolean, opts?: {
   const runThen = useCallback((args: string[]) => {
     void invoke<string>("run_agy_rotate", { args })
       .then(() => read(true))
+      // ★ 写完广播「池变了」：另一个 webview（菜单栏）与两边的续航条据此**只读盘**重读。
+      //   收方只读、从不回发 —— 不会成环（`run_agy_rotate` 本身也不 emit）。
+      .then(() => emit(POOL_EVT))
       .catch((e: unknown) => setErr(String(e).slice(0, 200)));
   }, [read]);
   const renameTo = useCallback((label: string, next: string) =>
@@ -519,6 +524,8 @@ export function useAgyPool(enabled: boolean, opts?: {
     runThen(["auto-switch", on ? "--on" : "--off"]);
   }, [runThen]);
   const removeIt = useCallback((label: string) => runThen(["remove", label]), [runThen]);
+  /** 置顶 / 取消置顶（2026-09-24 与 codex 对齐）。真源在池里 —— wrapper 在 app 没开时也要读。 */
+  const togglePin = useCallback((label: string) => runThen(["pin", "--toggle", label]), [runThen]);
 
   const snapshotOf = useCallback((a: AgyPoolAccount, liveSnap: AgySnapshot | null) => {
     // ★★★ **本机 RPC 那份只在能证明归属时才用。**（2026-09-13 三方评审共同指出）
@@ -535,5 +542,5 @@ export function useAgyPool(enabled: boolean, opts?: {
 
   return { accounts, liveSub, drifted, snapshotOf, busy, err, refresh, switchTo,
            renameTo, removeIt, switching, health, probe, setRotate,
-           autoOn, setAuto, running: runningId };
+           autoOn, setAuto, running: runningId, togglePin };
 }

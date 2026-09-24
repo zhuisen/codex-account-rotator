@@ -15,6 +15,10 @@
 · 采样器：确认「要 CSRF」之后一小时内**起手就退**（app 每 60s 会把它补拉起来 ——
   只在循环里 break 等于每分钟重生一次）。退出必须排在 `take_lock` 之前（不许留陈锁）。
 """
+try:
+    from . import _isolation  # noqa: F401  ★ 见 tests/_isolation.py —— 必须在任何被测模块之前
+except ImportError:
+    import _isolation  # noqa: F401
 import importlib.machinery
 import importlib.util
 import io

@@ -8,6 +8,10 @@
 
 三条的共同点还是那一个：**症状是钱或数据悄悄少了一点，而没有任何东西报错。**
 """
+try:
+    from . import _isolation  # noqa: F401  ★ 见 tests/_isolation.py —— 必须在任何被测模块之前
+except ImportError:
+    import _isolation  # noqa: F401
 import ast
 import json
 import os

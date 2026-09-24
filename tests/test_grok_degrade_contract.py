@@ -9,6 +9,10 @@ grok 的额度是百分比,而 `0%` 是"这周一点没用"的**合法值** —�
 没有它,401 / 500 / 坏 payload 就只能拿真 token 打真外网去凑,既慢又把测试绑在外网状态上。
 ★ 全程**不碰真实 `~/.grok`** —— `GROK_AUTH_PATH` 指向合成夹具(同 test_incremental_parse.py 的纪律)。
 """
+try:
+    from . import _isolation  # noqa: F401  ★ 见 tests/_isolation.py —— 必须在任何被测模块之前
+except ImportError:
+    import _isolation  # noqa: F401
 import http.server
 import json
 import os

@@ -1,6 +1,7 @@
 import { fullVersion } from "../helpers";
 import { useState, useEffect, useMemo, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { emit } from "@tauri-apps/api/event";
 import ConnectorPanel from "../components/ConnectorPanel";
 // ★ 外链走本仓自己的 `open_url`,**不用 `@tauri-apps/plugin-shell` 的 `open`**:
 //   那条路是 `open::that_detached`,spawn 完直接 drop `Child`,每点一次留一具僵尸
@@ -195,6 +196,25 @@ export default function SettingsPage({ t }: { t: Theme }) {
     } finally { void loadDawn(); }   // ★ 无论成败都回读：不拿"我打算设成什么"冒充"它现在是什么"
   }, [dawn, loadDawn]);
   useEffect(() => { void loadBorrow(); }, [loadBorrow]);
+  /** Gemini（agy）池的同一个开关（2026-09-24 与 codex 对齐）。真源在 agy 池里 ——
+   *  `bin/agy` 在 app 没开时也要读它。读走 `borrow --status --json`（纯读，不广播）。 */
+  const [agyBorrow, setAgyBorrow] = useState<boolean | null>(null);
+  const loadAgyBorrow = useCallback(async () => {
+    try {
+      const raw = await invoke<string>("run_agy_rotate", { args: ["borrow", "--status", "--json"] });
+      setAgyBorrow(!!(JSON.parse(raw) as { borrow: boolean }).borrow);
+    } catch {
+      setAgyBorrow(null);                  // ★ 读不到 ≠ 已关闭
+    }
+  }, []);
+  const toggleAgyBorrow = useCallback(async () => {
+    const next = !agyBorrow;
+    try {
+      await invoke("run_agy_rotate", { args: ["borrow", next ? "--on" : "--off"] });
+      void emit("agy-pool-updated");      // 续航条的「下一个」可能随之变化
+    } finally { void loadAgyBorrow(); }
+  }, [agyBorrow, loadAgyBorrow]);
+  useEffect(() => { void loadAgyBorrow(); }, [loadAgyBorrow]);
   const [s, setS] = useState(load);
   const update = (patch: Partial<Settings>) => {
     const next = { ...s, ...patch }; setS(next); save(next);
@@ -361,6 +381,19 @@ export default function SettingsPage({ t }: { t: Theme }) {
           background: borrow ? t.accent : t.barTrack, transition: "background .2s",
         }}>
           <div style={{ width: 18, height: 18, borderRadius: 9, background: "#fff", transform: borrow ? "translateX(16px)" : "translateX(0)", transition: "transform .2s" }} />
+        </div>
+      </Row>
+      <Row label="Gemini 池子空时借用已停用的号"
+           desc={agyBorrow == null
+             ? "读不到这项设置 —— 不是「已关闭」，是这次没读到"
+             : agyBorrow
+             ? "启动 agy 时一个可用的号都没有，就临时借一个你停用的号，并在总览顶部标红说明。关掉 = 不换号，agy 照用当前号跑"
+             : "已关闭：无号可用时启动 agy 不换号，绝不动你停用的号"}>
+        <div data-agy-borrow onClick={() => void toggleAgyBorrow()} style={{
+          width: 38, height: 22, borderRadius: 11, padding: 2, cursor: "pointer",
+          background: agyBorrow ? t.accent : t.barTrack, transition: "background .2s",
+        }}>
+          <div style={{ width: 18, height: 18, borderRadius: 9, background: "#fff", transform: agyBorrow ? "translateX(16px)" : "translateX(0)", transition: "transform .2s" }} />
         </div>
       </Row>
       <Row label="订阅到期预警" desc="订阅剩余天数 ≤ 此值时在卡片和通知中提醒">

@@ -278,6 +278,8 @@ export default function MenuBar() {
   //   而今日 Tab 与 Gemini 档一个像素都用不到它（同总览那条 `provider === "codex"` 的理由）。
   const { board: mbBoard } = useRotationBoard(tab === "acc" && plat === "codex");
   const agyPool = useAgyPool(tab === "acc" && plat === "gemini", { background: true });
+  const { board: mbAgyBoard } = useRotationBoard(tab === "acc" && plat === "gemini",
+                                                { source: "agy", dep: agyPool.accounts });
   const alive = accounts.filter(a => a.status !== "dead");
   const dead = accounts.filter(a => a.status === "dead");
   /** 芯片行的数据。★ 计数一律是**这一档渲染出来几行** —— 写"池里有几个"就是在说
@@ -511,6 +513,7 @@ export default function MenuBar() {
               <AgyRow key={a.sub} t={t} color={colorOf(traffic, "agy")}
                       snap={agyPool.snapshotOf(a, agySnap)} label={a.label}
                       isCurrent={a.sub === agyPool.liveSub}
+                      isBest={mbAgyBoard?.next?.aid === a.sub && a.sub !== agyPool.liveSub}
                       onSwitch={a.sub === agyPool.liveSub ? undefined
                         : () => { agyPool.switchTo(a.label);
                                   showToast(`已切到 ${a.label} · 下次启动 agy 生效`); }}

@@ -28,6 +28,10 @@
 3. **判定不了 ⇒ `unknown`，绝不 `ok`**。把「查不到」和「确实是新的」合并成一个值，
    等于让这道闸在最需要它的时候（进程查不到）静默放行。
 """
+try:
+    from . import _isolation  # noqa: F401  ★ 见 tests/_isolation.py —— 必须在任何被测模块之前
+except ImportError:
+    import _isolation  # noqa: F401
 import importlib.machinery
 import importlib.util
 import time

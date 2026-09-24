@@ -54,6 +54,10 @@ grok/agy 额度走带 `fetched_at` 单调采纳的 `useQuotaSidecar`，而它每
 100ms 让两条 stub（各起一个 python，真机实测各约 80ms）在 300ms 的点击间隔内跑完，
 这才是**只有被测那条能挡住**的那一档（CLAUDE.md §7.-1 第 ⑦ 问）。
 """
+try:
+    from . import _isolation  # noqa: F401  ★ 见 tests/_isolation.py —— 必须在任何被测模块之前
+except ImportError:
+    import _isolation  # noqa: F401
 import re
 import subprocess
 import sys

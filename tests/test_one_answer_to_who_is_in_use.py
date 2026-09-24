@@ -108,13 +108,12 @@ class TheCodexTabHasExactlyOneAnswer(unittest.TestCase):
         self.assertIn(">✓ 直连</span>", code, "★★ codex 卡动作条没用「✓ 直连」")
         self.assertNotIn(">✓ 当前</span>", code, "★★ codex 卡动作条还在写「✓ 当前」，与右上角「直连」两个名字")
 
-    def test_the_agy_tab_keeps_its_own_wording(self):
-        """★ agy **没有逐请求挑号器**，手动切号就是它的机制 ——
-        那边的「推荐切到谁」仍然成立，别顺手一起改掉。"""
-        agy = _call_site(self.APP, "isBest={agyBest?.sub === a.sub}")
-        self.assertTrue(agy, "★★ 找不到 agy 档的卡片调用 —— 断言打空了")
-        self.assertNotIn("bestLabel=", agy,
-                         "★ agy 档不该被改成「下一个」—— 它没有逐请求挑号器")
+    def test_the_agy_tab_now_follows_the_same_rule(self):
+        """★ 2026-09-24 用户拍板：Gemini 也按 codex 的规范 —— 角标同样来自**真挑号器**
+        （`agy/pool.py::pick` → `read_agy_board`），不再是前端排的「推荐切到谁」。
+        （此前这里守的是「agy 档保留 USE」，那条前提已被用户撤掉。）"""
+        agy = _call_site(self.APP, "isBest={agyBoard?.next?.aid === a.sub}")
+        self.assertTrue(agy, "★★ agy 档的「下一个」没有来自真挑号器")
 
 
 class TheBorrowFallbackIsSwitchable(unittest.TestCase):

@@ -19,6 +19,10 @@ app 侧 `data_dir()`（lib.rs:85）的优先级是
 它自己往 subprocess 里注入变量，所以永远证明不了「**服务定义供给了**这个变量」。
 2026-09-10 四方评审三个面板独立指出：代码改完了、没人喂它。
 """
+try:
+    from . import _isolation  # noqa: F401  ★ 见 tests/_isolation.py —— 必须在任何被测模块之前
+except ImportError:
+    import _isolation  # noqa: F401
 import os
 import plistlib
 import re

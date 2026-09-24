@@ -1,4 +1,8 @@
 """Proxy resume must never assign anonymous historical telemetry to the active account."""
+try:
+    from . import _isolation  # noqa: F401  ★ 见 tests/_isolation.py —— 必须在任何被测模块之前
+except ImportError:
+    import _isolation  # noqa: F401
 import concurrent.futures
 import contextlib
 import copy
