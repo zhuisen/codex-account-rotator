@@ -734,6 +734,32 @@ Fable 评审 40 条 + 四方评审 9 条，全部处理完。17 个 commit 未�
 
 ---------
 
+## v1.9.2 — 2026-09-24
+
+**Gemini 账号版块与 Codex 统一。**
+
+### 修复
+- Gemini 档补上顶栏「最近刷新 · N/M 新鲜」一行（数 Gemini 池各号的读取时刻，文案与 Codex 档共用一份实现）。
+- Gemini 卡补上停用轮换的 ⊘ 角标。
+- Gemini 卡底部多出的 23px 留白（页脚折成两行，179px → 156px，与 codex 卡等高）。
+- CHANGELOG 里 v1.9.1 一节放错位置（在 v1.9.0 之下）。
+
+### 文档
+- README / AGENTS.md / CLAUDE.md 补上代理轮换 Gemini 版块的口径与 `traffic/agy_rotation.py`。
+
+### B72 · Gemini 账号版块三处与 codex 不统一 — 2026-09-24 ✅（v1.9.2）
+
+用户点名（「这些都是 gemini 账号版块做不到位、不统一的地方」），修前 harness 1300×900 实测：
+① 顶栏右侧「最近刷新 · N/M 新鲜」只在 Codex 档有 —— Gemini 档补上同位同形的一行，数的是 **Gemini 池**各号的
+  `quota_at`，阈值同一条 `QUOTA_STALE_SEC`；文案抽成 `helpers.ts::freshnessLine` 两档共用（两处各写迟早只改一边）。
+② 停用轮换的 ⊘ 角标只画在 codex 卡上 —— `AgyCard` 补上，同位同色（琥珀）。
+③ **Gemini 卡 179px vs codex 卡 156px**：页脚写成 `flexDirection: column`，隐形占位徽章自成第二行，
+  多出来的 23px 全是底部空白。改成与账号卡同构的单行页脚后三张都是 156。
+闸 `tests/test_gemini_overview_parity.py`（5 条，渲染后的页面上量；3 个变异——页脚改回两行 / 去掉 ⊘ / 去掉新鲜度行——
+每个都重建 bundle 后变红）。三条旧闸的锚点跟着文案搬家（判据不变：`unknown` 进分母、codex 那行只数 codex 池）。
+
+---
+
 ## v1.9.1 — 2026-09-24
 
 **Gemini 额度读数恢复真实、轮换规则与 codex 对齐；日志页「代理轮换」分成 Codex ｜ Gemini 两个版块。**
@@ -871,17 +897,6 @@ sam 5h 0.717 / 周 0.948，5h 重置 21:32:22Z = 05:32 SGT，与状态栏逐分�
 drift 并进 switch / Gemini 版运行日志重复并入）。
 顺带修一条被新夹具戳穿的闸：`test_connector_oneclick` 数「停轮换角标」的期望值时对**整份** harness 计数，
 新内联的 Gemini 轮换夹具也带 `"rotate_off": true` ⇒ 期望 4、实画 3 的假红。改为只数 `var STATE = …;` 那一份。
-
-### B72 · Gemini 账号版块三处与 codex 不统一 — 2026-09-24 ✅（未发版）
-
-用户点名（「这些都是 gemini 账号版块做不到位、不统一的地方」），修前 harness 1300×900 实测：
-① 顶栏右侧「最近刷新 · N/M 新鲜」只在 Codex 档有 —— Gemini 档补上同位同形的一行，数的是 **Gemini 池**各号的
-  `quota_at`，阈值同一条 `QUOTA_STALE_SEC`；文案抽成 `helpers.ts::freshnessLine` 两档共用（两处各写迟早只改一边）。
-② 停用轮换的 ⊘ 角标只画在 codex 卡上 —— `AgyCard` 补上，同位同色（琥珀）。
-③ **Gemini 卡 179px vs codex 卡 156px**：页脚写成 `flexDirection: column`，隐形占位徽章自成第二行，
-  多出来的 23px 全是底部空白。改成与账号卡同构的单行页脚后三张都是 156。
-闸 `tests/test_gemini_overview_parity.py`（5 条，渲染后的页面上量；3 个变异——页脚改回两行 / 去掉 ⊘ / 去掉新鲜度行——
-每个都重建 bundle 后变红）。三条旧闸的锚点跟着文案搬家（判据不变：`unknown` 进分母、codex 那行只数 codex 池）。
 
 ---
 
