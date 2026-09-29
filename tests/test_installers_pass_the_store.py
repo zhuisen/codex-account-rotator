@@ -121,6 +121,73 @@ class TheLaunchdPlistsCarryTheStore(unittest.TestCase):
         self.assertIn("数据目录不存在", r.stdout + r.stderr)
 
 
+@unittest.skipUnless(sys.platform == "darwin", "launchd 是 macOS 专属")
+class TheLaunchdInstallerSurvivesDisabledAndFailingServices(unittest.TestCase):
+    """★★ 2026-09-26 真事故的另外两半（见 test_shell_var_before_multibyte 的前半）。
+
+    ① 服务处于 launchd 的 `disabled` 状态时，`bootstrap` 报 `Input/output error`。原脚本不先 `enable`。
+       （本机 2026-09-23 的清理会话对 ~79 个 LaunchAgent 做过 `disable`，而 `disable` 会持久化。）
+    ② 一个服务装不上，`set -e` 让脚本当场中断 ⇒ 后面的服务连 plist 都没写。
+       「装了一半」在终端上只差最后几行，而守护进程是真的没了（2026-09-10 同形）。
+
+    `launchctl` 用一个**有状态的桩**：`disable` 标记存在时 bootstrap 失败，`enable` 清掉标记，
+    `print` 只在 bootstrap 成功后才成功 —— 这样才验得出「先 enable」这个**顺序**，
+    而不是只验脚本里有那个字符串。必须用 `/bin/bash`（3.2）：PATH 里的 bash 若是 5.x，
+    全角逗号那个坑根本复现不了。
+    """
+
+    def _run(self, disabled=(), broken=()):
+        tmp = Path(tempfile.mkdtemp(prefix="codexbar-installer-state-"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        (tmp / "home" / "Library" / "LaunchAgents").mkdir(parents=True)
+        (tmp / "store").mkdir(); (tmp / "st").mkdir(); (tmp / "bin").mkdir()
+        for n in disabled:
+            (tmp / "st" / f"disabled_{n}").touch()
+        for n in broken:
+            (tmp / "st" / f"broken_{n}").touch()
+        stub = tmp / "bin" / "launchctl"
+        stub.write_text(r'''#!/bin/sh
+ST="$STUBDIR"; cmd="$1"; shift
+lab() { basename "$1" | sed -e 's/\.plist$//' -e 's/.*\.//'; }
+case "$cmd" in
+  enable)    rm -f "$ST/disabled_$(lab "$1")"; exit 0 ;;
+  bootout)   rm -f "$ST/loaded_$(lab "$1")"; exit 0 ;;
+  bootstrap) n=$(lab "$2")
+             if [ -e "$ST/broken_$n" ] || [ -e "$ST/disabled_$n" ]; then echo "Bootstrap failed: 5: Input/output error" >&2; exit 5; fi
+             touch "$ST/loaded_$n"; exit 0 ;;
+  print)     n=$(lab "$1"); [ -e "$ST/loaded_$n" ] && exit 0 || exit 113 ;;
+  *) exit 0 ;;
+esac
+''')
+        stub.chmod(0o755)
+        env = dict(os.environ)
+        env.update({"HOME": str(tmp / "home"), "PATH": f"{tmp / 'bin'}:{env['PATH']}",
+                    "STUBDIR": str(tmp / "st"), VAR: str(tmp / "store"),
+                    "LANG": "en_US.UTF-8", "LC_ALL": "en_US.UTF-8"})
+        r = subprocess.run(["/bin/bash", str(LAUNCHD)], capture_output=True, env=env,
+                           cwd=str(ROOT), timeout=180)
+        loaded = {n for n in ("autosync", "quotad", "proxy", "dawnprobe") if (tmp / "st" / f"loaded_{n}").exists()}
+        plists = {p.name.rsplit(".", 2)[-2] for p in (tmp / "home" / "Library" / "LaunchAgents").glob("*.plist")}
+        return r, loaded, plists
+
+    def test_a_disabled_service_is_enabled_before_bootstrap(self):
+        r, loaded, _ = self._run(disabled=("autosync", "quotad", "proxy", "dawnprobe"))
+        self.assertEqual(r.returncode, 0, r.stderr.decode("utf-8", "replace")[-800:])
+        self.assertEqual(loaded, {"autosync", "quotad", "proxy", "dawnprobe"},
+                         "★★ disabled 的服务没装上 —— bootstrap 前必须先 `launchctl enable`")
+
+    def test_one_failing_service_does_not_block_the_rest_and_says_why(self):
+        r, loaded, plists = self._run(broken=("quotad",))
+        err = r.stderr.decode("utf-8")          # ★ 严格解码：非法字节会直接抛 —— 那正是 connector 的 Traceback
+        self.assertNotEqual(r.returncode, 0, "★★ 有服务没装上却退出 0 —— 会被当成成功")
+        self.assertNotIn("unbound variable", err, "★★ 真错误被 `$rc，` 换成了一句乱码报错")
+        self.assertIn("bootstrap rc=", err, "★ 没说清是哪一步、什么退出码")
+        self.assertEqual(plists, {"autosync", "quotad", "proxy", "dawnprobe"},
+                         "★★ 后面的服务连 plist 都没写 —— `set -e` 让一个失败挡住了其余")
+        self.assertEqual(loaded, {"autosync", "proxy", "dawnprobe"},
+                         f"★★ 一个失败挡住了其余服务的加载: {loaded}")
+
+
 class TheWindowsTasksCarryTheStore(unittest.TestCase):
     """Windows 侧没法在 macOS 上执行，所以判据落在**任务表**上 —— 但要判到
     「每个任务的 Env 都含它」，不是「文件里出现过这个词」。"""

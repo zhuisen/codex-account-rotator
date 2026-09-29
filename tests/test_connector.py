@@ -316,6 +316,41 @@ class TheEntriesNeverClobberUserFiles(Sandbox):
                         "★ 删掉了不是我们建的 symlink")
         self.assertTrue(any("codex-rotate" in k for k in out["kept"]), out)
 
+    def test_remove_keeps_a_foreign_symlink_that_merely_points_inside_our_store(self):
+        """★★ 2026-09-26：`remove()` 用 `str(store) in tgt`（子串）判「是不是我们建的」，
+        而 `plan()` 用精确比较 —— 同一条规则两处实现，边界输入上不一致。
+        用户自己建的入口只要**指向仓库/运行时里的任何路径**（哪怕是另一个文件）就被当成我们的删掉。
+        判据必须与 `apply()` 建的目标**逐字节相同**。"""
+        self.apply("runtime", "entries")
+        runtime = connector._runtime_dir(self.src, self.store)
+        # 用户自建：指向 store 内、但不是我们会建的那个目标
+        (self.bin / "cxp").unlink()
+        (self.bin / "cxp").symlink_to(self.store / "my-notes" / "cxp")
+        (self.bin / "cxd").unlink()
+        (self.bin / "cxd").symlink_to(str(runtime / "proxy" / "cxd") + ".bak")
+        out = connector.remove(self.store)
+        self.assertTrue((self.bin / "cxp").is_symlink(), "★★ 删掉了用户自建、只是指向 store 内的 cxp")
+        self.assertTrue((self.bin / "cxd").is_symlink(), "★★ 删掉了用户自建、目标名带前缀相同的 cxd")
+        self.assertTrue(any("cxp" in k for k in out["kept"]) and any("cxd" in k for k in out["kept"]), out)
+        # 反向对照：我们自己建的仍然要撤掉，否则「什么都不删」也能过
+        self.assertFalse((self.bin / "agy-rotate").exists() or (self.bin / "agy-rotate").is_symlink(),
+                         "★ 我们自己建的入口没被撤销")
+
+    def test_remove_still_undoes_our_own_entries_in_a_clone_install(self):
+        """★ 反向对照（收紧成精确比较后最容易漏的方向）：clone 装机时 store 自己就是运行时，
+        链接指向 `<store>/proxy/cxp` 而不是 `<store>/runtime/proxy/cxp`。判据用错就会**一个都撤不掉**。"""
+        for rel in connector.RUNTIME_FILES:
+            if (self.src / rel).exists():
+                (self.store / rel).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(self.src / rel, self.store / rel)
+        self.assertTrue(connector._has_runtime(self.store), "夹具没有搭成 clone 装机")
+        self.apply("runtime", "entries")
+        self.assertTrue((self.bin / "cxp").is_symlink())
+        self.assertEqual(os.readlink(self.bin / "cxp"), str(self.store.resolve() / "proxy" / "cxp"))
+        connector.remove(self.store)
+        for n in connector.ENTRIES:
+            self.assertFalse((self.bin / n).is_symlink(), f"★★ clone 装机下 {n} 没被撤销")
+
     def test_every_entry_target_ships_in_the_runtime(self):
         """★★ 漏一个就会建出**悬空 symlink** —— 点一下报 No such file，
         而用户完全看不出与 Connector 有关。2026-09-19 `agy-rotate` 真漏过。"""

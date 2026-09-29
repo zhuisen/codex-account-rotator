@@ -313,7 +313,7 @@ def _launchctl(args, timeout=20):
         return None
     try:
         return subprocess.run(["launchctl", *args], capture_output=True,
-                              text=True, timeout=timeout)
+                              text=True, errors="replace", timeout=timeout)
     except Exception:
         return None
 
@@ -543,8 +543,10 @@ def apply(src, store, want):
     if "services" in want:
         script = runtime / "scripts" / "install-launchd.sh"
         env = dict(os.environ, CODEX_ROTATE_STORE=str(store))
+        # ★ `errors="replace"`：脚本 stderr 若带非法 UTF-8（bash 3.2 的变量名吞字节就会），严格解码会
+        #   抛 UnicodeDecodeError，用户看到的是一份 Traceback 而不是真错误（2026-09-26）。
         r = subprocess.run(["bash", str(script)], capture_output=True, text=True,
-                           timeout=180, env=env)
+                           errors="replace", timeout=180, env=env)
         if r.returncode != 0:
             # ★ 失败要如实上报,不能吞成 ok —— 否则用户以为装好了,而代理根本没起。
             return {"ok": False, "done": done, "notes": notes,
@@ -571,6 +573,12 @@ def remove(store, drop_runtime=False):
             p.unlink()
             removed.append(p.name)
 
+    # 我们会建的每个入口的**确切目标**（与 apply() 里 `_link(runtime / rel, …)` 逐字节一致）。
+    # ★ 用 `_runtime_dir`，不是上面那个 `store / "runtime"`：clone 装机时 store 自己就是运行时，
+    #   链接指向 `<store>/proxy/cxp`，用错的话「我们建的」全被当成别人的、一个都撤不掉。
+    rt = _runtime_dir(store, store)
+    ours = {n: (str(rt / rel),) for n, rel in ENTRIES.items()}
+    ours["codex"] = (str(rt / "scripts" / "codex-wrapper-with-logout-guard.sh"),)
     for name in list(ENTRIES) + ["codex"]:
         link = _local_bin() / name
         if not link.is_symlink():
@@ -578,7 +586,10 @@ def remove(store, drop_runtime=False):
                 kept.append(f"{name}（不是我们建的 symlink，没动）")
             continue
         tgt = os.readlink(link)
-        if str(runtime) in tgt or str(store) in tgt:
+        # ★ 精确比较，与 `plan()` / `apply()` 同一条规则（2026-09-26）。原来是子串
+        #   `str(store) in tgt`：用户自建、只要指向仓库内**任何**路径的入口都被当成我们的删掉，
+        #   而 plan() 用的是 `== str(runtime / rel)`，同一条规则两处不一致。
+        if tgt in ours.get(name, ()):
             link.unlink()
             removed.append(name)
         else:

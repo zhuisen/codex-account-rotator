@@ -77,6 +77,10 @@ log_path() {
 #   变量带给下一个,而那种串味不会报错。
 ENV_EXTRA=""
 
+# ★ 一个服务装不上**不许挡住其余的**（`set -e` 会让脚本停在第一个失败上，后面的连 plist 都不写）。
+#   每个 `emit … || FAILED=…` 收集失败，最后统一报错并以非 0 退出 —— 既不装一半，也不假装成功。
+FAILED=""
+
 emit() {  # emit <name> <body-xml> <arg…>
     local name="$1" body="$2"; shift 2
     local out="$AGENTS/$PREFIX.$name.plist"
@@ -101,8 +105,8 @@ emit() {  # emit <name> <body-xml> <arg…>
         echo "  <key>StandardOutPath</key><string>$logf</string>"
         echo "  <key>StandardErrorPath</key><string>$logf</string>"
         echo '</dict></plist>'
-    } > "$out"
-    plutil -lint "$out" >/dev/null
+    } > "$out" || return 1
+    plutil -lint "$out" >/dev/null || return 1
 
     # ★★ **`bootout` 是异步的** —— 它返回时任务往往还挂在 domain 里，紧跟的
     #    `bootstrap` 就撞上 `Bootstrap failed: 5: Input/output error`。
@@ -115,6 +119,10 @@ emit() {  # emit <name> <body-xml> <arg…>
     while [ "$i" -lt 50 ] && launchctl print "gui/$UID_NUM/$PREFIX.$name" >/dev/null 2>&1; do
         sleep 0.1; i=$((i + 1))
     done
+    # ★ 服务被 `launchctl disable` 过就会 `Bootstrap failed: 5: Input/output error`，而 `disable`
+    #   **持久化**（重启也不消）。2026-09-23 一次清理对 ~79 个 LaunchAgent 做过。先 `enable`：
+    #   只动我们自己这一个 label，且是可逆的；本来就 enabled 时是空操作。
+    launchctl enable "gui/$UID_NUM/$PREFIX.$name" 2>/dev/null || true
     local tries=0 rc=1
     while [ "$tries" -lt 5 ]; do
         if launchctl bootstrap "gui/$UID_NUM" "$out" 2>/dev/null; then rc=0; break; fi
@@ -122,7 +130,10 @@ emit() {  # emit <name> <body-xml> <arg…>
     done
     # ★ 判据是**真的加载上了**，不是 bootstrap 的退出码 —— 后者在这条路径上不可靠。
     if ! launchctl print "gui/$UID_NUM/$PREFIX.$name" >/dev/null 2>&1; then
-        echo "  ⛔ $name 装不上（bootstrap rc=$rc，重试 $tries 次后仍未加载）" >&2
+        # ★ `${rc}` 不是 `$rc` —— 后面紧跟全角逗号。bash 3.2 在 UTF-8 下把 `，` 的首字节吞进变量名，
+        #   `set -u` 报 `rc\xef: unbound variable`，真错误被换成乱码，stderr 里的非法字节还会让
+        #   connector.py 抛 UnicodeDecodeError（2026-09-26）。闸：tests/test_shell_var_before_multibyte.py。
+        echo "  ⛔ $name 装不上（bootstrap rc=${rc}，重试 ${tries} 次后仍未加载）" >&2
         echo "     手动:launchctl bootstrap gui/$UID_NUM $out" >&2
         return 1
     fi
@@ -134,7 +145,7 @@ ROT="$REPO/codex-rotate"
 emit autosync \
     "  <key>RunAtLoad</key><true/>
   <key>WatchPaths</key><array><string>$HOME/.codex/auth.json</string></array>" \
-    "$ROT" sync
+    "$ROT" sync || FAILED="$FAILED autosync"
 
 # ★★ keepalive(04:30) 与 refreshquota(07:00) 已于 2026-08-29 按用户要求**取消**，不再生成。
 #    · refreshquota 是真冗余 —— quotad 每 300s 已经全池扫一遍（`tick_usage` → `refresh-all`）。
@@ -148,7 +159,7 @@ emit autosync \
 emit quotad \
     '  <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>' \
-    "$REPO/daemon/quota_daemon.py"
+    "$REPO/daemon/quota_daemon.py" || FAILED="$FAILED quotad"
 
 # ★ `CRP_PORT` 现在走 `ENV_EXTRA` —— `emit` 统一生成唯一的一个 EnvironmentVariables 字典。
 #   在 body 里再写一个同名 key 会得到重复键的 plist,`plutil -lint` 未必拦得住。
@@ -156,7 +167,7 @@ ENV_EXTRA='    <key>CRP_PORT</key><string>8011</string>'
 emit proxy \
     '  <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>' \
-    "$REPO/proxy/proxy.py"
+    "$REPO/proxy/proxy.py" || FAILED="$FAILED proxy"
 
 # ★★ 每日清晨探针(06:00)。给 **Plus 号**各发一次最小计费补全,把 5h 窗口**锚定**上 ——
 #    没被用过的 5h 窗口服务端每轮都回「此刻 + 整窗」,倒计时永远停在 ~4h55m,那 5 小时等于没在走。
@@ -172,7 +183,7 @@ emit proxy \
 #      发现定时不跑时先比对 plist 形态(单行 vs 逐行美化 + 空 EnvironmentVariables),别先怀疑脚本。
 emit dawnprobe \
     '  <key>StartCalendarInterval</key><dict><key>Hour</key><integer>6</integer><key>Minute</key><integer>0</integer></dict>' \
-    "$ROT" dawn-probe
+    "$ROT" dawn-probe || FAILED="$FAILED dawnprobe"
 
 echo
 echo "==> loaded:"
@@ -180,3 +191,9 @@ for n in autosync quotad proxy dawnprobe; do
     printf '  %-13s %s\n' "$n" \
         "$(launchctl print "gui/$UID_NUM/$PREFIX.$n" 2>/dev/null | awk '/^\tstate = /&&!f{print $3; f=1}' || echo '?')"
 done
+
+if [ -n "$FAILED" ]; then
+    echo >&2
+    echo "⛔ 这些服务没装上:${FAILED}（其余已装好）。原因见上面各条 ⛔ 输出。" >&2
+    exit 1
+fi

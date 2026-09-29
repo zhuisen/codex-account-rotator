@@ -734,6 +734,27 @@ Fable 评审 40 条 + 四方评审 9 条，全部处理完。17 个 commit 未�
 
 ---------
 
+### B74 · 「一键接入」报 Traceback / remove 误删入口 / 从 GitHub 更新后账号「丢失」/ 服务装不上 — 2026-09-29 ✅（未发版）
+
+来源：`~/Downloads/mimo-incident-20260926/`（mimo 会话记录 + 一份归因整理）。**那份整理声称修复已提交（`8faf3c6` / `e4635a1`），
+本机所有仓库里都没有这两个 commit —— 修复根本没落盘，所以 v1.9.3 里四个缺陷全都还在。** 逐条独立复现后重修：
+① **`install-launchd.sh:125` 的 `$rc，`**（v1.9.2 起）：bash 3.2 在 UTF-8 下把全角逗号首字节吞进变量名，实测
+  `rc�: unbound variable`。只在「服务装不上」时才走，真错误被换成乱码，stderr 的非法 UTF-8 又让 `connector.py`
+  `text=True` 抛 `UnicodeDecodeError` ⇒ 设置页里是一份 Python Traceback。→ `${rc}` + `connector.py` 两处
+  `subprocess.run` 加 `errors="replace"`。
+② **`connector.remove` 子串判归属**：`str(store) in tgt`，而 `plan()` 是精确比较。→ 精确比较，目标与 `apply()` 逐字节相同
+  （用 `_runtime_dir`，clone 装机时 store 自己就是运行时；第一版收紧后**一个都撤不掉**，加了反向闸）。
+③ **CI 出的 .dmg 没有构建期烧录值 ⇒ `data_dir()` 落到空的 `app_data_dir()`**：clone 装机的机器从 GitHub 更新后账号
+  「全丢」，其实数据还在原仓库目录、launchd 的代理还在读它，app 与服务分叉。→ 新增 `pick_data_root`：
+  自己已有 `state.json` > 已安装代理 plist 里的 `CODEX_ROTATE_STORE` > 约定位置 > `app_data_dir()`；**只认含 `state.json` 的目录**。
+④ **服务被 `launchctl disable` 过就 `Bootstrap failed: 5: I/O error`**，且 `set -e` 让一个失败挡住其余。
+  → bootstrap 前先 `enable`（只动我们自己的 label）；`emit … || FAILED=…` 收集失败、其余照装、最后非 0 退出。
+**没做**：#6（5 个号 `refresh_token_reused`）无定论，需要重登；79 项 LaunchAgent 的 disabled 是本机状态，仓库改不了。
+**闸**：`test_shell_var_before_multibyte`（扫全部 shell 脚本，先证扫描器对已知坏行会响）· `test_installers_pass_the_store`
+（有状态的 launchctl 桩，`/bin/bash` 3.2 + UTF-8：验 disabled 会被 enable、一个失败不挡其余且报错可严格解码）·
+`test_connector`（外来 symlink 不删 + clone 装机撤得掉）· `test_rust_store_pick`（6 条 Rust 单测接进 unittest，CI 只跑 `cargo check`）。
+各闸的变异全部变红。
+
 ## v1.9.3 — 2026-09-29
 
 **四家牌价按官方页重取，费用列不再有「兜底价」的模型。**

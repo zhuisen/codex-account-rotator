@@ -42,6 +42,115 @@ fn data_dir() -> String {
     DATA_ROOT.get().cloned().unwrap_or_else(store_dir)
 }
 
+/// 从一份 launchd plist 里取 `CODEX_ROTATE_STORE` 的值（**代理 / quotad 实际在用的数据目录**）。
+/// 不引 plist 库：安装脚本写成单行、而磁盘上的副本会被别的东西改写成逐行美化，所以只做
+/// 「key 之后的第一个 `<string>…</string>`」这种对空白不敏感的取法。
+fn plist_store_value(text: &str) -> Option<String> {
+    let after = &text[text.find("<key>CODEX_ROTATE_STORE</key>")? + "<key>CODEX_ROTATE_STORE</key>".len()..];
+    let start = after.find("<string>")? + "<string>".len();
+    let end = after[start..].find("</string>")?;
+    let v = after[start..start + end].trim();
+    if v.is_empty() { None } else { Some(v.to_string()) }
+}
+
+/// ★★ **没有构建期烧录值时（= GitHub 上 CI 出的 .dmg），数据目录该落哪儿。**
+///
+/// 2026-09-26 事故：用户在 clone 装机的机器上从 GitHub 更新 CodexBar，新 app 的 `data_dir()` 直接落到
+/// 空的 `app_data_dir()` —— **账号「全丢」、无法刷新**。数据其实好好地躺在原来的仓库目录里，
+/// 而 launchd 起的代理 / quotad 还在读那个目录，于是 app 与服务**分叉**（且 `.state.lock` 落在两个路径上
+/// = 没有锁）。
+///
+/// 判据是「**已经有人在用的那个目录**」，按可信度：
+///   ① `app_data` 自己已经有 `state.json` —— 用户早就在包装模式下用了，别动；
+///   ② 已安装的代理 plist 里写的 `CODEX_ROTATE_STORE` —— 服务实际在读的目录，最权威；
+///   ③ 约定的仓库默认位置 —— plist 没装/读不到时的兜底；
+///   ④ 都没有 ⇒ 真·新装，落 `app_data`。
+/// 只认**含 `state.json`** 的目录：空目录不是「在用」，不能因为它存在就选它。
+fn pick_data_root(home: &std::path::Path, app_data: &std::path::Path) -> std::path::PathBuf {
+    use std::path::PathBuf;
+    let has_state = |d: &std::path::Path| d.join("state.json").is_file();
+    if has_state(app_data) {
+        return app_data.to_path_buf();
+    }
+    let plist = home.join("Library/LaunchAgents/com.doushutangmu.codex-rotate.proxy.plist");
+    if let Some(v) = std::fs::read_to_string(&plist).ok().and_then(|t| plist_store_value(&t)) {
+        let d = PathBuf::from(v);
+        if has_state(&d) {
+            return d;
+        }
+    }
+    let legacy = home.join("Projects/tools/codex-account-rotator");
+    if has_state(&legacy) {
+        return legacy;
+    }
+    app_data.to_path_buf()
+}
+
+#[cfg(test)]
+mod store_pick_tests {
+    use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+
+    fn tmp(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "codexbar-pick-{}-{}-{}", tag, std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+    fn with_state(d: &PathBuf) { fs::create_dir_all(d).unwrap(); fs::write(d.join("state.json"), "{}").unwrap(); }
+    fn proxy_plist(home: &PathBuf, store: &str, pretty: bool) {
+        let dir = home.join("Library/LaunchAgents"); fs::create_dir_all(&dir).unwrap();
+        let body = if pretty {
+            format!("<dict>\n  <key>CODEX_ROTATE_STORE</key>\n  <string>{}</string>\n</dict>", store)
+        } else {
+            format!("<dict><key>CODEX_ROTATE_STORE</key><string>{}</string></dict>", store)
+        };
+        fs::write(dir.join("com.doushutangmu.codex-rotate.proxy.plist"), body).unwrap();
+    }
+
+    #[test]
+    fn fresh_install_falls_back_to_app_data() {
+        let (home, app) = (tmp("h"), tmp("a"));
+        assert_eq!(pick_data_root(&home, &app), app);
+    }
+    #[test]
+    fn follows_the_store_the_installed_services_use() {
+        let (home, app, repo) = (tmp("h"), tmp("a"), tmp("r"));
+        with_state(&repo);
+        proxy_plist(&home, repo.to_str().unwrap(), false);
+        assert_eq!(pick_data_root(&home, &app), repo, "★★ 服务在读的目录有账号，app 却落到空目录 = 账号全丢");
+    }
+    #[test]
+    fn plist_reformatted_line_by_line_still_parses() {
+        let (home, app, repo) = (tmp("h"), tmp("a"), tmp("r"));
+        with_state(&repo);
+        proxy_plist(&home, repo.to_str().unwrap(), true);
+        assert_eq!(pick_data_root(&home, &app), repo);
+    }
+    #[test]
+    fn an_existing_app_data_store_wins() {
+        let (home, app, repo) = (tmp("h"), tmp("a"), tmp("r"));
+        with_state(&app); with_state(&repo);
+        proxy_plist(&home, repo.to_str().unwrap(), false);
+        assert_eq!(pick_data_root(&home, &app), app);
+    }
+    #[test]
+    fn an_empty_directory_is_not_in_use() {
+        let (home, app, empty) = (tmp("h"), tmp("a"), tmp("e"));
+        proxy_plist(&home, empty.to_str().unwrap(), false);
+        assert_eq!(pick_data_root(&home, &app), app, "★ 空目录存在 ≠ 在用");
+    }
+    #[test]
+    fn falls_back_to_the_conventional_repo_location() {
+        let (home, app) = (tmp("h"), tmp("a"));
+        let legacy = home.join("Projects/tools/codex-account-rotator");
+        with_state(&legacy);
+        assert_eq!(pick_data_root(&home, &app), legacy);
+    }
+}
+
 /// ★★ **所有子进程的唯一入口**。两件事只在这里做一次:
 ///
 /// ① **Windows 上不带 `CREATE_NO_WINDOW`,每次 spawn 都会闪一个控制台窗口。**
@@ -2194,14 +2303,18 @@ pub fn run() {
                         let _ = SCRIPT_ROOT.set(cand.to_string_lossy().to_string());
                     }
                 }
-                // ② 数据:env > 构建期烧进去的仓库路径 > app 数据目录
+                // ② 数据:env > 构建期烧进去的仓库路径 > 已在用的目录(见 pick_data_root) > app 数据目录
                 //    前两条保证「从仓库跑 deploy.sh」这条既有路径**行为完全不变** ——
                 //    已有的 state.json / auth/ 仍在仓库里，不会因为这次改动而"消失"。
                 let data = std::env::var("CODEXBAR_STORE").ok().filter(|v| !v.is_empty())
                     .or_else(|| option_env!("CODEXBAR_STORE_DEFAULT").map(|v| v.to_string())
                                  .filter(|v| !v.is_empty()))
-                    .or_else(|| app.path().app_data_dir().ok()
-                                 .map(|d| d.to_string_lossy().to_string()));
+                    .or_else(|| app.path().app_data_dir().ok().map(|d| {
+                        // ★ CI 构建的包（无烧录值）：优先接上**已经在用的**数据目录，别落到空目录。
+                        let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE"))
+                            .unwrap_or_default();
+                        pick_data_root(std::path::Path::new(&home), &d).to_string_lossy().to_string()
+                    }));
                 if let Some(d) = data {
                     let _ = fs::create_dir_all(&d);
                     let _ = DATA_ROOT.set(d);
