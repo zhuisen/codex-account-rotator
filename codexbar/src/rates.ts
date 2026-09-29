@@ -22,10 +22,15 @@ export interface Price {
 }
 
 export const RATES: Record<string, Price> = {
-  // ── Claude · platform.claude.com/docs/en/about-claude/pricing（2026-08-15 取）
+  // ── Claude · platform.claude.com/docs/en/about-claude/pricing（2026-09-29 取）
   //    缓存写取 **5m** 档(1.25×输入);1h 档是 2×,transcript 区分不出来,取常用的 5m。
+  //    ★ 缓存读**不再一律是输入价的 10%**：Fable 5.1 / Mythos 5.1 是 2.5%（$0.25），Opus 5.5 是 5%（$0.20）；
+  //      Fable 5 / Mythos 5 / 其余仍是 10%。别按「输入价 ÷ 10」心算。
+  "claude-fable-5-1":  { in: 10.0, cacheRead: 0.25, out: 50.0, cacheWrite: 12.5 },
+  "claude-mythos-5-1": { in: 10.0, cacheRead: 0.25, out: 50.0, cacheWrite: 12.5 },
   "claude-fable-5":    { in: 10.0, cacheRead: 1.0,  out: 50.0, cacheWrite: 12.5 },
   "claude-mythos-5":   { in: 10.0, cacheRead: 1.0,  out: 50.0, cacheWrite: 12.5 },
+  "claude-opus-5-5":   { in: 4.0,  cacheRead: 0.2,  out: 20.0, cacheWrite: 5.0 },
   "claude-opus-5":     { in: 5.0,  cacheRead: 0.5,  out: 25.0, cacheWrite: 6.25 },
   "claude-opus-4-8":   { in: 5.0,  cacheRead: 0.5,  out: 25.0, cacheWrite: 6.25 },
   "claude-opus-4-7":   { in: 5.0,  cacheRead: 0.5,  out: 25.0, cacheWrite: 6.25 },
@@ -33,14 +38,22 @@ export const RATES: Record<string, Price> = {
   "claude-opus-4-5":   { in: 5.0,  cacheRead: 0.5,  out: 25.0, cacheWrite: 6.25 },
   // ★ $2/$10 原是介绍价,官方已明确**转为标准价**,9/1 涨到 $3/$15 的计划取消(2026-08-15 核)。
   //   旧注释「介绍价至 2026-08-31，之后 $3/$15」作废 —— 删掉而不是留着,留着会让人按 $3 心算。
+  "claude-sonnet-5-5": { in: 2.0,  cacheRead: 0.2,  out: 10.0, cacheWrite: 2.5 },
   "claude-sonnet-5":   { in: 2.0,  cacheRead: 0.2,  out: 10.0, cacheWrite: 2.5 },
   "claude-sonnet-4-6": { in: 3.0,  cacheRead: 0.3,  out: 15.0, cacheWrite: 3.75 },
   "claude-haiku-4-5":  { in: 1.0,  cacheRead: 0.1,  out: 5.0,  cacheWrite: 1.25 },
 
-  // ── Codex / OpenAI · developers.openai.com/api/docs/pricing（2026-08-15 取,Standard 档）
+  // ── Codex / OpenAI · developers.openai.com/api/docs/pricing（2026-09-29 取,Standard 档）
+  //    ★ 全部按**短上下文**档。官方另有长上下文档（gpt-6-astra 输入 $20 / 输出 $75，即输入翻倍、
+  //      输出 1.5 倍），阈值页面没写明；我们按天分桶、看不到单次提示词长度，所以长会话会**低估**。
+  //    ★ `gpt-5.6-sol` 已从 $5/$30 降到 $4/$20（2026-09-29 核；此前表里是旧价）。费用一律按**当前**牌价重算，
+  //      所以历史日的等效成本会随之下移 —— 这是牌价变了，不是数据变了。
+  "gpt-6-astra":   { in: 10.0, cacheRead: 1.0,  out: 50.0 },
+  "gpt-6-sol":     { in: 2.0,  cacheRead: 0.2,  out: 10.0 },
+  "gpt-6-luna":    { in: 0.1,  cacheRead: 0.01, out: 0.5 },
   //    ★ 本机跑的就是 gpt-5.6-sol 与 gpt-5.5,此前它们**不在表里**、全走 $1.75/$14 的兜底,
   //      把 Codex 30 天费用低估成真价的 1/2.55（$1,020 vs $2,595,实测)。
-  "gpt-5.6-sol":   { in: 5.0,  cacheRead: 0.5,  out: 30.0 },
+  "gpt-5.6-sol":   { in: 4.0,  cacheRead: 0.4,  out: 20.0 },
   "gpt-5.6-terra": { in: 2.0,  cacheRead: 0.2,  out: 12.0 },
   "gpt-5.6-luna":  { in: 0.2,  cacheRead: 0.02, out: 1.2 },
   "gpt-5.6-cyber": { in: 12.5, cacheRead: 1.25, out: 75.0 },
@@ -48,17 +61,24 @@ export const RATES: Record<string, Price> = {
   "gpt-5.5-cyber": { in: 12.5, cacheRead: 1.25, out: 75.0 },
   "gpt-5.5-pro":   { in: 30.0, cacheRead: 3.0,  out: 180.0, est: true,
                      note: "官方未列缓存价,按输入 10% 估" },
+  "gpt-5.3-codex": { in: 1.75, cacheRead: 0.175, out: 14.0 },
 
   // ── Google Gemini（Antigravity/agy 跑的就是这些）· ai.google.dev/gemini-api/docs/pricing（2026-08-19 取）
   //    ★ 官方明确「thinking tokens 计入 output」——与我们实测的 `thinking ⊆ output` 一致，
   //      所以 output 直接用官方 out 价，**不要**再为 thinking 单列一档。
   //    ★ High/Medium/Low 是推理档位不是不同模型，**同价**。
+  //    （2026-09-29 复核：3.8 Flash 上线，与 3.7 同价同促销；3.1 Pro / 3.5 Flash 价不变。）
   //    ⚠️ 两个会让这张表悄悄过期的地方：
-  //      ① 3.7/3.6 Flash 现在是**促销价**，2026-12-31 到期后翻倍（0.75→1.50 / 3.75→7.50）。
+  //      ① 3.8/3.7/3.6 Flash 现在是**促销价**，2026-12-31 到期后翻倍（0.75→1.50 / 3.75→7.50）。
   //      ② 全部 Gemini 价按 **≤200k 提示词**档。超过 200k，3.1 Pro 的输入 2→4、输出 12→18。
   //         本机实测单次提示词约 17k，远未触线；长会话逼近 200k 时这里会低估一倍。
   "gemini-3.1-pro-high":     { in: 2.0,  cacheRead: 0.20,  out: 12.0 },
   "gemini-3.1-pro-low":      { in: 2.0,  cacheRead: 0.20,  out: 12.0 },
+  // 无档位后缀的裸名（`gemini-3.8-flash`）真实出现在 agy 落盘的记录里（2026-09-29 实测），必须单独收一条。
+  "gemini-3.8-flash":        { in: 0.75, cacheRead: 0.075, out: 3.75, note: "促销价,2026-12-31 后翻倍" },
+  "gemini-3.8-flash-high":   { in: 0.75, cacheRead: 0.075, out: 3.75, note: "促销价,2026-12-31 后翻倍" },
+  "gemini-3.8-flash-medium": { in: 0.75, cacheRead: 0.075, out: 3.75, note: "促销价,2026-12-31 后翻倍" },
+  "gemini-3.8-flash-low":    { in: 0.75, cacheRead: 0.075, out: 3.75, note: "促销价,2026-12-31 后翻倍" },
   "gemini-3.7-flash-high":   { in: 0.75, cacheRead: 0.075, out: 3.75, note: "促销价,2026-12-31 后翻倍" },
   "gemini-3.7-flash-medium": { in: 0.75, cacheRead: 0.075, out: 3.75, note: "促销价,2026-12-31 后翻倍" },
   "gemini-3.7-flash-low":    { in: 0.75, cacheRead: 0.075, out: 3.75, note: "促销价,2026-12-31 后翻倍" },
@@ -77,11 +97,17 @@ export const RATES: Record<string, Price> = {
   "gpt-oss-120b-medium":      { in: 0.1, cacheRead: 0.01, out: 0.5, est: true,
                                 note: "开源权重,无官方托管牌价;按同级开源模型粗估" },
 
-  // ── Grok / xAI · docs.x.ai/docs/models（2026-08-15 取,<200k 档）
+  // ── Grok / xAI · docs.x.ai/docs/models（2026-09-29 取,<200k 档）
+  //    ★ ≥200k 提示词整单进高档（输入/输出/缓存读全部 2×），我们看不到单次提示词长度 ⇒ 长会话会低估。
+  //    ★ 2026-09-29：`grok models` 的默认已是 **grok-4.7**（$2/$0.5/$6，与 4.6 同价），本机落盘的是 `grok-4.7-build`。
   //    ⚠️ 官方只列 Grok 4.5 / 4.6 / Build 0.1,**没有 `-build` 后缀的条目**。本机跑的
   //      `grok-4.5-build` / `grok-4.6-build` 究竟是「Grok 4.x 走 Build 界面」还是独立的
   //      「Grok Build」产品,文档区分不出来 —— 按同版本号的 Grok 4.x 计并标 est。
   //      两种解释在输入价上差 2 倍($2 vs $1),别当准数用。
+  "grok-4.7":       { in: 2.0, cacheRead: 0.5, out: 6.0 },
+  "grok-4.7-build": { in: 2.0, cacheRead: 0.5, out: 6.0, est: true, note: "按 Grok 4.7 计,见上" },
+  "grok-4.7-build-fast": { in: 2.0, cacheRead: 0.5, out: 6.0, est: true,
+                           note: "官方无 fast 变体牌价;按 Grok 4.7 计,见上" },
   "grok-4.6":       { in: 2.0, cacheRead: 0.5, out: 6.0 },
   "grok-4.5":       { in: 2.0, cacheRead: 0.3, out: 6.0 },
   "grok-4.6-build": { in: 2.0, cacheRead: 0.5, out: 6.0, est: true, note: "按 Grok 4.6 计,见上" },
@@ -116,7 +142,7 @@ export const RATES: Record<string, Price> = {
 /** 本机在跑但费率表里没有的型号，按同平台最接近的档位估算，**一律标 est**。 */
 const FALLBACK: Record<string, Price> = {
   claude:   { in: 5.0,   cacheRead: 0.5,    out: 25.0, cacheWrite: 6.25, est: true },
-  codex:    { in: 5.0,   cacheRead: 0.5,    out: 30.0, est: true, note: "按 gpt-5.6-sol 档" },
+  codex:    { in: 4.0,   cacheRead: 0.4,    out: 20.0, est: true, note: "按 gpt-5.6-sol 档" },
   grok:     { in: 2.0,   cacheRead: 0.3,    out: 6.0,  est: true },
   kimi:     { in: 3.0,   cacheRead: 0.3,    out: 15.0, est: true, note: "按 kimi-k3 档" },
   // ★ 这两个此前**没有兜底**,未登记的型号会拿到 {0,0,0} ⇒ 费用列显示 $0.000 ——
@@ -133,7 +159,7 @@ const FALLBACK: Record<string, Price> = {
   //   我最初按「3.1 Pro 是 omc 的内置默认、且最贵，取上界」来兜底,那会让费用**高估 2.7 倍**;
   //   「取上界」在这里是错的直觉:兜底要贴近**真实默认**,而不是贴近最坏情况。
   //   wrapper 现在已能从日志回填真实模型,这个兜底只在日志被轮转/读不到时才生效。
-  agy:      { in: 0.75,  cacheRead: 0.075,  out: 3.75, est: true, note: "按 Gemini 3.7 Flash（本机默认）" },
+  agy:      { in: 0.75,  cacheRead: 0.075,  out: 3.75, est: true, note: "按 Gemini 3.8 Flash（本机默认）" },
 };
 
 export function priceOf(model: string, platform: string): Price {

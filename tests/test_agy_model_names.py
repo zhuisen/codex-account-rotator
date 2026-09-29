@@ -17,6 +17,9 @@ import scan  # noqa: E402
 
 # (官方 id, 显示名) —— omc 传的是右边那个，agy 日志里打的也是右边那个
 AGY_MODELS = [
+    ("gemini-3.8-flash-high",    "Gemini 3.8 Flash (High)"),
+    ("gemini-3.8-flash-medium",  "Gemini 3.8 Flash (Medium)"),
+    ("gemini-3.8-flash-low",     "Gemini 3.8 Flash (Low)"),
     ("gemini-3.7-flash-high",    "Gemini 3.7 Flash (High)"),
     ("gemini-3.7-flash-medium",  "Gemini 3.7 Flash (Medium)"),
     ("gemini-3.7-flash-low",     "Gemini 3.7 Flash (Low)"),
