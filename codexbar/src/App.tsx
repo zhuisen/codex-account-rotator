@@ -898,9 +898,10 @@ export default function App() {
         const ca = accounts.find((x) => x.aid === creditConfirm);
         return ca ? (
           <UseCreditDialog a={ca} t={t} onCancel={() => setCreditConfirm(null)}
-            onConfirm={() => {
+            onConfirm={(cardId) => {
               setCreditConfirm(null);
-              void run(`usecredit-${ca.aid}`, ["use-credit", ca.node], `用重置卡 ${ca.node}`, { resultToast: true });
+              // ★ 传**弹窗里选中的那张的 id**：用户看到的就是将被用掉的，CLI 不再自己重算「最近」。
+              void run(`usecredit-${ca.aid}`, ["use-credit", ca.node, "--card", cardId], `用重置卡 ${ca.node}`, { resultToast: true });
             }} />
         ) : null;
       })()}

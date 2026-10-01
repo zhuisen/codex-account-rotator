@@ -2738,19 +2738,24 @@ def _api_post(tok, path, body, timeout=25):
         conn.close()
 
 
-def _pick_soonest_credit(credits, now=None):
-    """最近到期的那张**可用且有到期日**的卡。没有到期日 / 已过期 / 非 available / 没有 id 的一律不选。"""
+def _usable_credits(credits, now=None):
+    """可用、有 id、有到期日、没过期的卡（原样返回）。选卡的唯一过滤口径。"""
     now = time.time() if now is None else now
-    best, best_ts = None, None
+    out = []
     for c in credits or []:
         if c.get("status") != "available" or not c.get("id"):
             continue
         ts = _iso_ts(c.get("expires_at"))
         if ts is None or ts <= now:
             continue
-        if best_ts is None or ts < best_ts:
-            best, best_ts = c, ts
-    return best
+        out.append(c)
+    return out
+
+
+def _pick_soonest_credit(credits, now=None):
+    """最近到期的那张**可用且有到期日**的卡。没有到期日 / 已过期 / 非 available / 没有 id 的一律不选。"""
+    ok = _usable_credits(credits, now)
+    return min(ok, key=lambda c: _iso_ts(c.get("expires_at"))) if ok else None
 
 
 def _consume_outcome(status, raw):
@@ -2772,11 +2777,19 @@ def _consume_outcome(status, raw):
 
 
 def cmd_use_credit(args):
-    """用掉一个号**最近到期**的那张重置卡。`codex-rotate use-credit <label> [--json]`。退出码 0 ⟺ 服务端确认重置了窗口。"""
+    """用掉一个号的一张重置卡：默认**最近到期**的那张，`--card <id>` 指定某一张（弹窗里让人挑的）。
+    `codex-rotate use-credit <label> [--card <id>] [--json]`。退出码 0 ⟺ 服务端确认重置了窗口。"""
     as_json = "--json" in args
+    want = None
+    if "--card" in args:
+        k = args.index("--card")
+        if k + 1 >= len(args) or args[k + 1].startswith("--"):
+            sys.exit("--card 后面要跟卡片 id")
+        want = args[k + 1]
+        args = args[:k] + args[k + 2:]
     keys = [a for a in args if not a.startswith("--")]
     if len(keys) != 1:
-        sys.exit("usage: codex-rotate use-credit <label> [--json]")
+        sys.exit("usage: codex-rotate use-credit <label> [--card <id>] [--json]")
     s = _state()
     aid = _resolve_slot(s, keys[0])
     if aid is None:
@@ -2805,7 +2818,14 @@ def cmd_use_credit(args):
         if time.time() - (cached.get("fetched_at") or 0) > CREDIT_DETAIL_TTL:
             fail(f"取不到卡片明细（{msg}），没有使用")
         credits, stale = cached.get("credits") or [], True
-    card = _pick_soonest_credit(credits)
+    if want is not None:
+        # ★ 指定的那张必须**现在**还在新取的明细里、仍可用、没过期 —— 弹窗里列的是缓存（至多 12h），
+        #   这期间它可能已被别处用掉 / 过期；不在就**不发**，绝不退回去用另一张（用户挑的是这一张）。
+        card = next((c for c in _usable_credits(credits) if c.get("id") == want), None)
+        if card is None:
+            fail("你选的那张卡已经不可用了（可能刚被用掉或已过期），没有使用；重新打开看最新的")
+    else:
+        card = _pick_soonest_credit(credits)
     if card is None:
         fail("没有带到期日的可用卡，没有使用")
     # ③ 幂等键：先落盘再发

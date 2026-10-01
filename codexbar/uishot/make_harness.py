@@ -118,6 +118,7 @@ STUB = """
 
   var SNAPSHOT = __SNAPSHOT__;
   var STATE = __STATE__;
+  window.__HSTATE = STATE;   // ★ 让测试能就地改夹具（如打乱明细顺序）再触发刷新
 
   // ★ 菜单栏宽 412,而 **Chrome 最小窗宽是 500** —— 直接传 --window-size=412 会按 500 布局、
   //   按 412 裁图,伪装成"横向溢出"(CLAUDE.md §4 记过这个坑)。所以窗口开 500,用 CSS 把

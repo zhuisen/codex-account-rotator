@@ -122,6 +122,10 @@ export interface Account {
   cardDays?: number;
   /** Expiry date of that soonest credit, YYYY-MM-DD. */
   cardExp?: string;
+  /** 每一张**可用且有到期日**的卡，按到期先后（最近的在前）。用卡弹窗列的就是它。
+   *  ★ 只有拿到明细（`credits_detail`）才有；`cards > cardList.length` 说明有几张还没取到到期日，
+   *  弹窗要把这几张**如实说成「到期未知」**，不画成可选的行（CLI 选卡要求有到期日）。 */
+  cardList: { id: string; expiresAt: string; days: number }[];
   /** 其中**现在就能用**的张数（服务端的 `applicable_available_count`）。「有卡」≠「现在能用」：
    *  没有可重置的窗口时用卡等于白花，所以「使用重置卡」按钮只在它 > 0 时可点。未知按 0 算（不鼓励在没把握时花）。 */
   cardsUsable: number;
@@ -587,12 +591,14 @@ export function slotToAccount(aid: string, slot: Slot, tokens: Record<string, To
   let cardDays: number | undefined;
   let cardExp: string | undefined;
   let cardsExpiring = 0;
+  const cardList: { id: string; expiresAt: string; days: number }[] = [];
   for (const c of slot.credits_detail?.credits ?? []) {
     if (c.status !== "available" || !c.expires_at) continue;
     const ts = Date.parse(c.expires_at) / 1000;
     if (!Number.isFinite(ts) || ts <= n) continue;
     const days = (ts - n) / 86400;
     if (days <= CARD_WARN_DAYS) cardsExpiring++;
+    if (c.id) cardList.push({ id: c.id, expiresAt: c.expires_at, days });
     if (cardDays == null || days < cardDays) { cardDays = days; cardExp = c.expires_at.slice(0, 10); }
   }
 
@@ -629,7 +635,7 @@ export function slotToAccount(aid: string, slot: Slot, tokens: Record<string, To
     //   0 会被读成「刚刚读到的」，正好把最坏的情况显示成最好的。
     quotaAgeSec: qAge,
     quotaStale: qAge != null && qAge > QUOTA_STALE_SEC,
-    cards, cardDays, cardExp, cardsUsable: slot.credits?.applicable ?? 0,
+    cards, cardDays, cardExp, cardList: cardList.sort((x, y) => x.days - y.days), cardsUsable: slot.credits?.applicable ?? 0,
     // The two numbers come from different fetches at different times: the count is refreshed on every
     // usage probe, the detail only when `credits` runs. So the cached detail can legitimately still
     // list a card the server has already dropped, which would render "×1 · 2张…". Clamp — never claim
