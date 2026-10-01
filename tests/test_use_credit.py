@@ -5,8 +5,7 @@
 | 不变量 | 为什么 |
 |---|---|
 | 选**最近到期**、且**有到期日**的那张 | 用户要求；没有到期日的卡「不知道多久过期」≠「最近过期」，不能当最近 |
-| 现在没有可重置窗口（`applicable == 0`）⇒ **不发请求** | 服务端对「有卡没窗口」会怎么处理**没有任何观测**，不拿真卡去试 |
-| 读数太旧 ⇒ 不发 | 同上：`applicable` 是 5 分钟内的读数才算数 |
+| ~~没有可重置窗口 ⇒ 不发~~ **2026-10-01 撤销** | 用户实测额度没见底也能用卡并要求放开；服务端是最终裁判，成败只认 `windows_reset`，前后张数核对 |
 | 成功**只认** `windows_reset > 0` | 200 + `windows_reset: 0`（实测 `no_credit`）是「没生效」，不能报成「已使用」 |
 | 请求号（`redeem_request_id`）先落盘；没确认成功就复用 | 网络在发出去之后断了，重试若换新号就可能再用掉第二张 |
 | 请求结果未知 ⇒ 既不报成功也不清掉请求号 | 「这一枪没打中」与「确实没生效」不能是同一个值 |
@@ -134,16 +133,23 @@ class Flow(unittest.TestCase):
         sl = self.state["slots"][self.aid]
         self.assertNotIn("credit_redeem", sl, "成功后请求号应清掉")
 
-    def test_refuses_without_an_applicable_window_and_sends_nothing(self):
+    def test_it_still_sends_when_the_quota_is_not_exhausted(self):
+        """用户 2026-10-01 拍板：额度没见底（`applicable == 0`）也要能用卡。反向对照：旧闸会在这里拒绝。"""
         self.state["slots"][self.aid]["credits"]["applicable"] = 0
-        self.assertEqual(self.run_cmd("--json"), 1)
-        self.assertEqual(self.posts, [], "★★★ 没有可重置窗口也发了请求 —— 会拿真卡去试")
+        self.assertEqual(self.run_cmd("--json"), 0)
+        self.assertEqual(len(self.posts), 1, "★★ 没有可重置窗口就被客户端拦下了 —— 用户明确要求放开")
 
-    def test_refuses_on_a_stale_reading_and_sends_nothing(self):
+    def test_a_stale_or_unreadable_reading_does_not_block_either(self):
         self.state["slots"][self.aid]["credits"]["at"] = NOW - 3600
         CR._probe_quota = lambda *a: (None, "HTTP 403")     # 刷不新
+        self.assertEqual(self.run_cmd("--json"), 0)
+        self.assertEqual(len(self.posts), 1)
+
+    def test_without_an_applicable_window_the_outcome_is_still_judged_by_the_server(self):
+        """放开闸之后，成败判据更要硬：服务端说没重置任何窗口 ⇒ 失败，不能因为「是我们发的」就报成功。"""
+        self.state["slots"][self.aid]["credits"]["applicable"] = 0
+        self.post_result = (200, json.dumps({"code": "not_applicable", "credit": None, "windows_reset": 0}).encode())
         self.assertEqual(self.run_cmd("--json"), 1)
-        self.assertEqual(self.posts, [], "★★★ 读数过期了还发请求")
 
     def test_refuses_dead_expired_or_mismatched_accounts(self):
         self.state["slots"][self.aid]["auth_dead"] = True
@@ -201,14 +207,21 @@ class Wiring(unittest.TestCase):
         i = rs.index("const ALLOWED_CMDS")
         self.assertIn('"use-credit"', rs[i:rs.index("];", i)], "★★ 白名单没放行 —— 按钮点了只会报 disallowed command")
 
-    def test_the_button_is_gated_on_a_usable_window(self):
+    def test_the_button_only_needs_an_expiry_date_not_a_usable_window(self):
         code = re.sub(r"\{/\*[\s\S]*?\*/\}", "", (SRC / "components" / "AccountCard.tsx").read_text(encoding="utf-8"))
         i = code.index("onUseCredit && a.cards > 0")
         seg = code[i:i + 1400]
-        # ★ 判据要打在**三元的条件本身**上：`a.cardsUsable > 0` 这几个字在「不可点」分支的 title 里也出现，
-        #   只查子串，删掉条件里的那半也照样绿（变异实测抓到的空守卫）。
-        self.assertIn("a.cardsUsable > 0 && a.cardExp ?", seg,
-                      "★★★ 按钮没按「现在有可重置窗口 且 有到期日」收口 —— 会鼓励白花一张卡 / 画一个必被拒的按钮")
+        # ★ 判据要打在**三元的条件本身**上（子串会在别的分支的 title 里也出现 —— 变异实测抓到过一次空守卫）。
+        #   2026-10-01 用户拍板放开「额度见底才能用」：条件只剩「有到期日」。
+        self.assertIn("a.cardExp ?", seg, "★★ 没按「有到期日」收口 —— CLI 要求有到期日，否则画出一个必被拒的按钮")
+        self.assertNotIn("a.cardsUsable > 0 &&", seg, "★★ 又把「现在有可重置窗口」加回来了 —— 用户明确要求放开")
+
+    def test_the_footer_badge_is_clickable_and_two_step(self):
+        card = (SRC / "components" / "AccountCard.tsx").read_text(encoding="utf-8")
+        self.assertIn("onUse=", card, "★★ 角标没接 onUse")
+        badge = re.sub(r"\{/\*[\s\S]*?\*/\}", "", (SRC / "components" / "CardBadge.tsx").read_text(encoding="utf-8"))
+        self.assertIn("stopPropagation", badge, "★★ 点角标会同时触发卡片选中")
+        self.assertIn("armed", badge, "★★★ 角标一点就直接用卡 —— 不可逆动作必须两段确认")
 
 
 def _render():
@@ -246,9 +259,49 @@ class RendersInTheActionBar(unittest.TestCase):
         self.assertTrue(r, "★★ 一张卡的动作条都没渲染出来 —— 闸此刻没有判别力")
         enabled = [o for o in r if re.search(r"用卡 \d\d-\d\d", o["text"])]
         disabled = [o for o in r if o["disabled"]]
-        self.assertTrue(enabled, "★★ 夹具里 wing 有可用窗口，却没有「用卡 MM-DD」按钮")
-        self.assertTrue(disabled, "★★ 没有可重置窗口的号没有被标成不可点")
+        self.assertGreaterEqual(len(enabled), 2, "★★ 有卡有到期日的号都该有「用卡 MM-DD」（含 applicable=0 的号，用户 2026-10-01 要求放开）")
+        self.assertEqual(disabled, [], "★★ 夹具里每个有卡的号都有到期日，不该有被置灰的")
         self.assertFalse([o for o in enabled if o["overflow"]], "★ 按钮把动作条撑出了横向溢出")
+
+
+def _badge_probe():
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return None
+    import urllib.request
+    try:
+        urllib.request.urlopen(BASE, timeout=2).read(1)
+    except Exception:
+        return None
+    with sync_playwright() as p:
+        br = p.chromium.launch(executable_path=CHROME, headless=True)
+        pg = br.new_page(viewport={"width": 1300, "height": 900})
+        pg.goto(BASE, timeout=30000); pg.wait_for_timeout(3000)
+        h0 = pg.evaluate("[...document.querySelectorAll('[data-aid]')].map(c=>Math.round(c.getBoundingClientRect().height))")
+        n = pg.locator("[data-card-badge-use]").count()
+        b = pg.locator("[data-card-badge-use]").first
+        before = b.inner_text()
+        b.click(); pg.wait_for_timeout(300)
+        out = {"n": n, "before": before, "armed": b.inner_text(),
+               "bars": pg.evaluate("document.querySelectorAll('[data-actions]').length"),
+               "h_same": h0 == pg.evaluate("[...document.querySelectorAll('[data-aid]')].map(c=>Math.round(c.getBoundingClientRect().height))")}
+        pg.wait_for_timeout(5400)
+        out["after"] = b.inner_text()
+        br.close()
+    return out
+
+
+class TheFooterBadgeIsATwoStepButton(unittest.TestCase):
+    def test_first_click_only_arms_it_and_it_disarms(self):
+        r = _badge_probe()
+        if r is None:
+            self.skipTest("没有 playwright 或 harness 静态服务（3304）没在跑")
+        self.assertGreaterEqual(r["n"], 2, "★★ 页脚角标没有可点的 —— 闸此刻没有判别力")
+        self.assertRegex(r["armed"], r"确认用 \d\d-\d\d\?", "★★★ 第一次点没有「上膛」—— 不可逆动作一点就花")
+        self.assertEqual(r["bars"], 0, "★★ 点角标同时选中了卡片（没 stopPropagation）")
+        self.assertTrue(r["h_same"], "★ 上膛后卡片高度变了 —— 页脚必须恒为一行")
+        self.assertEqual(r["after"], r["before"], "★ 5 秒没二次点击应自动退回")
 
 
 if __name__ == "__main__":

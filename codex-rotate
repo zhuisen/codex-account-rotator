@@ -2636,6 +2636,9 @@ def cmd_credits(args):
     数量走免费层(每次额度探测都带回来,零额外请求);到期时间只有明细端点有,而它限流很凶,所以只在
     「免费计数 > 0 且缓存过期/计数变了」时才打,并在账号之间限速。--force 绕过缓存。
 
+    ★ 2026-10-01 用户实测:额度没见底也能用卡(`use-credit` 因此不再拿 applicable 当闸)。下面那段是此前的推断,
+    保留作历史;现在 n=1 的用户观测倾向于「不要求见底」,仍不足以断言规律。
+
     ★ applicable_available_count 的门槛尚未确定:目前 2 次观测(周用量 0% 和 74%)都是 0,说明"有卡"
     不等于"现在能用"。同样能解释这组数据的至少有「必须 limit_reached」和「必须超过某个高水位」两种,
     现有证据无法区分。判别实验是免费的:盯着高用量那个号的 applicable 在 used_percent 爬升时何时翻正
@@ -2706,14 +2709,15 @@ def cmd_credits(args):
 # `200 {"code":"no_credit","credit":null,"windows_reset":0}` —— 说明 credit_id 被服务端认了（该号有 3 张真卡，
 # 若忽略 credit_id 就不会报 no_credit），且不存在的卡不会花掉任何东西。
 # ⚠️ **这是全 app 唯一不可逆的花费动作**：一张卡用掉就没了。所以：
-#   · 只在「现在确实有可重置的窗口」（applicable > 0，且读数 ≤ 5 分钟）时才发 —— 服务端对「有卡但没窗口」
-#     会怎么处理没有任何观测，不拿真卡去试；
+#   · ★ **2026-10-01 用户实测：额度没见底也能用卡，要求放开** —— 原先这里有一道「applicable > 0 才发」的闸
+#     （当时没有任何观测说明服务端对「有卡但没窗口」会怎么处理，不拿真卡去试），已按用户拍板撤掉；
+#     服务端仍是最终裁判，**成败只看它回的 `windows_reset`**，并用前后张数核对。
+#     ⚠️ 副作用：服务端若对「没有可重置窗口」也扣卡而不重置，会白花一张 —— 张数前后对比就是这条的证据；
 #   · 选**最近到期**的那张（用户要求）；没有到期日的卡不选 —— 不知道多久到期 ≠ 最近到期；
 #   · `redeem_request_id` 先落盘再发请求：网络在「发出去之后」断了，重试复用同一个 id（服务端幂等），
 #     而不是再发一个新 id 把第二张也用掉；
 #   · **成败只认服务端的 `windows_reset > 0`**，并用随后一次免费 `/usage` 读数核对张数；其余一律如实说「没有生效」。
 CREDIT_CONSUME_PATH = "/backend-api/codex/rate-limit-reset-credits/consume"
-CREDIT_APPLICABLE_MAX_AGE = 300      # 「现在有可重置窗口」这条读数最多多旧
 CREDIT_REDEEM_REUSE_SECS = 900       # 同一张卡的 redeem_request_id 复用窗口
 
 
@@ -2788,15 +2792,11 @@ def cmd_use_credit(args):
 
     if slot.get("auth_dead"):
         fail(f"{label} 登录已失效，先重登")
-    # ① 现在有没有可重置的窗口 —— 免费读，刷新 `slot["credits"]`
+    # ① 免费读一次，只为拿「用之前有几张」做前后核对（不再拿它当闸，见上）
     _probe_quota(aid, slot, is_active)
     cr = (_state()["slots"].get(aid) or {}).get("credits") or {}
-    age = time.time() - (cr.get("at") or 0)
-    if age > CREDIT_APPLICABLE_MAX_AGE:
-        fail("读不到最新的重置卡状态（额度接口暂时不通），没有使用")
-    if not (cr.get("applicable") or 0) > 0:
-        fail(f"{label} 现在没有可重置的窗口，没有使用")
     before = cr.get("available")
+    applicable_before = cr.get("applicable")
     # ② 最近到期的那张
     credits, msg = _fetch_credit_detail(aid, slot, is_active)
     stale = False
@@ -2846,6 +2846,7 @@ def cmd_use_credit(args):
         _mutate_state(_done)
     res = {"ok": kind == "reset", "label": label, "kind": kind, "code": code, "windows_reset": windows,
            "credit_id": card["id"], "expires_at": card.get("expires_at"), "available_before": before,
+           "applicable_before": applicable_before,
            "available_after": after, "http_status": st, "detail_stale": stale}
     if as_json:
         print(json.dumps(res, ensure_ascii=False))

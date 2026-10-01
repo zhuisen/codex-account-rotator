@@ -327,7 +327,7 @@ export default function AccountCard({ a, isCurrent, isBest, isSelected, shortcut
             <span title={a.expStale ? "OpenAI 上次复核订阅早于这个日期,所以「已过期」是拿陈旧快照下的结论 —— 续费不在它视野里。刷新 token 也拉不到新状态,要等 OpenAI 自己复核。" : undefined}
                   style={{ fontSize: Z.exp, color: t.muted, fontFamily: "'JetBrains Mono'",
                            whiteSpace: "nowrap", flexShrink: 0 }}>到期 {a.exp}{a.expStale && <span style={{ color: "#E0901C" }}>*</span>}</span>
-            <span style={{ minWidth: 0, overflow: "hidden", display: "flex", justifyContent: "flex-end" }}><CardBadge a={a} t={t} /></span>
+            <span style={{ minWidth: 0, overflow: "hidden", display: "flex", justifyContent: "flex-end" }}><CardBadge a={a} t={t} onUse={onUseCredit && !isDead && a.cardExp ? () => onUseCredit(a.node) : undefined} using={!!usingCredit} /></span>
           </div>
         </div>
       </div>
@@ -372,21 +372,22 @@ export default function AccountCard({ a, isCurrent, isBest, isSelected, shortcut
               loading={probing} onConfirm={() => onProbe(a.node)} loadingText="探测…" />
           )}
           {/* ★★ 使用重置卡 —— 全 app **唯一不可逆**的花费：一张卡用掉就没了。
-              · 按钮上直接写**将要用掉哪一天到期的那张**（`cardExp` = 最近到期，与 CLI 的选卡规则同一条），
-                不是点下去才知道；
+              · 按钮上直接写**将要用掉哪一天到期的那张**（`cardExp` = 最近到期，与 CLI 的选卡规则同一条）；
               · 复用 `ProbeButton` 的琥珀 + 两段确认（单击亮「确认?」，5s 退回）；
-              · **现在没有可重置的窗口时不可点**（`cardsUsable`=服务端 applicable），并把原因写在 title 里：
-                那时用卡等于白花，CLI 也会拒绝 —— 前后两道，不靠一边。
-              · 没有到期日（`cardExp` 未取到）也不给点：CLI 选卡要求有到期日，界面不画一个必然被拒的按钮。 */}
+              · ★ **2026-10-01 用户拍板放开「额度见底才能用」**（他实测额度没见底也能用）：不再按
+                `cardsUsable`（服务端 applicable）置灰，服务端是最终裁判、结果原话进 toast。
+                `cardsUsable` 只进悬浮说明，让人知道服务端此刻怎么看；
+              · 没有到期日（`cardExp` 未取到）才不给点：CLI 选卡要求有到期日，不画一个必被拒的按钮。
+              · 页脚的「重置卡 ×N」角标同样可点（同一个 `onUseCredit`、同样两段确认）。 */}
           {!isDead && onUseCredit && a.cards > 0 && (
-            a.cardsUsable > 0 && a.cardExp ? (
+            a.cardExp ? (
               <ProbeButton t={t} variant="inline" label={`用卡 ${a.cardExp.slice(5)}`}
-                hint={`用掉 ${a.node} 最近到期（${a.cardExp}）的那张重置卡，重置当前窗口。⚠️ 不可逆：用掉就没了`}
+                hint={`用掉 ${a.node} 最近到期（${a.cardExp}）的那张重置卡，重置窗口。⚠️ 不可逆：用掉就没了`
+                  + (a.cardsUsable > 0 ? "" : "\n服务端此刻报告「没有需要重置的窗口」；额度没见底也能用（实测），结果以弹出提示为准")}
                 loading={!!usingCredit} onConfirm={() => onUseCredit(a.node)} loadingText="使用中…" />
             ) : (
               <span data-use-credit-disabled
-                    title={a.cardsUsable > 0 ? "最近到期的那张还没取到到期日，先点「刷新全池」"
-                                             : `${a.node} 现在没有可重置的窗口 —— 现在用卡是白花，等额度见底或窗口用起来再说`}
+                    title="最近到期的那张还没取到到期日，先点「刷新全池」"
                     style={{ fontSize: 11, padding: "5px 10px", borderRadius: 6, whiteSpace: "nowrap", cursor: "not-allowed",
                              color: t.muted, border: `1px solid ${t.ghostBorder}`, opacity: .6 }}>用卡</span>
             )

@@ -93,8 +93,12 @@ mod store_pick_tests {
     use std::path::PathBuf;
 
     fn tmp(tag: &str) -> PathBuf {
+        // ★ 计数器不能省：测试并行跑，而 macOS 的时钟只有微秒级 —— 只用时间戳时两个测试会拿到
+        //   同一个目录互相覆盖（实测偶发红：plist 被另一条测试改写）。
+        static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let d = std::env::temp_dir().join(format!(
-            "codexbar-pick-{}-{}-{}", tag, std::process::id(),
+            "codexbar-pick-{}-{}-{}-{}", tag, std::process::id(),
+            N.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
             std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
         fs::create_dir_all(&d).unwrap();
         d
