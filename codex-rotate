@@ -36,6 +36,7 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+import uuid
 from pathlib import Path
 
 CODEX_HOME = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
@@ -2696,6 +2697,169 @@ def cmd_credits(args):
             print(f"      (到期时间未取到: {r['msg']})")
 
 
+# ── 使用重置卡 ───────────────────────────────────────────────────────────────────────────────
+# 端点来自 codex 二进制自带的字符串（`strings` 找到 `/api/codex/rate-limit-reset-credits/consume`，
+# 与读取明细同族，故走 `/backend-api/codex/…`）。请求体 **2026-10-01 实测**（不是猜的）：
+#   POST {"credit_id": "<RateLimitResetCredit_…>", "redeem_request_id": "<uuid>"}
+#   → 200 {"code": "...", "credit": {...}|null, "windows_reset": N}
+# 判别实验（零花费）：对一个**当时没有可重置窗口**的号发一个**不存在的** credit_id，得到
+# `200 {"code":"no_credit","credit":null,"windows_reset":0}` —— 说明 credit_id 被服务端认了（该号有 3 张真卡，
+# 若忽略 credit_id 就不会报 no_credit），且不存在的卡不会花掉任何东西。
+# ⚠️ **这是全 app 唯一不可逆的花费动作**：一张卡用掉就没了。所以：
+#   · 只在「现在确实有可重置的窗口」（applicable > 0，且读数 ≤ 5 分钟）时才发 —— 服务端对「有卡但没窗口」
+#     会怎么处理没有任何观测，不拿真卡去试；
+#   · 选**最近到期**的那张（用户要求）；没有到期日的卡不选 —— 不知道多久到期 ≠ 最近到期；
+#   · `redeem_request_id` 先落盘再发请求：网络在「发出去之后」断了，重试复用同一个 id（服务端幂等），
+#     而不是再发一个新 id 把第二张也用掉；
+#   · **成败只认服务端的 `windows_reset > 0`**，并用随后一次免费 `/usage` 读数核对张数；其余一律如实说「没有生效」。
+CREDIT_CONSUME_PATH = "/backend-api/codex/rate-limit-reset-credits/consume"
+CREDIT_APPLICABLE_MAX_AGE = 300      # 「现在有可重置窗口」这条读数最多多旧
+CREDIT_REDEEM_REUSE_SECS = 900       # 同一张卡的 redeem_request_id 复用窗口
+
+
+def _api_post(tok, path, body, timeout=25):
+    """POST JSON to an authenticated Codex backend path. -> (status|None, body bytes)."""
+    conn = http.client.HTTPSConnection("chatgpt.com", 443, context=ssl.create_default_context(), timeout=timeout)
+    try:
+        conn.request("POST", path, body=json.dumps(body), headers={
+            "Authorization": f"Bearer {tok.get('access_token', '')}",
+            "chatgpt-account-id": tok.get("account_id"),
+            "originator": "codex_cli_rs", "User-Agent": "codex_cli_rs/0.146.0",
+            "Accept": "application/json", "Content-Type": "application/json"})
+        r = conn.getresponse()
+        return r.status, r.read()
+    except Exception as e:
+        return None, str(e).encode()
+    finally:
+        conn.close()
+
+
+def _pick_soonest_credit(credits, now=None):
+    """最近到期的那张**可用且有到期日**的卡。没有到期日 / 已过期 / 非 available / 没有 id 的一律不选。"""
+    now = time.time() if now is None else now
+    best, best_ts = None, None
+    for c in credits or []:
+        if c.get("status") != "available" or not c.get("id"):
+            continue
+        ts = _iso_ts(c.get("expires_at"))
+        if ts is None or ts <= now:
+            continue
+        if best_ts is None or ts < best_ts:
+            best, best_ts = c, ts
+    return best
+
+
+def _consume_outcome(status, raw):
+    """把服务端回应归类。→ (kind, code, windows_reset)。kind: reset | no_effect | http_error | unknown。
+    ★ 只有 `windows_reset > 0` 才算成功；200 但没重置任何窗口是 `no_effect`，绝不报成「已使用」。"""
+    if status is None:
+        return "unknown", None, 0        # 请求发没发到服务端不可知 ⇒ 不是失败也不是成功
+    if status != 200:
+        return "http_error", None, 0
+    try:
+        d = json.loads(raw)
+    except ValueError:
+        return "unknown", None, 0
+    wr = d.get("windows_reset")
+    wr = wr if isinstance(wr, int) and not isinstance(wr, bool) else 0
+    if wr > 0:
+        return "reset", d.get("code"), wr
+    return "no_effect", d.get("code"), 0
+
+
+def cmd_use_credit(args):
+    """用掉一个号**最近到期**的那张重置卡。`codex-rotate use-credit <label> [--json]`。退出码 0 ⟺ 服务端确认重置了窗口。"""
+    as_json = "--json" in args
+    keys = [a for a in args if not a.startswith("--")]
+    if len(keys) != 1:
+        sys.exit("usage: codex-rotate use-credit <label> [--json]")
+    s = _state()
+    aid = _resolve_slot(s, keys[0])
+    if aid is None:
+        sys.exit(f"没有这个号: {keys[0]}")
+    slot = s["slots"][aid]
+    label = slot.get("label", _mask(aid))
+    is_active = aid == s.get("active")
+
+    def fail(msg, **extra):
+        if as_json:
+            print(json.dumps({"ok": False, "label": label, "error": msg, **extra}, ensure_ascii=False))
+        sys.exit(msg if not as_json else 1)
+
+    if slot.get("auth_dead"):
+        fail(f"{label} 登录已失效，先重登")
+    # ① 现在有没有可重置的窗口 —— 免费读，刷新 `slot["credits"]`
+    _probe_quota(aid, slot, is_active)
+    cr = (_state()["slots"].get(aid) or {}).get("credits") or {}
+    age = time.time() - (cr.get("at") or 0)
+    if age > CREDIT_APPLICABLE_MAX_AGE:
+        fail("读不到最新的重置卡状态（额度接口暂时不通），没有使用")
+    if not (cr.get("applicable") or 0) > 0:
+        fail(f"{label} 现在没有可重置的窗口，没有使用")
+    before = cr.get("available")
+    # ② 最近到期的那张
+    credits, msg = _fetch_credit_detail(aid, slot, is_active)
+    stale = False
+    if credits is None:
+        cached = (slot.get("credits_detail") or {})
+        if time.time() - (cached.get("fetched_at") or 0) > CREDIT_DETAIL_TTL:
+            fail(f"取不到卡片明细（{msg}），没有使用")
+        credits, stale = cached.get("credits") or [], True
+    card = _pick_soonest_credit(credits)
+    if card is None:
+        fail("没有带到期日的可用卡，没有使用")
+    # ③ 幂等键：先落盘再发
+    pend = (_state()["slots"].get(aid) or {}).get("credit_redeem") or {}
+    if pend.get("credit_id") == card["id"] and time.time() - (pend.get("at") or 0) < CREDIT_REDEEM_REUSE_SECS:
+        rid = pend["redeem_request_id"]
+    else:
+        rid = str(uuid.uuid4())
+        _mutate_state(lambda st, a=aid, c=card["id"], r=rid: (st["slots"].get(a) or {}).update(
+            {"credit_redeem": {"credit_id": c, "redeem_request_id": r, "at": time.time()}}))
+    authpath = LIVE if is_active else (AUTH_DIR / slot["file"])
+    try:
+        auth = _load_json(authpath)
+        tok = auth.get("tokens") or {}
+    except (OSError, ValueError) as e:
+        fail(f"读不到登录凭证: {e}")
+    if _account_id(auth) != aid:
+        fail("登录凭证与账号对不上（可能刚切号），没有使用")
+    if _access_exp(tok) - time.time() < 60:
+        fail("token 已过期，先刷新或重登，没有使用")
+    # ④ 发
+    st, raw = _api_post(tok, CREDIT_CONSUME_PATH, {"credit_id": card["id"], "redeem_request_id": rid})
+    kind, code, windows = _consume_outcome(st, raw)
+    # ⑤ 核对：免费读一次，看张数
+    _probe_quota(aid, slot, is_active)
+    after = ((_state()["slots"].get(aid) or {}).get("credits") or {}).get("available")
+    exp = _iso_ts(card.get("expires_at"))
+    exp_s = datetime.datetime.fromtimestamp(exp).strftime("%m-%d %H:%M") if exp else "?"
+    if kind == "reset":
+        def _done(stt, a=aid, cid=card["id"]):
+            sl = stt["slots"].get(a)
+            if sl is None:
+                return
+            sl.pop("credit_redeem", None)
+            for c in ((sl.get("credits_detail") or {}).get("credits") or []):
+                if c.get("id") == cid:
+                    c["status"] = "redeemed"
+        _mutate_state(_done)
+    res = {"ok": kind == "reset", "label": label, "kind": kind, "code": code, "windows_reset": windows,
+           "credit_id": card["id"], "expires_at": card.get("expires_at"), "available_before": before,
+           "available_after": after, "http_status": st, "detail_stale": stale}
+    if as_json:
+        print(json.dumps(res, ensure_ascii=False))
+        sys.exit(0 if kind == "reset" else 1)
+    if kind == "reset":
+        print(f"✓ {label}：用掉了 {exp_s} 到期的那张，重置了 {windows} 个窗口（剩 {after} 张）")
+        return
+    if kind == "no_effect":
+        sys.exit(f"服务端没有重置任何窗口（code={code}），卡片张数 {before}→{after}")
+    if kind == "http_error":
+        sys.exit(f"服务端拒绝了（HTTP {st}），没有使用")
+    sys.exit(f"不确定有没有生效（请求结果未知）。稍后看张数是否变化：{before}→{after}；重试会复用同一个请求号，不会多用一张")
+
+
 TOKENS_CACHE = STORE / ".tokens-cache.json"
 
 
@@ -3822,7 +3986,7 @@ CMDS = {"add": cmd_add, "login": cmd_login, "list": cmd_list, "switch": cmd_swit
         "uncool": cmd_uncool, "quota": cmd_quota, "current": cmd_current, "ensure": cmd_ensure,
         "sync": cmd_sync, "rename": cmd_rename, "alias": cmd_alias, "keepalive": cmd_keepalive, "refresh": cmd_refresh,
         "refresh-all": cmd_refresh_all, "health": cmd_health, "remove": cmd_remove,
-        "ensure-live": cmd_ensure_live, "credits": cmd_credits, "probe": cmd_probe,
+        "ensure-live": cmd_ensure_live, "credits": cmd_credits, "use-credit": cmd_use_credit, "probe": cmd_probe,
         "dawn-probe": cmd_dawn_probe, "rotate": cmd_rotate,
         "tokens": cmd_tokens, "integration": cmd_integration,
         "priority": cmd_priority, "pin": cmd_pin, "next": cmd_next,
@@ -3841,7 +4005,7 @@ def main():
     if len(sys.argv) < 2 or sys.argv[1] not in CMDS:
         print("usage: codex-rotate {add <label>|login|remove <label>|list|switch [label]|cool [min]|uncool [label]|"
               "quota [--save]|sync|rename <old> <new>|rotate <label> --on|--off|refresh [label|all]|refresh-all|"
-              "keepalive [days] [--dry-run]|health|credits [--force] [--json]|"
+              "keepalive [days] [--dry-run]|health|credits [--force] [--json]|use-credit <label> [--json]|"
               "probe <label…|--all> [--model M] [--effort low|medium|high]|"
               "tokens [--days N] [--json]|ensure|current}")
         sys.exit(1)

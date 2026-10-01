@@ -69,7 +69,7 @@ export function useStore() {
     return () => clearInterval(id);
   }, []);
 
-  const run = useCallback(async (actionId: string, args: string[], msg: string) => {
+  const run = useCallback(async (actionId: string, args: string[], msg: string, opts?: { resultToast?: boolean }) => {
     setLoadingAction(actionId);
     // ★ 告诉另一个 webview「我开始跑了」。此前两边只在**结束**时靠 `state-changed` 同步,
     //   于是在菜单栏点刷新、再打开主界面,主界面整个执行期间看起来什么都没发生
@@ -82,9 +82,12 @@ export function useStore() {
     //    （目标号被用户暂停）。用户看到的是一句关于事实的假陈述。
     let ok = false;
     try {
-      await invoke("run_rotate", { args });
+      const out = await invoke<string>("run_rotate", { args });
       await refresh();
-      showToast(`✓ ${msg}`);
+      // ★ 花掉不可逆东西的动作要把**结果原话**给用户（用了哪张、重置了几个窗口、还剩几张），
+      //   不是一句泛泛的「✓ 用重置卡」。其余动作行为不变。
+      const last = opts?.resultToast ? String(out ?? "").trim().split("\n").pop() : "";
+      showToast(last ? last.slice(0, 120) : `✓ ${msg}`);
       ok = true;
     } catch (e: unknown) {
       const errMsg = String(e).slice(0, 80);

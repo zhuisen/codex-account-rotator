@@ -6,6 +6,18 @@
 
 ## 已知验证缺口（长期）
 
+（2026-10-01 从 memory.md 搬来，逐字未改）
+
+⏳ v1.8.0 本批留下的（别当已验）：
+  1. **真机没点过**：装机版上真点一次「接入」——harness 四态像素已验，但
+     `apply` 的 `services` 那一步会真跑 `install-launchd.sh` + `launchctl`，
+     **测试里一律没选它**（只有静态闸验「失败必须如实上报」）。
+  2. **安装包场景的运行时复制没在真 `.dmg` 上跑过** —— 本机是 clone 装机（`inplace=True`），
+     走的是「原地用」那条分支；复制那条只在沙箱夹具里验过。
+  3. Windows 侧 Connector **完全没验**（`install-launchd.sh` 是 macOS 专属，
+     Windows 要走 `install-windows.ps1`，`connector.py` 目前只调前者）。
+  4. 上一批遗留仍开着：外链端到端没点过；Clipsync 那 10 具僵尸未查。
+
 > 2026-09-14 从 `memory.md` §1a **整段搬来，逐字未改** —— 它们是「已发版但某一面没验到」的
 > 长期状态，不是进行时。里面有几条带当时的实测数字（`67501 行里各 0 次`、`谷底 ~1037px`、
 > `Δinput 98 与 4681`…），摘要会把那部分磨掉，所以只搬不压。
@@ -733,6 +745,25 @@ Fable 评审 40 条 + 四方评审 9 条，全部处理完。17 个 commit 未�
 两份夹具（**稠密夹具下新旧实现结果完全一样，那些闸恒绿**）。
 
 ---------
+
+### B75 · 账号卡新增「使用重置卡」（用最近到期的那张）— 2026-10-01 ✅（未发版）
+
+**需求**（用户）：在账号上新增功能，使用重置卡，用最近日期的那张。
+**端点（实测，不是猜的）**：`strings` codex 二进制找到 `/api/codex/rate-limit-reset-credits/consume`，与读明细同族 ⇒
+`POST /backend-api/codex/rate-limit-reset-credits/consume`，请求体 `{"credit_id", "redeem_request_id"}`（第一次只给
+`credit_id`+`idempotency_key` 被 400 `redeem_request_id: Field required` 纠正），回 `{"code","credit","windows_reset"}`。
+**零花费的判别实验**：对一个**当时没有可重置窗口**的号发一个**不存在**的 credit_id ⇒ `200 {"code":"no_credit","credit":null,
+"windows_reset":0}`。该号有 3 张真卡，若服务端忽略 credit_id 就不会报 no_credit ⇒ credit_id 被认了；不存在的卡不花任何东西。
+**这是全 app 唯一不可逆的花费动作**，所以：
+- `codex-rotate use-credit <label>`：**只在 `applicable > 0` 且读数 ≤ 5 分钟时才发**（「有卡没窗口」服务端会怎么处理没有观测，不拿真卡去试）；
+  选**最近到期且有到期日**的那张（没日期的不选：不知道多久过期 ≠ 最近）；
+- `redeem_request_id` **先落盘再发**，没确认成功就复用同一个 —— 网络在发出后断了，重试不会换新号多用一张；
+- **成败只认 `windows_reset > 0`**；200 但没重置窗口是「没生效」，请求结果未知既不报成功也不清请求号；发完再免费读一次核对张数。
+- 界面：卡片动作条里 `用卡 MM-DD`（直接写将要用掉哪天到期的那张），复用 `ProbeButton` 的琥珀 + 两段确认；
+  现在没有可重置窗口 / 没取到到期日时是灰的不可点，原因写在 title。结果原话（用了哪张、重置几个窗口、剩几张）进 toast。
+**没验的**：真的用掉一张卡（不可逆，没替你试）；服务端成功时 `code` 的取值未知（所以成败不看 `code`）。
+**闸**：`tests/test_use_credit.py`（17 条：选卡 / 结果分类 / 12 个「绝不发请求」与「重试不换请求号」的流程 / 白名单 / 渲染）。
+变异 9 个全红 —— 其中 2 个**第一次是绿的**（`a.cardsUsable > 0` 这几个字在不可点分支的 title 里也出现，只查子串等于空守卫），已收紧到三元条件本身。
 
 ## v1.9.4 — 2026-09-29
 

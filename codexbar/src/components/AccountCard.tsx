@@ -28,7 +28,7 @@ function DeltaChip({ delta, t }: { delta: number; t: Theme }) {
 
 
 export default function AccountCard({ a, isCurrent, isBest, isSelected, shortcut,
-  bestLabel = "USE", bestTitle, curLabel = "当前", curTitle, bestPct, probing, privacy, t, onSelect, onSwitch, onShowDetail, onRemove, onProbe, onRename, onToggleRotate, onTogglePin, winSlots, drag }: {
+  bestLabel = "USE", bestTitle, curLabel = "当前", curTitle, bestPct, probing, privacy, t, onSelect, onSwitch, onShowDetail, onRemove, onProbe, onUseCredit, usingCredit, onRename, onToggleRotate, onTogglePin, winSlots, drag }: {
   a: Account; isCurrent: boolean; isBest: boolean; isSelected: boolean; shortcut?: number;
   /** 高亮角标的文案。★ codex 档传「下一个」（真挑号器的结果），agy 档保留 `USE`
    *  —— agy **没有逐请求挑号器**，手动切号就是它的机制，「推荐切到谁」在那边仍成立。 */
@@ -58,6 +58,8 @@ export default function AccountCard({ a, isCurrent, isBest, isSelected, shortcut
    * ★ 不用「把 Pro 的条加粗填满」：同一个指标出现两种粗细，会让粗细看起来有含义而实际没有；
    *   且设计语言明写「进度=细胶囊条 3–8px，反对粗色块」。
    */
+  /** 用掉最近到期的那张重置卡（不可逆）。不传 = 这个界面没有该动作。 */
+  onUseCredit?: (label: string) => void; usingCredit?: boolean;
   winSlots: string[]; /** 该号正在探测中 */ probing: boolean; /** 打码模式 */ privacy: boolean; t: Theme;
   onSelect: () => void; onSwitch: () => void; onShowDetail: (aid: string) => void; onRemove: (label: string) => void; onProbe: (label: string) => void;
   /** 把这个号移出/放回自动轮换池。真源是 `state.json` 的 `rotate_off`（**不是 localStorage**）——
@@ -368,6 +370,26 @@ export default function AccountCard({ a, isCurrent, isBest, isSelected, shortcut
             <ProbeButton t={t} variant="inline" label="探针"
               hint={`对 ${a.node} 发一次真实补全,验它是否真能干活。⚠️ 消耗周额度(实测单次 <1%)`}
               loading={probing} onConfirm={() => onProbe(a.node)} loadingText="探测…" />
+          )}
+          {/* ★★ 使用重置卡 —— 全 app **唯一不可逆**的花费：一张卡用掉就没了。
+              · 按钮上直接写**将要用掉哪一天到期的那张**（`cardExp` = 最近到期，与 CLI 的选卡规则同一条），
+                不是点下去才知道；
+              · 复用 `ProbeButton` 的琥珀 + 两段确认（单击亮「确认?」，5s 退回）；
+              · **现在没有可重置的窗口时不可点**（`cardsUsable`=服务端 applicable），并把原因写在 title 里：
+                那时用卡等于白花，CLI 也会拒绝 —— 前后两道，不靠一边。
+              · 没有到期日（`cardExp` 未取到）也不给点：CLI 选卡要求有到期日，界面不画一个必然被拒的按钮。 */}
+          {!isDead && onUseCredit && a.cards > 0 && (
+            a.cardsUsable > 0 && a.cardExp ? (
+              <ProbeButton t={t} variant="inline" label={`用卡 ${a.cardExp.slice(5)}`}
+                hint={`用掉 ${a.node} 最近到期（${a.cardExp}）的那张重置卡，重置当前窗口。⚠️ 不可逆：用掉就没了`}
+                loading={!!usingCredit} onConfirm={() => onUseCredit(a.node)} loadingText="使用中…" />
+            ) : (
+              <span data-use-credit-disabled
+                    title={a.cardsUsable > 0 ? "最近到期的那张还没取到到期日，先点「刷新全池」"
+                                             : `${a.node} 现在没有可重置的窗口 —— 现在用卡是白花，等额度见底或窗口用起来再说`}
+                    style={{ fontSize: 11, padding: "5px 10px", borderRadius: 6, whiteSpace: "nowrap", cursor: "not-allowed",
+                             color: t.muted, border: `1px solid ${t.ghostBorder}`, opacity: .6 }}>用卡</span>
+            )
           )}
           {/* ★ 置顶排在「轮换开关」前面：它是你最常用的那个动作（「优先用这个号」），
               而轮换开关是偶尔才碰的。 */}

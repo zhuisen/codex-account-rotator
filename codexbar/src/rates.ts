@@ -51,6 +51,9 @@ export const RATES: Record<string, Price> = {
   "gpt-6-astra":   { in: 10.0, cacheRead: 1.0,  out: 50.0 },
   "gpt-6-sol":     { in: 2.0,  cacheRead: 0.2,  out: 10.0 },
   "gpt-6-luna":    { in: 0.1,  cacheRead: 0.01, out: 0.5 },
+  // 2026-10-01：`~/.codex/models_cache.json` 里多了 gpt-6.1-sol（新闸 test_rates_cover_live_models 当场抓到），
+  // 官方页只列这一个 6.1；缓存读 $0.10（输入的 5%，与 6-sol 的 $0.20 不同）。
+  "gpt-6.1-sol":   { in: 2.0,  cacheRead: 0.1,  out: 10.0 },
   //    ★ 本机跑的就是 gpt-5.6-sol 与 gpt-5.5,此前它们**不在表里**、全走 $1.75/$14 的兜底,
   //      把 Codex 30 天费用低估成真价的 1/2.55（$1,020 vs $2,595,实测)。
   "gpt-5.6-sol":   { in: 4.0,  cacheRead: 0.4,  out: 20.0 },

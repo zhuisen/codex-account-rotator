@@ -722,6 +722,8 @@ export default function App() {
                           onShowDetail={(aid) => { invoke<AccountDetail>("read_account_detail", { aid }).then(d => setDetailModal(d)).catch(() => {}); }}
                           onRemove={(label) => run(`remove-${label}`, ["remove", label], `已删除 ${label}`)}
                           onProbe={(label) => run(`probe-${a.aid}`, ["probe", label], `探针 ${label}`)}
+                          onUseCredit={(label) => run(`usecredit-${a.aid}`, ["use-credit", label], `用重置卡 ${label}`, { resultToast: true })}
+                          usingCredit={loadingAction === `usecredit-${a.aid}`}
                           onRename={(next) => run(`rename-${a.aid}`, ["rename", a.aid, next], `${a.node} → ${next}`)}
                           // ★ 走 CLI 而不是写 localStorage:真源是 `state.json`,代理在 app 没开时
                           //   也要读它 —— 两个真源迟早分叉成「界面说停用了、代理还在用」

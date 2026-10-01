@@ -332,7 +332,7 @@ fn store_dir() -> String {
 // ★ `dawn-probe` 加进来是给「app 内补跑」用的:本项目的 launchd 日历定时有前科
 //   (keepalive/refreshquota 的 StartCalendarInterval 被外力改写丢掉,runs = 0、从未运行过),
 //   所以 06:00 那个 plist **不能是唯一触发路径**。命令侧当天幂等 + 先占天,重复调用不会双重计费。
-const ALLOWED_CMDS: &[&str] = &["switch", "cool", "uncool", "refresh-all", "health", "list", "quota", "remove", "credits", "probe", "dawn-probe", "tokens", "rename", "rotate", "priority", "pin", "borrow"];
+const ALLOWED_CMDS: &[&str] = &["switch", "cool", "uncool", "refresh-all", "health", "list", "quota", "remove", "credits", "probe", "dawn-probe", "tokens", "rename", "rotate", "priority", "pin", "borrow", "use-credit"];
 // ★★ 2026-09-21 从这张表里**摘掉了 `next`**（agy 评审点名）。
 //    `next` 是纯只读查询，已由专用的 `read_rotation_board` 接管；留在这张表里
 //    等于给那条自激回环留一条**复活路径** —— 下一个人照样能 `run_rotate(["next"])`

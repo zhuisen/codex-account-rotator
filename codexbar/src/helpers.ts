@@ -122,6 +122,9 @@ export interface Account {
   cardDays?: number;
   /** Expiry date of that soonest credit, YYYY-MM-DD. */
   cardExp?: string;
+  /** 其中**现在就能用**的张数（服务端的 `applicable_available_count`）。「有卡」≠「现在能用」：
+   *  没有可重置的窗口时用卡等于白花，所以「使用重置卡」按钮只在它 > 0 时可点。未知按 0 算（不鼓励在没把握时花）。 */
+  cardsUsable: number;
   /** How many of `cards` lapse within CARD_WARN_DAYS. Distinct from `cards` on purpose: holding 2
    *  cards where only 1 is about to lapse is the normal case, and collapsing the two numbers would
    *  claim the whole stack is expiring. */
@@ -626,7 +629,7 @@ export function slotToAccount(aid: string, slot: Slot, tokens: Record<string, To
     //   0 会被读成「刚刚读到的」，正好把最坏的情况显示成最好的。
     quotaAgeSec: qAge,
     quotaStale: qAge != null && qAge > QUOTA_STALE_SEC,
-    cards, cardDays, cardExp,
+    cards, cardDays, cardExp, cardsUsable: slot.credits?.applicable ?? 0,
     // The two numbers come from different fetches at different times: the count is refreshed on every
     // usage probe, the detail only when `credits` runs. So the cached detail can legitimately still
     // list a card the server has already dropped, which would render "×1 · 2张…". Clamp — never claim
