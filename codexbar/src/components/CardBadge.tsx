@@ -1,4 +1,3 @@
-import { useEffect, useState } from "react";
 import { CARD_WARN_DAYS, type Account } from "../helpers";
 import { CARD_TYPE as Z, type Theme } from "../theme";
 
@@ -76,16 +75,10 @@ export function CardBadgeGhost({ compact }: { compact?: boolean }) {
  */
 export default function CardBadge({ a, t, compact, onUse, using }: {
   a: Account; t: Theme; compact?: boolean;
-  /** 点角标 = 用掉最近到期的那张（用户 2026-10-01 提议）。**不可逆**，所以两段确认；不传 = 只读角标（菜单栏）。 */
+  /** 点角标 = 请求用掉最近到期的那张（用户 2026-10-01 提议）。**不可逆**：调用方必须先弹确认弹窗
+   *  （`UseCreditDialog`），这里**不**自己确认；不传 = 只读角标（菜单栏）。 */
   onUse?: () => void; using?: boolean;
 }) {
-  const [armed, setArmed] = useState(false);
-  useEffect(() => {
-    if (!armed) return;
-    const id = setTimeout(() => setArmed(false), 5000);     // 与 ProbeButton 同：5s 不二次点击就退回
-    return () => clearTimeout(id);
-  }, [armed]);
-  useEffect(() => { if (using) setArmed(false); }, [using]);
   if (a.cards <= 0) {
     // ★ 走同一个壳（透明描边、无底色），否则「无重置卡」的页脚比有徽章的矮 9px，
     //   把这张卡的细条整体顶下去半行。菜单栏那版不画，也就没有这个问题。
@@ -114,16 +107,12 @@ export default function CardBadge({ a, t, compact, onUse, using }: {
     : `重置卡 ×${a.cards}${expiring ? ` · ${nOf}剩${days}天` : ""}`;
   const usable = !!onUse && !compact && !!a.cardExp;
   // ★ 点击**必须 stopPropagation**：角标在整张可点的卡片里，不拦的话每次点它都会同时切换卡片选中。
-  //   第一次点只是「上膛」（改成实心琥珀 +「确认用卡 MM-DD?」），第二次才真发 —— 不可逆动作不能一点就花。
   const click = (e: React.MouseEvent) => {
     if (!usable) return;
     e.stopPropagation();
     if (using) return;
-    if (!armed) { setArmed(true); return; }
-    setArmed(false);
     onUse!();
   };
-
   return (
     <span
       // ★ 「怎么用卡」这句 2026-09-18 从菜单栏横幅搬到这里。
@@ -136,19 +125,18 @@ export default function CardBadge({ a, t, compact, onUse, using }: {
         ? `共 ${a.cards} 张 · 最早一张到期 ${a.cardExp}${a.cardsExpiring ? ` · ${a.cardsExpiring} 张在 ${CARD_WARN_DAYS} 天内作废` : ""}`
         : `共 ${a.cards} 张 · 到期未知(运行 codex-rotate credits 取明细)`)
         + (usable
-          ? `\n点一下 → 再点一次确认：用掉最近到期（${a.cardExp}）的那张。⚠️ 不可逆。额度没见底也能用（用户实测）`
+          ? `\n点击：弹窗确认后用掉最近到期（${a.cardExp}）的那张。⚠️ 不可逆。额度没见底也能用（用户实测）`
           : (expiring ? "\n用卡：终端运行 codex → 输入 /usage → Redeem usage limit reset" : ""))}
       {...(usable ? { onClick: click, "data-card-badge-use": "" } : {})}
       style={{
         ...shell(compact),
         cursor: usable ? (using ? "default" : "pointer") : undefined,
-        color: armed ? "#1c1104" : expiring ? AMBER_TEXT : t.accent,
-        background: armed ? AMBER : expiring ? "rgba(224,144,28,.14)" : t.accentSoft,
-        border: `1px solid ${armed ? AMBER : expiring ? "rgba(224,144,28,.5)" : t.accentBorder}`,
-        fontWeight: armed ? 700 : undefined,
-        animation: expiring && !armed ? "cbPulse 2s infinite" : "none",
+        color: expiring ? AMBER_TEXT : t.accent,
+        background: expiring ? "rgba(224,144,28,.14)" : t.accentSoft,
+        border: `1px solid ${expiring ? "rgba(224,144,28,.5)" : t.accentBorder}`,
+        animation: expiring ? "cbPulse 2s infinite" : "none",
       }}>
-      <IconTicket size={size.icon} />{using ? "使用中…" : armed ? `确认用 ${a.cardExp?.slice(5)}?` : label}
+      <IconTicket size={size.icon} />{using ? "使用中…" : label}
     </span>
   );
 }

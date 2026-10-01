@@ -997,6 +997,8 @@ function relayEntry() {
       // 否则总览拖完顺序、`read_state` 回来的还是旧的,端到端闸验的就不是真链路了。
       case 'run_rotate': {
         var _a = (args && args.args) || [];
+        // ★ 记录每次调用：确认弹窗的闸要断言「点确认之前一次 use-credit 都没发出去」。
+        (window.__RUN_ROTATE__ = window.__RUN_ROTATE__ || []).push(_a);
         // ★ `borrow --on/--off` 真的改 STATE —— 否则设置页点完开关、`read_state`
         //   回来的还是旧值，端到端闸验的就不是真链路了（同 `priority --set` 的理由）。
         if (_a[0] === 'borrow') {

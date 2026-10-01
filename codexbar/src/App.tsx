@@ -8,6 +8,7 @@ import Toast from "./components/Toast";
 import GhostButton from "./components/GhostButton";
 import AccountCard from "./components/AccountCard";
 import DetailModal, { type AccountDetail } from "./components/DetailModal";
+import UseCreditDialog from "./components/UseCreditDialog";
 import LogsPage from "./pages/LogsPage";
 import RelayPage from "./pages/RelayPage";
 import TrafficPage from "./pages/TrafficPage";
@@ -131,6 +132,8 @@ export default function App() {
 
   const [drill, setDrill] = useState<string | null>(null);   // 平台详情:null = 停在总览
   const [detailModal, setDetailModal] = useState<AccountDetail | null>(null);
+  // 「使用重置卡」确认弹窗：只存 aid，账号数据每次渲染时从 `accounts` 现取（弹窗开着时数据变了也不会陈旧）。
+  const [creditConfirm, setCreditConfirm] = useState<string | null>(null);
   const [selectedCard, setSelectedCard] = useState<string | null>(null);
   /**
    * ★ 卡片动作弹层**打开后到点直接收回，不管有没有在操作**（用户 2026-09-23 定；时长见 `CARD_ACTIONS_LIFE_MS`）。
@@ -722,7 +725,8 @@ export default function App() {
                           onShowDetail={(aid) => { invoke<AccountDetail>("read_account_detail", { aid }).then(d => setDetailModal(d)).catch(() => {}); }}
                           onRemove={(label) => run(`remove-${label}`, ["remove", label], `已删除 ${label}`)}
                           onProbe={(label) => run(`probe-${a.aid}`, ["probe", label], `探针 ${label}`)}
-                          onUseCredit={(label) => run(`usecredit-${a.aid}`, ["use-credit", label], `用重置卡 ${label}`, { resultToast: true })}
+                          // ★ 点角标只是**请求**用卡 —— 先弹确认弹窗，确认后才真发（不可逆，用户 2026-10-01：「很容易误触」）。
+                          onUseCredit={() => setCreditConfirm(a.aid)}
                           usingCredit={loadingAction === `usecredit-${a.aid}`}
                           onRename={(next) => run(`rename-${a.aid}`, ["rename", a.aid, next], `${a.node} → ${next}`)}
                           // ★ 走 CLI 而不是写 localStorage:真源是 `state.json`,代理在 app 没开时
@@ -890,6 +894,16 @@ export default function App() {
         </div>
       </div>
 
+      {creditConfirm && (() => {
+        const ca = accounts.find((x) => x.aid === creditConfirm);
+        return ca ? (
+          <UseCreditDialog a={ca} t={t} onCancel={() => setCreditConfirm(null)}
+            onConfirm={() => {
+              setCreditConfirm(null);
+              void run(`usecredit-${ca.aid}`, ["use-credit", ca.node], `用重置卡 ${ca.node}`, { resultToast: true });
+            }} />
+        ) : null;
+      })()}
       {detailModal && <DetailModal detail={detailModal} privacy={privacy} t={t} onClose={() => setDetailModal(null)} />}
       {toast && <Toast msg={toast} t={t} />}
     </div>

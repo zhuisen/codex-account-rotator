@@ -207,21 +207,23 @@ class Wiring(unittest.TestCase):
         i = rs.index("const ALLOWED_CMDS")
         self.assertIn('"use-credit"', rs[i:rs.index("];", i)], "★★ 白名单没放行 —— 按钮点了只会报 disallowed command")
 
-    def test_the_button_only_needs_an_expiry_date_not_a_usable_window(self):
+    def test_there_is_no_use_button_in_the_action_bar(self):
+        """用户 2026-10-01：「很容易误触」—— 动作条里的「用卡」按钮取消，入口只剩页脚角标 + 确认弹窗。"""
         code = re.sub(r"\{/\*[\s\S]*?\*/\}", "", (SRC / "components" / "AccountCard.tsx").read_text(encoding="utf-8"))
-        i = code.index("onUseCredit && a.cards > 0")
-        seg = code[i:i + 1400]
-        # ★ 判据要打在**三元的条件本身**上（子串会在别的分支的 title 里也出现 —— 变异实测抓到过一次空守卫）。
-        #   2026-10-01 用户拍板放开「额度见底才能用」：条件只剩「有到期日」。
-        self.assertIn("a.cardExp ?", seg, "★★ 没按「有到期日」收口 —— CLI 要求有到期日，否则画出一个必被拒的按钮")
-        self.assertNotIn("a.cardsUsable > 0 &&", seg, "★★ 又把「现在有可重置窗口」加回来了 —— 用户明确要求放开")
+        self.assertNotIn("用卡 ", code, "★★ 动作条里又出现了「用卡」按钮")
+        self.assertNotIn("data-use-credit-disabled", code)
 
-    def test_the_footer_badge_is_clickable_and_two_step(self):
-        card = (SRC / "components" / "AccountCard.tsx").read_text(encoding="utf-8")
-        self.assertIn("onUse=", card, "★★ 角标没接 onUse")
+    def test_the_cli_is_only_reachable_through_the_confirm_dialog(self):
+        app = re.sub(r"\{/\*[\s\S]*?\*/\}", "", (SRC / "App.tsx").read_text(encoding="utf-8"))
+        app = re.sub(r"//[^\n]*", "", app)
+        self.assertEqual(app.count('"use-credit"'), 1, "★★ `use-credit` 出现在不止一处 —— 有别的入口绕过了确认弹窗")
+        self.assertGreater(app.index('"use-credit"'), app.index("<UseCreditDialog"),
+                           "★★★ 发 use-credit 的调用不在弹窗的 onConfirm 里 —— 不可逆动作没经过确认")
+        self.assertIn("setCreditConfirm(a.aid)", app, "★★ 点角标应该只是「请求」确认弹窗")
+
+    def test_the_badge_does_not_confirm_by_itself(self):
         badge = re.sub(r"\{/\*[\s\S]*?\*/\}", "", (SRC / "components" / "CardBadge.tsx").read_text(encoding="utf-8"))
         self.assertIn("stopPropagation", badge, "★★ 点角标会同时触发卡片选中")
-        self.assertIn("armed", badge, "★★★ 角标一点就直接用卡 —— 不可逆动作必须两段确认")
 
 
 def _render():
@@ -251,20 +253,7 @@ def _render():
     return [o for o in out if o]
 
 
-class RendersInTheActionBar(unittest.TestCase):
-    def test_enabled_shows_the_expiry_and_is_not_clipped_disabled_is_marked(self):
-        r = _render()
-        if r is None:
-            self.skipTest("没有 playwright 或 harness 静态服务（3304）没在跑")
-        self.assertTrue(r, "★★ 一张卡的动作条都没渲染出来 —— 闸此刻没有判别力")
-        enabled = [o for o in r if re.search(r"用卡 \d\d-\d\d", o["text"])]
-        disabled = [o for o in r if o["disabled"]]
-        self.assertGreaterEqual(len(enabled), 2, "★★ 有卡有到期日的号都该有「用卡 MM-DD」（含 applicable=0 的号，用户 2026-10-01 要求放开）")
-        self.assertEqual(disabled, [], "★★ 夹具里每个有卡的号都有到期日，不该有被置灰的")
-        self.assertFalse([o for o in enabled if o["overflow"]], "★ 按钮把动作条撑出了横向溢出")
-
-
-def _badge_probe():
+def _dialog_probe():
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
@@ -274,34 +263,63 @@ def _badge_probe():
         urllib.request.urlopen(BASE, timeout=2).read(1)
     except Exception:
         return None
+    R = "(window.__RUN_ROTATE__ || []).filter(a => a[0] === 'use-credit')"
     with sync_playwright() as p:
         br = p.chromium.launch(executable_path=CHROME, headless=True)
         pg = br.new_page(viewport={"width": 1300, "height": 900})
         pg.goto(BASE, timeout=30000); pg.wait_for_timeout(3000)
-        h0 = pg.evaluate("[...document.querySelectorAll('[data-aid]')].map(c=>Math.round(c.getBoundingClientRect().height))")
-        n = pg.locator("[data-card-badge-use]").count()
-        b = pg.locator("[data-card-badge-use]").first
-        before = b.inner_text()
+        out = {"n_badges": pg.locator("[data-card-badge-use]").count()}
+        # 每张卡的动作条里都不许有「用卡」
+        bars = []
+        for i in range(pg.evaluate("document.querySelectorAll('[data-aid]').length")):
+            pg.evaluate(f"document.querySelectorAll('[data-aid]')[{i}].click()"); pg.wait_for_timeout(300)
+            bars.append(pg.evaluate("(document.querySelector('[data-actions]')||{innerText:''}).innerText"))
+        out["bar_has_use"] = any("用卡" in b for b in bars)
+        pg.evaluate("document.querySelectorAll('[data-actions]').forEach(()=>0)")
+        b = pg.locator("[data-aid]:has-text('Egan') [data-card-badge-use]").first
+        dlg = "[data-use-credit-dialog]"
         b.click(); pg.wait_for_timeout(300)
-        out = {"n": n, "before": before, "armed": b.inner_text(),
-               "bars": pg.evaluate("document.querySelectorAll('[data-actions]').length"),
-               "h_same": h0 == pg.evaluate("[...document.querySelectorAll('[data-aid]')].map(c=>Math.round(c.getBoundingClientRect().height))")}
-        pg.wait_for_timeout(5400)
-        out["after"] = b.inner_text()
+        out["opened"] = pg.locator(dlg).count()
+        out["sent_on_open"] = pg.evaluate(R + ".length")
+        out["target"] = pg.locator("[data-use-credit-target]").inner_text()
+        out["cancel_focused"] = pg.evaluate("document.activeElement && document.activeElement.hasAttribute('data-use-credit-cancel')")
+        pg.keyboard.press("Enter"); pg.wait_for_timeout(200)
+        out["enter_confirms"] = pg.evaluate(R + ".length")
+        out["still_open_after_enter"] = pg.locator(dlg).count()
+        pg.keyboard.press("Escape"); pg.wait_for_timeout(200)
+        out["esc_closes"] = pg.locator(dlg).count() == 0
+        b.click(); pg.wait_for_timeout(200)
+        pg.mouse.click(5, 5); pg.wait_for_timeout(200)           # 点遮罩
+        out["overlay_closes"] = pg.locator(dlg).count() == 0
+        b.click(); pg.wait_for_timeout(200)
+        pg.locator("[data-use-credit-cancel]").click(); pg.wait_for_timeout(200)
+        out["cancel_closes"] = pg.locator(dlg).count() == 0
+        out["sent_before_confirm"] = pg.evaluate(R + ".length")
+        b.click(); pg.wait_for_timeout(200)
+        pg.locator("[data-use-credit-confirm]").click(); pg.wait_for_timeout(600)
+        out["sent_after_confirm"] = pg.evaluate(R)
+        out["closed_after_confirm"] = pg.locator(dlg).count() == 0
         br.close()
     return out
 
 
-class TheFooterBadgeIsATwoStepButton(unittest.TestCase):
-    def test_first_click_only_arms_it_and_it_disarms(self):
-        r = _badge_probe()
+class TheConfirmDialog(unittest.TestCase):
+    def test_flow(self):
+        r = _dialog_probe()
         if r is None:
             self.skipTest("没有 playwright 或 harness 静态服务（3304）没在跑")
-        self.assertGreaterEqual(r["n"], 2, "★★ 页脚角标没有可点的 —— 闸此刻没有判别力")
-        self.assertRegex(r["armed"], r"确认用 \d\d-\d\d\?", "★★★ 第一次点没有「上膛」—— 不可逆动作一点就花")
-        self.assertEqual(r["bars"], 0, "★★ 点角标同时选中了卡片（没 stopPropagation）")
-        self.assertTrue(r["h_same"], "★ 上膛后卡片高度变了 —— 页脚必须恒为一行")
-        self.assertEqual(r["after"], r["before"], "★ 5 秒没二次点击应自动退回")
+        self.assertGreaterEqual(r["n_badges"], 2, "★★ 页脚角标没有可点的 —— 闸此刻没有判别力")
+        self.assertFalse(r["bar_has_use"], "★★ 动作条里还有「用卡」按钮（用户要求取消，因为容易误触）")
+        self.assertEqual(r["opened"], 1, "★★ 点角标没有弹出确认弹窗")
+        self.assertEqual(r["sent_on_open"], 0, "★★★ 弹窗一出来就已经发了 use-credit")
+        self.assertRegex(r["target"], r"\d{4}-\d\d-\d\d 到期[\s\S]*共 \d+ 张，用后剩 \d+ 张", "★★ 弹窗没说清要用掉哪一张 / 用后剩几张")
+        self.assertTrue(r["cancel_focused"], "★★ 默认焦点不在「取消」上")
+        self.assertEqual(r["enter_confirms"], 0, "★★★ 回车就确认了 —— 连按回车会花掉一张卡")
+        self.assertEqual(r["still_open_after_enter"], 1)
+        self.assertTrue(r["esc_closes"] and r["overlay_closes"] and r["cancel_closes"], f"★★ 取消路径没都关掉弹窗: {r}")
+        self.assertEqual(r["sent_before_confirm"], 0, "★★★ 没点确认就发出了 use-credit")
+        self.assertEqual(r["sent_after_confirm"], [["use-credit", "Egan"]], "★★ 点确认后应恰好发一次 use-credit <号名>")
+        self.assertTrue(r["closed_after_confirm"])
 
 
 if __name__ == "__main__":

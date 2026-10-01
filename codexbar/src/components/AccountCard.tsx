@@ -371,27 +371,8 @@ export default function AccountCard({ a, isCurrent, isBest, isSelected, shortcut
               hint={`对 ${a.node} 发一次真实补全,验它是否真能干活。⚠️ 消耗周额度(实测单次 <1%)`}
               loading={probing} onConfirm={() => onProbe(a.node)} loadingText="探测…" />
           )}
-          {/* ★★ 使用重置卡 —— 全 app **唯一不可逆**的花费：一张卡用掉就没了。
-              · 按钮上直接写**将要用掉哪一天到期的那张**（`cardExp` = 最近到期，与 CLI 的选卡规则同一条）；
-              · 复用 `ProbeButton` 的琥珀 + 两段确认（单击亮「确认?」，5s 退回）；
-              · ★ **2026-10-01 用户拍板放开「额度见底才能用」**（他实测额度没见底也能用）：不再按
-                `cardsUsable`（服务端 applicable）置灰，服务端是最终裁判、结果原话进 toast。
-                `cardsUsable` 只进悬浮说明，让人知道服务端此刻怎么看；
-              · 没有到期日（`cardExp` 未取到）才不给点：CLI 选卡要求有到期日，不画一个必被拒的按钮。
-              · 页脚的「重置卡 ×N」角标同样可点（同一个 `onUseCredit`、同样两段确认）。 */}
-          {!isDead && onUseCredit && a.cards > 0 && (
-            a.cardExp ? (
-              <ProbeButton t={t} variant="inline" label={`用卡 ${a.cardExp.slice(5)}`}
-                hint={`用掉 ${a.node} 最近到期（${a.cardExp}）的那张重置卡，重置窗口。⚠️ 不可逆：用掉就没了`
-                  + (a.cardsUsable > 0 ? "" : "\n服务端此刻报告「没有需要重置的窗口」；额度没见底也能用（实测），结果以弹出提示为准")}
-                loading={!!usingCredit} onConfirm={() => onUseCredit(a.node)} loadingText="使用中…" />
-            ) : (
-              <span data-use-credit-disabled
-                    title="最近到期的那张还没取到到期日，先点「刷新全池」"
-                    style={{ fontSize: 11, padding: "5px 10px", borderRadius: 6, whiteSpace: "nowrap", cursor: "not-allowed",
-                             color: t.muted, border: `1px solid ${t.ghostBorder}`, opacity: .6 }}>用卡</span>
-            )
-          )}
+          {/* ★ **动作条里没有「用卡」按钮**（用户 2026-10-01：「很容易误触」）。用卡入口只有页脚的
+              「重置卡 ×N」角标，点它弹确认弹窗（`UseCreditDialog`）。动作条里的按钮紧挨着切换 / 探针，误触代价是一张卡。 */}
           {/* ★ 置顶排在「轮换开关」前面：它是你最常用的那个动作（「优先用这个号」），
               而轮换开关是偶尔才碰的。 */}
           {onTogglePin && !isDead && (
