@@ -299,6 +299,16 @@ paths:
   症状无声：额度扫描每 300s 失败一次，而 `tick_usage` 把 `cmd_refresh_all` 的每账号结果吞进 `StringIO`。
   ★ **`access 已过期` ≠ 掉登录**：先只读 `health`，再 `codex-rotate refresh <label>`（非活跃号安全），**回 `ok` 即证明没掉登录**。
 - 重置卡的**张数与到期分属两次取数**（张数随 usage 探测免费带回，到期只在限流的明细端点）。`cards>0 && cardDays==null` 是合法状态，显示"到期未知"而不是假装没有；`cardsExpiring` 必须 `min(…, cards)` 钳位。
+- ★★★ **使用重置卡（`codex-rotate use-credit`，2026-10-01，CHANGELOG B75）—— 全 app 唯一不可逆的花费动作。**
+  - **端点（实测，不是猜的）**：`POST /backend-api/codex/rate-limit-reset-credits/consume`（`strings` codex 二进制找到 `/api/codex/rate-limit-reset-credits/consume`），
+    体 `{"credit_id","redeem_request_id"}`，回 `{"code","credit","windows_reset"}`。**零花费的判别实验**：对一个当时没有可重置窗口的号发一个**不存在**的
+    credit_id ⇒ `200 {"code":"no_credit","credit":null,"windows_reset":0}`（该号有 3 张真卡，说明 credit_id 被认了；不存在的卡不花东西）。
+  - **成败只认服务端的 `windows_reset > 0`**，不认 HTTP 200 也不认 `code`（成功时 `code` 的取值至今没见过）；200 但没重置窗口 = 「没生效」；请求结果未知（`status=None`）既不报成功也不清请求号。
+  - **`redeem_request_id` 先落盘（`slot["credit_redeem"]`）再发**，同一张卡 15 分钟内重试复用同一个 —— 网络在发出后断了，换新号可能多用第二张。
+  - **选卡**：默认最近到期且**有到期日**的（没日期 ≠ 最近）；`--card <id>`（弹窗里选的）必须在**新取的明细**里仍可用，否则**不发、绝不退回去用另一张**。
+  - ⚠️ **「额度没见底才不能用」那道闸已撤**（用户 2026-10-01 实测额度没见底也能用）：旧版 `applicable > 0` 才发，是因为没有观测说明服务端对「有卡没窗口」怎么处理。
+    现在服务端是最终裁判，副作用是**服务端若对没窗口也扣卡不重置会白花一张**——张数前后对比是证据。旧的「服务端要求当前周窗口需要重置才放行」只是推断，别再当事实写。
+  - **界面入口只有页脚角标 + 确认弹窗**（动作条里的按钮因**很容易误触**已取消）；弹窗默认焦点在「取消」、回车不确认、不用系统 `confirm()`（WKWebView 不可用）。闸 `tests/test_use_credit.py`。
 - 每个新号必须**独立无痕窗**登授权 URL，否则同浏览器会话链里两个号反复互顶（"signed in to another account"）。
 - ★ **代理回给 codex 的状态码决定它重发几次**。实测（假上游顶掉真代理，数 `POST /responses`）：`502 → 30 次` · `409 → 6 次` · `429 → 1 次` · `400 → 1 次`。计费请求要「中止而不重发」时**必须**用 **400**——用 5xx 会被 codex 带退避猛重试，而每次重试在代理里都重新挑号，等于把「两个号各计一次」放大成「N 个号轮着计费」，比不修更糟。**别靠记忆猜哪个码可重试，起个假上游数一次。**
 - ★ **计费相位分界 = `conn.request()` vs `conn.getresponse()`**。`sendall` 抛异常 ⟺ 仍有尾段未写入 ⟹ Content-Length 下 body 不完整 ⟹ 上游永不 dispatch ⟹ 不计费。所以 `request()` 失败可**证明**未计费、换号安全；只有 `getresponse()` 失败才是「已交内核、到没到不可知」。判「会不会烧钱」用**黑名单**（`command not in ("GET","HEAD")`）而非白名单——白名单漏掉新计费端点会让双计费静默复活，且计数器对它零感知。
