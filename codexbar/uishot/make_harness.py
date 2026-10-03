@@ -1802,6 +1802,17 @@ def redacted_state():
     #   那半（角标上的 1 / 2）一个像素都验不到，而截图会正常渲染、探针报干净。
     #   取前两个非 dead 的号，与 `pinned` 的真实形状一致（aid 列表，按点击先后）。
     alive_ids = [a for a, sl in out_slots.items() if not sl.get("auth_dead")]
+    # ★★ **「停轮换」状态不能指望真 state.json 恰好有** —— 夹具取自真实状态，而用户一旦把所有号都放回轮换，
+    #   `test_connector_oneclick` / `test_runway_hero` 两条依赖「有 rotate_off 的号」的闸会**一起红**（2026-10-03 实测：
+    #   真状态里 9 个号 0 个停用）。判别力不能靠运气：不足 3 个时，从**末尾**补到 3 个（与此前真实形状同量：3 个），
+    #   不动前面的号 —— 置顶 / 重置卡等夹具依赖的前几个号保持原样。
+    off = [a for a in alive_ids if out_slots[a].get("rotate_off")]
+    for a in reversed(alive_ids):
+        if len(off) >= 3:
+            break
+        if a not in off:
+            out_slots[a]["rotate_off"] = True
+            off.append(a)
     active = idmap.get(raw.get("active"), "")
     # ★★ `last_aid`（代理最近一次真的用了谁）**必须与 `active` 不同**（2026-09-23）。
     #   菜单栏/托盘改成跟代理走之后，判据就是「高亮落在 last_aid 而不是 active 上」——

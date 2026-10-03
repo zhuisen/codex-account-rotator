@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { Theme } from "../theme";
 import { AMBER, AMBER_TEXT } from "./CardBadge";
-import type { Account } from "../helpers";
+import { cardLeftText, type Account } from "../helpers";
 
 /**
  * 「使用重置卡」的确认弹窗。
@@ -45,7 +45,6 @@ export default function UseCreditDialog({ a, t, onCancel, onConfirm }: {
 
   const chosen = a.cardList.find((c) => c.id === sel) ?? a.cardList[0];
   const unknown = Math.max(0, a.cards - a.cardList.length);
-  const left = (d: number) => (d >= 1 ? `还剩 ${Math.floor(d)} 天` : `还剩 ${Math.max(1, Math.floor(d * 24))} 小时`);
   return (
     <div data-use-credit-dialog onClick={onCancel}
          style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", display: "flex", alignItems: "center",
@@ -73,7 +72,7 @@ export default function UseCreditDialog({ a, t, onCancel, onConfirm }: {
                                  border: `2px solid ${on ? AMBER : t.muted}`, background: on ? AMBER : "transparent",
                                  boxSizing: "border-box" }} />
                   <span style={{ fontWeight: on ? 700 : 400 }}>{c.expiresAt.slice(0, 10)} 到期</span>
-                  <span style={{ color: t.text2 }}>{left(c.days)}</span>
+                  <span style={{ color: t.text2 }}>还剩 {cardLeftText(c.days)}</span>
                   {i === 0 && <span style={{ marginLeft: "auto", fontSize: 10, fontWeight: 700, color: "#1c1104", background: AMBER, padding: "1px 6px", borderRadius: 4 }}>最近</span>}
                 </div>
               );

@@ -18,7 +18,7 @@ import { useDawnProbe } from "./hooks/useDawnProbe";
 import { useTraffic } from "./hooks/useTraffic";
 import { useGrokQuota } from "./hooks/useGrokQuota";
 import { useAgyQuota } from "./hooks/useAgyQuota";
-import { fmtAgo } from "./helpers";
+import { fmtAgo, cardLeftText } from "./helpers";
 import { usePrivacy } from "./hooks/usePrivacy";
 import { useCardBannerDismiss } from "./hooks/useCardBannerDismiss";
 import { useIntegration } from "./hooks/useIntegration";
@@ -476,7 +476,7 @@ export default function MenuBar() {
                  title={`${cardAlert.node} 共 ${cardAlert.cards} 张 · 用卡可立即把周额度重置为 100%\n`
                         + "用法：终端运行 codex → 输入 /usage → Redeem usage limit reset\n"
                         + "（只能在交互式 TUI 里用，且服务端要求当前周窗口“需要重置”才放行）"}>
-              {cardAlert.node} {cardAlert.cardsExpiring || 1} 张重置卡 {Math.max(1, Math.ceil(cardAlert.cardDays ?? 0))} 天后作废
+              {cardAlert.node} {cardAlert.cardsExpiring || 1} 张重置卡 {cardLeftText(cardAlert.cardDays ?? 0)}后作废
             </div>
           </div>
           {/* ★ 关闭按钮。按**这张卡的身份**记忆（节点 + 最早到期日），

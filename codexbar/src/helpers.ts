@@ -135,6 +135,21 @@ export interface Account {
   cardsExpiring: number;
 }
 
+/**
+ * 重置卡「还剩多久」的**唯一**说法（用户 2026-10-03：角标写「剩 2 天」、点进弹窗却是「还剩 1 天」，
+ * 口径要统一，**剩一天才是对的**）。
+ *
+ * 向**下**取整：剩 1.3 天就是「1天」，不是 2 天 —— 向上取整会把「还剩一天出头」说成两天，
+ * 让人以为还有一整天缓冲。不够一天改说小时（至少 1 小时，最后几十分钟也不写成 0）。
+ * 角标 / 弹窗 / 菜单栏横幅都调它；各自手写取整正是这次两个数对不上的原因。
+ * 返回不带「剩 / 还剩」前缀的片段（「1天」「5小时」），由调用点拼句子。
+ */
+export function cardLeftText(days: number): string {
+  if (!Number.isFinite(days)) return "?";
+  if (days >= 1) return `${Math.floor(days)}天`;
+  return `${Math.max(1, Math.floor(days * 24))}小时`;
+}
+
 /** ≤ this many days left ⇒ amber + pulse (design handoff §4). */
 export const CARD_WARN_DAYS = 3;
 

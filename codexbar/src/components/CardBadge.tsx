@@ -1,4 +1,4 @@
-import { CARD_WARN_DAYS, type Account } from "../helpers";
+import { CARD_WARN_DAYS, cardLeftText, type Account } from "../helpers";
 import { CARD_TYPE as Z, type Theme } from "../theme";
 
 export const IconTicket = ({ size = 10 }: { size?: number }) => (
@@ -92,9 +92,9 @@ export default function CardBadge({ a, t, compact, onUse, using }: {
   const expiring = isCardExpiring(a);
   const size = SIZE(compact);
 
-  // Days is a float; "0.4 天" reads as already gone, so round UP — a card with 10 hours left is
-  // still usable today and must not be labelled 0.
-  const days = Math.max(1, Math.ceil(a.cardDays ?? 0));
+  // ★ 「还剩多久」只有 `cardLeftText` 一种说法（向下取整，不够一天说小时）。原来这里是
+  //   `Math.ceil` —— 剩 1.3 天写成「剩2天」，点进弹窗却是 1 天（用户 2026-10-03）。
+  const left = cardLeftText(a.cardDays ?? 0);
   // The COUNT is always shown. The expiring suffix names how many of them actually lapse, because
   // "2 张" + "2 天后到期" side by side otherwise reads as "both cards die in 2 days" — the common
   // real case is a stack where only the oldest is about to go.
@@ -103,8 +103,8 @@ export default function CardBadge({ a, t, compact, onUse, using }: {
   const some = expiring && a.cardsExpiring > 0 && a.cardsExpiring < a.cards;
   const nOf = some ? `${a.cardsExpiring}张` : "";
   const label = compact
-    ? `×${a.cards}${expiring ? `·${nOf}${days}天` : ""}`
-    : `重置卡 ×${a.cards}${expiring ? ` · ${nOf}剩${days}天` : ""}`;
+    ? `×${a.cards}${expiring ? `·${nOf}${left}` : ""}`
+    : `重置卡 ×${a.cards}${expiring ? ` · ${nOf}剩${left}` : ""}`;
   const usable = !!onUse && !compact && !!a.cardExp;
   // ★ 点击**必须 stopPropagation**：角标在整张可点的卡片里，不拦的话每次点它都会同时切换卡片选中。
   const click = (e: React.MouseEvent) => {
