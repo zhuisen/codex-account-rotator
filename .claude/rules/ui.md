@@ -118,10 +118,12 @@ paths:
   - 输入框的 `onKeyDown` **必须 `stopPropagation`** —— 全局 ⌘1~⌘9 是切号快捷键，不拦的话在框里打数字会切号。`onBlur` 一律放弃（不静默提交），Esc 取消，卡片取消选中时退出编辑态。
   - label 只是昵称：`plan` / `file` / 凭证 / `active`（存 aid）全不受影响，实测往返验证过。
 - 额度色阈值只有一条规则（handoff §5.1.5）：剩余 `<50%` 琥珀 `#E0901C`、否则绿 `#27B26B`；托盘标题额外把 `rem == 0` 标红 `#E0524D`（0 是天然边界，不是新阈值）。**实现有两份**：两个 webview 共用 `helpers.ts` 的 `quotaColor()`；托盘走 Rust 的 `rem_rgb()`（给 `attributedTitle` 里百分比那一段上色）—— 跨语言没法共用，**改阈值或色值必须两处一起改**。
-- ★★ **刘海额度条**（用户 2026-10-17 从 demo 选定：收起 B「刘海下沿 7pt 黑边里的分段细线」+ 展开 2「额度环面板」；只显示 Codex 与 agy；**默认关**；外接屏/合盖不显示）。demo 留档 `~/Downloads/codexbar_notch_demo_20261017.html`。
-  - **刘海本身没有像素**：画进刘海矩形的东西看不见，所以细线在下沿多出的黑边里。岛恒为黑色，不跟主题。
+- ★★ **刘海额度条**（用户 2026-10-17：收起 = **刘海周围的光晕**〔先从 demo 选了 B 细线，真机看过嫌不明显，同日换成 A 光晕〕+ 展开 2「额度环面板」；只显示 Codex 与 agy；**默认关**；外接屏/合盖不显示）。demo 留档 `~/Downloads/codexbar_notch_demo_20261017.html`。
+  - **刘海本身没有像素**：画进刘海矩形的东西看不见，所以光晕画在刘海外沿，窗口四周多留透明边（`GLOW_X/GLOW_Y`，必须装下光晕 + **2σ** 的 blur —— 只留 1σ 时边缘被裁成一圈直边，用户一眼看出「限制了范围」，有闸）。光晕是贴边 + 散开两层、呼吸周期错开，别合回一层。岛恒为黑色，不跟主题。
+  - **光晕的颜色有两种含义**（用户从三种里选的）：平时 = 额度（每窗口一段，段间渐变，读不到画灰不画红），6s 慢呼吸；有平台在跑 = 整圈平台色，2.4s 快呼吸，停下恢复额度色。在跑时看不到额度，这是选定的取舍。
   - 颜色走**托盘那一条**（`quotaColor` + 0 标红），不走卡片的 `quotaLevel`（≤10 红）—— 它和托盘标题同属"瞄一眼"的指示。所以上面那条「实现有两份」现在是**三份**：`quotaColor()`、`rem_rgb()`、`notchSegs.ts::segColor`（后者复用 `quotaColor`，只多 0 标红；**判的是显示出来的整数**，剩 0.4% 时环上写 0 就必须红）。
-  - 尺寸常量分三处：`notch.rs` 的 `PANEL_W/FLARE/LIP` · `NotchHud.tsx` 的 `PANEL_W` · `notch.css` 的 `--pw/--flare/--lip`。闸 `tests/test_notch_hud.py`。
+  - **在跑的判据**：45s 内写过 rollout / agy `-wal`，Rust 变了才推 `notch-activity`。⚠️ **别用 `last_proxy_ts` 判 Codex**：codex 定时 `GET /models` 也会刷新它，停手后仍显示在跑。收起态窗口比刘海大一圈（光晕），所以收起时整窗不收鼠标。
+  - 尺寸常量分三处：`notch.rs` 的 `PANEL_W/FLARE/GLOW_X/GLOW_Y` · `NotchHud.tsx` 的 `PANEL_W` · `notch.css` 的 `--pw/--flare` 与 `.nh-glow` 尺寸。闸 `tests/test_notch_hud.py`。
   - ⚠️ 悬停判定**别改回网页 mouseenter**：CodexBar 是 Accessory 应用、几乎从不在前台；后台窗口里 WKWebView 收不收得到鼠标移动**没验过**，验证程序从一开始就绕开了它，用户实测好用的是光标判定那条路。也别改回纯轮询：验证程序实测空闲主进程 0.60%（Tauri `cursor_position`，每次派发到主线程）→ 0.30%（后台线程直接读 `NSEvent mouseLocation`），**不轮询时的底数没量过**，所以「剩下的 0.30% 都是轮询」是推断。
   - ★★ **agy 的数取池里当前那个号的**（`agyPool.snapshotOf(当前号, 本机RPC)`，与菜单栏同一条），不只拿 `useAgyQuota` —— 本机 RPC 自 agy 1.2 恒 `csrf_required`，只拿它就是画几周前的 `last_good`（2026-10-17 评审时本机那份停在 24.5 天前）。刘海窗口**不做保鲜**（`useAgyPool(false)` + `useAgyQuota({ enabled: false })`，只读盘、收广播），保鲜只有菜单栏一个 webview。
   - ★ 收起态窗口 `setIgnoresMouseEvents: YES`、展开才接点击；出现用 `orderFrontRegardless`，**不用 `show()`**（tao 的 show 是 `makeKeyAndOrderFront`，会抢走主窗口焦点）。设置页那一行必须说出「开着但没显示」的原因（`notchSegs.ts::notchRowDesc`）。四方评审 2026-10-17 的全部发现与闸见 CHANGELOG B87。

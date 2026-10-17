@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { type AppState, type TokenInfo, type Account, type Slot, slotToAccount, recommended, poolRefreshedAt, poolFreshness, CARD_WARN_DAYS } from "../helpers";
+import { type AppState, type TokenInfo, type Account, type Slot, slotToAccount, recommended, poolRefreshedAt, poolFreshness, CARD_WARN_DAYS, inUseAid } from "../helpers";
 import { useBusyMirror } from "./useBusyMirror";
 
 export interface StoreCounts {
@@ -123,7 +123,7 @@ export function useStore() {
    *   `currentNode`（= `active`）保留给**切号/死号监视/自动切号**这些只关心 auth.json 的路径；
    *   显示「谁在用」一律用这个。取不到 `last_aid`（新装机、代理还没服务过任何请求）才退回 `active`。
    */
-  const inUseNode = (state.last_aid && state.slots?.[state.last_aid]) ? state.last_aid : state.active;
+  const inUseNode = inUseAid(state);
   const hero = recommended(accounts);
   const counts: StoreCounts = {
     total: accounts.length,

@@ -126,10 +126,23 @@ class TheTrayTitleFollowsTheProxyToo(unittest.TestCase):
 
     def test_frontend_uses_the_same_rule(self):
         """★ 跨语言两份实现，判据必须一致：都是「last_aid 在池里就用它，否则 active」。"""
-        ts = (ROOT / "codexbar" / "src" / "hooks" / "useStore.ts").read_text(encoding="utf-8")
-        self.assertRegex(ts, r"inUseNode\s*=\s*\(state\.last_aid\s*&&\s*state\.slots\?\.\[state\.last_aid\]\)"
-                             r"\s*\?\s*state\.last_aid\s*:\s*state\.active",
+        # 2026-10-17 起判据抽进 `helpers.ts::inUseAid`（刘海条也要用），TS 侧只此一份。
+        src = ROOT / "codexbar" / "src"
+        helpers = (src / "helpers.ts").read_text(encoding="utf-8")
+        self.assertRegex(helpers, r"export function inUseAid\(state: AppState\)[^{]*\{\s*"
+                                  r"return\s*\(state\.last_aid\s*&&\s*state\.slots\?\.\[state\.last_aid\]\)"
+                                  r"\s*\?\s*state\.last_aid\s*:\s*state\.active;",
                          "★ 前端的「在用」判据与托盘不一致")
+        for f in (src / "hooks" / "useStore.ts", src / "NotchHud.tsx"):
+            self.assertRegex(f.read_text(encoding="utf-8"), r"\binUseAid\(state\)",
+                             f"★ {f.name} 没走 inUseAid —— 又多出一份「在用」判据")
+        # 刘海条里 inUseAid 调了两处，只核「出现过」会被另一处兜住；另写一份判据绕不开这两个字段。
+        notch = re.sub(r"//[^\n]*", "", (src / "NotchHud.tsx").read_text(encoding="utf-8"))
+        self.assertNotRegex(notch, r"state\.(active|last_aid)\b",
+                            "★ 刘海条自己读 active/last_aid —— 又多出一份「在用」判据")
+        store = re.sub(r"//[^\n]*", "", (src / "hooks" / "useStore.ts").read_text(encoding="utf-8"))
+        rhs = re.findall(r"\bconst inUseNode\s*=\s*([^;]+);", store)
+        self.assertEqual(rhs, ["inUseAid(state)"], "★ useStore 的 inUseNode 没走 inUseAid")
 
 
 # 卡片动作弹层：点开 → 时长一半时在 → 到点 +600ms 不在；另一组 80% 时按一下键，到点 +600ms 照样不在。

@@ -1,11 +1,11 @@
 /* 刘海额度条（`NotchHud.tsx`）。窗口透明、无边框，贴在刘海上；岛恒为黑色 ——
    刘海本身是黑的，岛跟着换主题会在浅色下变成一块白补丁。
-   ★ `--flare` / `--lip` 与 `notch.rs` 的 FLARE / LIP 同值；`--pw` 与 PANEL_W 同值。 */
+   ★ `--flare` 与 `notch.rs` 的 FLARE 同值；`--pw` 与 PANEL_W 同值；光晕尺寸配 GLOW_X / GLOW_Y。 */
 @font-face { font-family: 'JetBrains Mono'; src: url('/fonts/jetbrains-mono-latin-400-normal.woff2') format('woff2'); font-weight: 400; font-display: swap; }
 
 :root {
-  --nw: 179px; --nh: 32px; --flare: 7px; --lip: 7px; --pw: 312px;
-  --island: #000; --fg: #f2f4f7; --muted: #8a929c; --track: rgba(255, 255, 255, .14);
+  --nw: 179px; --nh: 32px; --flare: 7px; --pw: 312px;
+  --island: #000; --fg: #f2f4f7; --muted: #8a929c;
 }
 html, body, #root { margin: 0; height: 100%; background: transparent; overflow: hidden; }
 body {
@@ -13,8 +13,8 @@ body {
   color: var(--fg); -webkit-user-select: none; user-select: none; cursor: default;
 }
 .nh-island {
-  position: absolute; top: 0; left: 50%; width: var(--nw); height: calc(var(--nh) + var(--lip));
-  margin-left: calc(var(--nw) / -2); background: var(--island); border-radius: 0 0 13px 13px;
+  position: absolute; top: 0; left: 50%; width: var(--nw); height: var(--nh);
+  margin-left: calc(var(--nw) / -2); background: var(--island); border-radius: 0 0 12px 12px;
   transition: opacity .12s;
 }
 /* 刘海上沿两侧的内凹圆角 */
@@ -24,16 +24,37 @@ body {
 .nh-island::before, .nh-panel::before { left: calc(var(--flare) * -1); background: radial-gradient(circle at 0 100%, transparent 6.5px, var(--island) 7px); }
 .nh-island::after, .nh-panel::after { right: calc(var(--flare) * -1); background: radial-gradient(circle at 100% 100%, transparent 6.5px, var(--island) 7px); }
 
-.nh-bars { position: absolute; left: 15px; right: 15px; bottom: 5px; height: 3px; display: flex; gap: 4px; }
-.nh-bars span { flex: 1; border-radius: 2px; background: var(--track); overflow: hidden; }
-.nh-bars i { display: block; height: 100%; border-radius: 2px; }
-.nh-bars span.stale i { opacity: .45; }
+/* ★ 光晕（用户 2026-10-17：起初是刘海下沿的分段细线，用户嫌不明显，换成 demo 里 A 的光晕）。
+   平时颜色 = 额度、6s 慢呼吸；有平台在跑颜色 = 平台色、2.4s 快呼吸（颜色由 NotchHud 算好放进 --glow）。
+   ★ 两层叠出来（用户嫌一层「散得太整齐规则、看得出限制了范围」）：贴边一层亮而窄，散开一层宽而淡、
+     偏向下方、底边是椭圆；两层呼吸周期错开，不同起同落 —— 两个高斯叠起来的衰减比一个自然。
+   ★ blur(σ) 要往外 ~2σ 才淡到看不见（2σ 处剩 2%），窗口透明边按这个留（GLOW_X / GLOW_Y），
+     少了就被窗口裁出一圈直边 —— 第一版只按 1σ 留，就是用户看到的「框」。
+   只动透明度。实测单层光晕时刘海网页进程常驻约 0.28% CPU（细线那版 0.18%）。 */
+.nh-glow { position: absolute; inset: 0; pointer-events: none; }
+.nh-glow i { position: absolute; left: 50%; background: var(--glow); will-change: opacity; }
+.nh-glow .g1 {
+  top: -6px; width: calc(var(--nw) + var(--flare) * 2 + 8px); margin-left: calc((var(--nw) + var(--flare) * 2 + 8px) / -2);
+  height: calc(var(--nh) + 10px); border-radius: 0 0 22px 22px; filter: blur(7px);
+  animation: nh-breathe 6s ease-in-out infinite;
+}
+.nh-glow .g2 {
+  top: -14px; width: calc(var(--nw) + var(--flare) * 2 + 28px); margin-left: calc((var(--nw) + var(--flare) * 2 + 28px) / -2);
+  height: calc(var(--nh) + 26px); border-radius: 0 0 50% 50% / 0 0 70% 70%; filter: blur(20px);
+  animation: nh-breathe-wide 7.4s ease-in-out -2.5s infinite;
+}
+@keyframes nh-breathe { 0%, 100% { opacity: .95; } 50% { opacity: .45; } }
+@keyframes nh-breathe-wide { 0%, 100% { opacity: .7; } 50% { opacity: .22; } }
+.nh-active .nh-glow .g1 { animation-duration: 2.4s; }
+.nh-active .nh-glow .g2 { animation-duration: 3.1s; }
+.nh-quiet .nh-glow, .nh-open .nh-glow { opacity: 0; }
+.nh-quiet .nh-glow i, .nh-open .nh-glow i { animation: none; }
 
 .nh-panel {
   position: absolute; top: 0; left: 50%; width: var(--pw); margin-left: calc(var(--pw) / -2);
   box-sizing: border-box; background: var(--island); border-radius: 0 0 22px 22px;
   padding: calc(var(--nh) + 10px) 16px 14px; font-size: 12px;
-  clip-path: inset(0 calc(50% - var(--nw) / 2) calc(100% - var(--nh) - var(--lip)) calc(50% - var(--nw) / 2) round 0 0 13px 13px);
+  clip-path: inset(0 calc(50% - var(--nw) / 2) calc(100% - var(--nh)) calc(50% - var(--nw) / 2) round 0 0 12px 12px);
   opacity: 0; pointer-events: none;
   transition: clip-path .34s cubic-bezier(.2, .8, .2, 1), opacity .14s ease;
 }
@@ -54,4 +75,4 @@ body {
   color: #d5dae1; font-size: 11.5px;
 }
 .nh-foot b { font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; color: var(--fg); font-weight: 500; }
-@media (prefers-reduced-motion: reduce) { .nh-panel { transition: opacity .15s; } }
+@media (prefers-reduced-motion: reduce) { .nh-panel { transition: opacity .15s; } .nh-glow i { animation: none; opacity: .8; } .nh-glow .g2 { opacity: .5; } }

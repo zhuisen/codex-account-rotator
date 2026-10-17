@@ -670,6 +670,15 @@ fn notch_geometry() -> Option<Value> {
     None
 }
 
+/// 谁正在跑（刘海光晕）。之后的变化走 `notch-activity` 推送，这里只给初次挂载用。
+#[tauri::command]
+fn notch_activity() -> Option<Value> {
+    #[cfg(target_os = "macos")]
+    return serde_json::to_value(notch::activity()).ok();
+    #[cfg(not(target_os = "macos"))]
+    None
+}
+
 /// 刘海面板量出来的自然高度（随额度窗口个数变）。
 #[tauri::command]
 fn notch_panel_height(app: AppHandle, h: f64) {
@@ -2771,7 +2780,7 @@ pub fn run() {
             check_update,
             open_url,
             set_dock_visible,
-            set_notch_hud, notch_status, notch_geometry, notch_panel_height,
+            set_notch_hud, notch_status, notch_geometry, notch_panel_height, notch_activity,
             set_main_visible,
             read_auth_tokens,
             read_logs,

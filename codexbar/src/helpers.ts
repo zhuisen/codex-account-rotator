@@ -568,6 +568,16 @@ function buildWindow(w: Win | undefined, capturedAt?: number, anchor?: QuotaAnch
   };
 }
 
+/**
+ * ★★ **代理此刻在用的号**（用户 2026-09-23：显示跟着代理轮换走）。`last_aid` 由 proxy.py 每次成功响应后写入；
+ *   取不到（新装机、代理还没服务过请求、或指向已删除的号）才退回 `active`。
+ *   与 Rust `format_tray_title` 同一条判据（跨语言没法共用，只能同步改）；TS 这边只此一份，
+ *   `useStore.inUseNode` 与刘海条都用它。
+ */
+export function inUseAid(state: AppState): string | undefined {
+  return (state.last_aid && state.slots?.[state.last_aid]) ? state.last_aid : state.active;
+}
+
 export function slotToAccount(aid: string, slot: Slot, tokens: Record<string, TokenInfo>,
                               pinned?: string[]): Account {
   const q = slot.quota;

@@ -13,6 +13,12 @@
 
 不 import 任何项目模块、不碰凭证；node 那半只读 `codexbar/src/*.ts`。
 """
+try:
+    # ★ 本文件只起 node（跑 notchSegs.ts），不起任何脚本；但它断言了 `agy-quota-updated` 这类事件名，
+    #   `test_isolation_bootstrap` 按子串把它算作脚本测试 —— 照规矩引入隔离，免得以后真加了脚本测试时漏掉。
+    from . import _isolation  # noqa: F401
+except ImportError:
+    import _isolation  # noqa: F401
 import json
 import pathlib
 import re
@@ -31,6 +37,7 @@ SETTINGS = APP / "src" / "pages" / "SettingsPage.tsx"
 APP_TSX = APP / "src" / "App.tsx"
 SEGS = APP / "src" / "notchSegs.ts"
 CAPS = APP / "src-tauri" / "capabilities"
+DATA = APP / "src" / "hooks" / "useNotchData.ts"
 
 
 def code_only(path):
@@ -38,6 +45,9 @@ def code_only(path):
     s = path.read_text(encoding="utf-8")
     s = re.sub(r"\{?/\*[\s\S]*?\*/\}?", "", s)
     return re.sub(r"(?<![:/\"])//[^\n]*", "", s)
+
+
+_code = code_only
 
 
 def run_segs(expr):
@@ -69,11 +79,27 @@ class SizesAgree(unittest.TestCase):
         self.assertEqual(rs, tsx, "notch.rs 与 NotchHud.tsx 的面板宽不一致 ⇒ 面板被裁或偏到一边")
         self.assertEqual(rs, css, "notch.rs 与 notch.css 的 --pw 不一致")
 
-    def test_flare_and_lip_match_the_css(self):
-        for name, var in (("FLARE", "--flare"), ("LIP", "--lip")):
-            rs = float(_one(RS, rf"^const {name}: f64 = (\d+(?:\.\d+)?);", name))
-            css = float(_one(CSS, rf"{var}: (\d+)px", var))
-            self.assertEqual(rs, css, f"notch.rs 的 {name} 与 notch.css 的 {var} 不一致")
+    def test_flare_matches_the_css(self):
+        rs = float(_one(RS, r"^const FLARE: f64 = (\d+(?:\.\d+)?);", "FLARE"))
+        css = float(_one(CSS, r"--flare: (\d+)px", "--flare"))
+        self.assertEqual(rs, css, "notch.rs 的 FLARE 与 notch.css 的 --flare 不一致")
+
+    def test_window_has_room_for_the_whole_blurred_glow(self):
+        """光晕带 blur，窗口留的透明边装不下时，模糊的边缘会被窗口裁出一圈直边。
+        blur(σ) 往外 2σ 才淡到 2% —— 第一版按 1σ 留边，用户一眼看出「限制了范围」（2026-10-17）。"""
+        css = _code(CSS)
+        flare = float(_one(RS, r"^const FLARE: f64 = (\d+(?:\.\d+)?);", "FLARE"))
+        gx = float(_one(RS, r"^const GLOW_X: f64 = (\d+(?:\.\d+)?);", "GLOW_X"))
+        gy = float(_one(RS, r"^const GLOW_Y: f64 = (\d+(?:\.\d+)?);", "GLOW_Y"))
+        layers = re.findall(r"(?m)^\.nh-glow \.(g\d) \{(.*?)\}", css, re.S)
+        self.assertEqual([n for n, _ in layers], ["g1", "g2"], "光晕应是贴边 g1 + 散开 g2 两层")
+        for name, body in layers:
+            extra_w = float(re.search(r"width: calc\(var\(--nw\) \+ var\(--flare\) \* 2 \+ (\d+)px\)", body).group(1))
+            extra_h = float(re.search(r"height: calc\(var\(--nh\) \+ (\d+)px\)", body).group(1))
+            top = float(re.search(r"top: (-?\d+)px", body).group(1))
+            blur = float(re.search(r"filter: blur\((\d+)px\)", body).group(1))
+            self.assertGreaterEqual(flare + gx, flare + extra_w / 2 + 2 * blur, f"{name}：两侧透明边装不下光晕 + 2σ")
+            self.assertGreaterEqual(gy, top + extra_h + 2 * blur, f"{name}：下方透明边装不下光晕 + 2σ")
 
 
 class WindowBehaviour(unittest.TestCase):
@@ -249,7 +275,8 @@ class ReviewFindingsStayFixed(unittest.TestCase):
         """★★ 本机 RPC 自 agy 1.2 起恒 csrf_required，只拿它 = 画一个几周前的 last_good（本机实测 24.5 天前）。"""
         self.assertIn("agyPool.snapshotOf(agyCur, agySnap)", self.hud)
         self.assertIn("useAgyPool(false)", self.hud, "★ 刘海窗口不做保鲜（那是菜单栏的活），只读盘 + 收广播")
-        self.assertIn("useAgyQuota({ enabled: false })", self.hud)
+        self.assertIn("const { state, agy: agySnap } = useNotchData();", self.hud,
+                      "本机那份只作 snapshotOf 的归属候选，且只听推送（不用自带定时器的 useAgyQuota）")
         self.assertNotRegex(self.hud, r"useAgyPool\([^)]*background", "保鲜只能有一个 webview（菜单栏）")
 
     def test_the_tracking_thread_never_touches_nswindow_or_tao_cursor(self):
@@ -302,6 +329,131 @@ class ReviewFindingsStayFixed(unittest.TestCase):
         self.assertRegex(self.hud, r"Promise\.all\(uns\)\.then\(\(\) => invoke",
                          "监听注册好之后再问一次当前展开态")
         self.assertIn('"notch-geom"', self.hud, "改分辨率 / 换屏后前端的刘海尺寸要跟着变")
+
+
+
+class PushNotPoll(unittest.TestCase):
+    """用户 2026-10-17：刘海网页进程改成数据变化时再推送。打开刘海条时它的 WebContent 曾 60s 平均 0.25%，
+    来源是借用了主界面/菜单栏那两个自带定时器的 hook。"""
+
+    def test_does_not_borrow_the_polling_hooks(self):
+        code = _code(TSX)
+        for hook in ("useStore", "useAgyQuota", "useQuotaSidecar"):
+            self.assertNotRegex(code, rf"\b{hook}\b", f"刘海条不许用 {hook}：它自带 30s 定时器")
+        self.assertRegex(code, r"useNotchData\(\)", "刘海条要走只听推送的 useNotchData")
+
+    def test_data_hook_only_listens(self):
+        code = _code(DATA)
+        self.assertNotIn("setInterval", code, "取数 hook 里不许有周期定时器")
+        self.assertNotIn("run_agy_quota", code, "刘海条只读 sidecar，不发起取数（会起 python）")
+        self.assertNotIn("read_auth_tokens", code, "额度窗口用不到 token，别每次连全部 token 一起读")
+        self.assertRegex(code, r'listen\("state-changed"', "要跟着 state.json 的推送重读")
+        self.assertRegex(code, r'listen\("agy-quota-updated"', "要跟着 agy sidecar 的推送重读")
+
+    def test_the_pool_hook_is_push_only_when_neither_enabled_nor_background(self):
+        """刘海用 `useAgyPool(false)`。它的每个定时器都必须挡在 enabled / background 之后，
+        否则刘海窗口会跟着跑 30s 心跳（甚至起取额度的子进程）。"""
+        pool = _code(APP / "src" / "hooks" / "useAgyPool.ts")
+        n = pool.count("setInterval")
+        self.assertGreater(n, 0)
+        for i in [j for j in range(len(pool)) if pool.startswith("setInterval", j)]:
+            eff = pool[pool.rfind("useEffect(", 0, i):i]
+            self.assertRegex(eff, r"if \(!(enabled|background)\) return;", "池 hook 的定时器没挡在 enabled / background 之后")
+        self.assertIn("listen(POOL_EVT", pool, "池文件变了要跟着读盘")
+        self.assertIn("listen<LivePayload>(LIVE_EVT", pool, "当前号变了要跟着换")
+
+    def test_the_only_interval_runs_while_the_panel_is_open(self):
+        code = _code(TSX)
+        self.assertEqual(code.count("setInterval"), 1, "只允许面板展开时那一个倒计时定时器")
+        i = code.index("setInterval")
+        guard = code.rfind("if (!open) return;", 0, i)
+        self.assertNotEqual(guard, -1, "唯一的定时器必须挂在 `if (!open) return;` 之后")
+        self.assertLess(i - guard, 120, "定时器离 open 守卫太远，可能不在同一个 effect 里")
+
+
+
+class ActivityGlow(unittest.TestCase):
+    """用户 2026-10-17：收起态改成光晕。平时颜色 = 额度、慢呼吸；有平台在跑 = 平台色、快呼吸
+    （Codex 青绿、agy 蓝、同时跑左右各半），停下恢复额度色。"""
+
+    def test_glow_breathes_slowly_and_faster_while_working(self):
+        css = _code(CSS)
+        for g in ("g1", "g2"):
+            idle = float(re.search(rf"(?m)^\.nh-glow \.{g} \{{[^}}]*animation: nh-breathe[-\w]* ([\d.]+)s", css).group(1))
+            run = float(re.search(rf"(?m)^\.nh-active \.nh-glow \.{g} \{{ animation-duration: ([\d.]+)s; \}}", css).group(1))
+            self.assertLess(run, idle, f"{g}：在跑时必须比平时呼吸得快")
+
+    def test_two_layers_do_not_breathe_in_lockstep(self):
+        """两层同周期同相位，看着就是一块整齐的光在一明一暗 —— 用户嫌的正是「太整齐规则」。"""
+        css = _code(CSS)
+        dur = {g: re.search(rf"(?m)^\.nh-glow \.{g} \{{[^}}]*animation: nh-breathe[-\w]* ([\d.]+)s", css).group(1)
+               for g in ("g1", "g2")}
+        self.assertNotEqual(dur["g1"], dur["g2"], "两层呼吸周期要错开")
+
+    def test_glow_hides_when_open_or_empty(self):
+        css = _code(CSS)
+        self.assertRegex(css, r"(?m)^\.nh-quiet \.nh-glow, \.nh-open \.nh-glow \{ opacity: 0; \}",
+                         "展开面板时、以及没有任何数据时，光晕要收掉")
+        self.assertRegex(css, r"(?m)^\.nh-quiet \.nh-glow i, \.nh-open \.nh-glow i \{ animation: none; \}",
+                         "收掉后不能还在跑动画（白耗 CPU）")
+
+    def test_holds_still_under_reduce_motion(self):
+        css = _code(CSS)
+        m = re.search(r"@media \(prefers-reduced-motion: reduce\)\s*\{(.*)\}\s*$", css, re.S | re.M)
+        self.assertIsNotNone(m)
+        self.assertRegex(m.group(1), r"\.nh-glow i \{ animation: none;", "开了「减弱动态效果」光晕就不该再动")
+
+    def test_colour_means_quota_unless_a_platform_is_working(self):
+        code = _code(TSX)
+        self.assertRegex(code, r"const glow = lit\.length > 0 \? platformGlow : quotaGlow;",
+                         "平时是额度色，在跑才换平台色")
+        self.assertRegex(code, r"s\.pct == null \? UNKNOWN : segColor\(s\.pct\)",
+                         "额度色走 segColor（与托盘同一条），读不到用 UNKNOWN 而不是当 0 画红")
+        self.assertNotRegex(code, r'UNKNOWN = "#E0524D"', "读不到不能画成红色")
+
+    def test_activity_is_pushed_by_rust(self):
+        code = _code(TSX)
+        self.assertRegex(code, r'listen<[^>]+>\("notch-activity"', "要跟着 Rust 的活动推送")
+        self.assertRegex(code, r'invoke<[^>]+>\("notch_activity"\)', "首次挂载要取一次当前状态")
+        self.assertRegex(code, r'lit\.length > 0 && "nh-active"', "活动状态没接到 class 上")
+        self.assertNotIn("last_proxy_ts", code, "codex 会定时 GET /models，代理照样刷新 last_proxy_ts —— 停手后仍会亮")
+        lib = LIB.read_text(encoding="utf-8")
+        block = re.search(r"generate_handler!\[(.*?)\]\)", lib, re.S).group(1)
+        self.assertRegex(block, r"\bnotch_activity\b")
+
+    def test_rust_reads_the_right_files(self):
+        rs = _code(RS)
+        self.assertRegex(rs, r'n\.starts_with\("rollout-"\) && n\.ends_with\("\.jsonl"\)', "Codex 看 rollout 写入")
+        self.assertRegex(rs, r'n\.ends_with\("\.db-wal"\)', "agy 是 WAL 库，生成时写的是 -wal，只看主库会永远判成空闲")
+        self.assertNotIn("last_proxy_ts", rs)
+        self.assertRegex(rs, r"if changed \{ let _ = app\.emit_to\(LABEL, \"notch-activity\", a\); \}", "只在变了才推")
+
+
+
+class ActivityWatcher(unittest.TestCase):
+    """评审 2026-10-17（PR #1 退回意见）：检测线程快速开关后会丢；没有刘海屏时也在每 2s 扫文件。"""
+
+    def setUp(self):
+        rs = code_only(RS)
+        self.watch = rs[rs.index("fn watch_activity("):rs.index("pub fn activity(")]
+        self.ensure = rs[rs.index("fn ensure_window("):rs.index("fn drop_window(")]
+
+    def test_a_new_watcher_takes_over_instead_of_bailing_out(self):
+        self.assertNotIn("WATCHING", code_only(RS), "布尔标记：快速关了再开时新线程起不来、旧线程随后退出 ⇒ 一条都没有")
+        self.assertIn("WATCHER.store(me", self.watch, "新起的一条直接接管")
+        self.assertIn("WATCHER.load(Ordering::SeqCst) == me", self.watch, "旧的看到不是自己就退")
+        self.assertIn("ENABLE_GEN.load(Ordering::SeqCst) == gen", self.watch, "同 track：开关换代后旧线程退出")
+        self.assertIn("WATCHER.compare_exchange(me, 0", self.watch, "退出时只清自己那一号")
+        head = self.watch[:self.watch.index("std::thread::spawn")]
+        self.assertNotIn("return", head, "起线程前不许因为「已经有一条」就退出 —— 那条可能正要因换代退出")
+
+    def test_runs_only_while_the_window_exists(self):
+        self.assertIn("app.get_webview_window(LABEL).is_some()", self.watch, "窗口没了（合盖 / 外接屏）就别再扫文件")
+        self.assertEqual(self.ensure.count("watch_activity(app)"), 2,
+                         "建窗和「窗口已在、只是重新打开」两条路都要接上检测线程（set_enabled 每次都换代）")
+        se = code_only(RS)
+        se = se[se.index("pub fn set_enabled("):se.index("pub fn status(")]
+        self.assertNotIn("watch_activity", se, "不能在 set_enabled 里无条件起 —— 没有刘海屏时也会跑")
 
 
 if __name__ == "__main__":
